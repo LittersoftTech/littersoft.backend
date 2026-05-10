@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/database/">
+    <Project Path="database/Pawfront.Database/Pawfront.Database.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Pawfront.Api/Pawfront.Api.csproj" />
+    <Project Path="src/Pawfront.Application/Pawfront.Application.csproj" />
+    <Project Path="src/Pawfront.Contracts/Pawfront.Contracts.csproj" />
+    <Project Path="src/Pawfront.Domain/Pawfront.Domain.csproj" />
+    <Project Path="src/Pawfront.Infrastructure.Azure/Pawfront.Infrastructure.Azure.csproj" />
+    <Project Path="src/Pawfront.Infrastructure.Cosmos/Pawfront.Infrastructure.Cosmos.csproj" />
+    <Project Path="src/Pawfront.Infrastructure.Sql/Pawfront.Infrastructure.Sql.csproj" />
+  </Folder>
+</Solution>

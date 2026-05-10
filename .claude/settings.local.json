@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build *)",
+      "Bash(powershell -Command '\\(Get-Content -Raw -LiteralPath '\\\\''__TRACKED_VAR__'\\\\''\\) -replace '\\\\''ApiResults\\\\.\\(NotFound|BadRequest|Conflict\\)\\\\\\(new \\\\{ error = \"\\([^\"]+\\)\", message = \\([^}]+?\\) \\\\}\\\\\\)'\\\\'', '\\\\''ApiResults.$1\\(\"$2\", $3\\)'\\\\'' | Set-Content -NoNewline -LiteralPath '\\\\''__TRACKED_VAR__'\\\\''')"
+    ]
+  }
+}

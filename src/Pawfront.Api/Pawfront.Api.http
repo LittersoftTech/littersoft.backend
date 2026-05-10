@@ -1,0 +1,52 @@
+@Pawfront.Api_HostAddress = http://localhost:5051
+@FirebaseIdToken = paste-firebase-id-token-here
+
+GET {{Pawfront.Api_HostAddress}}/api/v1/health
+Accept: application/json
+Authorization: Bearer {{FirebaseIdToken}}
+
+###
+
+POST {{Pawfront.Api_HostAddress}}/api/v1/provider-onboarding/firebase-auth
+Content-Type: application/json
+Authorization: Bearer {{FirebaseIdToken}}
+
+{
+  "fcmToken": "sample-fcm-token-from-device",
+  "deviceId": "sample-device-id",
+  "devicePlatform": "Android"
+}
+
+###
+
+POST {{Pawfront.Api_HostAddress}}/api/v1/provider-onboarding/profile
+Content-Type: application/json
+Authorization: Bearer {{FirebaseIdToken}}
+
+{
+  "providerAuthIdentityId": "00000000-0000-0000-0000-000000000000",
+  "firstName": "Jane",
+  "lastName": "Provider",
+  "gender": "Female",
+  "mobileCountryCode": "+91",
+  "mobileNumber": "9876543210",
+  "dateOfBirth": "1992-05-10"
+}
+
+###
+
+POST {{Pawfront.Api_HostAddress}}/api/v1/providers/00000000-0000-0000-0000-000000000000/mobile-verification/otp
+Accept: application/json
+Authorization: Bearer {{FirebaseIdToken}}
+
+###
+
+POST {{Pawfront.Api_HostAddress}}/api/v1/providers/00000000-0000-0000-0000-000000000000/mobile-verification/otp/00000000-0000-0000-0000-000000000000/verify
+Content-Type: application/json
+Authorization: Bearer {{FirebaseIdToken}}
+
+{
+  "otpCode": "123456"
+}
+
+###

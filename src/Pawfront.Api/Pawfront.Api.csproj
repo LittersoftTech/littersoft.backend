@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Pawfront.Application\Pawfront.Application.csproj" />
+    <ProjectReference Include="..\Pawfront.Contracts\Pawfront.Contracts.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Cosmos\Pawfront.Infrastructure.Cosmos.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Sql\Pawfront.Infrastructure.Sql.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Azure\Pawfront.Infrastructure.Azure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Monitor.OpenTelemetry.AspNetCore" Version="1.5.0" />
+    <PackageReference Include="Google.Apis.Auth" Version="1.74.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.7" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.7" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="OpenTelemetry.Exporter.Console" Version="1.15.3" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.15.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.SqlClient" Version="1.15.2" />
+  </ItemGroup>
+
+</Project>
