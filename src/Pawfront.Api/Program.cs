@@ -46,5 +46,6 @@ api.MapPetGroomerEndpoints();
 api.MapPetTrainerEndpoints();
 api.MapPetAdoptionSaleEndpoints();
 api.MapVetEndpoints();
+api.MapEventEndpoints();
 
 app.Run();

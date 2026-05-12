@@ -11,4 +11,5 @@ public sealed class BlobStorageFolderOptions
 {
     public string ProfilePhotos { get; init; } = "profile-photos";
     public string ServicePhotos { get; init; } = "service-photos";
+    public string EventBanners { get; init; } = "events";
 }

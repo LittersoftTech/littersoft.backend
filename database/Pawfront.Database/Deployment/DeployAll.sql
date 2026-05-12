@@ -24,7 +24,7 @@ PRINT '--- Pawfront deployment starting ---';
 GO
 
 --------------------------------------------------------------------------------
--- 1. Schema
+-- 1. Schemas
 --------------------------------------------------------------------------------
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Provider')
 BEGIN
@@ -34,6 +34,28 @@ END
 ELSE
 BEGIN
     PRINT 'Schema [Provider] already exists.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Customer')
+BEGIN
+    EXEC ('CREATE SCHEMA [Customer]');
+    PRINT 'Created schema [Customer].';
+END
+ELSE
+BEGIN
+    PRINT 'Schema [Customer] already exists.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Event')
+BEGIN
+    EXEC ('CREATE SCHEMA [Event]');
+    PRINT 'Created schema [Event].';
+END
+ELSE
+BEGIN
+    PRINT 'Schema [Event] already exists.';
 END
 GO
 
@@ -379,6 +401,155 @@ END
 ELSE
 BEGIN
     PRINT 'Table [Provider].[ProviderCancellationPolicies] already exists.';
+END
+GO
+
+
+-- 2.8 Customer.PetParents ----------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetParents' AND [schema_id] = SCHEMA_ID(N'Customer'))
+BEGIN
+    CREATE TABLE [Customer].[PetParents]
+    (
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_PetParents_PetParentId] DEFAULT NEWSEQUENTIALID(),
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetParents_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetParents_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_PetParents] PRIMARY KEY CLUSTERED ([PetParentId] ASC)
+    );
+    PRINT 'Created table [Customer].[PetParents].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Customer].[PetParents] already exists.';
+END
+GO
+
+
+-- 2.9 Customer.Pets ----------------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Customer'))
+BEGIN
+    CREATE TABLE [Customer].[Pets]
+    (
+        [PetId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_Pets_PetId] DEFAULT NEWSEQUENTIALID(),
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Pets_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Pets_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_Pets] PRIMARY KEY CLUSTERED ([PetId] ASC),
+        CONSTRAINT [FK_Pets_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Customer].[PetParents] ([PetParentId])
+    );
+    PRINT 'Created table [Customer].[Pets].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Customer].[Pets] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Pets_PetParentId'
+      AND [object_id] = OBJECT_ID(N'[Customer].[Pets]'))
+    CREATE INDEX [IX_Pets_PetParentId]
+        ON [Customer].[Pets] ([PetParentId]);
+GO
+
+
+-- 2.10 Event.Events ----------------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Events' AND [schema_id] = SCHEMA_ID(N'Event'))
+BEGIN
+    CREATE TABLE [Event].[Events]
+    (
+        [EventId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_Events_EventId] DEFAULT NEWSEQUENTIALID(),
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [EventCategory] NVARCHAR(64) NOT NULL,
+        [IsChildFriendly] BIT NOT NULL,
+        [Title] NVARCHAR(200) NOT NULL,
+        [Description] NVARCHAR(MAX) NOT NULL,
+        [BannerImageUrl] NVARCHAR(1000) NULL,
+        [EventType] NVARCHAR(32) NOT NULL,
+        [StartDate] DATE NOT NULL,
+        [EndDate] DATE NOT NULL,
+        [StartTime] TIME(0) NOT NULL,
+        [EndTime] TIME(0) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Events_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Events_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_Events] PRIMARY KEY CLUSTERED ([EventId] ASC),
+        CONSTRAINT [FK_Events_Providers_ProviderId]
+            FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
+        CONSTRAINT [CK_Events_EventCategory] CHECK ([EventCategory] IN (
+            N'AdoptionAndRescue', N'PetTraining', N'Charity', N'Volunteering',
+            N'HealthAndWellness', N'SocialAndCultural', N'OutdoorActivities', N'ParentEducation')),
+        CONSTRAINT [CK_Events_EventType] CHECK ([EventType] IN (N'Physical', N'Online')),
+        CONSTRAINT [CK_Events_DateRange] CHECK ([StartDate] <= [EndDate])
+    );
+    PRINT 'Created table [Event].[Events].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Event].[Events] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Events_ProviderId_StartDate'
+      AND [object_id] = OBJECT_ID(N'[Event].[Events]'))
+    CREATE INDEX [IX_Events_ProviderId_StartDate]
+        ON [Event].[Events] ([ProviderId], [StartDate] DESC);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Events_Category_StartDate'
+      AND [object_id] = OBJECT_ID(N'[Event].[Events]'))
+    CREATE INDEX [IX_Events_Category_StartDate]
+        ON [Event].[Events] ([EventCategory], [StartDate] DESC)
+        INCLUDE ([ProviderId], [Title], [EventType]);
+GO
+
+
+-- 2.11 Event.EventAmenities --------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'EventAmenities' AND [schema_id] = SCHEMA_ID(N'Event'))
+BEGIN
+    CREATE TABLE [Event].[EventAmenities]
+    (
+        [EventId] UNIQUEIDENTIFIER NOT NULL,
+        [Amenity] NVARCHAR(64) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_EventAmenities_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_EventAmenities] PRIMARY KEY CLUSTERED ([EventId] ASC, [Amenity] ASC),
+        CONSTRAINT [FK_EventAmenities_Events_EventId]
+            FOREIGN KEY ([EventId]) REFERENCES [Event].[Events] ([EventId]) ON DELETE CASCADE,
+        CONSTRAINT [CK_EventAmenities_Amenity] CHECK ([Amenity] IN (
+            N'FreeParking', N'PaidParking', N'Restrooms', N'DrinkingWater',
+            N'FoodAndBeverage', N'SeatingAreas', N'FirstAidBooth', N'None'))
+    );
+    PRINT 'Created table [Event].[EventAmenities].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Event].[EventAmenities] already exists.';
 END
 GO
 
@@ -953,6 +1124,123 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Provider].[GetProviderOnboardingStatus].';
+GO
+
+
+-- 3.10 Event.CreateEvent -----------------------------------------------------
+CREATE OR ALTER PROCEDURE [Event].[CreateEvent]
+    @ProviderId UNIQUEIDENTIFIER,
+    @EventCategory NVARCHAR(64),
+    @IsChildFriendly BIT,
+    @Title NVARCHAR(200),
+    @Description NVARCHAR(MAX),
+    @BannerImageUrl NVARCHAR(1000) = NULL,
+    @EventType NVARCHAR(32),
+    @StartDate DATE,
+    @EndDate DATE,
+    @StartTime TIME(0),
+    @EndTime TIME(0),
+    @AmenitiesJson NVARCHAR(MAX) = N'[]'
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[Providers]
+        WHERE [ProviderId] = @ProviderId
+    )
+    BEGIN
+        THROW 51030, 'Provider profile was not found.', 1;
+    END
+
+    DECLARE @InsertedEventId TABLE (EventId UNIQUEIDENTIFIER);
+
+    INSERT INTO [Event].[Events]
+    (
+        [ProviderId], [EventCategory], [IsChildFriendly], [Title], [Description],
+        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime]
+    )
+    OUTPUT inserted.[EventId] INTO @InsertedEventId
+    VALUES
+    (
+        @ProviderId, @EventCategory, @IsChildFriendly, @Title, @Description,
+        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime
+    );
+
+    DECLARE @EventId UNIQUEIDENTIFIER = (SELECT TOP (1) [EventId] FROM @InsertedEventId);
+
+    INSERT INTO [Event].[EventAmenities] ([EventId], [Amenity])
+    SELECT DISTINCT @EventId, [value]
+    FROM OPENJSON(@AmenitiesJson)
+    WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
+
+    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Event].[Events]
+    WHERE [EventId] = @EventId;
+
+    SELECT [Amenity]
+    FROM [Event].[EventAmenities]
+    WHERE [EventId] = @EventId
+    ORDER BY [Amenity];
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Event].[CreateEvent].';
+GO
+
+
+-- 3.11 Event.GetEvent --------------------------------------------------------
+CREATE OR ALTER PROCEDURE [Event].[GetEvent]
+    @EventId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Event].[Events]
+    WHERE [EventId] = @EventId;
+
+    SELECT [Amenity]
+    FROM [Event].[EventAmenities]
+    WHERE [EventId] = @EventId
+    ORDER BY [Amenity];
+END;
+GO
+PRINT 'Created/updated [Event].[GetEvent].';
+GO
+
+
+-- 3.12 Event.ListEventsByProvider --------------------------------------------
+CREATE OR ALTER PROCEDURE [Event].[ListEventsByProvider]
+    @ProviderId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Event].[Events]
+    WHERE [ProviderId] = @ProviderId
+    ORDER BY [StartDate] DESC, [StartTime] DESC;
+
+    SELECT a.[EventId], a.[Amenity]
+    FROM [Event].[EventAmenities] a
+    INNER JOIN [Event].[Events] e ON e.[EventId] = a.[EventId]
+    WHERE e.[ProviderId] = @ProviderId
+    ORDER BY a.[EventId], a.[Amenity];
+END;
+GO
+PRINT 'Created/updated [Event].[ListEventsByProvider].';
 GO
 
 

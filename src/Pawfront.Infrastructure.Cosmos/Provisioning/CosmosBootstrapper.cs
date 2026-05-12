@@ -95,6 +95,10 @@ internal sealed class CosmosBootstrapper(
             options.Containers.ProviderServices,
             ProviderServiceDocument.PartitionKeyPath);
 
+        yield return new CosmosContainerSpec(
+            options.Containers.Events,
+            EventDocument.PartitionKeyPath);
+
         // Future containers (uncomment as their features land):
         // yield return new CosmosContainerSpec(options.Containers.PetProfiles,        "/customerId");
         // yield return new CosmosContainerSpec(options.Containers.VisitNotes,         "/providerId");
