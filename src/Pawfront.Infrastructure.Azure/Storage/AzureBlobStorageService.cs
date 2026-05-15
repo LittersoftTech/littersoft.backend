@@ -1,3 +1,4 @@
+using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Options;
@@ -39,12 +40,64 @@ internal sealed class AzureBlobStorageService(
         return blobClient.Uri.ToString();
     }
 
+    public async Task<BlobDownload?> DownloadAsync(string blobUrl, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(blobUrl))
+        {
+            throw new ArgumentException("Blob URL is required.", nameof(blobUrl));
+        }
+
+        if (!Uri.TryCreate(blobUrl, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new ArgumentException("Blob URL must be an absolute http(s) URL.", nameof(blobUrl));
+        }
+
+        var container = await GetContainerAsync(cancellationToken);
+
+        // SSRF guard: the URL must live under our own container, not an arbitrary host.
+        var containerUri = container.Uri;
+        if (!string.Equals(uri.Host, containerUri.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Blob URL host does not match the configured storage account.", nameof(blobUrl));
+        }
+
+        var containerPath = containerUri.AbsolutePath.TrimEnd('/') + "/";
+        if (!uri.AbsolutePath.StartsWith(containerPath, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Blob URL does not point at the configured container.", nameof(blobUrl));
+        }
+
+        var blobName = Uri.UnescapeDataString(uri.AbsolutePath.Substring(containerPath.Length));
+        if (string.IsNullOrWhiteSpace(blobName))
+        {
+            throw new ArgumentException("Blob URL is missing a blob name.", nameof(blobUrl));
+        }
+
+        var blobClient = container.GetBlobClient(blobName);
+
+        try
+        {
+            var response = await blobClient.DownloadStreamingAsync(cancellationToken: cancellationToken);
+            var details = response.Value.Details;
+            var contentType = string.IsNullOrWhiteSpace(details.ContentType)
+                ? "application/octet-stream"
+                : details.ContentType;
+            return new BlobDownload(response.Value.Content, contentType, details.ContentLength);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return null;
+        }
+    }
+
     private string BuildBlobName(BlobUploadKind kind, Guid providerId, string fileName)
     {
         var folder = kind switch
         {
             BlobUploadKind.ProfilePhoto => options.Folders.ProfilePhotos,
             BlobUploadKind.ServicePhoto => options.Folders.ServicePhotos,
+            BlobUploadKind.EventBanner => options.Folders.EventBanners,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported blob upload kind.")
         };
 

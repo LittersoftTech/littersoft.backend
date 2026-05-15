@@ -1,15 +1,19 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Configuration;
+using Pawfront.Application.Events;
 using Pawfront.Application.Onboarding;
 using Pawfront.Application.Policies;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.Providers;
 using Pawfront.Application.Services;
 using Pawfront.Application.Services.ProviderServiceLocations;
+using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
+using Pawfront.Infrastructure.Sql.Events;
 using Pawfront.Infrastructure.Sql.Onboarding;
 using Pawfront.Infrastructure.Sql.Policies;
 using Pawfront.Infrastructure.Sql.ProviderOnboarding;
@@ -27,7 +31,6 @@ public static class SqlServiceRegistration
     {
         services.AddSingleton<IProviderService, InMemoryProviderService>();
         services.AddSingleton<IPetServiceCatalog, InMemoryPetServiceCatalog>();
-        services.AddSingleton<IBookingService, InMemoryBookingService>();
         services.TryAddSingleton<IProviderMobileOtpSender, NoOpProviderMobileOtpSender>();
 
         var sqlConnectionString = configuration.GetConnectionString("SqlServer");
@@ -39,6 +42,9 @@ public static class SqlServiceRegistration
             services.AddSingleton<IProviderServiceLocationRegistry, InMemoryProviderServiceLocationRegistry>();
             services.AddSingleton<IProviderPolicyService, InMemoryProviderPolicyService>();
             services.AddSingleton<IProviderOnboardingStatusReader, InMemoryProviderOnboardingStatusReader>();
+            services.AddSingleton<IEventSqlStore, InMemoryEventStore>();
+            services.AddSingleton<IProviderAvailabilityService, InMemoryProviderAvailabilityService>();
+            services.AddSingleton<IBookingSqlStore, InMemoryBookingStore>();
         }
         else
         {
@@ -60,6 +66,21 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderOnboardingStatusReader>(provider =>
                 new SqlProviderOnboardingStatusReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IEventSqlStore>(provider =>
+                new SqlEventStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderAvailabilityService>(provider =>
+                new SqlProviderAvailabilityService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IBookingSqlStore>(provider =>
+                new SqlBookingStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
         }

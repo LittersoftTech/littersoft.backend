@@ -1,0 +1,11 @@
+CREATE TABLE [Customer].[PetParents]
+(
+    [PetParentId] UNIQUEIDENTIFIER NOT NULL
+        CONSTRAINT [DF_PetParents_PetParentId] DEFAULT NEWSEQUENTIALID(),
+    [CreatedAtUtc] DATETIME2(7) NOT NULL
+        CONSTRAINT [DF_PetParents_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+    [UpdatedAtUtc] DATETIME2(7) NOT NULL
+        CONSTRAINT [DF_PetParents_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+    CONSTRAINT [PK_PetParents] PRIMARY KEY CLUSTERED ([PetParentId] ASC)
+);

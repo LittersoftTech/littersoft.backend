@@ -32,6 +32,9 @@ internal static class PetGroomerEndpoints
     {
         try
         {
+            await locationRegistry.EnsureCategoryAvailableAsync(
+                providerId, CategoryName, cancellationToken);
+
             var result = await registry.RegisterGroomerShopAsync(
                 new RegisterGroomerShopCommand(
                     providerId,
@@ -57,6 +60,10 @@ internal static class PetGroomerEndpoints
 
             return ApiResults.Ok(ToResponse(result));
         }
+        catch (ProviderServiceCategoryConflictException exception)
+        {
+            return ApiResults.Conflict("ServiceCategoryConflict", exception.Message);
+        }
         catch (ProviderServiceLocationProviderNotFoundException exception)
         {
             return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
@@ -76,6 +83,9 @@ internal static class PetGroomerEndpoints
     {
         try
         {
+            await locationRegistry.EnsureCategoryAvailableAsync(
+                providerId, CategoryName, cancellationToken);
+
             var result = await registry.RegisterFreelanceGroomerAsync(
                 new RegisterFreelanceGroomerCommand(
                     providerId,
@@ -96,6 +106,10 @@ internal static class PetGroomerEndpoints
                 cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
+        }
+        catch (ProviderServiceCategoryConflictException exception)
+        {
+            return ApiResults.Conflict("ServiceCategoryConflict", exception.Message);
         }
         catch (ProviderServiceLocationProviderNotFoundException exception)
         {

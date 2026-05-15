@@ -1,7 +1,5 @@
-using Pawfront.Application.Bookings;
 using Pawfront.Application.Providers;
 using Pawfront.Application.Services;
-using Pawfront.Contracts.Bookings;
 using Pawfront.Contracts.Providers;
 using Pawfront.Contracts.Services;
 
@@ -18,9 +16,6 @@ internal static class ProviderEndpoints
 
         providers.MapPost("/{providerId:guid}/services", CreateService);
         providers.MapGet("/{providerId:guid}/services", ListServices);
-
-        providers.MapPost("/{providerId:guid}/bookings", CreateBooking);
-        providers.MapGet("/{providerId:guid}/bookings", ListBookings);
 
         return builder;
     }
@@ -59,24 +54,5 @@ internal static class ProviderEndpoints
     {
         var serviceList = await serviceCatalog.ListByProviderAsync(providerId, cancellationToken);
         return ApiResults.Ok(serviceList);
-    }
-
-    private static async Task<IResult> CreateBooking(
-        Guid providerId,
-        CreateBookingRequest request,
-        IBookingService bookingService,
-        CancellationToken cancellationToken)
-    {
-        var booking = await bookingService.CreateAsync(providerId, request, cancellationToken);
-        return ApiResults.Created($"/api/v1/providers/{providerId}/bookings/{booking.Id}", booking);
-    }
-
-    private static async Task<IResult> ListBookings(
-        Guid providerId,
-        IBookingService bookingService,
-        CancellationToken cancellationToken)
-    {
-        var bookingList = await bookingService.ListByProviderAsync(providerId, cancellationToken);
-        return ApiResults.Ok(bookingList);
     }
 }

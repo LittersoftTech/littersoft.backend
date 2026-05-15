@@ -41,10 +41,14 @@ api.MapHealthEndpoints();
 api.MapProviderOnboardingEndpoints();
 api.MapProviderEndpoints();
 api.MapProviderPolicyEndpoints();
+api.MapProviderAvailabilityEndpoints();
 api.MapPetSitterEndpoints();
 api.MapPetGroomerEndpoints();
 api.MapPetTrainerEndpoints();
 api.MapPetAdoptionSaleEndpoints();
 api.MapVetEndpoints();
+api.MapEventEndpoints();
+api.MapBookingEndpoints();
+api.MapBlobImageEndpoints();
 
 app.Run();

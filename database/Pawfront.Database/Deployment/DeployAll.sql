@@ -24,7 +24,7 @@ PRINT '--- Pawfront deployment starting ---';
 GO
 
 --------------------------------------------------------------------------------
--- 1. Schema
+-- 1. Schemas
 --------------------------------------------------------------------------------
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Provider')
 BEGIN
@@ -34,6 +34,39 @@ END
 ELSE
 BEGIN
     PRINT 'Schema [Provider] already exists.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Customer')
+BEGIN
+    EXEC ('CREATE SCHEMA [Customer]');
+    PRINT 'Created schema [Customer].';
+END
+ELSE
+BEGIN
+    PRINT 'Schema [Customer] already exists.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Event')
+BEGIN
+    EXEC ('CREATE SCHEMA [Event]');
+    PRINT 'Created schema [Event].';
+END
+ELSE
+BEGIN
+    PRINT 'Schema [Event] already exists.';
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Booking')
+BEGIN
+    EXEC ('CREATE SCHEMA [Booking]');
+    PRINT 'Created schema [Booking].';
+END
+ELSE
+BEGIN
+    PRINT 'Schema [Booking] already exists.';
 END
 GO
 
@@ -268,6 +301,40 @@ IF NOT EXISTS (
 GO
 
 
+-- 2.5a Retrofit: drop legacy composite UNIQUE (ProviderId, ServiceCategory) ---
+-- and add UNIQUE(ProviderId) so a provider can only register ONE service.
+-- Safe re-run: idempotent. Will FAIL if any provider already has > 1 row —
+-- run the duplicate check + cleanup script in CLAUDE.md before retrofitting.
+IF EXISTS (
+    SELECT 1 FROM sys.objects
+    WHERE [name] = N'UQ_ProviderServiceRegistrations_ProviderCategory'
+      AND [parent_object_id] = OBJECT_ID(N'[Provider].[ProviderServiceRegistrations]'))
+BEGIN
+    ALTER TABLE [Provider].[ProviderServiceRegistrations]
+        DROP CONSTRAINT [UQ_ProviderServiceRegistrations_ProviderCategory];
+    PRINT 'Dropped legacy [UQ_ProviderServiceRegistrations_ProviderCategory].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.objects
+    WHERE [name] = N'UQ_ProviderServiceRegistrations_Provider'
+      AND [parent_object_id] = OBJECT_ID(N'[Provider].[ProviderServiceRegistrations]'))
+BEGIN
+    -- Only attempt to add when the table already exists; new installs include
+    -- it inline in the CREATE TABLE block below.
+    IF EXISTS (
+        SELECT 1 FROM sys.tables
+        WHERE [name] = N'ProviderServiceRegistrations' AND [schema_id] = SCHEMA_ID(N'Provider'))
+    BEGIN
+        ALTER TABLE [Provider].[ProviderServiceRegistrations]
+            ADD CONSTRAINT [UQ_ProviderServiceRegistrations_Provider] UNIQUE ([ProviderId]);
+        PRINT 'Added [UQ_ProviderServiceRegistrations_Provider].';
+    END
+END
+GO
+
+
 -- 2.5 ProviderServiceRegistrations --------------------------------------------
 IF NOT EXISTS (
     SELECT 1 FROM sys.tables
@@ -288,8 +355,9 @@ BEGIN
             CONSTRAINT [DF_ProviderServiceRegistrations_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
 
         CONSTRAINT [PK_ProviderServiceRegistrations] PRIMARY KEY CLUSTERED ([ProviderServiceRegistrationId] ASC),
-        CONSTRAINT [UQ_ProviderServiceRegistrations_ProviderCategory]
-            UNIQUE ([ProviderId], [ServiceCategory]),
+        -- One registration per provider. A provider can only offer ONE category at a time.
+        CONSTRAINT [UQ_ProviderServiceRegistrations_Provider]
+            UNIQUE ([ProviderId]),
         CONSTRAINT [FK_ProviderServiceRegistrations_Providers_ProviderId]
             FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
         CONSTRAINT [CK_ProviderServiceRegistrations_ServiceCategory]
@@ -323,6 +391,65 @@ IF NOT EXISTS (
     CREATE INDEX [IX_ProviderServiceRegistrations_Location]
         ON [Provider].[ProviderServiceRegistrations] ([Latitude], [Longitude])
         INCLUDE ([ProviderId], [ServiceCategory], [SubCategory]);
+GO
+
+
+-- 2.5b ProviderWeeklyAvailability --------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ProviderWeeklyAvailability' AND [schema_id] = SCHEMA_ID(N'Provider'))
+BEGIN
+    CREATE TABLE [Provider].[ProviderWeeklyAvailability]
+    (
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [DayOfWeek] TINYINT NOT NULL,
+        [IsOpen] BIT NOT NULL,
+        [StartTime] TIME(0) NULL,
+        [EndTime] TIME(0) NULL,
+        [BreakStartTime] TIME(0) NULL,
+        [BreakEndTime] TIME(0) NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ProviderWeeklyAvailability_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ProviderWeeklyAvailability_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_ProviderWeeklyAvailability]
+            PRIMARY KEY CLUSTERED ([ProviderId] ASC, [DayOfWeek] ASC),
+        CONSTRAINT [FK_ProviderWeeklyAvailability_Providers_ProviderId]
+            FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]) ON DELETE CASCADE,
+        CONSTRAINT [CK_ProviderWeeklyAvailability_DayOfWeek]
+            CHECK ([DayOfWeek] BETWEEN 0 AND 6),
+        CONSTRAINT [CK_ProviderWeeklyAvailability_Closed_NullTimes] CHECK (
+            [IsOpen] = 1 OR (
+                [StartTime] IS NULL AND [EndTime] IS NULL
+                AND [BreakStartTime] IS NULL AND [BreakEndTime] IS NULL
+            )
+        ),
+        CONSTRAINT [CK_ProviderWeeklyAvailability_Open_HasWindow] CHECK (
+            [IsOpen] = 0 OR ([StartTime] IS NOT NULL AND [EndTime] IS NOT NULL)
+        ),
+        CONSTRAINT [CK_ProviderWeeklyAvailability_WindowOrder] CHECK (
+            [StartTime] IS NULL OR [EndTime] IS NULL OR [StartTime] < [EndTime]
+        ),
+        CONSTRAINT [CK_ProviderWeeklyAvailability_Break_BothOrNeither] CHECK (
+            ([BreakStartTime] IS NULL AND [BreakEndTime] IS NULL)
+            OR ([BreakStartTime] IS NOT NULL AND [BreakEndTime] IS NOT NULL)
+        ),
+        CONSTRAINT [CK_ProviderWeeklyAvailability_BreakOrder] CHECK (
+            [BreakStartTime] IS NULL OR [BreakEndTime] IS NULL
+            OR [BreakStartTime] < [BreakEndTime]
+        ),
+        CONSTRAINT [CK_ProviderWeeklyAvailability_BreakInsideWindow] CHECK (
+            [BreakStartTime] IS NULL OR [BreakEndTime] IS NULL
+            OR ([BreakStartTime] >= [StartTime] AND [BreakEndTime] <= [EndTime])
+        )
+    );
+    PRINT 'Created table [Provider].[ProviderWeeklyAvailability].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Provider].[ProviderWeeklyAvailability] already exists.';
+END
 GO
 
 
@@ -379,6 +506,219 @@ END
 ELSE
 BEGIN
     PRINT 'Table [Provider].[ProviderCancellationPolicies] already exists.';
+END
+GO
+
+
+-- 2.8 Customer.PetParents ----------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetParents' AND [schema_id] = SCHEMA_ID(N'Customer'))
+BEGIN
+    CREATE TABLE [Customer].[PetParents]
+    (
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_PetParents_PetParentId] DEFAULT NEWSEQUENTIALID(),
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetParents_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetParents_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_PetParents] PRIMARY KEY CLUSTERED ([PetParentId] ASC)
+    );
+    PRINT 'Created table [Customer].[PetParents].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Customer].[PetParents] already exists.';
+END
+GO
+
+
+-- 2.9 Customer.Pets ----------------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Customer'))
+BEGIN
+    CREATE TABLE [Customer].[Pets]
+    (
+        [PetId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_Pets_PetId] DEFAULT NEWSEQUENTIALID(),
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Pets_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Pets_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_Pets] PRIMARY KEY CLUSTERED ([PetId] ASC),
+        CONSTRAINT [FK_Pets_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Customer].[PetParents] ([PetParentId])
+    );
+    PRINT 'Created table [Customer].[Pets].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Customer].[Pets] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Pets_PetParentId'
+      AND [object_id] = OBJECT_ID(N'[Customer].[Pets]'))
+    CREATE INDEX [IX_Pets_PetParentId]
+        ON [Customer].[Pets] ([PetParentId]);
+GO
+
+
+-- 2.10 Event.Events ----------------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Events' AND [schema_id] = SCHEMA_ID(N'Event'))
+BEGIN
+    CREATE TABLE [Event].[Events]
+    (
+        [EventId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_Events_EventId] DEFAULT NEWSEQUENTIALID(),
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [EventCategory] NVARCHAR(64) NOT NULL,
+        [IsChildFriendly] BIT NOT NULL,
+        [Title] NVARCHAR(200) NOT NULL,
+        [Description] NVARCHAR(MAX) NOT NULL,
+        [BannerImageUrl] NVARCHAR(1000) NULL,
+        [EventType] NVARCHAR(32) NOT NULL,
+        [StartDate] DATE NOT NULL,
+        [EndDate] DATE NOT NULL,
+        [StartTime] TIME(0) NOT NULL,
+        [EndTime] TIME(0) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Events_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Events_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_Events] PRIMARY KEY CLUSTERED ([EventId] ASC),
+        CONSTRAINT [FK_Events_Providers_ProviderId]
+            FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
+        CONSTRAINT [CK_Events_EventCategory] CHECK ([EventCategory] IN (
+            N'AdoptionAndRescue', N'PetTraining', N'Charity', N'Volunteering',
+            N'HealthAndWellness', N'SocialAndCultural', N'OutdoorActivities', N'ParentEducation')),
+        CONSTRAINT [CK_Events_EventType] CHECK ([EventType] IN (N'Physical', N'Online')),
+        CONSTRAINT [CK_Events_DateRange] CHECK ([StartDate] <= [EndDate])
+    );
+    PRINT 'Created table [Event].[Events].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Event].[Events] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Events_ProviderId_StartDate'
+      AND [object_id] = OBJECT_ID(N'[Event].[Events]'))
+    CREATE INDEX [IX_Events_ProviderId_StartDate]
+        ON [Event].[Events] ([ProviderId], [StartDate] DESC);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Events_Category_StartDate'
+      AND [object_id] = OBJECT_ID(N'[Event].[Events]'))
+    CREATE INDEX [IX_Events_Category_StartDate]
+        ON [Event].[Events] ([EventCategory], [StartDate] DESC)
+        INCLUDE ([ProviderId], [Title], [EventType]);
+GO
+
+
+-- 2.10b Booking.Bookings ------------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Bookings' AND [schema_id] = SCHEMA_ID(N'Booking'))
+BEGIN
+    CREATE TABLE [Booking].[Bookings]
+    (
+        [BookingId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_Bookings_BookingId] DEFAULT NEWSEQUENTIALID(),
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [ServiceCategory] NVARCHAR(64) NOT NULL,
+        [SubCategory] NVARCHAR(64) NOT NULL,
+        [BookingDate] DATE NOT NULL,
+        [StartTime] TIME(0) NOT NULL,
+        [EndTime] TIME(0) NOT NULL,
+        [Status] NVARCHAR(32) NOT NULL
+            CONSTRAINT [DF_Bookings_Status] DEFAULT N'Confirmed',
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Bookings_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Bookings_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [CancelledAtUtc] DATETIME2(7) NULL,
+
+        CONSTRAINT [PK_Bookings] PRIMARY KEY CLUSTERED ([BookingId] ASC),
+        CONSTRAINT [FK_Bookings_Providers_ProviderId]
+            FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
+        CONSTRAINT [FK_Bookings_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Customer].[PetParents] ([PetParentId]),
+        CONSTRAINT [CK_Bookings_TimeOrder] CHECK ([StartTime] < [EndTime]),
+        CONSTRAINT [CK_Bookings_Status]
+            CHECK ([Status] IN (N'Confirmed', N'Cancelled', N'Completed', N'NoShow')),
+        CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
+            ([Status] = N'Cancelled' AND [CancelledAtUtc] IS NOT NULL)
+            OR ([Status] <> N'Cancelled')
+        )
+    );
+    PRINT 'Created table [Booking].[Bookings].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Booking].[Bookings] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Bookings_Provider_Date_Status'
+      AND [object_id] = OBJECT_ID(N'[Booking].[Bookings]'))
+    CREATE INDEX [IX_Bookings_Provider_Date_Status]
+        ON [Booking].[Bookings] ([ProviderId], [BookingDate], [Status])
+        INCLUDE ([StartTime], [EndTime], [BookingId], [PetParentId]);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Bookings_PetParent_Status'
+      AND [object_id] = OBJECT_ID(N'[Booking].[Bookings]'))
+    CREATE INDEX [IX_Bookings_PetParent_Status]
+        ON [Booking].[Bookings] ([PetParentId], [Status])
+        INCLUDE ([BookingDate], [StartTime], [EndTime], [ProviderId]);
+GO
+
+
+-- 2.11 Event.EventAmenities --------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'EventAmenities' AND [schema_id] = SCHEMA_ID(N'Event'))
+BEGIN
+    CREATE TABLE [Event].[EventAmenities]
+    (
+        [EventId] UNIQUEIDENTIFIER NOT NULL,
+        [Amenity] NVARCHAR(64) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_EventAmenities_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_EventAmenities] PRIMARY KEY CLUSTERED ([EventId] ASC, [Amenity] ASC),
+        CONSTRAINT [FK_EventAmenities_Events_EventId]
+            FOREIGN KEY ([EventId]) REFERENCES [Event].[Events] ([EventId]) ON DELETE CASCADE,
+        CONSTRAINT [CK_EventAmenities_Amenity] CHECK ([Amenity] IN (
+            N'FreeParking', N'PaidParking', N'Restrooms', N'DrinkingWater',
+            N'FoodAndBeverage', N'SeatingAreas', N'FirstAidBooth', N'None'))
+    );
+    PRINT 'Created table [Event].[EventAmenities].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Event].[EventAmenities] already exists.';
 END
 GO
 
@@ -742,13 +1082,14 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @ExistingId UNIQUEIDENTIFIER;
+    DECLARE @ExistingCategory NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @ExistingId = [ProviderServiceRegistrationId]
+    SELECT @ExistingId = [ProviderServiceRegistrationId],
+           @ExistingCategory = [ServiceCategory]
     FROM [Provider].[ProviderServiceRegistrations] WITH (UPDLOCK, HOLDLOCK)
-    WHERE [ProviderId] = @ProviderId
-      AND [ServiceCategory] = @ServiceCategory;
+    WHERE [ProviderId] = @ProviderId;
 
     IF @ExistingId IS NULL
     BEGIN
@@ -765,6 +1106,13 @@ BEGIN
         ([ProviderId], [ServiceCategory], [SubCategory], [Latitude], [Longitude])
         VALUES
         (@ProviderId, @ServiceCategory, @SubCategory, @Latitude, @Longitude);
+    END
+    ELSE IF @ExistingCategory <> @ServiceCategory
+    BEGIN
+        DECLARE @ConflictMessage NVARCHAR(400) =
+            N'Provider is already registered under ''' + @ExistingCategory +
+            N''' and cannot register under ''' + @ServiceCategory + N'''.';
+        THROW 51011, @ConflictMessage, 1;
     END
     ELSE
     BEGIN
@@ -785,8 +1133,7 @@ BEGIN
            [CreatedAtUtc],
            [UpdatedAtUtc]
     FROM [Provider].[ProviderServiceRegistrations]
-    WHERE [ProviderId] = @ProviderId
-      AND [ServiceCategory] = @ServiceCategory;
+    WHERE [ProviderId] = @ProviderId;
 
     COMMIT TRANSACTION;
 END;
@@ -953,6 +1300,376 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Provider].[GetProviderOnboardingStatus].';
+GO
+
+
+-- 3.13 SaveProviderWeeklyAvailability ----------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[SaveProviderWeeklyAvailability]
+    @ProviderId UNIQUEIDENTIFIER,
+    @AvailabilityJson NVARCHAR(MAX)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[Providers]
+        WHERE [ProviderId] = @ProviderId
+    )
+    BEGIN
+        THROW 51050, 'Provider profile was not found.', 1;
+    END
+
+    DELETE FROM [Provider].[ProviderWeeklyAvailability]
+    WHERE [ProviderId] = @ProviderId;
+
+    INSERT INTO [Provider].[ProviderWeeklyAvailability]
+    (
+        [ProviderId], [DayOfWeek], [IsOpen],
+        [StartTime], [EndTime], [BreakStartTime], [BreakEndTime]
+    )
+    SELECT @ProviderId,
+           CAST(JSON_VALUE([value], '$.dayOfWeek') AS TINYINT),
+           CAST(JSON_VALUE([value], '$.isOpen') AS BIT),
+           CAST(JSON_VALUE([value], '$.startTime') AS TIME(0)),
+           CAST(JSON_VALUE([value], '$.endTime') AS TIME(0)),
+           CAST(JSON_VALUE([value], '$.breakStartTime') AS TIME(0)),
+           CAST(JSON_VALUE([value], '$.breakEndTime') AS TIME(0))
+    FROM OPENJSON(@AvailabilityJson);
+
+    SELECT [ProviderId], [DayOfWeek], [IsOpen],
+           [StartTime], [EndTime], [BreakStartTime], [BreakEndTime],
+           [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Provider].[ProviderWeeklyAvailability]
+    WHERE [ProviderId] = @ProviderId
+    ORDER BY [DayOfWeek];
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Provider].[SaveProviderWeeklyAvailability].';
+GO
+
+
+-- 3.14 GetProviderWeeklyAvailability -----------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[GetProviderWeeklyAvailability]
+    @ProviderId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [ProviderId], [DayOfWeek], [IsOpen],
+           [StartTime], [EndTime], [BreakStartTime], [BreakEndTime],
+           [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Provider].[ProviderWeeklyAvailability]
+    WHERE [ProviderId] = @ProviderId
+    ORDER BY [DayOfWeek];
+END;
+GO
+PRINT 'Created/updated [Provider].[GetProviderWeeklyAvailability].';
+GO
+
+
+-- 3.15 Booking.CreateBooking -------------------------------------------------
+CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
+    @ProviderId UNIQUEIDENTIFIER,
+    @PetParentId UNIQUEIDENTIFIER,
+    @ServiceCategory NVARCHAR(64),
+    @SubCategory NVARCHAR(64),
+    @BookingDate DATE,
+    @StartTime TIME(0),
+    @EndTime TIME(0),
+    @Capacity INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (SELECT 1 FROM [Provider].[Providers] WHERE [ProviderId] = @ProviderId)
+        THROW 51061, 'Provider was not found.', 1;
+
+    IF NOT EXISTS (SELECT 1 FROM [Customer].[PetParents] WHERE [PetParentId] = @PetParentId)
+        THROW 51060, 'Pet parent was not found.', 1;
+
+    DECLARE @Concurrent INT;
+    SELECT @Concurrent = COUNT(*)
+    FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [ProviderId] = @ProviderId
+      AND [BookingDate] = @BookingDate
+      AND [Status] = N'Confirmed'
+      AND [StartTime] < @EndTime
+      AND [EndTime] > @StartTime;
+
+    IF @Concurrent >= @Capacity
+        THROW 51062, 'No remaining capacity for this slot.', 1;
+
+    DECLARE @InsertedBookingId TABLE ([BookingId] UNIQUEIDENTIFIER);
+
+    INSERT INTO [Booking].[Bookings]
+    ([ProviderId], [PetParentId], [ServiceCategory], [SubCategory],
+     [BookingDate], [StartTime], [EndTime])
+    OUTPUT inserted.[BookingId] INTO @InsertedBookingId
+    VALUES (@ProviderId, @PetParentId, @ServiceCategory, @SubCategory,
+            @BookingDate, @StartTime, @EndTime);
+
+    DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);
+
+    SELECT [BookingId], [ProviderId], [PetParentId], [ServiceCategory], [SubCategory],
+           [BookingDate], [StartTime], [EndTime], [Status],
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+    FROM [Booking].[Bookings]
+    WHERE [BookingId] = @BookingId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Booking].[CreateBooking].';
+GO
+
+
+-- 3.16 Booking.GetBooking ----------------------------------------------------
+CREATE OR ALTER PROCEDURE [Booking].[GetBooking]
+    @BookingId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [BookingId], [ProviderId], [PetParentId], [ServiceCategory], [SubCategory],
+           [BookingDate], [StartTime], [EndTime], [Status],
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+    FROM [Booking].[Bookings]
+    WHERE [BookingId] = @BookingId;
+END;
+GO
+PRINT 'Created/updated [Booking].[GetBooking].';
+GO
+
+
+-- 3.17 Booking.CancelBooking -------------------------------------------------
+CREATE OR ALTER PROCEDURE [Booking].[CancelBooking]
+    @BookingId UNIQUEIDENTIFIER,
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @CurrentStatus NVARCHAR(32);
+    DECLARE @CurrentParent UNIQUEIDENTIFIER;
+
+    BEGIN TRANSACTION;
+
+    SELECT @CurrentStatus = [Status],
+           @CurrentParent = [PetParentId]
+    FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [BookingId] = @BookingId;
+
+    IF @CurrentStatus IS NULL
+        THROW 51063, 'Booking was not found.', 1;
+
+    IF @CurrentParent <> @PetParentId
+        THROW 51064, 'Only the original booker can cancel this booking.', 1;
+
+    IF @CurrentStatus = N'Cancelled'
+        THROW 51065, 'Booking is already cancelled.', 1;
+
+    UPDATE [Booking].[Bookings]
+    SET [Status] = N'Cancelled',
+        [CancelledAtUtc] = @Now,
+        [UpdatedAtUtc] = @Now
+    WHERE [BookingId] = @BookingId;
+
+    SELECT [BookingId], [ProviderId], [PetParentId], [ServiceCategory], [SubCategory],
+           [BookingDate], [StartTime], [EndTime], [Status],
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+    FROM [Booking].[Bookings]
+    WHERE [BookingId] = @BookingId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Booking].[CancelBooking].';
+GO
+
+
+-- 3.18 Booking.ListBookingsByProvider ----------------------------------------
+CREATE OR ALTER PROCEDURE [Booking].[ListBookingsByProvider]
+    @ProviderId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [BookingId], [ProviderId], [PetParentId], [ServiceCategory], [SubCategory],
+           [BookingDate], [StartTime], [EndTime], [Status],
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+    FROM [Booking].[Bookings]
+    WHERE [ProviderId] = @ProviderId
+    ORDER BY [BookingDate] DESC, [StartTime] DESC;
+END;
+GO
+PRINT 'Created/updated [Booking].[ListBookingsByProvider].';
+GO
+
+
+-- 3.19 Booking.ListBookingsByPetParent ---------------------------------------
+CREATE OR ALTER PROCEDURE [Booking].[ListBookingsByPetParent]
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [BookingId], [ProviderId], [PetParentId], [ServiceCategory], [SubCategory],
+           [BookingDate], [StartTime], [EndTime], [Status],
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+    FROM [Booking].[Bookings]
+    WHERE [PetParentId] = @PetParentId
+    ORDER BY [BookingDate] DESC, [StartTime] DESC;
+END;
+GO
+PRINT 'Created/updated [Booking].[ListBookingsByPetParent].';
+GO
+
+
+-- 3.20 Booking.GetBookingsForDate --------------------------------------------
+CREATE OR ALTER PROCEDURE [Booking].[GetBookingsForDate]
+    @ProviderId UNIQUEIDENTIFIER,
+    @BookingDate DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [StartTime], [EndTime]
+    FROM [Booking].[Bookings]
+    WHERE [ProviderId] = @ProviderId
+      AND [BookingDate] = @BookingDate
+      AND [Status] = N'Confirmed'
+    ORDER BY [StartTime];
+END;
+GO
+PRINT 'Created/updated [Booking].[GetBookingsForDate].';
+GO
+
+
+-- 3.10 Event.CreateEvent -----------------------------------------------------
+CREATE OR ALTER PROCEDURE [Event].[CreateEvent]
+    @ProviderId UNIQUEIDENTIFIER,
+    @EventCategory NVARCHAR(64),
+    @IsChildFriendly BIT,
+    @Title NVARCHAR(200),
+    @Description NVARCHAR(MAX),
+    @BannerImageUrl NVARCHAR(1000) = NULL,
+    @EventType NVARCHAR(32),
+    @StartDate DATE,
+    @EndDate DATE,
+    @StartTime TIME(0),
+    @EndTime TIME(0),
+    @AmenitiesJson NVARCHAR(MAX) = N'[]'
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[Providers]
+        WHERE [ProviderId] = @ProviderId
+    )
+    BEGIN
+        THROW 51030, 'Provider profile was not found.', 1;
+    END
+
+    DECLARE @InsertedEventId TABLE (EventId UNIQUEIDENTIFIER);
+
+    INSERT INTO [Event].[Events]
+    (
+        [ProviderId], [EventCategory], [IsChildFriendly], [Title], [Description],
+        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime]
+    )
+    OUTPUT inserted.[EventId] INTO @InsertedEventId
+    VALUES
+    (
+        @ProviderId, @EventCategory, @IsChildFriendly, @Title, @Description,
+        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime
+    );
+
+    DECLARE @EventId UNIQUEIDENTIFIER = (SELECT TOP (1) [EventId] FROM @InsertedEventId);
+
+    INSERT INTO [Event].[EventAmenities] ([EventId], [Amenity])
+    SELECT DISTINCT @EventId, [value]
+    FROM OPENJSON(@AmenitiesJson)
+    WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
+
+    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Event].[Events]
+    WHERE [EventId] = @EventId;
+
+    SELECT [Amenity]
+    FROM [Event].[EventAmenities]
+    WHERE [EventId] = @EventId
+    ORDER BY [Amenity];
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Event].[CreateEvent].';
+GO
+
+
+-- 3.11 Event.GetEvent --------------------------------------------------------
+CREATE OR ALTER PROCEDURE [Event].[GetEvent]
+    @EventId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Event].[Events]
+    WHERE [EventId] = @EventId;
+
+    SELECT [Amenity]
+    FROM [Event].[EventAmenities]
+    WHERE [EventId] = @EventId
+    ORDER BY [Amenity];
+END;
+GO
+PRINT 'Created/updated [Event].[GetEvent].';
+GO
+
+
+-- 3.12 Event.ListEventsByProvider --------------------------------------------
+CREATE OR ALTER PROCEDURE [Event].[ListEventsByProvider]
+    @ProviderId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Event].[Events]
+    WHERE [ProviderId] = @ProviderId
+    ORDER BY [StartDate] DESC, [StartTime] DESC;
+
+    SELECT a.[EventId], a.[Amenity]
+    FROM [Event].[EventAmenities] a
+    INNER JOIN [Event].[Events] e ON e.[EventId] = a.[EventId]
+    WHERE e.[ProviderId] = @ProviderId
+    ORDER BY a.[EventId], a.[Amenity];
+END;
+GO
+PRINT 'Created/updated [Event].[ListEventsByProvider].';
 GO
 
 
