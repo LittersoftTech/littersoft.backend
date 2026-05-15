@@ -1,0 +1,763 @@
+{
+  "info": {
+    "name": "Pawfront Backend API",
+    "description": "Complete API testing suite for the Pawfront provider-facing backend.\n\n**Setup**\n1. Set the `baseUrl` collection variable (default `https://localhost:5001`).\n2. Get a Firebase ID token (see CLAUDE.md `Get a fresh Firebase ID token`) and set `firebaseToken`.\n3. Run requests roughly in folder order. Several requests have test scripts that auto-populate ids (`providerAuthIdentityId`, `providerId`, `otpId`, `eventId`, `bookingId`).\n\n**Notes**\n- Every endpoint requires the `FirebaseUser` policy → `Authorization: Bearer {{firebaseToken}}`.\n- All responses follow the `ApiResponse<T>` envelope: `{ success, data, error }`.\n- A provider can register only ONE service category. Pick one of the five service folders and stick to it for a given `providerId`.\n- Image-upload requests use multipart with field name `file`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      { "key": "token", "value": "{{firebaseToken}}", "type": "string" }
+    ]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://localhost:5001" },
+    { "key": "firebaseToken", "value": "PASTE_FIREBASE_ID_TOKEN_HERE" },
+    { "key": "providerAuthIdentityId", "value": "" },
+    { "key": "providerId", "value": "" },
+    { "key": "otpId", "value": "" },
+    { "key": "eventId", "value": "" },
+    { "key": "bookingId", "value": "" },
+    { "key": "petParentId", "value": "11111111-1111-1111-1111-111111111111" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/health", "host": ["{{baseUrl}}"], "path": ["api","v1","health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Provider Onboarding",
+      "item": [
+        {
+          "name": "POST firebase-auth (upsert auth identity)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.providerAuthIdentityId) {",
+                  "  pm.collectionVariables.set('providerAuthIdentityId', json.data.providerAuthIdentityId);",
+                  "}",
+                  "if (json && json.data && json.data.providerId) {",
+                  "  pm.collectionVariables.set('providerId', json.data.providerId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/provider-onboarding/firebase-auth", "host": ["{{baseUrl}}"], "path": ["api","v1","provider-onboarding","firebase-auth"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fcmToken\": \"fcm_dummy_token_abc123XYZ\",\n  \"deviceId\": \"device-uuid-9f1c-aa11-bb22\",\n  \"devicePlatform\": \"Android\"\n}"
+            }
+          }
+        },
+        {
+          "name": "POST profile (complete provider profile)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.providerId) {",
+                  "  pm.collectionVariables.set('providerId', json.data.providerId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/provider-onboarding/profile", "host": ["{{baseUrl}}"], "path": ["api","v1","provider-onboarding","profile"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"providerAuthIdentityId\": \"{{providerAuthIdentityId}}\",\n  \"firstName\": \"Ayur\",\n  \"lastName\": \"Shitarale\",\n  \"gender\": \"Male\",\n  \"mobileCountryCode\": \"+91\",\n  \"mobileNumber\": \"9876543210\",\n  \"dateOfBirth\": \"1995-08-22\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Mobile Verification",
+      "item": [
+        {
+          "name": "POST send OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.providerMobileOtpId) {",
+                  "  pm.collectionVariables.set('otpId', json.data.providerMobileOtpId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/mobile-verification/otp", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","mobile-verification","otp"] }
+          }
+        },
+        {
+          "name": "POST verify OTP",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/mobile-verification/otp/{{otpId}}/verify", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","mobile-verification","otp","{{otpId}}","verify"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"otpCode\": \"123456\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3a. Service - Pet Sitter",
+      "item": [
+        {
+          "name": "POST profile-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter/profile-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-sitter","profile-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST service-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter/service-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-sitter","service-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST register pet-hotel",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter/pet-hotel", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-sitter","pet-hotel"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petHotelName\": \"Happy Tails Pet Hotel\",\n  \"address\": \"42 Park Lane\",\n  \"zip\": \"411001\",\n  \"city\": \"Pune\",\n  \"telephoneCountryCode\": \"+91\",\n  \"telephoneNumber\": \"2025550101\",\n  \"email\": \"hello@happytails.example\",\n  \"website\": \"https://happytails.example\",\n  \"description\": \"A cozy boarding facility for cats and dogs with 24/7 supervision.\",\n  \"hotelImageUrl\": \"https://example.com/images/hotel.jpg\",\n  \"latitude\": 18.5204,\n  \"longitude\": 73.8567\n}"
+            }
+          }
+        },
+        {
+          "name": "POST register freelance pet-sitter",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter/freelance", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-sitter","freelance"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"address\": \"Flat 7B, Green Apartments\",\n  \"zip\": \"411014\",\n  \"city\": \"Pune\",\n  \"website\": null,\n  \"aboutYou\": \"Lifelong dog lover with 6+ years sitting experience.\",\n  \"profileImageUrl\": \"https://example.com/images/sitter.jpg\",\n  \"latitude\": 18.5612,\n  \"longitude\": 73.9143\n}"
+            }
+          }
+        },
+        {
+          "name": "POST pet-hotel offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter/pet-hotel/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-sitter","pet-hotel","offering"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenseNumber\": \"PSL-2026-00123\",\n  \"licenseType\": \"State\",\n  \"licenseImageUrl\": \"https://example.com/images/license.jpg\",\n  \"dayCare\": {\n    \"pricePerHour\": 200,\n    \"addOns\": [\"Feeding\", \"OutdoorWalks\"],\n    \"minimumBookingHours\": 2,\n    \"latePickupCharges\": 100,\n    \"dropOffTime\": \"09:00:00\",\n    \"pickUpTime\": \"19:00:00\"\n  },\n  \"nightStay\": {\n    \"pricePerHour\": 150,\n    \"addOns\": [\"GiveMedicines\", \"BathAndDry\"],\n    \"minimumBookingHours\": 12,\n    \"latePickupCharges\": 200,\n    \"dropOffTime\": \"19:00:00\",\n    \"pickUpTime\": \"08:00:00\"\n  },\n  \"animalsHandled\": [\"Dogs\", \"Cats\"],\n  \"maxPetsAtOneTime\": 3,\n  \"dogTemperaments\": [\"Friendly\", \"Anxious\"],\n  \"serviceLocation\": \"PetHotel\",\n  \"allowParentFood\": true\n}"
+            }
+          }
+        },
+        {
+          "name": "POST freelance offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter/freelance/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-sitter","freelance","offering"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenseNumber\": \"PSL-2026-FL77\",\n  \"licenseType\": \"Personal\",\n  \"licenseImageUrl\": \"https://example.com/images/license-fl.jpg\",\n  \"dayCare\": {\n    \"pricePerHour\": 180,\n    \"addOns\": [\"Massage\"],\n    \"minimumBookingHours\": 3,\n    \"latePickupCharges\": 120,\n    \"dropOffTime\": \"10:00:00\",\n    \"pickUpTime\": \"18:00:00\"\n  },\n  \"nightStay\": null,\n  \"animalsHandled\": [\"Dogs\"],\n  \"maxPetsAtOneTime\": 2,\n  \"dogTemperaments\": [\"Friendly\"],\n  \"serviceLocation\": \"CustomerPlace\",\n  \"allowParentFood\": false\n}"
+            }
+          }
+        },
+        {
+          "name": "GET pet-sitter service",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-sitter"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3b. Service - Pet Groomer",
+      "item": [
+        {
+          "name": "POST profile-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-groomer/profile-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-groomer","profile-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST service-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-groomer/service-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-groomer","service-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST register groomer-shop",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-groomer/groomer-shop", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-groomer","groomer-shop"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"groomerShopName\": \"Pawsh Grooming\",\n  \"address\": \"12 MG Road\",\n  \"zip\": \"411001\",\n  \"city\": \"Pune\",\n  \"telephoneCountryCode\": \"+91\",\n  \"telephoneNumber\": \"2025550199\",\n  \"email\": \"hello@pawsh.example\",\n  \"website\": \"https://pawsh.example\",\n  \"description\": \"Premium full-service grooming for cats and dogs.\",\n  \"shopImageUrl\": \"https://example.com/images/groomershop.jpg\",\n  \"latitude\": 18.5304,\n  \"longitude\": 73.8467\n}"
+            }
+          }
+        },
+        {
+          "name": "POST register freelance groomer",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-groomer/freelance", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-groomer","freelance"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"address\": \"Studio 4, Lake View\",\n  \"zip\": \"411015\",\n  \"city\": \"Pune\",\n  \"website\": null,\n  \"aboutYou\": \"Mobile groomer specializing in anxious dogs.\",\n  \"profileImageUrl\": \"https://example.com/images/groomer.jpg\",\n  \"latitude\": 18.5712,\n  \"longitude\": 73.9243\n}"
+            }
+          }
+        },
+        {
+          "name": "POST groomer-shop offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-groomer/groomer-shop/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-groomer","groomer-shop","offering"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenseNumber\": \"GRM-2026-00777\",\n  \"licenseType\": \"State\",\n  \"licenseImageUrl\": \"https://example.com/images/grm-license.jpg\",\n  \"session\": {\n    \"pricePerHour\": 500,\n    \"addOns\": [\"NailTrim\", \"EarCleaning\", \"DeShedding\"],\n    \"minimumBookingHours\": 1,\n    \"latePickupCharges\": 150,\n    \"dropOffTime\": \"10:00:00\",\n    \"pickUpTime\": \"18:00:00\"\n  },\n  \"animalsHandled\": [\"Dogs\", \"Cats\"],\n  \"maxPetsAtOneTime\": 4,\n  \"dogTemperaments\": [\"Friendly\", \"Anxious\"],\n  \"serviceLocation\": \"GroomerShop\"\n}"
+            }
+          }
+        },
+        {
+          "name": "POST freelance offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-groomer/freelance/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-groomer","freelance","offering"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenseNumber\": \"GRM-2026-FL12\",\n  \"licenseType\": \"Personal\",\n  \"licenseImageUrl\": \"https://example.com/images/grm-fl.jpg\",\n  \"session\": {\n    \"pricePerHour\": 600,\n    \"addOns\": [\"NailTrim\", \"FleaTreatment\"],\n    \"minimumBookingHours\": 1,\n    \"latePickupCharges\": 200,\n    \"dropOffTime\": \"11:00:00\",\n    \"pickUpTime\": \"17:00:00\"\n  },\n  \"animalsHandled\": [\"Dogs\"],\n  \"maxPetsAtOneTime\": 1,\n  \"dogTemperaments\": [\"Friendly\"],\n  \"serviceLocation\": \"CustomerPlace\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET pet-groomer service",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-groomer", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-groomer"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3c. Service - Pet Trainer",
+      "item": [
+        {
+          "name": "POST profile-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-trainer/profile-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-trainer","profile-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST service-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-trainer/service-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-trainer","service-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST register training-school",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-trainer/training-school", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-trainer","training-school"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"trainingSchoolName\": \"K9 Academy\",\n  \"address\": \"7 Kalyani Nagar\",\n  \"zip\": \"411006\",\n  \"city\": \"Pune\",\n  \"telephoneCountryCode\": \"+91\",\n  \"telephoneNumber\": \"2025550111\",\n  \"email\": \"hello@k9academy.example\",\n  \"website\": \"https://k9academy.example\",\n  \"description\": \"Positive-reinforcement obedience and behaviour classes.\",\n  \"schoolImageUrl\": \"https://example.com/images/school.jpg\",\n  \"latitude\": 18.5454,\n  \"longitude\": 73.9123\n}"
+            }
+          }
+        },
+        {
+          "name": "POST register freelance trainer",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-trainer/freelance", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-trainer","freelance"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"address\": \"22 Baner Road\",\n  \"zip\": \"411045\",\n  \"city\": \"Pune\",\n  \"website\": null,\n  \"aboutYou\": \"Certified trainer focused on reactive-dog rehab.\",\n  \"profileImageUrl\": \"https://example.com/images/trainer.jpg\",\n  \"latitude\": 18.5602,\n  \"longitude\": 73.7805\n}"
+            }
+          }
+        },
+        {
+          "name": "POST training-school offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-trainer/training-school/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-trainer","training-school","offering"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenseNumber\": \"TRN-2026-00010\",\n  \"licenseType\": \"State\",\n  \"licenseImageUrl\": \"https://example.com/images/trn-license.jpg\",\n  \"session\": {\n    \"sessionDurationHours\": 1,\n    \"pricePerSession\": 800\n  },\n  \"petsTrained\": [\"Dog\", \"Cat\"],\n  \"ageGroups\": [\"Puppy\", \"Adolescent\", \"Adult\"],\n  \"temperaments\": [\"Calm\", \"Energetic\", \"Anxious\"],\n  \"maxConcurrentSessions\": 5,\n  \"serviceLocations\": [\"TrainingSchool\", \"NatureOrParks\"],\n  \"trainingApproaches\": [\"Positive Reinforcement\", \"Clicker Training\"],\n  \"previousExperience\": [\"5 years military K9\", \"Certified CCPDT-KA\"],\n  \"privateTrainingDescription\": \"1-on-1 sessions tailored to behavioural issues, including reactivity and separation anxiety.\"\n}"
+            }
+          }
+        },
+        {
+          "name": "POST freelance offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-trainer/freelance/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-trainer","freelance","offering"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"licenseNumber\": \"TRN-2026-FL05\",\n  \"licenseType\": \"Personal\",\n  \"licenseImageUrl\": \"https://example.com/images/trn-fl.jpg\",\n  \"session\": {\n    \"sessionDurationHours\": 1.5,\n    \"pricePerSession\": 1200\n  },\n  \"petsTrained\": [\"Dog\"],\n  \"ageGroups\": [\"Puppy\", \"Adult\"],\n  \"temperaments\": [\"AllTemperaments\"],\n  \"maxConcurrentSessions\": 1,\n  \"serviceLocations\": [\"CustomerLocation\", \"NatureOrParks\"],\n  \"trainingApproaches\": [\"Force-free\"],\n  \"previousExperience\": null,\n  \"privateTrainingDescription\": \"Custom 1:1 plans for the pet and family at home.\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET pet-trainer service",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-trainer", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-trainer"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3d. Service - Pet Adoption & Sale",
+      "item": [
+        {
+          "name": "POST profile-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-adoption-sale/profile-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-adoption-sale","profile-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST service-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-adoption-sale/service-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-adoption-sale","service-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST register pet-shelter",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-adoption-sale/pet-shelter", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-adoption-sale","pet-shelter"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petShelterName\": \"Second Chance Shelter\",\n  \"address\": \"15 NIBM Road\",\n  \"zip\": \"411048\",\n  \"city\": \"Pune\",\n  \"telephoneCountryCode\": \"+91\",\n  \"telephoneNumber\": \"2025550133\",\n  \"email\": \"hello@secondchance.example\",\n  \"website\": \"https://secondchance.example\",\n  \"description\": \"Non-profit shelter for rescued dogs and cats.\",\n  \"shelterImageUrl\": \"https://example.com/images/shelter.jpg\",\n  \"latitude\": 18.4678,\n  \"longitude\": 73.9080\n}"
+            }
+          }
+        },
+        {
+          "name": "POST register pet-shop",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-adoption-sale/pet-shop", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-adoption-sale","pet-shop"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petShopName\": \"Whiskers & Wags\",\n  \"address\": \"3 FC Road\",\n  \"zip\": \"411004\",\n  \"city\": \"Pune\",\n  \"telephoneCountryCode\": \"+91\",\n  \"telephoneNumber\": \"2025550144\",\n  \"email\": \"hello@whiskerswags.example\",\n  \"website\": null,\n  \"description\": \"Ethical breeder partner with full health certifications.\",\n  \"shopImageUrl\": \"https://example.com/images/shop.jpg\",\n  \"latitude\": 18.5235,\n  \"longitude\": 73.8417\n}"
+            }
+          }
+        },
+        {
+          "name": "POST register freelance",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-adoption-sale/freelance", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-adoption-sale","freelance"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"address\": \"19 Aundh\",\n  \"zip\": \"411007\",\n  \"city\": \"Pune\",\n  \"website\": null,\n  \"aboutYou\": \"Independent rescuer matching dogs to forever homes.\",\n  \"profileImageUrl\": \"https://example.com/images/freelance-as.jpg\",\n  \"latitude\": 18.5582,\n  \"longitude\": 73.8077\n}"
+            }
+          }
+        },
+        {
+          "name": "GET pet-adoption-sale service",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-adoption-sale", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-adoption-sale"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3e. Service - Vet",
+      "item": [
+        {
+          "name": "POST profile-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/vet/profile-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","vet","profile-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST service-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/vet/service-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","vet","service-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST register vet-clinic",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/vet/vet-clinic", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","vet","vet-clinic"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"clinicName\": \"PetCare Veterinary Clinic\",\n  \"address\": \"88 SB Road\",\n  \"zip\": \"411016\",\n  \"city\": \"Pune\",\n  \"telephoneCountryCode\": \"+91\",\n  \"telephoneNumber\": \"2025550155\",\n  \"email\": \"info@petcareclinic.example\",\n  \"website\": \"https://petcareclinic.example\",\n  \"description\": \"Full-service small-animal clinic with surgery and diagnostics.\",\n  \"clinicImageUrl\": \"https://example.com/images/clinic.jpg\",\n  \"latitude\": 18.5326,\n  \"longitude\": 73.8285\n}"
+            }
+          }
+        },
+        {
+          "name": "POST register freelance vet",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/vet/freelance", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","vet","freelance"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"address\": \"55 Wakad\",\n  \"zip\": \"411057\",\n  \"city\": \"Pune\",\n  \"website\": null,\n  \"aboutYou\": \"BVSc & AH with 8 years home-visit practice.\",\n  \"profileImageUrl\": \"https://example.com/images/vet.jpg\",\n  \"latitude\": 18.5972,\n  \"longitude\": 73.7625\n}"
+            }
+          }
+        },
+        {
+          "name": "POST vet-clinic offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/vet/vet-clinic/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","vet","vet-clinic","offering"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"certificateImageUrl\": \"https://example.com/images/vet-certificate.jpg\",\n  \"appointment\": {\n    \"appointmentDurationHours\": 0.5,\n    \"pricePerAppointment\": 700\n  },\n  \"animalsTreated\": [\"Dog\", \"Cat\", \"Bird\", \"Rabbit\"],\n  \"maxConcurrentConsultations\": 2,\n  \"serviceLocation\": \"VetClinic\"\n}"
+            }
+          }
+        },
+        {
+          "name": "POST freelance vet offering",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/vet/freelance/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","vet","freelance","offering"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"certificateImageUrl\": \"https://example.com/images/vet-fl-cert.jpg\",\n  \"appointment\": {\n    \"appointmentDurationHours\": 1,\n    \"pricePerAppointment\": 1500\n  },\n  \"animalsTreated\": [\"Dog\", \"Cat\"],\n  \"serviceLocation\": \"CustomerLocation\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET vet service",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/vet", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","vet"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Provider Policy",
+      "item": [
+        {
+          "name": "POST payout-methods",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/policy/payout-methods", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","policy","payout-methods"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payoutMethods\": [\"Cash\", \"Digital\"]\n}"
+            }
+          }
+        },
+        {
+          "name": "POST cancellation policy",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/policy/cancellation", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","policy","cancellation"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"minimumHoursBeforeCancellation\": 48\n}"
+            }
+          }
+        },
+        {
+          "name": "GET policy",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/policy", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","policy"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Provider Availability",
+      "item": [
+        {
+          "name": "POST weekly availability",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","availability"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"days\": [\n    { \"dayOfWeek\": 0, \"isOpen\": false, \"startTime\": null, \"endTime\": null, \"breakStartTime\": null, \"breakEndTime\": null },\n    { \"dayOfWeek\": 1, \"isOpen\": true, \"startTime\": \"09:00:00\", \"endTime\": \"18:00:00\", \"breakStartTime\": \"13:00:00\", \"breakEndTime\": \"14:00:00\" },\n    { \"dayOfWeek\": 2, \"isOpen\": true, \"startTime\": \"09:00:00\", \"endTime\": \"18:00:00\", \"breakStartTime\": \"13:00:00\", \"breakEndTime\": \"14:00:00\" },\n    { \"dayOfWeek\": 3, \"isOpen\": true, \"startTime\": \"09:00:00\", \"endTime\": \"18:00:00\", \"breakStartTime\": \"13:00:00\", \"breakEndTime\": \"14:00:00\" },\n    { \"dayOfWeek\": 4, \"isOpen\": true, \"startTime\": \"09:00:00\", \"endTime\": \"18:00:00\", \"breakStartTime\": \"13:00:00\", \"breakEndTime\": \"14:00:00\" },\n    { \"dayOfWeek\": 5, \"isOpen\": true, \"startTime\": \"09:00:00\", \"endTime\": \"18:00:00\", \"breakStartTime\": \"13:00:00\", \"breakEndTime\": \"14:00:00\" },\n    { \"dayOfWeek\": 6, \"isOpen\": true, \"startTime\": \"10:00:00\", \"endTime\": \"15:00:00\", \"breakStartTime\": null, \"breakEndTime\": null }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "GET weekly availability",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","availability"] }
+          }
+        },
+        {
+          "name": "GET available slots",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?date=2026-05-20&durationHours=2&granularityMinutes=30",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","providers","{{providerId}}","availability","slots"],
+              "query": [
+                { "key": "date", "value": "2026-05-20" },
+                { "key": "durationHours", "value": "2" },
+                { "key": "granularityMinutes", "value": "30" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Bookings",
+      "item": [
+        {
+          "name": "POST create booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.bookingId) {",
+                  "  pm.collectionVariables.set('bookingId', json.data.bookingId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petParentId\": \"{{petParentId}}\",\n  \"bookingDate\": \"2026-05-20\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET bookings by provider",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings"] }
+          }
+        },
+        {
+          "name": "GET booking by id",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/bookings/{{bookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","bookings","{{bookingId}}"] }
+          }
+        },
+        {
+          "name": "POST cancel booking",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/bookings/{{bookingId}}/cancel", "host": ["{{baseUrl}}"], "path": ["api","v1","bookings","{{bookingId}}","cancel"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petParentId\": \"{{petParentId}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET bookings by pet-parent",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","pet-parents","{{petParentId}}","bookings"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Events",
+      "item": [
+        {
+          "name": "POST banner-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events/banner-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events","banner-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "POST create event (Physical, Paid)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.eventId) {",
+                  "  pm.collectionVariables.set('eventId', json.data.eventId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventCategory\": \"AdoptionAndRescue\",\n  \"isChildFriendly\": true,\n  \"title\": \"Spring Adoption Drive 2026\",\n  \"description\": \"Meet 30+ adoptable rescue dogs and cats. Free vet check-ups on-site.\",\n  \"bannerImageUrl\": \"https://example.com/images/event-banner.jpg\",\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\", \"FirstAidBooth\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-06-15\",\n  \"endDate\": \"2026-06-15\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"physical\": {\n    \"maximumCapacity\": 200,\n    \"isPaid\": true,\n    \"price\": 100\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "POST create event (Online, Free)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventCategory\": \"ParentEducation\",\n  \"isChildFriendly\": true,\n  \"title\": \"Webinar: Bringing Home a Puppy\",\n  \"description\": \"Live online session for new pet parents.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"None\"],\n  \"eventType\": \"Online\",\n  \"startDate\": \"2026-06-20\",\n  \"endDate\": \"2026-06-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"20:30:00\",\n  \"physical\": null\n}"
+            }
+          }
+        },
+        {
+          "name": "GET events by provider",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] }
+          }
+        },
+        {
+          "name": "GET event by id",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Onboarding Status",
+      "item": [
+        {
+          "name": "GET onboarding-status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/onboarding-status", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","onboarding-status"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Legacy (in-memory)",
+      "item": [
+        {
+          "name": "POST /providers (legacy)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers", "host": ["{{baseUrl}}"], "path": ["api","v1","providers"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessName\": \"Test Provider Co.\",\n  \"ownerName\": \"Demo Owner\",\n  \"email\": \"owner@example.com\",\n  \"phoneNumber\": \"+919876543210\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /providers (legacy)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers", "host": ["{{baseUrl}}"], "path": ["api","v1","providers"] }
+          }
+        },
+        {
+          "name": "POST /providers/{id}/services (legacy)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Basic Grooming\",\n  \"description\": \"Bath, blow-dry, nail trim.\",\n  \"basePrice\": 750,\n  \"durationMinutes\": 60\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /providers/{id}/services (legacy)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services"] }
+          }
+        }
+      ]
+    }
+  ]
+}
