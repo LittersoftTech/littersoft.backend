@@ -118,6 +118,8 @@ every change. Re-runs are safe (uses `IF NOT EXISTS` for tables/indexes and
 - `Customer.*` — `PetParents`, `Pets` (scaffolding only, no APIs)
 - `Event.*` — `Events`, `EventAmenities` (event subscriptions designed but
   not yet built)
+- `Booking.*` — `Bookings` (real, race-safe via `Booking.CreateBooking` sproc
+  with `UPDLOCK, HOLDLOCK` capacity check)
 
 ### Stored procedures live in `[Provider]` and `[Event]`
 See `database/Pawfront.Database/StoredProcedures/`. Naming pattern:
@@ -127,8 +129,17 @@ Custom `THROW` codes used for typed errors:
 - `51002` provider profile not found (OTP create)
 - `51003` provider mobile OTP not found
 - `51010` provider profile not found (service registration)
+- `51011` provider already registered under a different service category
+  (one-service-per-provider rule) → API maps to **409 ServiceCategoryConflict**
 - `51020/51021` provider profile not found (payout / cancellation policy)
 - `51030` provider profile not found (event create)
+- `51050` provider profile not found (weekly availability save)
+- `51060` pet parent not found (booking create)
+- `51061` provider not found (booking create)
+- `51062` no remaining capacity for slot (booking create)
+- `51063` booking not found (booking cancel)
+- `51064` only the booker can cancel
+- `51065` booking already cancelled
 
 ## Cosmos
 
@@ -201,7 +212,12 @@ Each category has a **basic registration** + **offering** (where applicable):
 
 All registrations also write a row to **`Provider.ProviderServiceRegistrations`** (SQL
 filter index with lat/lng) for fast geo + category filtering before
-hitting Cosmos for details. UNIQUE on `(ProviderId, ServiceCategory)`.
+hitting Cosmos for details. **UNIQUE on `(ProviderId)` — a provider can
+offer only ONE service category at a time.** Attempting to register a
+second category returns `409 ServiceCategoryConflict`. The pre-check
+`IProviderServiceLocationRegistry.EnsureCategoryAvailableAsync` runs
+before the Cosmos write so no orphan Cosmos docs are created; the SQL
+sproc also throws `51011` as a defense-in-depth race guard.
 
 Allowed enum values vary per category — see each category's Cosmos
 registry (`CosmosXxxServiceRegistry`) for the canonical lists. Common
@@ -213,6 +229,56 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
 - `POST /providers/{id}/policy/cancellation` — single nullable value
   (`null | 24 | 48 | 72 | 96` hours), stored in
   `Provider.ProviderCancellationPolicies` (one row per provider).
+
+### Provider weekly availability + slot computation (Rounds 1 & 2 of calendar)
+- `POST /providers/{id}/availability` — saves all 7 day rows atomically
+  (delete + insert). Body: `{ "days": [{ dayOfWeek, isOpen, startTime?,
+  endTime?, breakStartTime?, breakEndTime? }, ...] }`. Exactly 7 entries,
+  dayOfWeek 0..6 each appearing once (0 = Sunday). One optional break per
+  day, must fit inside the working window.
+- `GET /providers/{id}/availability` — returns whatever is stored
+  (`days` is empty until first save; mobile uses that as the "not set yet"
+  signal).
+- Stored in `Provider.ProviderWeeklyAvailability` with composite PK
+  `(ProviderId, DayOfWeek)` and CHECK constraints enforcing all the
+  invariants (closed-day has no times, open-day has both, break inside
+  window, start < end, etc.). `ON DELETE CASCADE` from `Provider.Providers`.
+- `GET /providers/{id}/availability/slots?date=YYYY-MM-DD&durationHours=2&granularityMinutes=30`
+  — Round 2 endpoint. Reads provider's single service registration (SQL),
+  pulls the offering from Cosmos for capacity + duration rule, then walks
+  the working windows for that date (minus break) at the requested
+  granularity. Returns `{ slots: [{ startTime, endTime }, ...] }`.
+  - **Duration rule per category:** PetSitter/PetGroomer require
+    `durationHours >= offering minimum`; PetTrainer/Vet require
+    `durationHours == offering fixed duration`; PetAdoptionAndSale rejects
+    (no offering structure built).
+  - **Capacity comes from the offering** (`maxPetsAtOneTime` /
+    `maxConcurrentSessions` / `maxConcurrentConsultations`); response
+    surfaces it as `capacity`.
+  - **TODO Round 3:** slot list is currently capacity-naive (no real
+    bookings table yet). When `Event.Bookings` lands, the orchestrator
+    will subtract slots whose overlapping-booking count has reached
+    `capacity`. The orchestrator and endpoint are ready; only the
+    booking-reader call needs to be wired in.
+- **Round 3 shipped.** Real bookings table `Booking.Bookings`. Capacity
+  check is race-safe via `Booking.CreateBooking` sproc with
+  `UPDLOCK, HOLDLOCK` on the overlap-count query, so two concurrent
+  POSTs serialise and the second is rejected once capacity is full.
+  - `IProviderOfferingResolver` extracted as the shared "look up
+    provider's category, capacity, duration rule" reader — used by
+    both the slot service and the booking service.
+  - `BookingService` implements both `IBookingService` (Create / Get /
+    Cancel / list-by-provider / list-by-parent) and
+    `IDailyBookingReader` (used by the slot service to subtract
+    overlapping bookings against capacity). Single registration via
+    `BookingService` resolves both abstractions.
+  - Booking validation in C# rejects out-of-hours windows, break
+    overlaps, and duration mismatches BEFORE hitting SQL. The SQL
+    sproc still has the capacity check as the race-safe last line of
+    defense.
+  - Sub-categories carried as a denormalised snapshot on the
+    booking row (so historical bookings keep meaning even if the
+    provider deregisters).
 - `GET /providers/{id}/policy` — returns both.
 
 ### Onboarding status orchestrator
@@ -300,8 +366,12 @@ POST   /providers/                                            (legacy in-memory)
 GET    /providers/                                            (legacy in-memory)
 POST   /providers/{providerId}/services                       (legacy in-memory)
 GET    /providers/{providerId}/services                       (legacy in-memory)
-POST   /providers/{providerId}/bookings                       (legacy in-memory)
-GET    /providers/{providerId}/bookings                       (legacy in-memory)
+
+POST   /providers/{providerId}/bookings
+GET    /providers/{providerId}/bookings
+GET    /bookings/{bookingId}
+POST   /bookings/{bookingId}/cancel
+GET    /pet-parents/{petParentId}/bookings
 
 POST   /providers/{providerId}/mobile-verification/otp
 POST   /providers/{providerId}/mobile-verification/otp/{otpId}/verify
@@ -309,6 +379,10 @@ POST   /providers/{providerId}/mobile-verification/otp/{otpId}/verify
 POST   /providers/{providerId}/policy/payout-methods
 POST   /providers/{providerId}/policy/cancellation
 GET    /providers/{providerId}/policy
+
+POST   /providers/{providerId}/availability
+GET    /providers/{providerId}/availability
+GET    /providers/{providerId}/availability/slots                      ?date= &durationHours= [&granularityMinutes=]
 
 GET    /providers/{providerId}/onboarding-status
 

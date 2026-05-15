@@ -1,18 +1,23 @@
 namespace Pawfront.Contracts.Bookings;
 
 public sealed record CreateBookingRequest(
-    Guid ServiceId,
-    Guid CustomerId,
-    Guid PetId,
-    DateTimeOffset StartsAt,
-    DateTimeOffset EndsAt);
+    Guid PetParentId,
+    DateOnly BookingDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime);
+
+public sealed record CancelBookingRequest(Guid PetParentId);
 
 public sealed record BookingResponse(
-    Guid Id,
+    Guid BookingId,
     Guid ProviderId,
-    Guid ServiceId,
-    Guid CustomerId,
-    Guid PetId,
-    DateTimeOffset StartsAt,
-    DateTimeOffset EndsAt,
-    string Status);
+    Guid PetParentId,
+    string ServiceCategory,
+    string SubCategory,
+    DateOnly BookingDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    string Status,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    DateTimeOffset? CancelledAtUtc);

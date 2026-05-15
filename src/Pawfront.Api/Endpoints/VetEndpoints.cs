@@ -32,6 +32,9 @@ internal static class VetEndpoints
     {
         try
         {
+            await locationRegistry.EnsureCategoryAvailableAsync(
+                providerId, CategoryName, cancellationToken);
+
             var result = await registry.RegisterVetClinicAsync(
                 new RegisterVetClinicCommand(
                     providerId,
@@ -57,6 +60,10 @@ internal static class VetEndpoints
 
             return ApiResults.Ok(ToResponse(result));
         }
+        catch (ProviderServiceCategoryConflictException exception)
+        {
+            return ApiResults.Conflict("ServiceCategoryConflict", exception.Message);
+        }
         catch (ProviderServiceLocationProviderNotFoundException exception)
         {
             return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
@@ -76,6 +83,9 @@ internal static class VetEndpoints
     {
         try
         {
+            await locationRegistry.EnsureCategoryAvailableAsync(
+                providerId, CategoryName, cancellationToken);
+
             var result = await registry.RegisterFreelanceVeterinarianAsync(
                 new RegisterFreelanceVeterinarianCommand(
                     providerId,
@@ -96,6 +106,10 @@ internal static class VetEndpoints
                 cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
+        }
+        catch (ProviderServiceCategoryConflictException exception)
+        {
+            return ApiResults.Conflict("ServiceCategoryConflict", exception.Message);
         }
         catch (ProviderServiceLocationProviderNotFoundException exception)
         {

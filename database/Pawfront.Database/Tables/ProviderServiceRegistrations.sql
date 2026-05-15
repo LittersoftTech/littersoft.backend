@@ -13,8 +13,9 @@ CREATE TABLE [Provider].[ProviderServiceRegistrations]
         CONSTRAINT [DF_ProviderServiceRegistrations_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
 
     CONSTRAINT [PK_ProviderServiceRegistrations] PRIMARY KEY CLUSTERED ([ProviderServiceRegistrationId] ASC),
-    CONSTRAINT [UQ_ProviderServiceRegistrations_ProviderCategory]
-        UNIQUE ([ProviderId], [ServiceCategory]),
+    -- One registration per provider. A provider can only offer ONE service category at a time.
+    CONSTRAINT [UQ_ProviderServiceRegistrations_Provider]
+        UNIQUE ([ProviderId]),
     CONSTRAINT [FK_ProviderServiceRegistrations_Providers_ProviderId]
         FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
     CONSTRAINT [CK_ProviderServiceRegistrations_ServiceCategory]

@@ -11,13 +11,15 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @ExistingId UNIQUEIDENTIFIER;
+    DECLARE @ExistingCategory NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @ExistingId = [ProviderServiceRegistrationId]
+    -- A provider can have at most one registration. Look up by ProviderId alone.
+    SELECT @ExistingId = [ProviderServiceRegistrationId],
+           @ExistingCategory = [ServiceCategory]
     FROM [Provider].[ProviderServiceRegistrations] WITH (UPDLOCK, HOLDLOCK)
-    WHERE [ProviderId] = @ProviderId
-      AND [ServiceCategory] = @ServiceCategory;
+    WHERE [ProviderId] = @ProviderId;
 
     IF @ExistingId IS NULL
     BEGIN
@@ -47,8 +49,17 @@ BEGIN
             @Longitude
         );
     END
+    ELSE IF @ExistingCategory <> @ServiceCategory
+    BEGIN
+        -- Provider is already registered under a different category. Reject (409).
+        DECLARE @ConflictMessage NVARCHAR(400) =
+            N'Provider is already registered under ''' + @ExistingCategory +
+            N''' and cannot register under ''' + @ServiceCategory + N'''.';
+        THROW 51011, @ConflictMessage, 1;
+    END
     ELSE
     BEGIN
+        -- Same category — refresh the sub-category, lat/lng.
         UPDATE [Provider].[ProviderServiceRegistrations]
         SET [SubCategory] = @SubCategory,
             [Latitude] = @Latitude,
@@ -66,8 +77,7 @@ BEGIN
            [CreatedAtUtc],
            [UpdatedAtUtc]
     FROM [Provider].[ProviderServiceRegistrations]
-    WHERE [ProviderId] = @ProviderId
-      AND [ServiceCategory] = @ServiceCategory;
+    WHERE [ProviderId] = @ProviderId;
 
     COMMIT TRANSACTION;
 END;

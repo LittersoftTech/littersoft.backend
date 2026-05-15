@@ -1,9 +1,21 @@
-using Pawfront.Contracts.Bookings;
-
 namespace Pawfront.Application.Bookings;
 
 public interface IBookingService
 {
-    Task<BookingResponse> CreateAsync(Guid providerId, CreateBookingRequest request, CancellationToken cancellationToken);
-    Task<IReadOnlyCollection<BookingResponse>> ListByProviderAsync(Guid providerId, CancellationToken cancellationToken);
+    Task<BookingResult> CreateAsync(CreateBookingCommand command, CancellationToken cancellationToken);
+
+    Task<BookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
+
+    Task<BookingResult> CancelAsync(
+        Guid bookingId,
+        Guid petParentId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<BookingResult>> ListByProviderAsync(
+        Guid providerId,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken);
 }
