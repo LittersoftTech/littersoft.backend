@@ -49,5 +49,6 @@ api.MapPetAdoptionSaleEndpoints();
 api.MapVetEndpoints();
 api.MapEventEndpoints();
 api.MapBookingEndpoints();
+api.MapBlobImageEndpoints();
 
 app.Run();

@@ -9,4 +9,8 @@ public interface IPawfrontBlobStorage
         Stream content,
         string contentType,
         CancellationToken cancellationToken);
+
+    Task<BlobDownload?> DownloadAsync(
+        string blobUrl,
+        CancellationToken cancellationToken);
 }
