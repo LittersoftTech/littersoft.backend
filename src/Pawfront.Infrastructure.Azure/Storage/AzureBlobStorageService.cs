@@ -1,8 +1,10 @@
+using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Options;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Storage;
+using BlobDownloadResult = Pawfront.Application.Storage.BlobDownloadResult;
 
 namespace Pawfront.Infrastructure.Azure.Storage;
 
@@ -37,6 +39,69 @@ internal sealed class AzureBlobStorageService(
             cancellationToken: cancellationToken);
 
         return blobClient.Uri.ToString();
+    }
+
+    public async Task<BlobDownloadResult?> DownloadAsync(
+        string blobUrl,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(blobUrl))
+        {
+            throw new ArgumentException("Blob URL is required.", nameof(blobUrl));
+        }
+
+        if (!Uri.TryCreate(blobUrl, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+        {
+            throw new ArgumentException("Blob URL must be an absolute http(s) URI.", nameof(blobUrl));
+        }
+
+        var container = await GetContainerAsync(cancellationToken);
+        var blobName = ResolveManagedBlobName(uri, container);
+
+        var blobClient = container.GetBlobClient(blobName);
+
+        try
+        {
+            var response = await blobClient.DownloadStreamingAsync(cancellationToken: cancellationToken);
+            var details = response.Value.Details;
+            var contentType = string.IsNullOrWhiteSpace(details.ContentType)
+                ? "application/octet-stream"
+                : details.ContentType;
+
+            return new BlobDownloadResult(
+                response.Value.Content,
+                contentType,
+                details.ContentLength == 0 ? null : details.ContentLength);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return null;
+        }
+    }
+
+    private static string ResolveManagedBlobName(Uri uri, BlobContainerClient container)
+    {
+        var containerUri = container.Uri;
+
+        if (!string.Equals(uri.Host, containerUri.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                "Blob URL host does not belong to the managed storage account.",
+                nameof(uri));
+        }
+
+        var segments = uri.AbsolutePath.TrimStart('/').Split('/', 2);
+        if (segments.Length < 2 ||
+            !string.Equals(segments[0], container.Name, StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(segments[1]))
+        {
+            throw new ArgumentException(
+                "Blob URL does not point at the managed container.",
+                nameof(uri));
+        }
+
+        return Uri.UnescapeDataString(segments[1]);
     }
 
     private string BuildBlobName(BlobUploadKind kind, Guid providerId, string fileName)
