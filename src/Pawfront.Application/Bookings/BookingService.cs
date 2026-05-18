@@ -1,4 +1,5 @@
 using Pawfront.Application.Availability;
+using Pawfront.Application.Closures;
 using Pawfront.Application.Offerings;
 
 namespace Pawfront.Application.Bookings;
@@ -6,7 +7,8 @@ namespace Pawfront.Application.Bookings;
 internal sealed class BookingService(
     IBookingSqlStore sqlStore,
     IProviderOfferingResolver offeringResolver,
-    IProviderAvailabilityService availabilityService) : IBookingService, IDailyBookingReader
+    IProviderAvailabilityService availabilityService,
+    IProviderClosureReader closureReader) : IBookingService, IDailyBookingReader
 {
     public async Task<BookingResult> CreateAsync(
         CreateBookingCommand command,
@@ -34,6 +36,10 @@ internal sealed class BookingService(
 
         // 3. Validate the requested window fits inside the provider's weekly availability.
         await ValidateAgainstAvailabilityAsync(
+            command.ProviderId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
+
+        // 3b. Reject if a provider closure (sick leave, vacation, etc.) covers this window.
+        await ValidateAgainstClosuresAsync(
             command.ProviderId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
         // 4. Hand off to the SQL sproc (capacity check + insert is race-safe there).
@@ -79,6 +85,30 @@ internal sealed class BookingService(
         {
             throw new InvalidBookingTimeException(
                 $"This service requires a minimum booking duration of {offering.DurationHours} hours.");
+        }
+    }
+
+    private async Task ValidateAgainstClosuresAsync(
+        Guid providerId,
+        DateOnly bookingDate,
+        TimeOnly startTime,
+        TimeOnly endTime,
+        CancellationToken cancellationToken)
+    {
+        var closures = await closureReader.GetActiveClosuresForDateAsync(providerId, bookingDate, cancellationToken);
+        foreach (var closure in closures)
+        {
+            // Full-day closure blocks any booking on the date.
+            if (closure.IsFullDay)
+            {
+                throw new ProviderClosedOnDateException(providerId, bookingDate, closure.Reason);
+            }
+
+            // Partial-day closure: standard half-open overlap test.
+            if (closure.StartTime!.Value < endTime && closure.EndTime!.Value > startTime)
+            {
+                throw new ProviderClosedOnDateException(providerId, bookingDate, closure.Reason);
+            }
         }
     }
 

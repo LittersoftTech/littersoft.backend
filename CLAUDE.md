@@ -140,6 +140,8 @@ Custom `THROW` codes used for typed errors:
 - `51063` booking not found (booking cancel)
 - `51064` only the booker can cancel
 - `51065` booking already cancelled
+- `51070` provider profile not found (closure create)
+- `51071` provider closure not found (closure delete)
 
 ## Cosmos
 
@@ -281,6 +283,19 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
     provider deregisters).
 - `GET /providers/{id}/policy` — returns both.
 
+### Provider closures (sick leave / vacation)
+- `POST /providers/{id}/closures` — body: `{ startDate, endDate, startTime?, endTime?, reason? }`.
+  - Full-day across the range when no times given. Partial-day (`startTime`+`endTime` set) requires `startDate == endDate`.
+  - Always returns 200 + envelope `success=true`. The response payload is **discriminated**:
+    - `status: "Created"` → `closure` is populated.
+    - `status: "BookingsExist"` → no closure was created; `conflictingBookings` lists the confirmed bookings inside the window plus a `warningMessage`. Provider must move/cancel them and retry. **There is no `force` override** — the user explicitly chose strict rejection.
+  - SQL sproc `Provider.CreateClosure` holds `UPDLOCK, HOLDLOCK` on the conflict-detect query so concurrent `Booking.CreateBooking` on the same provider serialises behind it (race-safe).
+- `GET /providers/{id}/closures?from=&to=` — list closures whose date range intersects `[from, to]` (either bound optional).
+- `DELETE /providers/{id}/closures/{closureId}` — reopen.
+- Slot service consults closures: full-day → empty slots; partial-day → carved out of the working windows like an extra break.
+- Booking service consults closures: any overlap → `ProviderClosedOnDateException` mapped to **409 ProviderClosed**.
+- Table: `Provider.ProviderClosures` (ClosureId, ProviderId, StartDate, EndDate, StartTime?, EndTime?, Reason?, CreatedAtUtc). CHECKs enforce `EndDate >= StartDate`, both times together-or-neither, and partial-day windows require `StartDate = EndDate`.
+
 ### Onboarding status orchestrator
 - `GET /providers/{id}/onboarding-status` — single endpoint that returns:
   `basicInfo`, `serviceSelection`, `selectedServiceDetails` (one entry per
@@ -383,6 +398,10 @@ GET    /providers/{providerId}/policy
 POST   /providers/{providerId}/availability
 GET    /providers/{providerId}/availability
 GET    /providers/{providerId}/availability/slots                      ?date= &durationHours= [&granularityMinutes=]
+
+POST   /providers/{providerId}/closures
+GET    /providers/{providerId}/closures                                [?from= &to=]
+DELETE /providers/{providerId}/closures/{closureId}
 
 GET    /providers/{providerId}/onboarding-status
 

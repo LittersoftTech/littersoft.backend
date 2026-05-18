@@ -1,4 +1,5 @@
 using Pawfront.Application.Bookings;
+using Pawfront.Application.Closures;
 using Pawfront.Contracts.Bookings;
 
 namespace Pawfront.Api.Endpoints;
@@ -57,6 +58,10 @@ internal static class BookingEndpoints
         catch (BookingCapacityExceededException exception)
         {
             return ApiResults.Conflict("CapacityExceeded", exception.Message);
+        }
+        catch (ProviderClosedOnDateException exception)
+        {
+            return ApiResults.Conflict("ProviderClosed", exception.Message);
         }
         catch (InvalidBookingTimeException exception)
         {

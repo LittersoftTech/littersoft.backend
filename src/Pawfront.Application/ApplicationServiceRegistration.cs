@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
+using Pawfront.Application.Closures;
 using Pawfront.Application.Events;
 using Pawfront.Application.Offerings;
 using Pawfront.Application.Onboarding;
@@ -21,6 +22,11 @@ public static class ApplicationServiceRegistration
         services.TryAddScoped<BookingService>();
         services.TryAddScoped<IBookingService>(sp => sp.GetRequiredService<BookingService>());
         services.TryAddScoped<IDailyBookingReader>(sp => sp.GetRequiredService<BookingService>());
+
+        // ProviderClosureService also implements two interfaces (service + narrow reader).
+        services.TryAddScoped<ProviderClosureService>();
+        services.TryAddScoped<IProviderClosureService>(sp => sp.GetRequiredService<ProviderClosureService>());
+        services.TryAddScoped<IProviderClosureReader>(sp => sp.GetRequiredService<ProviderClosureService>());
 
         return services;
     }
