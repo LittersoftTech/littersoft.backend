@@ -1,4 +1,5 @@
 using Pawfront.Application.Bookings;
+using Pawfront.Application.Closures;
 using Pawfront.Application.Offerings;
 
 namespace Pawfront.Application.Availability;
@@ -6,7 +7,8 @@ namespace Pawfront.Application.Availability;
 internal sealed class ProviderAvailabilitySlotService(
     IProviderOfferingResolver offeringResolver,
     IProviderAvailabilityService availabilityService,
-    IDailyBookingReader bookingReader) : IProviderAvailabilitySlotService
+    IDailyBookingReader bookingReader,
+    IProviderClosureReader closureReader) : IProviderAvailabilitySlotService
 {
     private const int MinGranularityMinutes = 1;
     private const int MaxGranularityMinutes = 240;
@@ -64,8 +66,27 @@ internal sealed class ProviderAvailabilitySlotService(
                 Array.Empty<TimeSlot>());
         }
 
-        // 4. Build the working windows (split around break if set).
+        // 3b. Apply any ad-hoc closures (sick leave / vacation). A full-day closure
+        //     short-circuits to zero slots; partial-day closures are treated as
+        //     extra breaks that carve the working windows further.
+        var closures = await closureReader.GetActiveClosuresForDateAsync(providerId, date, cancellationToken);
+        if (closures.Any(c => c.IsFullDay))
+        {
+            return new AvailableSlotsResult(
+                providerId,
+                date,
+                offering.ServiceCategory,
+                offering.SubCategory,
+                durationHours,
+                offering.Capacity,
+                granularityMinutes,
+                Array.Empty<TimeSlot>());
+        }
+
+        // 4. Build the working windows (split around break if set, then split
+        //    again around any partial-day closure windows).
         var windows = BuildWorkingWindows(daySchedule);
+        windows = SubtractClosureWindows(windows, closures);
 
         // 5. Read confirmed bookings for this date so we can subtract overlapping slots.
         var existingBookings = await bookingReader.GetBookingsForDateAsync(providerId, date, cancellationToken);
@@ -121,6 +142,64 @@ internal sealed class ProviderAvailabilitySlotService(
             }
         }
         return count;
+    }
+
+    /// <summary>
+    /// Removes each partial-day closure window from the working windows. A closure
+    /// that lies fully inside a window splits it in two; one that overlaps an edge
+    /// trims the edge; one that covers a window removes it entirely.
+    /// </summary>
+    private static List<(TimeOnly Start, TimeOnly End)> SubtractClosureWindows(
+        List<(TimeOnly Start, TimeOnly End)> windows,
+        IReadOnlyList<ActiveClosure> closures)
+    {
+        if (closures.Count == 0)
+        {
+            return windows;
+        }
+
+        var current = windows;
+        foreach (var closure in closures)
+        {
+            // Full-day closures are already handled upstream — defensive skip.
+            if (closure.StartTime is null || closure.EndTime is null) continue;
+
+            var cs = closure.StartTime.Value;
+            var ce = closure.EndTime.Value;
+            var next = new List<(TimeOnly Start, TimeOnly End)>(current.Count);
+
+            foreach (var (ws, we) in current)
+            {
+                // No overlap → keep window unchanged.
+                if (ce <= ws || cs >= we)
+                {
+                    next.Add((ws, we));
+                    continue;
+                }
+
+                // Closure covers the whole window → drop it.
+                if (cs <= ws && ce >= we)
+                {
+                    continue;
+                }
+
+                // Left fragment.
+                if (cs > ws)
+                {
+                    next.Add((ws, cs));
+                }
+
+                // Right fragment.
+                if (ce < we)
+                {
+                    next.Add((ce, we));
+                }
+            }
+
+            current = next;
+        }
+
+        return current;
     }
 
     private static List<(TimeOnly Start, TimeOnly End)> BuildWorkingWindows(DayAvailabilityResult day)

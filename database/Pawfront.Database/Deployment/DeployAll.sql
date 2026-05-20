@@ -394,6 +394,61 @@ IF NOT EXISTS (
 GO
 
 
+-- 2.5c ProviderClosures -------------------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ProviderClosures' AND [schema_id] = SCHEMA_ID(N'Provider'))
+BEGIN
+    CREATE TABLE [Provider].[ProviderClosures]
+    (
+        [ClosureId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_ProviderClosures_ClosureId] DEFAULT NEWSEQUENTIALID(),
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [StartDate] DATE NOT NULL,
+        [EndDate] DATE NOT NULL,
+        [StartTime] TIME(0) NULL,
+        [EndTime] TIME(0) NULL,
+        [Reason] NVARCHAR(500) NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ProviderClosures_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_ProviderClosures] PRIMARY KEY CLUSTERED ([ClosureId] ASC),
+        CONSTRAINT [FK_ProviderClosures_Providers_ProviderId]
+            FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]) ON DELETE CASCADE,
+        CONSTRAINT [CK_ProviderClosures_DateOrder] CHECK ([EndDate] >= [StartDate]),
+        CONSTRAINT [CK_ProviderClosures_Time_BothOrNeither] CHECK (
+            ([StartTime] IS NULL AND [EndTime] IS NULL)
+            OR ([StartTime] IS NOT NULL AND [EndTime] IS NOT NULL AND [StartTime] < [EndTime])
+        ),
+        CONSTRAINT [CK_ProviderClosures_PartialDayIsSingleDate] CHECK (
+            [StartTime] IS NULL OR [StartDate] = [EndDate]
+        )
+    );
+    PRINT 'Created table [Provider].[ProviderClosures].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Provider].[ProviderClosures] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ProviderClosures_Provider_Range'
+      AND [object_id] = OBJECT_ID(N'[Provider].[ProviderClosures]'))
+BEGIN
+    CREATE INDEX [IX_ProviderClosures_Provider_Range]
+        ON [Provider].[ProviderClosures] ([ProviderId], [StartDate], [EndDate])
+        INCLUDE ([StartTime], [EndTime], [Reason]);
+    PRINT 'Created index [IX_ProviderClosures_Provider_Range].';
+END
+ELSE
+BEGIN
+    PRINT 'Index [IX_ProviderClosures_Provider_Range] already exists.';
+END
+GO
+
+
 -- 2.5b ProviderWeeklyAvailability --------------------------------------------
 IF NOT EXISTS (
     SELECT 1 FROM sys.tables
@@ -1670,6 +1725,145 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Event].[ListEventsByProvider].';
+GO
+
+
+-- 3.21 Provider.CreateClosure -----------------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[CreateClosure]
+    @ProviderId UNIQUEIDENTIFIER,
+    @StartDate DATE,
+    @EndDate DATE,
+    @StartTime TIME(0) = NULL,
+    @EndTime TIME(0) = NULL,
+    @Reason NVARCHAR(500) = NULL,
+    @ClosureId UNIQUEIDENTIFIER = NULL OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    SET @ClosureId = NULL;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[Providers]
+        WHERE [ProviderId] = @ProviderId
+    )
+    BEGIN
+        THROW 51070, 'Provider profile was not found.', 1;
+    END
+
+    DECLARE @Conflicts TABLE (
+        BookingId UNIQUEIDENTIFIER NOT NULL,
+        PetParentId UNIQUEIDENTIFIER NOT NULL,
+        BookingDate DATE NOT NULL,
+        StartTime TIME(0) NOT NULL,
+        EndTime TIME(0) NOT NULL
+    );
+
+    INSERT INTO @Conflicts (BookingId, PetParentId, BookingDate, StartTime, EndTime)
+    SELECT b.[BookingId], b.[PetParentId], b.[BookingDate], b.[StartTime], b.[EndTime]
+    FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
+    WHERE b.[ProviderId] = @ProviderId
+      AND b.[Status] = N'Confirmed'
+      AND b.[BookingDate] BETWEEN @StartDate AND @EndDate
+      AND (
+          @StartTime IS NULL
+          OR (b.[StartTime] < @EndTime AND b.[EndTime] > @StartTime)
+      );
+
+    IF EXISTS (SELECT 1 FROM @Conflicts)
+    BEGIN
+        SELECT BookingId, PetParentId, BookingDate, StartTime, EndTime
+        FROM @Conflicts
+        ORDER BY BookingDate, StartTime;
+        ROLLBACK TRANSACTION;
+        RETURN;
+    END
+
+    DECLARE @InsertedId UNIQUEIDENTIFIER = NEWID();
+
+    INSERT INTO [Provider].[ProviderClosures]
+        ([ClosureId], [ProviderId], [StartDate], [EndDate], [StartTime], [EndTime], [Reason])
+    VALUES
+        (@InsertedId, @ProviderId, @StartDate, @EndDate, @StartTime, @EndTime, @Reason);
+
+    SET @ClosureId = @InsertedId;
+
+    SELECT [ClosureId], [ProviderId], [StartDate], [EndDate],
+           [StartTime], [EndTime], [Reason], [CreatedAtUtc]
+    FROM [Provider].[ProviderClosures]
+    WHERE [ClosureId] = @InsertedId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Provider].[CreateClosure].';
+GO
+
+
+-- 3.22 Provider.ListClosures -------------------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[ListClosures]
+    @ProviderId UNIQUEIDENTIFIER,
+    @From DATE = NULL,
+    @To DATE = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [ClosureId], [ProviderId], [StartDate], [EndDate],
+           [StartTime], [EndTime], [Reason], [CreatedAtUtc]
+    FROM [Provider].[ProviderClosures]
+    WHERE [ProviderId] = @ProviderId
+      AND (@To   IS NULL OR [StartDate] <= @To)
+      AND (@From IS NULL OR [EndDate]   >= @From)
+    ORDER BY [StartDate], [StartTime];
+END;
+GO
+PRINT 'Created/updated [Provider].[ListClosures].';
+GO
+
+
+-- 3.23 Provider.DeleteClosure ------------------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[DeleteClosure]
+    @ProviderId UNIQUEIDENTIFIER,
+    @ClosureId  UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM [Provider].[ProviderClosures]
+    WHERE [ClosureId] = @ClosureId
+      AND [ProviderId] = @ProviderId;
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        THROW 51071, 'Provider closure was not found for this provider.', 1;
+    END
+END;
+GO
+PRINT 'Created/updated [Provider].[DeleteClosure].';
+GO
+
+
+-- 3.24 Provider.GetActiveClosuresForDate -------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[GetActiveClosuresForDate]
+    @ProviderId UNIQUEIDENTIFIER,
+    @Date DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [ClosureId], [StartDate], [EndDate], [StartTime], [EndTime], [Reason]
+    FROM [Provider].[ProviderClosures]
+    WHERE [ProviderId] = @ProviderId
+      AND @Date BETWEEN [StartDate] AND [EndDate]
+    ORDER BY [StartTime];
+END;
+GO
+PRINT 'Created/updated [Provider].[GetActiveClosuresForDate].';
 GO
 
 

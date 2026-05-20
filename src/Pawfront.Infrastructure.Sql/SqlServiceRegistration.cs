@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
+using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Events;
 using Pawfront.Application.Onboarding;
@@ -13,6 +14,7 @@ using Pawfront.Application.Services;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
+using Pawfront.Infrastructure.Sql.Closures;
 using Pawfront.Infrastructure.Sql.Events;
 using Pawfront.Infrastructure.Sql.Onboarding;
 using Pawfront.Infrastructure.Sql.Policies;
@@ -45,6 +47,7 @@ public static class SqlServiceRegistration
             services.AddSingleton<IEventSqlStore, InMemoryEventStore>();
             services.AddSingleton<IProviderAvailabilityService, InMemoryProviderAvailabilityService>();
             services.AddSingleton<IBookingSqlStore, InMemoryBookingStore>();
+            services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
         }
         else
         {
@@ -81,6 +84,11 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IBookingSqlStore>(provider =>
                 new SqlBookingStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderClosureSqlStore>(provider =>
+                new SqlProviderClosureStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
         }

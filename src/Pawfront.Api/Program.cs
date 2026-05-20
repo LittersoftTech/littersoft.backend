@@ -50,5 +50,6 @@ api.MapVetEndpoints();
 api.MapEventEndpoints();
 api.MapBookingEndpoints();
 api.MapBlobImageEndpoints();
+api.MapProviderClosureEndpoints();
 
 app.Run();
