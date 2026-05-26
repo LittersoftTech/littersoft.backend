@@ -1,16 +1,20 @@
 using System.Collections.Concurrent;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
+using Pawfront.Application.ProviderServices;
 
 namespace Pawfront.Infrastructure.Sql.Closures;
 
 /// <summary>
 /// Dev-fallback in-memory implementation of <see cref="IProviderClosureSqlStore"/>.
-/// Mirrors the SQL sproc semantics: conflict check against confirmed bookings, then
-/// insert. Race-safety via a per-provider semaphore in lieu of UPDLOCK + HOLDLOCK.
+/// Mirrors the SQL sproc semantics: validate every ServiceId belongs to the provider
+/// and is active, then conflict-check against confirmed bookings on those services,
+/// then insert N rows (all-or-nothing). Race-safety via a per-provider semaphore in
+/// lieu of UPDLOCK + HOLDLOCK.
 /// </summary>
-internal sealed class InMemoryProviderClosureStore(IBookingSqlStore bookingStore)
-    : IProviderClosureSqlStore
+internal sealed class InMemoryProviderClosureStore(
+    IBookingSqlStore bookingStore,
+    IProviderServiceCatalog catalog) : IProviderClosureSqlStore
 {
     private readonly ConcurrentDictionary<Guid, ClosureRow> closures = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> providerLocks = new();
@@ -23,20 +27,31 @@ internal sealed class InMemoryProviderClosureStore(IBookingSqlStore bookingStore
         await providerLock.WaitAsync(cancellationToken);
         try
         {
-            // No provider-existence check here — the in-memory bookings table doesn't track
-            // providers either. The SQL implementation does enforce this via FK + the 51070 throw.
+            // Validate every ServiceId belongs to the provider and is active.
+            var providerServices = await catalog.ListByProviderAsync(
+                command.ProviderId, includeInactive: true, cancellationToken);
+            var ownedActiveServiceIds = providerServices
+                .Where(s => s.IsActive)
+                .Select(s => s.ServiceId)
+                .ToHashSet();
+            if (!command.ServiceIds.All(ownedActiveServiceIds.Contains))
+            {
+                throw new ProviderClosureServiceInvalidException(command.ProviderId);
+            }
 
-            // Pull all bookings for this provider, then filter by date range + (optional) time overlap.
-            var providerBookings = await bookingStore.ListByProviderAsync(command.ProviderId, cancellationToken);
+            var targetServiceIds = command.ServiceIds.ToHashSet();
 
+            var providerBookings = await bookingStore.ListByProviderAsync(command.ProviderId, date: null, cancellationToken);
             var conflicts = providerBookings
                 .Where(b => string.Equals(b.Status, "Confirmed", StringComparison.Ordinal))
+                .Where(b => targetServiceIds.Contains(b.ServiceId))
                 .Where(b => b.BookingDate >= command.StartDate && b.BookingDate <= command.EndDate)
                 .Where(b =>
                     command.StartTime is null
                     || (b.StartTime < command.EndTime!.Value && b.EndTime > command.StartTime.Value))
-                .OrderBy(b => b.BookingDate).ThenBy(b => b.StartTime)
-                .Select(b => new ConflictingBooking(b.BookingId, b.PetParentId, b.BookingDate, b.StartTime, b.EndTime))
+                .OrderBy(b => b.ServiceId).ThenBy(b => b.BookingDate).ThenBy(b => b.StartTime)
+                .Select(b => new ConflictingBooking(
+                    b.ServiceId, b.BookingId, b.PetParentId, b.BookingDate, b.StartTime, b.EndTime))
                 .ToArray();
 
             if (conflicts.Length > 0)
@@ -44,19 +59,27 @@ internal sealed class InMemoryProviderClosureStore(IBookingSqlStore bookingStore
                 return new CreateClosureResult.BookingsExist(conflicts);
             }
 
-            var row = new ClosureRow
+            var now = DateTimeOffset.UtcNow;
+            var created = new List<ProviderClosure>();
+            foreach (var serviceId in command.ServiceIds)
             {
-                ClosureId = Guid.NewGuid(),
-                ProviderId = command.ProviderId,
-                StartDate = command.StartDate,
-                EndDate = command.EndDate,
-                StartTime = command.StartTime,
-                EndTime = command.EndTime,
-                Reason = command.Reason,
-                CreatedAtUtc = DateTimeOffset.UtcNow
-            };
-            closures[row.ClosureId] = row;
-            return new CreateClosureResult.Created(ToClosure(row));
+                var row = new ClosureRow
+                {
+                    ClosureId = Guid.NewGuid(),
+                    ProviderId = command.ProviderId,
+                    ServiceId = serviceId,
+                    StartDate = command.StartDate,
+                    EndDate = command.EndDate,
+                    StartTime = command.StartTime,
+                    EndTime = command.EndTime,
+                    Reason = command.Reason,
+                    CreatedAtUtc = now
+                };
+                closures[row.ClosureId] = row;
+                created.Add(ToClosure(row));
+            }
+
+            return new CreateClosureResult.Created(created);
         }
         finally
         {
@@ -66,12 +89,14 @@ internal sealed class InMemoryProviderClosureStore(IBookingSqlStore bookingStore
 
     public Task<IReadOnlyList<ProviderClosure>> ListAsync(
         Guid providerId,
+        Guid? serviceId,
         DateOnly? from,
         DateOnly? to,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<ProviderClosure> list = closures.Values
             .Where(c => c.ProviderId == providerId)
+            .Where(c => serviceId is null || c.ServiceId == serviceId.Value)
             .Where(c => to   is null || c.StartDate <= to.Value)
             .Where(c => from is null || c.EndDate   >= from.Value)
             .OrderBy(c => c.StartDate).ThenBy(c => c.StartTime ?? TimeOnly.MinValue)
@@ -91,12 +116,12 @@ internal sealed class InMemoryProviderClosureStore(IBookingSqlStore bookingStore
     }
 
     public Task<IReadOnlyList<ActiveClosure>> GetActiveClosuresForDateAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly date,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<ActiveClosure> list = closures.Values
-            .Where(c => c.ProviderId == providerId)
+            .Where(c => c.ServiceId == serviceId)
             .Where(c => date >= c.StartDate && date <= c.EndDate)
             .OrderBy(c => c.StartTime ?? TimeOnly.MinValue)
             .Select(c => new ActiveClosure(c.ClosureId, c.StartTime, c.EndTime, c.Reason))
@@ -105,13 +130,14 @@ internal sealed class InMemoryProviderClosureStore(IBookingSqlStore bookingStore
     }
 
     private static ProviderClosure ToClosure(ClosureRow row) => new(
-        row.ClosureId, row.ProviderId, row.StartDate, row.EndDate,
+        row.ClosureId, row.ProviderId, row.ServiceId, row.StartDate, row.EndDate,
         row.StartTime, row.EndTime, row.Reason, row.CreatedAtUtc);
 
     private sealed class ClosureRow
     {
         public Guid ClosureId { get; init; }
         public Guid ProviderId { get; init; }
+        public Guid ServiceId { get; init; }
         public DateOnly StartDate { get; init; }
         public DateOnly EndDate { get; init; }
         public TimeOnly? StartTime { get; init; }

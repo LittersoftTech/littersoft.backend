@@ -10,7 +10,7 @@ using Pawfront.Application.Onboarding;
 using Pawfront.Application.Policies;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.Providers;
-using Pawfront.Application.Services;
+using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
@@ -21,7 +21,6 @@ using Pawfront.Infrastructure.Sql.Policies;
 using Pawfront.Infrastructure.Sql.ProviderOnboarding;
 using Pawfront.Infrastructure.Sql.Providers;
 using Pawfront.Infrastructure.Sql.ProviderServices;
-using Pawfront.Infrastructure.Sql.Services;
 
 namespace Pawfront.Infrastructure.Sql;
 
@@ -32,7 +31,6 @@ public static class SqlServiceRegistration
         IConfiguration configuration)
     {
         services.AddSingleton<IProviderService, InMemoryProviderService>();
-        services.AddSingleton<IPetServiceCatalog, InMemoryPetServiceCatalog>();
         services.TryAddSingleton<IProviderMobileOtpSender, NoOpProviderMobileOtpSender>();
 
         var sqlConnectionString = configuration.GetConnectionString("SqlServer");
@@ -48,6 +46,7 @@ public static class SqlServiceRegistration
             services.AddSingleton<IProviderAvailabilityService, InMemoryProviderAvailabilityService>();
             services.AddSingleton<IBookingSqlStore, InMemoryBookingStore>();
             services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
+            services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
         }
         else
         {
@@ -77,6 +76,11 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            services.AddScoped<IEventBookingSqlStore>(provider =>
+                new SqlEventBookingStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             services.AddScoped<IProviderAvailabilityService>(provider =>
                 new SqlProviderAvailabilityService(
                     sqlConnectionString,
@@ -89,6 +93,11 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderClosureSqlStore>(provider =>
                 new SqlProviderClosureStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderServiceCatalog>(provider =>
+                new SqlProviderServiceCatalog(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
         }

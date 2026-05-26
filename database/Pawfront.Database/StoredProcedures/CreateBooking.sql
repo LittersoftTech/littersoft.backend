@@ -1,6 +1,7 @@
 CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
     @ProviderId UNIQUEIDENTIFIER,
     @PetParentId UNIQUEIDENTIFIER,
+    @ServiceId UNIQUEIDENTIFIER,
     @ServiceCategory NVARCHAR(64),
     @SubCategory NVARCHAR(64),
     @BookingDate DATE,
@@ -32,12 +33,28 @@ BEGIN
         THROW 51060, 'Pet parent was not found.', 1;
     END
 
-    -- Race-safe capacity check: count confirmed bookings overlapping the requested window,
-    -- holding UPDLOCK + HOLDLOCK so concurrent CreateBooking calls serialise.
+    -- Validate that the ServiceId belongs to the provider and is active.
+    -- UPDLOCK + HOLDLOCK serialises us against concurrent DeactivateProviderService
+    -- so a service can't disappear between our check and the insert.
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[ProviderServices] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [ServiceId] = @ServiceId
+          AND [ProviderId] = @ProviderId
+          AND [IsActive] = 1
+    )
+    BEGIN
+        THROW 51066, 'Service is not valid or active for this provider.', 1;
+    END
+
+    -- Race-safe capacity check: count confirmed bookings overlapping the requested
+    -- window FOR THIS SERVICE, holding UPDLOCK + HOLDLOCK so concurrent CreateBooking
+    -- calls on the same service serialise. DayCare and NightStay each have their own
+    -- capacity bucket.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
-    WHERE [ProviderId] = @ProviderId
+    WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
       AND [Status] = N'Confirmed'
       AND [StartTime] < @EndTime
@@ -54,6 +71,7 @@ BEGIN
     (
         [ProviderId],
         [PetParentId],
+        [ServiceId],
         [ServiceCategory],
         [SubCategory],
         [BookingDate],
@@ -65,6 +83,7 @@ BEGIN
     (
         @ProviderId,
         @PetParentId,
+        @ServiceId,
         @ServiceCategory,
         @SubCategory,
         @BookingDate,
@@ -77,6 +96,7 @@ BEGIN
     SELECT [BookingId],
            [ProviderId],
            [PetParentId],
+           [ServiceId],
            [ServiceCategory],
            [SubCategory],
            [BookingDate],

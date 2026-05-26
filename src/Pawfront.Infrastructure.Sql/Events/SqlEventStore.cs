@@ -163,6 +163,43 @@ internal sealed class SqlEventStore(
         return amenities;
     }
 
+    public async Task<EventCounters> IncrementCounterAsync(
+        Guid eventId,
+        string counterType,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.IncrementEventCounter", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@EventId", eventId);
+        command.Parameters.AddWithValue("@CounterType", counterType);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Counter row was not returned after increment.");
+            }
+            return new EventCounters(
+                ViewCount: reader.GetInt32(0),
+                ShareCount: reader.GetInt32(1),
+                InquiryCount: reader.GetInt32(2));
+        }
+        catch (SqlException exception) when (exception.Number == 51096)
+        {
+            throw new EventNotFoundException(eventId);
+        }
+        catch (SqlException exception) when (exception.Number == 51097)
+        {
+            throw new ArgumentException(exception.Message, nameof(counterType));
+        }
+    }
+
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(configuredConnectionString))

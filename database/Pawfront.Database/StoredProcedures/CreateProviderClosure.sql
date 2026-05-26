@@ -1,33 +1,52 @@
-CREATE OR ALTER PROCEDURE [Provider].[CreateClosure]
+CREATE OR ALTER PROCEDURE [Provider].[CreateClosures]
     @ProviderId UNIQUEIDENTIFIER,
+    @ServiceIds [Provider].[ServiceIdList] READONLY,
     @StartDate DATE,
     @EndDate DATE,
     @StartTime TIME(0) = NULL,
     @EndTime TIME(0) = NULL,
-    @Reason NVARCHAR(500) = NULL,
-    @ClosureId UNIQUEIDENTIFIER = NULL OUTPUT
+    @Reason NVARCHAR(500) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
-    SET @ClosureId = NULL;
-
     BEGIN TRANSACTION;
 
+    -- Caller passed an empty list. Treat as a request error.
+    IF NOT EXISTS (SELECT 1 FROM @ServiceIds)
+    BEGIN
+        THROW 51075, 'At least one service id is required.', 1;
+    END
+
     IF NOT EXISTS (
-        SELECT 1
-        FROM [Provider].[Providers]
-        WHERE [ProviderId] = @ProviderId
+        SELECT 1 FROM [Provider].[Providers] WHERE [ProviderId] = @ProviderId
     )
     BEGIN
         THROW 51070, 'Provider profile was not found.', 1;
     END
 
-    -- Race-safe conflict check. UPDLOCK + HOLDLOCK serialises us against any
-    -- concurrent Booking.CreateBooking on the same provider, so a booking
-    -- inserted between our check and our INSERT will block until we commit.
+    -- Every requested ServiceId must exist, belong to this provider, and be active.
+    -- UPDLOCK + HOLDLOCK serialise us against concurrent DeactivateProviderService.
+    IF EXISTS (
+        SELECT 1
+        FROM @ServiceIds AS s
+        LEFT JOIN [Provider].[ProviderServices] AS ps WITH (UPDLOCK, HOLDLOCK)
+            ON s.[ServiceId] = ps.[ServiceId]
+        WHERE ps.[ServiceId] IS NULL
+           OR ps.[ProviderId] <> @ProviderId
+           OR ps.[IsActive] = 0
+    )
+    BEGIN
+        THROW 51072, 'One or more service ids are not valid or active for this provider.', 1;
+    END
+
+    -- Race-safe conflict check, scoped by ServiceId — a DayCare closure should
+    -- only conflict with DayCare bookings, not NightStay bookings. UPDLOCK +
+    -- HOLDLOCK serialises us against concurrent Booking.CreateBooking on the
+    -- same service.
     DECLARE @Conflicts TABLE (
+        ServiceId UNIQUEIDENTIFIER NOT NULL,
         BookingId UNIQUEIDENTIFIER NOT NULL,
         PetParentId UNIQUEIDENTIFIER NOT NULL,
         BookingDate DATE NOT NULL,
@@ -35,11 +54,11 @@ BEGIN
         EndTime TIME(0) NOT NULL
     );
 
-    INSERT INTO @Conflicts (BookingId, PetParentId, BookingDate, StartTime, EndTime)
-    SELECT b.[BookingId], b.[PetParentId], b.[BookingDate], b.[StartTime], b.[EndTime]
+    INSERT INTO @Conflicts (ServiceId, BookingId, PetParentId, BookingDate, StartTime, EndTime)
+    SELECT b.[ServiceId], b.[BookingId], b.[PetParentId], b.[BookingDate], b.[StartTime], b.[EndTime]
     FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
-    WHERE b.[ProviderId] = @ProviderId
-      AND b.[Status] = N'Confirmed'
+    INNER JOIN @ServiceIds AS s ON s.[ServiceId] = b.[ServiceId]
+    WHERE b.[Status] = N'Confirmed'
       AND b.[BookingDate] BETWEEN @StartDate AND @EndDate
       AND (
           -- Full-day closure: ANY confirmed booking on a covered date conflicts.
@@ -50,28 +69,39 @@ BEGIN
 
     IF EXISTS (SELECT 1 FROM @Conflicts)
     BEGIN
-        SELECT BookingId, PetParentId, BookingDate, StartTime, EndTime
+        SELECT ServiceId, BookingId, PetParentId, BookingDate, StartTime, EndTime
         FROM @Conflicts
-        ORDER BY BookingDate, StartTime;
+        ORDER BY ServiceId, BookingDate, StartTime;
 
-        -- @ClosureId remains NULL: signals to caller that creation was refused.
         ROLLBACK TRANSACTION;
         RETURN;
     END
 
-    DECLARE @InsertedId UNIQUEIDENTIFIER = NEWID();
+    -- All-or-nothing batch insert: every service id gets its own closure row.
+    DECLARE @Inserted TABLE (
+        ClosureId UNIQUEIDENTIFIER,
+        ProviderId UNIQUEIDENTIFIER,
+        ServiceId UNIQUEIDENTIFIER,
+        StartDate DATE,
+        EndDate DATE,
+        StartTime TIME(0),
+        EndTime TIME(0),
+        Reason NVARCHAR(500),
+        CreatedAtUtc DATETIME2(7)
+    );
 
     INSERT INTO [Provider].[ProviderClosures]
-        ([ClosureId], [ProviderId], [StartDate], [EndDate], [StartTime], [EndTime], [Reason])
-    VALUES
-        (@InsertedId, @ProviderId, @StartDate, @EndDate, @StartTime, @EndTime, @Reason);
+        ([ProviderId], [ServiceId], [StartDate], [EndDate], [StartTime], [EndTime], [Reason])
+    OUTPUT inserted.[ClosureId], inserted.[ProviderId], inserted.[ServiceId],
+           inserted.[StartDate], inserted.[EndDate], inserted.[StartTime], inserted.[EndTime],
+           inserted.[Reason], inserted.[CreatedAtUtc]
+    INTO @Inserted
+    SELECT @ProviderId, s.[ServiceId], @StartDate, @EndDate, @StartTime, @EndTime, @Reason
+    FROM @ServiceIds AS s;
 
-    SET @ClosureId = @InsertedId;
-
-    SELECT [ClosureId], [ProviderId], [StartDate], [EndDate],
-           [StartTime], [EndTime], [Reason], [CreatedAtUtc]
-    FROM [Provider].[ProviderClosures]
-    WHERE [ClosureId] = @InsertedId;
+    SELECT ClosureId, ProviderId, ServiceId, StartDate, EndDate, StartTime, EndTime, Reason, CreatedAtUtc
+    FROM @Inserted
+    ORDER BY ServiceId;
 
     COMMIT TRANSACTION;
 END;

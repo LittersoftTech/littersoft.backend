@@ -6,17 +6,19 @@ namespace Pawfront.Infrastructure.Sql.Bookings;
 /// <summary>
 /// In-memory implementation of <see cref="IBookingSqlStore"/> used in the dev fallback path
 /// (no SQL conn string + Key Vault disabled). Behaviour mirrors the SQL stored procedures
-/// for the happy path plus the typed exceptions; capacity check is race-safe via a per-provider
-/// async lock instead of UPDLOCK+HOLDLOCK.
+/// for the happy path plus the typed exceptions; capacity check is race-safe via a per-service
+/// async lock instead of UPDLOCK+HOLDLOCK, and is scoped by ServiceId so DayCare and NightStay
+/// each have independent capacity.
 /// </summary>
 internal sealed class InMemoryBookingStore : IBookingSqlStore
 {
     private readonly ConcurrentDictionary<Guid, BookingRow> bookings = new();
-    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> providerLocks = new();
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> serviceLocks = new();
 
     public async Task<BookingResult> CreateAsync(
         Guid providerId,
         Guid petParentId,
+        Guid serviceId,
         string serviceCategory,
         string subCategory,
         DateOnly bookingDate,
@@ -25,13 +27,13 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         int capacity,
         CancellationToken cancellationToken)
     {
-        var providerLock = providerLocks.GetOrAdd(providerId, _ => new SemaphoreSlim(1, 1));
-        await providerLock.WaitAsync(cancellationToken);
+        var serviceLock = serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
+        await serviceLock.WaitAsync(cancellationToken);
         try
         {
-            // Count overlapping confirmed bookings for this provider+date.
+            // Count overlapping confirmed bookings for this service+date.
             var concurrent = bookings.Values.Count(b =>
-                b.ProviderId == providerId
+                b.ServiceId == serviceId
                 && b.BookingDate == bookingDate
                 && b.Status == "Confirmed"
                 && b.StartTime < endTime
@@ -39,7 +41,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
 
             if (concurrent >= capacity)
             {
-                throw new BookingCapacityExceededException(providerId, bookingDate, startTime, endTime);
+                throw new BookingCapacityExceededException(serviceId, bookingDate, startTime, endTime);
             }
 
             var now = DateTimeOffset.UtcNow;
@@ -48,6 +50,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 BookingId = Guid.NewGuid(),
                 ProviderId = providerId,
                 PetParentId = petParentId,
+                ServiceId = serviceId,
                 ServiceCategory = serviceCategory,
                 SubCategory = subCategory,
                 BookingDate = bookingDate,
@@ -64,7 +67,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         }
         finally
         {
-            providerLock.Release();
+            serviceLock.Release();
         }
     }
 
@@ -104,10 +107,12 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
 
     public Task<IReadOnlyList<BookingResult>> ListByProviderAsync(
         Guid providerId,
+        DateOnly? date,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<BookingResult> list = bookings.Values
             .Where(b => b.ProviderId == providerId)
+            .Where(b => date is null || b.BookingDate == date.Value)
             .OrderByDescending(b => b.BookingDate)
             .ThenByDescending(b => b.StartTime)
             .Select(ToResult)
@@ -129,13 +134,13 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
     }
 
     public Task<IReadOnlyList<BookingWindow>> GetBookingsForDateAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly bookingDate,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<BookingWindow> list = bookings.Values
             .Where(b =>
-                b.ProviderId == providerId
+                b.ServiceId == serviceId
                 && b.BookingDate == bookingDate
                 && b.Status == "Confirmed")
             .OrderBy(b => b.StartTime)
@@ -148,6 +153,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         new(row.BookingId,
             row.ProviderId,
             row.PetParentId,
+            row.ServiceId,
             row.ServiceCategory,
             row.SubCategory,
             row.BookingDate,
@@ -163,6 +169,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         public Guid BookingId { get; init; }
         public Guid ProviderId { get; init; }
         public Guid PetParentId { get; init; }
+        public Guid ServiceId { get; init; }
         public required string ServiceCategory { get; init; }
         public required string SubCategory { get; init; }
         public DateOnly BookingDate { get; init; }

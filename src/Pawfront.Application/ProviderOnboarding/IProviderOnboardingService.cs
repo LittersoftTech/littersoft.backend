@@ -12,6 +12,16 @@ public interface IProviderOnboardingService
         CompleteProviderProfileRequest request,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Returns the persisted personal information for a provider (name, gender,
+    /// mobile, date of birth, mobile-verified timestamp, onboarding status,
+    /// timestamps). Throws <see cref="ProviderProfileNotFoundException"/> when the
+    /// row is missing.
+    /// </summary>
+    Task<ProviderProfileResponse> GetProviderProfileAsync(
+        Guid providerId,
+        CancellationToken cancellationToken);
+
     Task<SendProviderMobileOtpResponse> SendProviderMobileOtpAsync(
         Guid providerId,
         CancellationToken cancellationToken);

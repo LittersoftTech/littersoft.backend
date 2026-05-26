@@ -1,3 +1,4 @@
+using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetTrainer;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Contracts.Services.PetTrainer;
@@ -125,6 +126,7 @@ internal static class PetTrainerEndpoints
         Guid providerId,
         SaveTrainingSchoolOfferingRequest request,
         IPetTrainerServiceRegistry registry,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         try
@@ -146,6 +148,9 @@ internal static class PetTrainerEndpoints
                     request.PrivateTrainingDescription),
                 cancellationToken);
 
+            await SyncTrainerServiceAsync(providerId, result.SubCategory,
+                result.TrainingSchool?.Offering, serviceCatalog, cancellationToken);
+
             return ApiResults.Ok(ToResponse(result));
         }
         catch (TrainingSchoolNotRegisteredException exception)
@@ -162,6 +167,7 @@ internal static class PetTrainerEndpoints
         Guid providerId,
         SaveFreelanceTrainerOfferingRequest request,
         IPetTrainerServiceRegistry registry,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         try
@@ -183,6 +189,9 @@ internal static class PetTrainerEndpoints
                     request.PrivateTrainingDescription),
                 cancellationToken);
 
+            await SyncTrainerServiceAsync(providerId, result.SubCategory,
+                result.Freelance?.Offering, serviceCatalog, cancellationToken);
+
             return ApiResults.Ok(ToResponse(result));
         }
         catch (FreelanceTrainerNotRegisteredException exception)
@@ -192,6 +201,24 @@ internal static class PetTrainerEndpoints
         catch (ArgumentException exception)
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static async Task SyncTrainerServiceAsync(
+        Guid providerId,
+        string subCategory,
+        PetTrainerOfferingResult? offering,
+        IProviderServiceCatalog catalog,
+        CancellationToken cancellationToken)
+    {
+        if (offering?.Session is not null)
+        {
+            await catalog.UpsertAsync(providerId, CategoryName, subCategory,
+                ProviderServiceTypes.TrainingSession, cancellationToken);
+        }
+        else
+        {
+            await catalog.DeactivateAsync(providerId, ProviderServiceTypes.TrainingSession, cancellationToken);
         }
     }
 

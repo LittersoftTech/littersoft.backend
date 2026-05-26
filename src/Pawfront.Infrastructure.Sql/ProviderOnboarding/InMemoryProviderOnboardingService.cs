@@ -131,6 +131,20 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
         }
     }
 
+    public Task<ProviderProfileResponse> GetProviderProfileAsync(
+        Guid providerId,
+        CancellationToken cancellationToken)
+    {
+        lock (syncRoot)
+        {
+            if (!profilesByProviderId.TryGetValue(providerId, out var profile))
+            {
+                throw new ProviderProfileNotFoundException(providerId);
+            }
+            return Task.FromResult(ToResponse(profile));
+        }
+    }
+
     public async Task<SendProviderMobileOtpResponse> SendProviderMobileOtpAsync(
         Guid providerId,
         CancellationToken cancellationToken)

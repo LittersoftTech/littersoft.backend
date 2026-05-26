@@ -7,12 +7,16 @@ namespace Pawfront.Application.Closures;
 public interface IProviderClosureSqlStore
 {
     /// <summary>
-    /// Race-safe insert. Holds UPDLOCK + HOLDLOCK on the conflicting-bookings query
-    /// so a concurrent CreateBooking on the same provider serialises behind it.
-    /// Returns the bookings list when the window has overlapping confirmed bookings
-    /// (nothing is inserted); otherwise returns the newly persisted closure.
+    /// Race-safe batch insert. Validates every ServiceId belongs to the provider
+    /// and is active, then runs a UPDLOCK + HOLDLOCK conflict check against the
+    /// matching bookings — concurrent CreateBooking on any of the targeted services
+    /// serialises behind it. Returns the conflicting bookings list when the window
+    /// has overlapping confirmed bookings on ANY targeted service (nothing is
+    /// inserted); otherwise returns the newly persisted closures (one per ServiceId).
     /// Throws <see cref="ProviderClosureProviderNotFoundException"/> when the
-    /// provider profile is missing.
+    /// provider profile is missing, or
+    /// <see cref="ProviderClosureServiceInvalidException"/> when any ServiceId
+    /// is unknown / inactive / not owned by the provider.
     /// </summary>
     Task<CreateClosureResult> CreateAsync(
         CreateProviderClosureCommand command,
@@ -20,6 +24,7 @@ public interface IProviderClosureSqlStore
 
     Task<IReadOnlyList<ProviderClosure>> ListAsync(
         Guid providerId,
+        Guid? serviceId,
         DateOnly? from,
         DateOnly? to,
         CancellationToken cancellationToken);
@@ -31,7 +36,7 @@ public interface IProviderClosureSqlStore
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<ActiveClosure>> GetActiveClosuresForDateAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly date,
         CancellationToken cancellationToken);
 }

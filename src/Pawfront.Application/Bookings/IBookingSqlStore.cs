@@ -7,15 +7,20 @@ namespace Pawfront.Application.Bookings;
 public interface IBookingSqlStore
 {
     /// <summary>
-    /// Race-safe insert. The stored proc holds UPDLOCK + HOLDLOCK on the overlap-count query
-    /// and rejects the insert when concurrent bookings have already filled the requested slot.
+    /// Race-safe insert. The stored proc validates the ServiceId belongs to the provider
+    /// and is active, then holds UPDLOCK + HOLDLOCK on the overlap-count query for that
+    /// service and rejects the insert when concurrent bookings have already filled the
+    /// requested slot.
     /// Throws <see cref="BookingCapacityExceededException"/> when full,
-    /// <see cref="BookingProviderNotFoundException"/> if the provider is gone, and
-    /// <see cref="BookingPetParentNotFoundException"/> if the parent is gone.
+    /// <see cref="BookingProviderNotFoundException"/> if the provider is gone,
+    /// <see cref="BookingPetParentNotFoundException"/> if the parent is gone, or
+    /// <see cref="BookingServiceInvalidException"/> if the ServiceId is unknown,
+    /// inactive, or not owned by the provider.
     /// </summary>
     Task<BookingResult> CreateAsync(
         Guid providerId,
         Guid petParentId,
+        Guid serviceId,
         string serviceCategory,
         string subCategory,
         DateOnly bookingDate,
@@ -33,6 +38,7 @@ public interface IBookingSqlStore
 
     Task<IReadOnlyList<BookingResult>> ListByProviderAsync(
         Guid providerId,
+        DateOnly? date,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(
@@ -40,7 +46,7 @@ public interface IBookingSqlStore
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingWindow>> GetBookingsForDateAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly bookingDate,
         CancellationToken cancellationToken);
 }

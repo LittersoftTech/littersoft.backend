@@ -112,16 +112,21 @@ SQL project — DeployAll is the one source of truth that should be re-run on
 every change. Re-runs are safe (uses `IF NOT EXISTS` for tables/indexes and
 `CREATE OR ALTER` for sprocs).
 
+A full **Mermaid ER diagram** + per-table descriptions live in
+[`database/Pawfront.Database/README.md`](database/Pawfront.Database/README.md).
+Keep that file in sync whenever a table or relationship changes.
+
 ### Schemas
 - `Provider.*` — provider profile, auth identity, OTP, device tokens,
-  policies, service-registration index
+  policies, service-registration index, **per-service catalog
+  (`ProviderServices`) and closures**
 - `Customer.*` — `PetParents`, `Pets` (scaffolding only, no APIs)
 - `Event.*` — `Events`, `EventAmenities` (event subscriptions designed but
   not yet built)
 - `Booking.*` — `Bookings` (real, race-safe via `Booking.CreateBooking` sproc
-  with `UPDLOCK, HOLDLOCK` capacity check)
+  with `UPDLOCK, HOLDLOCK` capacity check, scoped by `ServiceId`)
 
-### Stored procedures live in `[Provider]` and `[Event]`
+### Stored procedures live in `[Provider]`, `[Event]`, and `[Booking]`
 See `database/Pawfront.Database/StoredProcedures/`. Naming pattern:
 `Provider.SaveXxx`, `Provider.GetXxx`, `Event.CreateEvent`, etc.
 Custom `THROW` codes used for typed errors:
@@ -136,12 +141,30 @@ Custom `THROW` codes used for typed errors:
 - `51050` provider profile not found (weekly availability save)
 - `51060` pet parent not found (booking create)
 - `51061` provider not found (booking create)
-- `51062` no remaining capacity for slot (booking create)
+- `51062` no remaining capacity for slot (booking create) — capacity is
+  scoped by `ServiceId`
 - `51063` booking not found (booking cancel)
 - `51064` only the booker can cancel
 - `51065` booking already cancelled
+- `51066` ServiceId is unknown, inactive, or not owned by the provider
+  (booking create)
 - `51070` provider profile not found (closure create)
 - `51071` provider closure not found (closure delete)
+- `51072` one or more ServiceIds are unknown/inactive/not owned by the
+  provider (closure batch create)
+- `51075` empty ServiceId list (closure batch create)
+- `51080` provider profile not found (provider service upsert)
+- `51090` event not found (event booking create)
+- `51091` event sold out / not enough remaining capacity → API maps to
+  **409 EventSoldOut**
+- `51092` event booking not found (payment confirmation)
+- `51093` event booking payment already confirmed with a different result
+- `51094` invalid event-booking request (empty attendee list, invalid
+  PaymentStatus)
+- `51095` event not found for the requesting provider (organiser-scoped
+  dashboard reads — metrics / attendees)
+- `51096` event not found (counter increment)
+- `51097` invalid counter type (must be `View`, `Share`, or `Inquiry`)
 
 ## Cosmos
 
@@ -163,12 +186,20 @@ Custom `THROW` codes used for typed errors:
 
 ## Blob
 
-Container: `provider-images`. Folders:
+Container: `provider-images` (private). Folders:
 - `profile-photos/<providerId>/<guid>.<ext>`
 - `service-photos/<providerId>/<guid>.<ext>`
 - `events/<providerId>/<guid>.<ext>`
 
 `BlobUploadKind` enum: `ProfilePhoto`, `ServicePhoto`, `EventBanner`.
+
+**Universal fetch endpoint:** the container is private, so the mobile client
+can't `GET` the blob URL directly. Instead it POSTs to
+`POST /api/v1/blob-images` with `{ blobUrl }`; the server streams the bytes
+back using `IPawfrontBlobStorage.DownloadAsync(...)`. Wired in
+`BlobImageEndpoints.cs` → `MapBlobImageEndpoints()`. Returns
+`404 BlobNotFound` for an unknown URL; `400 InvalidRequest` for a URL the
+storage adapter can't parse (different container, malformed, etc.).
 
 ## Telemetry
 
@@ -199,6 +230,12 @@ console exporter for traces/metrics/logs.
 4. `POST /providers/{id}/mobile-verification/otp/{otpId}/verify` — flips
    profile to `MobileVerified` on success. **Always returns 200**; client
    checks `data.isValidated`.
+5. `GET /providers/{id}/profile` — read-back of the persisted personal info
+   (`firstName`, `lastName`, `gender`, `mobileCountryCode`, `mobileNumber`,
+   `dateOfBirth`, `mobileVerifiedAtUtc`, `onboardingStatus`, timestamps).
+   Backed by `Provider.GetProviderProfile` sproc against `Provider.Providers`.
+   Returns 404 `ProviderProfileNotFound` if the row is missing. Same
+   `ProviderProfileResponse` shape that step 2 returns.
 
 ### Service categories (5 of them)
 
@@ -245,56 +282,85 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
   `(ProviderId, DayOfWeek)` and CHECK constraints enforcing all the
   invariants (closed-day has no times, open-day has both, break inside
   window, start < end, etc.). `ON DELETE CASCADE` from `Provider.Providers`.
-- `GET /providers/{id}/availability/slots?date=YYYY-MM-DD&durationHours=2&granularityMinutes=30`
-  — Round 2 endpoint. Reads provider's single service registration (SQL),
-  pulls the offering from Cosmos for capacity + duration rule, then walks
-  the working windows for that date (minus break) at the requested
-  granularity. Returns `{ slots: [{ startTime, endTime }, ...] }`.
-  - **Duration rule per category:** PetSitter/PetGroomer require
-    `durationHours >= offering minimum`; PetTrainer/Vet require
-    `durationHours == offering fixed duration`; PetAdoptionAndSale rejects
-    (no offering structure built).
+- `GET /providers/{id}/availability/slots?serviceId=GUID&date=YYYY-MM-DD&durationHours=2&granularityMinutes=30`
+  — Reads the `ProviderServices` row for the ServiceId, pulls the matching
+  Cosmos offering branch (DayCare vs NightStay vs Session vs Appointment)
+  for capacity + duration rule, then walks the working windows for that date
+  (minus break, minus any partial-day closures **on this ServiceId**) at the
+  requested granularity. Subtracts overlapping confirmed bookings on this
+  ServiceId against the offering's capacity. Returns
+  `{ providerId, serviceId, date, serviceCategory, subCategory, serviceType,
+     durationHours, capacity, granularityMinutes, slots: [...] }`.
+  - **Duration rule per service type:** PetSitter (`DayCare`, `NightStay`) and
+    PetGroomer (`GroomingSession`) require `durationHours >= offering minimum`;
+    PetTrainer (`TrainingSession`) and Vet (`VetAppointment`) require
+    `durationHours == offering fixed duration`; PetAdoptionAndSale has no
+    `ProviderServices` row and therefore can't be queried here.
   - **Capacity comes from the offering** (`maxPetsAtOneTime` /
-    `maxConcurrentSessions` / `maxConcurrentConsultations`); response
-    surfaces it as `capacity`.
-  - **TODO Round 3:** slot list is currently capacity-naive (no real
-    bookings table yet). When `Event.Bookings` lands, the orchestrator
-    will subtract slots whose overlapping-booking count has reached
-    `capacity`. The orchestrator and endpoint are ready; only the
-    booking-reader call needs to be wired in.
-- **Round 3 shipped.** Real bookings table `Booking.Bookings`. Capacity
-  check is race-safe via `Booking.CreateBooking` sproc with
-  `UPDLOCK, HOLDLOCK` on the overlap-count query, so two concurrent
-  POSTs serialise and the second is rejected once capacity is full.
-  - `IProviderOfferingResolver` extracted as the shared "look up
-    provider's category, capacity, duration rule" reader — used by
-    both the slot service and the booking service.
+    `maxConcurrentSessions` / `maxConcurrentConsultations`) but is scoped by
+    ServiceId — DayCare and NightStay each get their own capacity bucket.
+- **Bookings.** Real bookings table `Booking.Bookings` carries `ServiceId`.
+  Capacity check is race-safe via `Booking.CreateBooking` sproc with
+  `UPDLOCK, HOLDLOCK` on the overlap-count query **scoped by ServiceId**,
+  so two concurrent POSTs on the same service serialise and the second is
+  rejected once capacity is full.
+  - `IProviderOfferingResolver` is the shared "look up service capacity +
+    duration rule by ServiceId" reader — used by both the slot service
+    and the booking service. It joins the `Provider.ProviderServices` row
+    with the matching Cosmos offering branch.
   - `BookingService` implements both `IBookingService` (Create / Get /
     Cancel / list-by-provider / list-by-parent) and
     `IDailyBookingReader` (used by the slot service to subtract
-    overlapping bookings against capacity). Single registration via
-    `BookingService` resolves both abstractions.
+    overlapping bookings against capacity, **scoped by ServiceId**).
+    Single registration via `BookingService` resolves both abstractions.
   - Booking validation in C# rejects out-of-hours windows, break
-    overlaps, and duration mismatches BEFORE hitting SQL. The SQL
-    sproc still has the capacity check as the race-safe last line of
-    defense.
+    overlaps, duration mismatches, and closure overlaps **on the
+    booked ServiceId** BEFORE hitting SQL. The SQL sproc still has
+    the capacity check (per service) as the race-safe last line of
+    defense, plus its own ServiceId-belongs-to-provider check.
   - Sub-categories carried as a denormalised snapshot on the
     booking row (so historical bookings keep meaning even if the
     provider deregisters).
+  - `GET /providers/{id}/bookings` accepts an optional `?date=YYYY-MM-DD`
+    query param that narrows results to a single calendar day (day-view
+    UI). Omit it for full history. Filter is applied in
+    `Booking.ListBookingsByProvider` via a nullable `@BookingDate` param.
 - `GET /providers/{id}/policy` — returns both.
 
-### Provider closures (sick leave / vacation)
-- `POST /providers/{id}/closures` — body: `{ startDate, endDate, startTime?, endTime?, reason? }`.
+### Per-service catalog (`Provider.ProviderServices`)
+A provider's offering can expose more than one bookable service (e.g.
+PetSitter's DayCare AND NightStay). Closures, bookings, and slot queries
+all reference a specific **ServiceId**, not the whole provider.
+
+- Table `Provider.ProviderServices`: `(ServiceId GUID PK, ProviderId,
+  ServiceCategory, SubCategory, ServiceType, IsActive, CreatedAtUtc, UpdatedAtUtc)`,
+  UNIQUE(`ProviderId`, `ServiceType`). `ServiceType` ∈ `DayCare`, `NightStay`,
+  `GroomingSession`, `TrainingSession`, `VetAppointment` (PetAdoptionAndSale has
+  no offering and therefore no row here).
+- Rows are upserted automatically when an offering POST runs — the endpoint
+  handler calls `IProviderServiceCatalog.UpsertAsync` for each sub-offering
+  present and `DeactivateAsync` for any that were removed (rows are soft-
+  deactivated, not deleted, so historical closures/bookings remain valid).
+- `GET /providers/{providerId}/services` returns the active catalog (with
+  `?includeInactive=true` to see deactivated rows). Replaces the legacy
+  in-memory `POST/GET /providers/{providerId}/services` placeholders, which
+  were removed.
+
+### Provider closures (sick leave / vacation) — **per-service**
+- `POST /providers/{id}/closures` — body: `{ serviceIds: [GUID, ...], startDate, endDate, startTime?, endTime?, reason? }`.
+  - `serviceIds` is required and non-empty. The server validates every id
+    belongs to the provider and is active, then creates **one closure row
+    per service id in a single transaction** (all-or-nothing).
   - Full-day across the range when no times given. Partial-day (`startTime`+`endTime` set) requires `startDate == endDate`.
   - Always returns 200 + envelope `success=true`. The response payload is **discriminated**:
-    - `status: "Created"` → `closure` is populated.
-    - `status: "BookingsExist"` → no closure was created; `conflictingBookings` lists the confirmed bookings inside the window plus a `warningMessage`. Provider must move/cancel them and retry. **There is no `force` override** — the user explicitly chose strict rejection.
-  - SQL sproc `Provider.CreateClosure` holds `UPDLOCK, HOLDLOCK` on the conflict-detect query so concurrent `Booking.CreateBooking` on the same provider serialises behind it (race-safe).
-- `GET /providers/{id}/closures?from=&to=` — list closures whose date range intersects `[from, to]` (either bound optional).
-- `DELETE /providers/{id}/closures/{closureId}` — reopen.
-- Slot service consults closures: full-day → empty slots; partial-day → carved out of the working windows like an extra break.
-- Booking service consults closures: any overlap → `ProviderClosedOnDateException` mapped to **409 ProviderClosed**.
-- Table: `Provider.ProviderClosures` (ClosureId, ProviderId, StartDate, EndDate, StartTime?, EndTime?, Reason?, CreatedAtUtc). CHECKs enforce `EndDate >= StartDate`, both times together-or-neither, and partial-day windows require `StartDate = EndDate`.
+    - `status: "Created"` → `closures` is populated (one entry per requested ServiceId).
+    - `status: "BookingsExist"` → no closures were created; `conflictingBookings` lists confirmed bookings inside the window for any of the targeted services (each carries `serviceId`) plus a `warningMessage`. Provider must move/cancel them and retry. **There is no `force` override**.
+  - SQL sproc `Provider.CreateClosures` (plural; the legacy `CreateClosure` is dropped on re-deploy) holds `UPDLOCK, HOLDLOCK` on the conflict-detect query so concurrent `Booking.CreateBooking` on any of the targeted services serialises behind it (race-safe).
+- `GET /providers/{id}/closures?serviceId=&from=&to=` — list closures whose date range intersects `[from, to]`. `serviceId` narrows to a single service.
+- `DELETE /providers/{id}/closures/{closureId}` — reopen one closure row.
+- Slot service consults closures **scoped by ServiceId**: a DayCare closure does not affect NightStay slots/bookings.
+- Booking service consults closures **scoped by ServiceId**: overlap → `ProviderClosedOnDateException` mapped to **409 ServiceClosed**.
+- Table: `Provider.ProviderClosures` (`ClosureId, ProviderId, ServiceId (FK → ProviderServices), StartDate, EndDate, StartTime?, EndTime?, Reason?, CreatedAtUtc`). CHECKs enforce `EndDate >= StartDate`, both times together-or-neither, and partial-day windows require `StartDate = EndDate`.
 
 ### Onboarding status orchestrator
 - `GET /providers/{id}/onboarding-status` — single endpoint that returns:
@@ -321,25 +387,93 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
   `FoodAndBeverage`, `SeatingAreas`, `FirstAidBooth`, `None`. `None` can't
   coexist with others (enforced in validation).
 
+### Event ticket bookings
+Anyone with a Firebase login can buy tickets for a physical event. **No FK
+to PetParents** — attendee names are free text and never validated against
+any user table. Bookings are **per ticket**: 4 attendees → 4 child ticket
+rows under one parent booking.
+
+- `POST /events/{eventId}/bookings` — body:
+  `{ bookerName, bookerEmail, bookerMobile?, attendeeNames: [...], paymentMethod }`.
+  `paymentMethod` is `CreditCard` or `Twint`. Returns the booking + ticket
+  rows; booking is created in `PaymentStatus = Pending`.
+- `GET /event-bookings/{bookingId}` — booking + one entry per ticket
+  (denormalised on the wire — if 4 tickets were bought, 4 entries appear in
+  the `tickets` array).
+- `POST /event-bookings/{bookingId}/payment-confirmation` — external
+  gateway callback. Body: `{ paymentStatus, paymentReference? }` where
+  `paymentStatus` is `Paid` or `Failed`. Idempotent for redelivery of the
+  same (status, reference) pair; throws **409 PaymentAlreadyConfirmed** if
+  the booking was already finalised with a different result.
+- Storage: SQL only. `Event.EventBookings` (one row per transaction) +
+  `Event.EventBookingTickets` (one row per attendee/ticket). **No Cosmos
+  doc is written** — the event Cosmos doc is read for `maximumCapacity` and
+  `price` but never mutated, so per-event ETag contention is avoided.
+- Capacity is enforced inside `Event.CreateEventBooking` by SUMming
+  `TicketCount` over confirmed rows for the event under `UPDLOCK +
+  HOLDLOCK`, then rejecting when the requested ticket count would push the
+  total past `@MaximumCapacity`. Concurrent buyers serialise and the
+  (N+1)-th seat is rejected once the event is full. Maps to **409
+  EventSoldOut** (`51091`).
+- `TotalAmount` is a snapshot of `price × ticketCount` at booking time.
+  For free events (`Physical.IsPaid = false`) it is 0.
+- Online events have no `Physical` block (no capacity) and therefore can't
+  be ticketed. Booking attempts return **400 EventNotBookable**.
+- Cancellation / refund flow is **not** built yet — only the
+  `Status = Cancelled` column shape exists for it.
+
+### Event organiser dashboard (metrics + attendees)
+Two **organiser-only** GETs that return the data the event creator needs
+to monitor an event. Both URL-scope under `/providers/{providerId}` and
+verify the event in the path belongs to that provider — a mismatch
+returns **404 EventNotFound** (we don't leak existence).
+
+- `GET /providers/{providerId}/events/{eventId}/attendees` — returns one
+  row per ticket. Excludes Cancelled bookings; surfaces `paymentStatus`
+  per row so the organiser can see Pending/Paid/Failed.
+- `GET /providers/{providerId}/events/{eventId}/metrics` — returns
+  `{ views, shares, inquiries, confirmedAttendees, earnings }`.
+  `confirmedAttendees` = `SUM(TicketCount)` over confirmed Paid bookings;
+  `earnings` = `SUM(TotalAmount)` over confirmed Paid bookings.
+
+The three engagement counters (`views`, `shares`, `inquiries`) are simple
+integers on `Event.Events`. They're bumped via **public** increment
+endpoints (open to any signed-in Firebase user, not just the organiser):
+
+- `POST /events/{eventId}/views`
+- `POST /events/{eventId}/shares`
+- `POST /events/{eventId}/inquiries`
+
+Each returns the updated `{ viewCount, shareCount, inquiryCount }` so the
+mobile client can update its UI without a follow-up read. Backed by
+`Event.IncrementEventCounter` (atomic single-column `UPDATE`).
+
+**Inquiries are currently a counter only.** If a richer "inquiry has
+content (text, contact info, reply thread)" model is needed later, it
+would add an `Event.EventInquiries` table; the counter on `Event.Events`
+would then become a denormalised cache (or be replaced by a JOIN).
+
 ## In progress / next step
 
-**Event subscriptions are designed but not built.** Last conversation
-ended with a proposal awaiting confirmation:
+**Event ticket cancellation / refund flow is not built yet.** The
+`Event.EventBookings.Status = Cancelled` column + `CancelledAtUtc` exist
+for the eventual implementation, but there are no endpoints, no sproc, and
+no capacity-release logic. When this lands it must:
 
-- New SQL tables: `Event.EventSubscriptions` + `Event.EventSubscriptionPets`
-- UNIQUE(EventId, PetParentId) — re-subscription flips status, no row
-  proliferation
-- Capacity enforcement via stored proc with `UPDLOCK, HOLDLOCK` to
-  serialize concurrent subscribes; API fetches `MaximumCapacity` from
-  Cosmos and passes it to the proc
-- 4 endpoints: subscribe / cancel / list-by-event / list-by-parent
-- Self-cancellation only; provider moderation deferred
-- Payment deferred (placeholder `IsPaid` + `PaymentReference` fields)
-- No Cosmos doc for subscriptions
+- Decide who can cancel (the booker is identified only by free-text email,
+  not a Firebase UID — policy decision needed).
+- Flip `Status` to `Cancelled` + set `CancelledAtUtc`, which releases
+  capacity automatically (the `CreateEventBooking` capacity SUM filters
+  `Status = N'Confirmed'`).
+- Handle the external refund leg if `PaymentStatus = Paid`.
 
-Six decision points still open — see the last reply in chat history.
-User said "save this for later," so design is pending confirmation
-before build.
+The earlier deferred **pet-parent subscription** design (with
+`EventSubscriptions` + `EventSubscriptionPets`, pets per subscriber,
+UNIQUE(EventId, PetParentId)) was **superseded** by the simpler ticket-
+booking model — anyone can book, attendees are free text, payment is
+explicit. If a richer "pet parent + their pets attend" model is needed
+later, it would layer on top of `Event.EventBookings` rather than replace
+it.
 
 ## Deferred / known issues — pull forward when relevant
 
@@ -347,10 +481,18 @@ before build.
    AccountKey, Blob AccountKey are all in committed config. **Rotate
    these.** Move to user-secrets or Key Vault before any production
    exposure.
-2. **`Provider.Providers`, `Services`, `Bookings` services** are still
-   in-memory placeholders (`InMemoryProviderService`, etc.). The
-   "legacy" `/providers POST/GET` and `/providers/{id}/services` and
-   `/providers/{id}/bookings` endpoints don't persist across restarts.
+2. **Legacy in-memory `IProviderService` / `POST GET /providers`** —
+   these two endpoints (different from the real provider profile flow)
+   are placeholders backed by `InMemoryProviderService` and don't persist
+   across restarts. Safe to delete when no longer used as a smoke test.
+   The real `Provider.Providers` row IS persisted — written by
+   `Provider.CompleteProviderProfile` and read by the new
+   `Provider.GetProviderProfile` sproc (exposed at
+   `GET /providers/{id}/profile`). Bookings, closures, services,
+   policies, availability, OTPs, and events are all SQL-backed.
+   The legacy in-memory `/providers/{id}/services` POST/GET were removed
+   when the real per-service catalog (`Provider.ProviderServices`) shipped;
+   `GET /providers/{id}/services` now returns the SQL-backed catalog.
 3. **Pet Adoption & Sale offering** not built — only basic registration.
 4. **Online events** have no Cosmos doc / extension fields yet.
 5. **No PUT / DELETE for events** — only create.
@@ -379,11 +521,12 @@ POST   /provider-onboarding/profile
 
 POST   /providers/                                            (legacy in-memory)
 GET    /providers/                                            (legacy in-memory)
-POST   /providers/{providerId}/services                       (legacy in-memory)
-GET    /providers/{providerId}/services                       (legacy in-memory)
 
-POST   /providers/{providerId}/bookings
-GET    /providers/{providerId}/bookings
+GET    /providers/{providerId}/profile                                           personal info (name, gender, mobile, DOB, …)
+GET    /providers/{providerId}/services                                          [?includeInactive=]
+
+POST   /providers/{providerId}/bookings                                          body now carries serviceId
+GET    /providers/{providerId}/bookings                                          [?date=YYYY-MM-DD] — day-view filter
 GET    /bookings/{bookingId}
 POST   /bookings/{bookingId}/cancel
 GET    /pet-parents/{petParentId}/bookings
@@ -397,10 +540,10 @@ GET    /providers/{providerId}/policy
 
 POST   /providers/{providerId}/availability
 GET    /providers/{providerId}/availability
-GET    /providers/{providerId}/availability/slots                      ?date= &durationHours= [&granularityMinutes=]
+GET    /providers/{providerId}/availability/slots                      ?serviceId= &date= &durationHours= [&granularityMinutes=]
 
-POST   /providers/{providerId}/closures
-GET    /providers/{providerId}/closures                                [?from= &to=]
+POST   /providers/{providerId}/closures                                 body carries serviceIds[]
+GET    /providers/{providerId}/closures                                [?serviceId= &from= &to=]
 DELETE /providers/{providerId}/closures/{closureId}
 
 GET    /providers/{providerId}/onboarding-status
@@ -448,6 +591,19 @@ POST   /providers/{providerId}/events/banner-image                     (multipar
 POST   /providers/{providerId}/events
 GET    /providers/{providerId}/events
 GET    /events/{eventId}
+
+POST   /events/{eventId}/bookings                                      body: { bookerName, bookerEmail, bookerMobile?, attendeeNames[], paymentMethod }
+GET    /event-bookings/{bookingId}                                     returns booking + one entry per ticket
+POST   /event-bookings/{bookingId}/payment-confirmation                gateway callback → flips PaymentStatus to Paid|Failed
+
+POST   /events/{eventId}/views                                         public engagement counter
+POST   /events/{eventId}/shares                                        public engagement counter
+POST   /events/{eventId}/inquiries                                     public engagement counter
+
+GET    /providers/{providerId}/events/{eventId}/attendees              organiser only — one entry per ticket
+GET    /providers/{providerId}/events/{eventId}/metrics                organiser only — views, shares, inquiries, confirmedAttendees, earnings
+
+POST   /blob-images                                                    body: { blobUrl } — streams bytes from the private blob container
 ```
 
 ## Working agreements

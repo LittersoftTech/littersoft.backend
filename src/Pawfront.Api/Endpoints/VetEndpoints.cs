@@ -1,3 +1,4 @@
+using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Application.Services.Vet;
 using Pawfront.Contracts.Services.Vet;
@@ -125,6 +126,7 @@ internal static class VetEndpoints
         Guid providerId,
         SaveVetClinicOfferingRequest request,
         IVetServiceRegistry registry,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         try
@@ -138,6 +140,9 @@ internal static class VetEndpoints
                     request.MaxConcurrentConsultations,
                     request.ServiceLocation),
                 cancellationToken);
+
+            await SyncVetServiceAsync(providerId, result.SubCategory,
+                result.VetClinic?.Offering, serviceCatalog, cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
         }
@@ -155,6 +160,7 @@ internal static class VetEndpoints
         Guid providerId,
         SaveFreelanceVeterinarianOfferingRequest request,
         IVetServiceRegistry registry,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         try
@@ -168,6 +174,9 @@ internal static class VetEndpoints
                     request.ServiceLocation),
                 cancellationToken);
 
+            await SyncVetServiceAsync(providerId, result.SubCategory,
+                result.Freelance?.Offering, serviceCatalog, cancellationToken);
+
             return ApiResults.Ok(ToResponse(result));
         }
         catch (FreelanceVeterinarianNotRegisteredException exception)
@@ -177,6 +186,24 @@ internal static class VetEndpoints
         catch (ArgumentException exception)
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static async Task SyncVetServiceAsync(
+        Guid providerId,
+        string subCategory,
+        VetOfferingResult? offering,
+        IProviderServiceCatalog catalog,
+        CancellationToken cancellationToken)
+    {
+        if (offering?.Appointment is not null)
+        {
+            await catalog.UpsertAsync(providerId, CategoryName, subCategory,
+                ProviderServiceTypes.VetAppointment, cancellationToken);
+        }
+        else
+        {
+            await catalog.DeactivateAsync(providerId, ProviderServiceTypes.VetAppointment, cancellationToken);
         }
     }
 

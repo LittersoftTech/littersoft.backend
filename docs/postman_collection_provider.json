@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Pawfront Backend API",
-    "description": "Complete API testing suite for the Pawfront provider-facing backend.\n\n**Setup**\n1. Set the `baseUrl` collection variable (default `https://localhost:5001`).\n2. Get a Firebase ID token (see CLAUDE.md `Get a fresh Firebase ID token`) and set `firebaseToken`.\n3. Run requests roughly in folder order. Several requests have test scripts that auto-populate ids (`providerAuthIdentityId`, `providerId`, `otpId`, `eventId`, `bookingId`).\n\n**Notes**\n- Every endpoint requires the `FirebaseUser` policy → `Authorization: Bearer {{firebaseToken}}`.\n- All responses follow the `ApiResponse<T>` envelope: `{ success, data, error }`.\n- A provider can register only ONE service category. Pick one of the five service folders and stick to it for a given `providerId`.\n- Image-upload requests use multipart with field name `file`.",
+    "description": "Complete API testing suite for the Pawfront provider-facing backend.\n\n**Setup**\n1. Set the `baseUrl` collection variable (default `https://localhost:5001`).\n2. Get a Firebase ID token (see CLAUDE.md `Get a fresh Firebase ID token`) and set `firebaseToken`.\n3. Run requests roughly in folder order. Several requests have test scripts that auto-populate ids (`providerAuthIdentityId`, `providerId`, `otpId`, `eventId`, `bookingId`, plus the per-service-type `serviceId*` vars).\n\n**Notes**\n- Every endpoint requires the `FirebaseUser` policy → `Authorization: Bearer {{firebaseToken}}`.\n- All responses follow the `ApiResponse<T>` envelope: `{ success, data, error }`.\n- A provider can register only ONE service category. Pick one of the five service folders and stick to it for a given `providerId`.\n- **Per-service flow:** after a provider saves an offering, the server upserts a row in `Provider.ProviderServices` for each sub-offering present (e.g. PetSitter with DayCare + NightStay = two ServiceIds). Closures, bookings, and slot queries are all scoped by `ServiceId`. **Run `3z. Provider Services Catalog → GET /services` after the offering save** — its test script populates `serviceId`, `serviceIdDayCare`, `serviceIdNightStay`, `serviceIdGrooming`, `serviceIdTraining`, `serviceIdVet` for use in the later folders.\n- Image-upload requests use multipart with field name `file`.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -17,10 +17,17 @@
     { "key": "providerId", "value": "" },
     { "key": "otpId", "value": "" },
     { "key": "eventId", "value": "" },
+    { "key": "eventBookingId", "value": "", "description": "Populated by POST /events/{eventId}/bookings." },
     { "key": "bookingId", "value": "" },
     { "key": "petParentId", "value": "11111111-1111-1111-1111-111111111111" },
     { "key": "closureId", "value": "" },
-    { "key": "blobUrl", "value": "" }
+    { "key": "blobUrl", "value": "" },
+    { "key": "serviceId", "value": "", "description": "Catch-all: first active ServiceId returned by GET /services. Use when you only care about one service (single-offering categories)." },
+    { "key": "serviceIdDayCare", "value": "", "description": "PetSitter DayCare ServiceId. Populated by GET /services if the provider offers DayCare." },
+    { "key": "serviceIdNightStay", "value": "", "description": "PetSitter NightStay ServiceId. Populated by GET /services if the provider offers NightStay." },
+    { "key": "serviceIdGrooming", "value": "", "description": "PetGroomer GroomingSession ServiceId." },
+    { "key": "serviceIdTraining", "value": "", "description": "PetTrainer TrainingSession ServiceId." },
+    { "key": "serviceIdVet", "value": "", "description": "Vet VetAppointment ServiceId." }
   ],
   "item": [
     {
@@ -91,6 +98,14 @@
               "mode": "raw",
               "raw": "{\n  \"providerAuthIdentityId\": \"{{providerAuthIdentityId}}\",\n  \"firstName\": \"Ayur\",\n  \"lastName\": \"Shitarale\",\n  \"gender\": \"Male\",\n  \"mobileCountryCode\": \"+91\",\n  \"mobileNumber\": \"9876543210\",\n  \"dateOfBirth\": \"1995-08-22\"\n}"
             }
+          }
+        },
+        {
+          "name": "GET provider profile (personal info)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/profile", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","profile"] },
+            "description": "Returns the persisted personal information for this provider — name, gender, mobile, date of birth, mobile-verified timestamp, onboarding status, created/updated timestamps. Returns 404 ProviderProfileNotFound when the row is missing."
           }
         }
       ]
@@ -502,6 +517,58 @@
       ]
     },
     {
+      "name": "3z. Provider Services Catalog (run after offering save)",
+      "description": "Returns the SQL-backed catalog of services the provider currently offers. Rows are upserted automatically by the offering POSTs (one row per sub-offering present — e.g. PetSitter with DayCare + NightStay = two rows). The test script on `GET /services` populates per-ServiceType collection variables (`serviceIdDayCare`, `serviceIdNightStay`, `serviceIdGrooming`, `serviceIdTraining`, `serviceIdVet`) plus the generic `serviceId` (first active row) for use in the Availability / Closures / Bookings folders below.",
+      "item": [
+        {
+          "name": "GET /services (catalog)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && Array.isArray(json.data.services)) {",
+                  "  const activeServices = json.data.services.filter(s => s.isActive);",
+                  "  for (const s of activeServices) {",
+                  "    if (s.serviceType === 'DayCare')         pm.collectionVariables.set('serviceIdDayCare', s.serviceId);",
+                  "    if (s.serviceType === 'NightStay')       pm.collectionVariables.set('serviceIdNightStay', s.serviceId);",
+                  "    if (s.serviceType === 'GroomingSession') pm.collectionVariables.set('serviceIdGrooming', s.serviceId);",
+                  "    if (s.serviceType === 'TrainingSession') pm.collectionVariables.set('serviceIdTraining', s.serviceId);",
+                  "    if (s.serviceType === 'VetAppointment')  pm.collectionVariables.set('serviceIdVet', s.serviceId);",
+                  "  }",
+                  "  if (activeServices.length > 0) {",
+                  "    pm.collectionVariables.set('serviceId', activeServices[0].serviceId);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services"] }
+          }
+        },
+        {
+          "name": "GET /services?includeInactive=true",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services?includeInactive=true",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","providers","{{providerId}}","services"],
+              "query": [
+                { "key": "includeInactive", "value": "true" }
+              ]
+            },
+            "description": "Includes services that were deactivated (the provider removed the matching sub-offering on a later save). Historical closures / bookings can still reference these ServiceIds, so the row is kept."
+          }
+        }
+      ]
+    },
+    {
       "name": "4. Provider Policy",
       "item": [
         {
@@ -560,28 +627,49 @@
           }
         },
         {
-          "name": "GET available slots",
+          "name": "GET available slots (DayCare example)",
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?date=2026-05-20&durationHours=2&granularityMinutes=30",
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdDayCare}}&date=2026-05-20&durationHours=2&granularityMinutes=30",
               "host": ["{{baseUrl}}"],
               "path": ["api","v1","providers","{{providerId}}","availability","slots"],
               "query": [
+                { "key": "serviceId", "value": "{{serviceIdDayCare}}" },
                 { "key": "date", "value": "2026-05-20" },
                 { "key": "durationHours", "value": "2" },
                 { "key": "granularityMinutes", "value": "30" }
               ]
-            }
+            },
+            "description": "Slots are computed per-service: capacity, duration rule, partial-day closures, and overlap-with-existing-bookings are all scoped by `serviceId`. For single-offering categories (PetGroomer/PetTrainer/Vet) use `{{serviceId}}` instead of `{{serviceIdDayCare}}`. For PetSitter NightStay use `{{serviceIdNightStay}}`."
+          }
+        },
+        {
+          "name": "GET available slots (NightStay example)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdNightStay}}&date=2026-05-20&durationHours=12&granularityMinutes=60",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","providers","{{providerId}}","availability","slots"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceIdNightStay}}" },
+                { "key": "date", "value": "2026-05-20" },
+                { "key": "durationHours", "value": "12" },
+                { "key": "granularityMinutes", "value": "60" }
+              ]
+            },
+            "description": "Same date, different service — NightStay returns its own slot grid independent of DayCare (different capacity bucket, different duration rule, different closures)."
           }
         }
       ]
     },
     {
-      "name": "5b. Provider Closures (sick leave / vacation)",
+      "name": "5b. Provider Closures (sick leave / vacation) — PER-SERVICE",
+      "description": "Closures are scoped by `ServiceId`. A single POST can close ONE or MANY services at the same time by passing an array of `serviceIds`; the server inserts one closure row per service in a single transaction (all-or-nothing). A closure on DayCare does NOT block NightStay slots/bookings, and vice versa.",
       "item": [
         {
-          "name": "POST close service — full day, single date",
+          "name": "POST close ONE service — DayCare full day",
           "event": [
             {
               "listen": "test",
@@ -589,11 +677,11 @@
                 "type": "text/javascript",
                 "exec": [
                   "const json = pm.response.json();",
-                  "if (json && json.data && json.data.status === 'Created' && json.data.closure && json.data.closure.closureId) {",
-                  "  pm.collectionVariables.set('closureId', json.data.closure.closureId);",
+                  "if (json && json.data && json.data.status === 'Created' && Array.isArray(json.data.closures) && json.data.closures.length > 0) {",
+                  "  pm.collectionVariables.set('closureId', json.data.closures[0].closureId);",
                   "}",
                   "if (json && json.data && json.data.status === 'BookingsExist') {",
-                  "  console.warn('Closure rejected — bookings exist:', json.data.conflictingBookings);",
+                  "  console.warn('Closure batch rejected — bookings exist on one or more services:', json.data.conflictingBookings);",
                   "}"
                 ]
               }
@@ -605,38 +693,67 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/closures", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","closures"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"startDate\": \"2026-06-01\",\n  \"endDate\": \"2026-06-01\",\n  \"startTime\": null,\n  \"endTime\": null,\n  \"reason\": \"Sick leave\"\n}"
+              "raw": "{\n  \"serviceIds\": [\"{{serviceIdDayCare}}\"],\n  \"startDate\": \"2026-06-01\",\n  \"endDate\": \"2026-06-01\",\n  \"startTime\": null,\n  \"endTime\": null,\n  \"reason\": \"Sick leave (DayCare only — NightStay remains open)\"\n}"
             },
-            "description": "Closes the service for the entire calendar day on 2026-06-01.\n\n**Response shape (always 200 + success=true):**\n- `data.status = \"Created\"` → `data.closure` is populated.\n- `data.status = \"BookingsExist\"` → closure NOT created. `data.conflictingBookings` lists the affected bookings; `data.warningMessage` carries the human message. The provider must move/cancel those bookings and retry."
+            "description": "Closes DayCare for the whole day on 2026-06-01. NightStay bookings on the same day are unaffected.\n\n**Response shape (always 200 + success=true):**\n- `data.status = \"Created\"` → `data.closures` is populated (one entry per requested ServiceId).\n- `data.status = \"BookingsExist\"` → no closures were created. `data.conflictingBookings` lists confirmed bookings inside the window across ALL targeted services (each carries its `serviceId`); `data.warningMessage` is the human-readable message. The provider must move/cancel those bookings and retry."
           }
         },
         {
-          "name": "POST close service — full day, date range (vacation)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/closures", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","closures"] },
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"startDate\": \"2026-07-10\",\n  \"endDate\": \"2026-07-15\",\n  \"startTime\": null,\n  \"endTime\": null,\n  \"reason\": \"Family vacation\"\n}"
+          "name": "POST close MULTIPLE services — DayCare + NightStay together (vacation)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.status === 'Created' && Array.isArray(json.data.closures) && json.data.closures.length > 0) {",
+                  "  pm.collectionVariables.set('closureId', json.data.closures[0].closureId);",
+                  "  console.log(`Created ${json.data.closures.length} closure rows.`);",
+                  "}"
+                ]
+              }
             }
-          }
-        },
-        {
-          "name": "POST close service — partial day (e.g. vet appointment)",
+          ],
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/closures", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","closures"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"startDate\": \"2026-06-05\",\n  \"endDate\": \"2026-06-05\",\n  \"startTime\": \"14:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"reason\": \"Personal appointment\"\n}"
+              "raw": "{\n  \"serviceIds\": [\"{{serviceIdDayCare}}\", \"{{serviceIdNightStay}}\"],\n  \"startDate\": \"2026-07-10\",\n  \"endDate\": \"2026-07-15\",\n  \"startTime\": null,\n  \"endTime\": null,\n  \"reason\": \"Family vacation (everything offline)\"\n}"
+            },
+            "description": "Atomic batch close across two services. Server creates two closure rows (one per ServiceId) in a single transaction. If ANY of the targeted services has a conflicting confirmed booking inside the window, the WHOLE batch is rejected and no rows are inserted."
+          }
+        },
+        {
+          "name": "POST close single-service provider — generic (PetGroomer / PetTrainer / Vet)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/closures", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","closures"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceIds\": [\"{{serviceId}}\"],\n  \"startDate\": \"2026-06-15\",\n  \"endDate\": \"2026-06-15\",\n  \"startTime\": null,\n  \"endTime\": null,\n  \"reason\": \"Sick leave\"\n}"
+            },
+            "description": "For categories with only one ServiceType (PetGroomer / PetTrainer / Vet), the generic `{{serviceId}}` collection variable (first active row from `GET /services`) is the easy choice."
+          }
+        },
+        {
+          "name": "POST close service — partial day (e.g. vet appointment block)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/closures", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","closures"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"serviceIds\": [\"{{serviceId}}\"],\n  \"startDate\": \"2026-06-05\",\n  \"endDate\": \"2026-06-05\",\n  \"startTime\": \"14:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"reason\": \"Personal appointment\"\n}"
             },
             "description": "Partial-day window. StartTime + EndTime must be set together; StartDate must equal EndDate when times are present (multi-day partial windows are rejected with 400 InvalidRequest)."
           }
         },
         {
-          "name": "GET closures (optional date-range filter)",
+          "name": "GET closures (all services for provider)",
           "request": {
             "method": "GET",
             "url": {
@@ -648,14 +765,32 @@
                 { "key": "to", "value": "2026-12-31" }
               ]
             },
-            "description": "Returns closures whose date range intersects [from, to]. Both bounds optional — omit either query param for an open-ended side."
+            "description": "Returns closures whose date range intersects [from, to] across ALL the provider's services. Each row carries `serviceId` so the UI can group them. Both `from` and `to` are optional — omit either for an open-ended side."
           }
         },
         {
-          "name": "DELETE closure (reopen)",
+          "name": "GET closures — single service filter",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/closures?serviceId={{serviceIdDayCare}}&from=2026-01-01&to=2026-12-31",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","providers","{{providerId}}","closures"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceIdDayCare}}" },
+                { "key": "from", "value": "2026-01-01" },
+                { "key": "to", "value": "2026-12-31" }
+              ]
+            },
+            "description": "Narrow to closures for one specific service."
+          }
+        },
+        {
+          "name": "DELETE closure (reopen one row)",
           "request": {
             "method": "DELETE",
-            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/closures/{{closureId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","closures","{{closureId}}"] }
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/closures/{{closureId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","closures","{{closureId}}"] },
+            "description": "Reopens a single closure row (one ServiceId). If you closed DayCare + NightStay together as two rows, you must DELETE each closureId to reopen both."
           }
         }
       ]
@@ -664,7 +799,7 @@
       "name": "6. Bookings",
       "item": [
         {
-          "name": "POST create booking",
+          "name": "POST create booking (DayCare example)",
           "event": [
             {
               "listen": "test",
@@ -685,15 +820,59 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"petParentId\": \"{{petParentId}}\",\n  \"bookingDate\": \"2026-05-20\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\"\n}"
-            }
+              "raw": "{\n  \"petParentId\": \"{{petParentId}}\",\n  \"serviceId\": \"{{serviceIdDayCare}}\",\n  \"bookingDate\": \"2026-05-20\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\"\n}"
+            },
+            "description": "`serviceId` is REQUIRED. The server validates that this ServiceId belongs to the provider and is active (else 400 InvalidServiceId). Capacity is checked per-service — DayCare bookings count separately from NightStay bookings, and closures only block if they target the same ServiceId.\n\nFor PetSitter NightStay use `{{serviceIdNightStay}}`. For single-offering categories (PetGroomer / PetTrainer / Vet) use `{{serviceId}}`."
           }
         },
         {
-          "name": "GET bookings by provider",
+          "name": "POST create booking (NightStay example)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.bookingId) {",
+                  "  pm.collectionVariables.set('bookingId', json.data.bookingId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petParentId\": \"{{petParentId}}\",\n  \"serviceId\": \"{{serviceIdNightStay}}\",\n  \"bookingDate\": \"2026-05-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"07:00:00\"\n}"
+            },
+            "description": "NightStay on the SAME date as DayCare — both can exist independently. (Note: this example uses a NightStay window that crosses midnight; valid only if the provider's weekly availability covers it. Adjust to your provider's hours.)"
+          }
+        },
+        {
+          "name": "GET bookings by provider (all)",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings"] }
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings"] },
+            "description": "Returns the full booking history for this provider when no `date` query param is given."
+          }
+        },
+        {
+          "name": "GET bookings by provider — filter by date",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings?date=2026-05-20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","providers","{{providerId}}","bookings"],
+              "query": [
+                { "key": "date", "value": "2026-05-20" }
+              ]
+            },
+            "description": "Returns only the bookings whose `bookingDate` equals the provided `date` (YYYY-MM-DD). Used by the provider's day-view UI."
           }
         },
         {
@@ -790,6 +969,128 @@
       ]
     },
     {
+      "name": "7b. Event Ticket Bookings",
+      "description": "Ticket purchases against a physical event. **Anyone** signed in can buy tickets for any names — attendee names are free text and not validated against the database. The booking is created with `PaymentStatus = Pending`; flip it to `Paid` (or `Failed`) via the gateway callback request.\n\nRequires the parent `eventId` to be a **Physical** event with a `physical.maximumCapacity` set (Online events return 400 EventNotBookable). Capacity is enforced atomically inside `Event.CreateEventBooking` — concurrent buyers serialise and the (N+1)-th seat returns 409 EventSoldOut.",
+      "item": [
+        {
+          "name": "POST create event booking (Credit Card, 4 tickets)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.bookingId) {",
+                  "  pm.collectionVariables.set('eventBookingId', json.data.bookingId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}","bookings"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bookerName\": \"Ayur Shitarale\",\n  \"bookerEmail\": \"ayur@example.com\",\n  \"bookerMobile\": \"+919876543210\",\n  \"attendeeNames\": [\n    \"Ayur Shitarale\",\n    \"Anika Shitarale\",\n    \"Ravi Patel\",\n    \"Meera Joshi\"\n  ],\n  \"paymentMethod\": \"CreditCard\"\n}"
+            },
+            "description": "Creates one booking row + 4 ticket rows in a single race-safe transaction. The booking comes back with `paymentStatus: \"Pending\"` and the `tickets` array carries one entry per attendee (TicketNumber 1..N).\n\nResponse → sets `eventBookingId` collection variable for downstream requests."
+          }
+        },
+        {
+          "name": "POST create event booking (Twint, 2 tickets)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}","bookings"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bookerName\": \"Priya Verma\",\n  \"bookerEmail\": \"priya@example.com\",\n  \"bookerMobile\": null,\n  \"attendeeNames\": [\n    \"Priya Verma\",\n    \"Arjun Verma\"\n  ],\n  \"paymentMethod\": \"Twint\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET event booking by id",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/event-bookings/{{eventBookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","event-bookings","{{eventBookingId}}"] },
+            "description": "Returns the booking envelope + a `tickets` array with one entry per attendee. If 4 tickets were bought, 4 entries come back here."
+          }
+        },
+        {
+          "name": "POST payment-confirmation (Paid)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/event-bookings/{{eventBookingId}}/payment-confirmation", "host": ["{{baseUrl}}"], "path": ["api","v1","event-bookings","{{eventBookingId}}","payment-confirmation"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentStatus\": \"Paid\",\n  \"paymentReference\": \"gw-tx-2026-05-24-abc123\"\n}"
+            },
+            "description": "Simulates the external gateway callback. Flips `PaymentStatus` to `Paid` and records the gateway reference. Idempotent for redelivery of the same (status, reference) pair; a different reference for an already-confirmed booking returns 409 PaymentAlreadyConfirmed."
+          }
+        },
+        {
+          "name": "POST payment-confirmation (Failed)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/event-bookings/{{eventBookingId}}/payment-confirmation", "host": ["{{baseUrl}}"], "path": ["api","v1","event-bookings","{{eventBookingId}}","payment-confirmation"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentStatus\": \"Failed\",\n  \"paymentReference\": \"gw-tx-2026-05-24-decline-xyz789\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7c. Event Engagement & Organiser Dashboard",
+      "description": "Two halves of the same dashboard story:\n\n**Public engagement counters** (POST views/shares/inquiries) — anyone signed in can call these from the event detail screen. Each request bumps a single counter on `Event.Events` atomically and returns the updated `{ viewCount, shareCount, inquiryCount }`. Inquiries are a counter only — there is no inquiry content stored today.\n\n**Organiser-only reads** (GET attendees + metrics) — URL-scoped under `/providers/{providerId}/events/{eventId}`. The server verifies the event belongs to that provider; if not it returns 404 EventNotFound (we don't distinguish 'doesn't exist' vs 'not yours' to avoid leaking existence).",
+      "item": [
+        {
+          "name": "POST increment view count",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/views", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}","views"] },
+            "description": "Atomic +1 on `Event.Events.ViewCount`. Call from the mobile event-detail screen. Returns the new `{ viewCount, shareCount, inquiryCount }`."
+          }
+        },
+        {
+          "name": "POST increment share count",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/shares", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}","shares"] }
+          }
+        },
+        {
+          "name": "POST increment inquiry count",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/inquiries", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}","inquiries"] }
+          }
+        },
+        {
+          "name": "GET event attendees (organiser only)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events/{{eventId}}/attendees", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events","{{eventId}}","attendees"] },
+            "description": "One row per ticket. Joins booking + ticket; excludes Cancelled bookings; surfaces `paymentStatus` per row so the organiser can chase Pending/Failed payments.\n\n404 EventNotFound if `eventId` doesn't belong to `providerId`."
+          }
+        },
+        {
+          "name": "GET event metrics (organiser only)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events/{{eventId}}/metrics", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events","{{eventId}}","metrics"] },
+            "description": "Returns `{ views, shares, inquiries, confirmedAttendees, earnings }`. `confirmedAttendees` and `earnings` are computed live from confirmed-Paid bookings; the three engagement counters are read from `Event.Events`.\n\n404 EventNotFound if `eventId` doesn't belong to `providerId`."
+          }
+        }
+      ]
+    },
+    {
       "name": "8. Onboarding Status",
       "item": [
         {
@@ -821,9 +1122,10 @@
     },
     {
       "name": "9. Legacy (in-memory)",
+      "description": "The legacy in-memory `/providers/{id}/services` POST/GET endpoints have been REMOVED. `GET /providers/{id}/services` now serves the real SQL-backed catalog — see folder `3z. Provider Services Catalog`. The two legacy `/providers` endpoints below are still in-memory placeholders and don't persist across restarts.",
       "item": [
         {
-          "name": "POST /providers (legacy)",
+          "name": "POST /providers (legacy in-memory)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -835,29 +1137,10 @@
           }
         },
         {
-          "name": "GET /providers (legacy)",
+          "name": "GET /providers (legacy in-memory)",
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/providers", "host": ["{{baseUrl}}"], "path": ["api","v1","providers"] }
-          }
-        },
-        {
-          "name": "POST /providers/{id}/services (legacy)",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services"] },
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Basic Grooming\",\n  \"description\": \"Bath, blow-dry, nail trim.\",\n  \"basePrice\": 750,\n  \"durationMinutes\": 60\n}"
-            }
-          }
-        },
-        {
-          "name": "GET /providers/{id}/services (legacy)",
-          "request": {
-            "method": "GET",
-            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services"] }
           }
         }
       ]

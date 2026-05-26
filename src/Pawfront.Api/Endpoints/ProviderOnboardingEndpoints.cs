@@ -18,9 +18,26 @@ internal static class ProviderOnboardingEndpoints
         mobileVerification.MapPost("/otp", SendOtp);
         mobileVerification.MapPost("/otp/{providerMobileOtpId:guid}/verify", VerifyOtp);
 
+        builder.MapGet("/providers/{providerId:guid}/profile", GetProviderProfile);
         builder.MapGet("/providers/{providerId:guid}/onboarding-status", GetOnboardingStatus);
 
         return builder;
+    }
+
+    private static async Task<IResult> GetProviderProfile(
+        Guid providerId,
+        IProviderOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await onboardingService.GetProviderProfileAsync(providerId, cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (ProviderProfileNotFoundException exception)
+        {
+            return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
+        }
     }
 
     private static async Task<IResult> SaveFirebaseAuth(

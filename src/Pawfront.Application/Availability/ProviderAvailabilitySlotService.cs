@@ -15,6 +15,7 @@ internal sealed class ProviderAvailabilitySlotService(
 
     public async Task<AvailableSlotsResult> GetAvailableSlotsAsync(
         Guid providerId,
+        Guid serviceId,
         DateOnly date,
         decimal durationHours,
         int granularityMinutes,
@@ -32,12 +33,15 @@ internal sealed class ProviderAvailabilitySlotService(
                 nameof(granularityMinutes));
         }
 
-        // 1. Resolve the provider's single service registration + offering.
-        var resolution = await offeringResolver.ResolveAsync(providerId, cancellationToken);
+        // 1. Resolve the specific service: capacity + duration rule.
+        var resolution = await offeringResolver.ResolveAsync(serviceId, cancellationToken);
         var offering = resolution switch
         {
-            OfferingResolution.NotRegistered => throw new ProviderServiceNotRegisteredException(providerId),
-            OfferingResolution.NotConfigured nc => throw new ProviderOfferingNotConfiguredException(providerId, nc.ServiceCategory),
+            OfferingResolution.NotFound => throw new SlotServiceInvalidException(serviceId, providerId),
+            OfferingResolution.Inactive => throw new SlotServiceInvalidException(serviceId, providerId),
+            OfferingResolution.NotConfigured nc => throw new ProviderOfferingNotConfiguredException(nc.ProviderId, nc.ServiceCategory),
+            OfferingResolution.Resolved r when r.ProviderId != providerId
+                => throw new SlotServiceInvalidException(serviceId, providerId),
             OfferingResolution.Resolved r => r,
             _ => throw new InvalidOperationException("Unknown offering resolution.")
         };
@@ -55,32 +59,18 @@ internal sealed class ProviderAvailabilitySlotService(
             || daySchedule.StartTime is null
             || daySchedule.EndTime is null)
         {
-            return new AvailableSlotsResult(
-                providerId,
-                date,
-                offering.ServiceCategory,
-                offering.SubCategory,
-                durationHours,
-                offering.Capacity,
-                granularityMinutes,
-                Array.Empty<TimeSlot>());
+            return EmptySlots(providerId, serviceId, offering, date, durationHours, granularityMinutes);
         }
 
-        // 3b. Apply any ad-hoc closures (sick leave / vacation). A full-day closure
-        //     short-circuits to zero slots; partial-day closures are treated as
-        //     extra breaks that carve the working windows further.
-        var closures = await closureReader.GetActiveClosuresForDateAsync(providerId, date, cancellationToken);
+        // 3b. Apply any ad-hoc closures FOR THIS SERVICE. A full-day closure on
+        //     this service short-circuits to zero slots; partial-day closures are
+        //     treated as extra breaks that carve the working windows further. A
+        //     closure on a sibling service (e.g. NightStay when computing DayCare
+        //     slots) does NOT affect this query.
+        var closures = await closureReader.GetActiveClosuresForDateAsync(serviceId, date, cancellationToken);
         if (closures.Any(c => c.IsFullDay))
         {
-            return new AvailableSlotsResult(
-                providerId,
-                date,
-                offering.ServiceCategory,
-                offering.SubCategory,
-                durationHours,
-                offering.Capacity,
-                granularityMinutes,
-                Array.Empty<TimeSlot>());
+            return EmptySlots(providerId, serviceId, offering, date, durationHours, granularityMinutes);
         }
 
         // 4. Build the working windows (split around break if set, then split
@@ -88,8 +78,8 @@ internal sealed class ProviderAvailabilitySlotService(
         var windows = BuildWorkingWindows(daySchedule);
         windows = SubtractClosureWindows(windows, closures);
 
-        // 5. Read confirmed bookings for this date so we can subtract overlapping slots.
-        var existingBookings = await bookingReader.GetBookingsForDateAsync(providerId, date, cancellationToken);
+        // 5. Read confirmed bookings for this service+date so we can subtract overlapping slots.
+        var existingBookings = await bookingReader.GetBookingsForDateAsync(serviceId, date, cancellationToken);
 
         // 6. Walk each window, emit slots whose overlap count is below capacity.
         var durationSpan = TimeSpan.FromHours((double)durationHours);
@@ -118,14 +108,34 @@ internal sealed class ProviderAvailabilitySlotService(
 
         return new AvailableSlotsResult(
             providerId,
+            serviceId,
             date,
             offering.ServiceCategory,
             offering.SubCategory,
+            offering.ServiceType,
             durationHours,
             offering.Capacity,
             granularityMinutes,
             slots);
     }
+
+    private static AvailableSlotsResult EmptySlots(
+        Guid providerId,
+        Guid serviceId,
+        OfferingResolution.Resolved offering,
+        DateOnly date,
+        decimal durationHours,
+        int granularityMinutes) =>
+        new(providerId,
+            serviceId,
+            date,
+            offering.ServiceCategory,
+            offering.SubCategory,
+            offering.ServiceType,
+            durationHours,
+            offering.Capacity,
+            granularityMinutes,
+            Array.Empty<TimeSlot>());
 
     private static int CountOverlaps(
         IReadOnlyList<BookingWindow> bookings,
