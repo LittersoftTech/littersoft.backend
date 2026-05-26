@@ -27,11 +27,19 @@ internal static class ProviderClosureEndpoints
             return ApiResults.BadRequest("InvalidRequest", "Request body is required.");
         }
 
+        if (request.ServiceIds is null || request.ServiceIds.Count == 0)
+        {
+            return ApiResults.BadRequest(
+                "InvalidRequest",
+                "At least one serviceId is required.");
+        }
+
         try
         {
             var result = await closureService.CreateAsync(
                 new CreateProviderClosureCommand(
                     providerId,
+                    request.ServiceIds,
                     request.StartDate,
                     request.EndDate,
                     request.StartTime,
@@ -43,20 +51,20 @@ internal static class ProviderClosureEndpoints
             {
                 CreateClosureResult.Created created => ApiResults.Ok(new CreateProviderClosureResponse(
                     Status: ProviderClosureCreationStatus.Created,
-                    Closure: ToSummary(created.Closure),
+                    Closures: created.Closures.Select(ToSummary).ToArray(),
                     ConflictingBookings: null,
                     WarningMessage: null)),
 
                 CreateClosureResult.BookingsExist conflict => ApiResults.Ok(new CreateProviderClosureResponse(
                     Status: ProviderClosureCreationStatus.BookingsExist,
-                    Closure: null,
+                    Closures: null,
                     ConflictingBookings: conflict.Bookings
                         .Select(b => new ConflictingBookingSummary(
-                            b.BookingId, b.PetParentId, b.BookingDate, b.StartTime, b.EndTime))
+                            b.ServiceId, b.BookingId, b.PetParentId, b.BookingDate, b.StartTime, b.EndTime))
                         .ToArray(),
                     WarningMessage:
-                        $"This service has {conflict.Bookings.Count} existing booking(s) inside the requested closure window. " +
-                        "Please move or cancel these bookings before closing the service.")),
+                        $"{conflict.Bookings.Count} existing booking(s) inside the requested closure window across the targeted service(s). " +
+                        "Please move or cancel these bookings before closing the service(s).")),
 
                 _ => throw new InvalidOperationException("Unknown CreateClosureResult variant.")
             };
@@ -64,6 +72,14 @@ internal static class ProviderClosureEndpoints
         catch (ProviderClosureProviderNotFoundException exception)
         {
             return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
+        }
+        catch (ProviderClosureServiceInvalidException exception)
+        {
+            return ApiResults.BadRequest("InvalidServiceId", exception.Message);
+        }
+        catch (ProviderClosureEmptyServiceIdsException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
         }
         catch (ArgumentException exception)
         {
@@ -73,6 +89,7 @@ internal static class ProviderClosureEndpoints
 
     private static async Task<IResult> ListClosures(
         Guid providerId,
+        Guid? serviceId,
         DateOnly? from,
         DateOnly? to,
         IProviderClosureService closureService,
@@ -80,7 +97,7 @@ internal static class ProviderClosureEndpoints
     {
         try
         {
-            var closures = await closureService.ListAsync(providerId, from, to, cancellationToken);
+            var closures = await closureService.ListAsync(providerId, serviceId, from, to, cancellationToken);
             return ApiResults.Ok(new ProviderClosuresResponse(
                 providerId,
                 closures.Select(ToSummary).ToArray()));
@@ -109,6 +126,6 @@ internal static class ProviderClosureEndpoints
     }
 
     private static ProviderClosureSummary ToSummary(ProviderClosure c) => new(
-        c.ClosureId, c.ProviderId, c.StartDate, c.EndDate,
+        c.ClosureId, c.ProviderId, c.ServiceId, c.StartDate, c.EndDate,
         c.StartTime, c.EndTime, c.Reason, c.CreatedAtUtc);
 }

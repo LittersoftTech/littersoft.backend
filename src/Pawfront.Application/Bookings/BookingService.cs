@@ -19,12 +19,15 @@ internal sealed class BookingService(
             throw new InvalidBookingTimeException("StartTime must be earlier than EndTime.");
         }
 
-        // 1. Resolve the provider's category, sub-category, capacity, and duration rule.
-        var resolution = await offeringResolver.ResolveAsync(command.ProviderId, cancellationToken);
+        // 1. Resolve the service: capacity + duration rule + ownership check.
+        var resolution = await offeringResolver.ResolveAsync(command.ServiceId, cancellationToken);
         var offering = resolution switch
         {
-            OfferingResolution.NotRegistered => throw new BookingProviderNotRegisteredException(command.ProviderId),
-            OfferingResolution.NotConfigured nc => throw new BookingOfferingNotConfiguredException(command.ProviderId, nc.ServiceCategory),
+            OfferingResolution.NotFound => throw new BookingServiceInvalidException(command.ServiceId, command.ProviderId),
+            OfferingResolution.Inactive => throw new BookingServiceInvalidException(command.ServiceId, command.ProviderId),
+            OfferingResolution.NotConfigured nc => throw new BookingOfferingNotConfiguredException(nc.ProviderId, nc.ServiceCategory),
+            OfferingResolution.Resolved r when r.ProviderId != command.ProviderId
+                => throw new BookingServiceInvalidException(command.ServiceId, command.ProviderId),
             OfferingResolution.Resolved r => r,
             _ => throw new InvalidOperationException("Unknown offering resolution.")
         };
@@ -38,14 +41,15 @@ internal sealed class BookingService(
         await ValidateAgainstAvailabilityAsync(
             command.ProviderId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
-        // 3b. Reject if a provider closure (sick leave, vacation, etc.) covers this window.
+        // 3b. Reject if a closure on THIS service covers the requested window.
         await ValidateAgainstClosuresAsync(
-            command.ProviderId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
+            command.ServiceId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
         // 4. Hand off to the SQL sproc (capacity check + insert is race-safe there).
         return await sqlStore.CreateAsync(
             command.ProviderId,
             command.PetParentId,
+            command.ServiceId,
             offering.ServiceCategory,
             offering.SubCategory,
             command.BookingDate,
@@ -61,17 +65,20 @@ internal sealed class BookingService(
     public Task<BookingResult> CancelAsync(Guid bookingId, Guid petParentId, CancellationToken cancellationToken)
         => sqlStore.CancelAsync(bookingId, petParentId, cancellationToken);
 
-    public Task<IReadOnlyList<BookingResult>> ListByProviderAsync(Guid providerId, CancellationToken cancellationToken)
-        => sqlStore.ListByProviderAsync(providerId, cancellationToken);
+    public Task<IReadOnlyList<BookingResult>> ListByProviderAsync(
+        Guid providerId,
+        DateOnly? date,
+        CancellationToken cancellationToken)
+        => sqlStore.ListByProviderAsync(providerId, date, cancellationToken);
 
     public Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(Guid petParentId, CancellationToken cancellationToken)
         => sqlStore.ListByPetParentAsync(petParentId, cancellationToken);
 
     public Task<IReadOnlyList<BookingWindow>> GetBookingsForDateAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly date,
         CancellationToken cancellationToken)
-        => sqlStore.GetBookingsForDateAsync(providerId, date, cancellationToken);
+        => sqlStore.GetBookingsForDateAsync(serviceId, date, cancellationToken);
 
     private static void ValidateDuration(decimal durationHours, OfferingResolution.Resolved offering)
     {
@@ -89,25 +96,25 @@ internal sealed class BookingService(
     }
 
     private async Task ValidateAgainstClosuresAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly bookingDate,
         TimeOnly startTime,
         TimeOnly endTime,
         CancellationToken cancellationToken)
     {
-        var closures = await closureReader.GetActiveClosuresForDateAsync(providerId, bookingDate, cancellationToken);
+        var closures = await closureReader.GetActiveClosuresForDateAsync(serviceId, bookingDate, cancellationToken);
         foreach (var closure in closures)
         {
-            // Full-day closure blocks any booking on the date.
+            // Full-day closure on this service blocks any booking on the date.
             if (closure.IsFullDay)
             {
-                throw new ProviderClosedOnDateException(providerId, bookingDate, closure.Reason);
+                throw new ProviderClosedOnDateException(serviceId, bookingDate, closure.Reason);
             }
 
             // Partial-day closure: standard half-open overlap test.
             if (closure.StartTime!.Value < endTime && closure.EndTime!.Value > startTime)
             {
-                throw new ProviderClosedOnDateException(providerId, bookingDate, closure.Reason);
+                throw new ProviderClosedOnDateException(serviceId, bookingDate, closure.Reason);
             }
         }
     }

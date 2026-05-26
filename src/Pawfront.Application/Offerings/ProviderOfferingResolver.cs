@@ -1,87 +1,123 @@
+using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.PetSitter;
 using Pawfront.Application.Services.PetTrainer;
-using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Application.Services.Vet;
 using Pawfront.Domain.Services;
 
 namespace Pawfront.Application.Offerings;
 
 internal sealed class ProviderOfferingResolver(
-    IProviderServiceLocationRegistry locationRegistry,
+    IProviderServiceCatalog catalog,
     IPetSitterServiceRegistry petSitter,
     IPetGroomerServiceRegistry petGroomer,
     IPetTrainerServiceRegistry petTrainer,
     IVetServiceRegistry vet) : IProviderOfferingResolver
 {
-    public async Task<OfferingResolution> ResolveAsync(Guid providerId, CancellationToken cancellationToken)
+    public async Task<OfferingResolution> ResolveAsync(Guid serviceId, CancellationToken cancellationToken)
     {
-        var registration = await locationRegistry.GetByProviderIdAsync(providerId, cancellationToken);
-        if (registration is null)
+        var service = await catalog.GetByIdAsync(serviceId, cancellationToken);
+        if (service is null)
         {
-            return new OfferingResolution.NotRegistered();
+            return new OfferingResolution.NotFound();
         }
 
-        var category = registration.ServiceCategory;
-        var subCategory = registration.SubCategory;
-
-        if (category == nameof(ProviderServiceCategory.PetSitter))
+        if (!service.IsActive)
         {
-            var doc = await petSitter.GetAsync(providerId, cancellationToken);
-            var offering = doc?.PetHotel?.Offering ?? doc?.Freelance?.Offering;
-            if (offering is null) return new OfferingResolution.NotConfigured(category, subCategory);
-
-            var minHours = MinAvailable(
-                offering.DayCare?.MinimumBookingHours,
-                offering.NightStay?.MinimumBookingHours);
-            if (minHours is null) return new OfferingResolution.NotConfigured(category, subCategory);
-
-            return new OfferingResolution.Resolved(
-                category, subCategory, offering.MaxPetsAtOneTime, minHours.Value, IsDurationFixed: false);
+            return new OfferingResolution.Inactive(service.ProviderId, service.ServiceCategory, service.ServiceType);
         }
 
-        if (category == nameof(ProviderServiceCategory.PetGroomer))
+        return service.ServiceType switch
         {
-            var doc = await petGroomer.GetAsync(providerId, cancellationToken);
-            var offering = doc?.GroomerShop?.Offering ?? doc?.Freelance?.Offering;
-            if (offering?.Session is null) return new OfferingResolution.NotConfigured(category, subCategory);
-
-            return new OfferingResolution.Resolved(
-                category, subCategory, offering.MaxPetsAtOneTime,
-                offering.Session.MinimumBookingHours, IsDurationFixed: false);
-        }
-
-        if (category == nameof(ProviderServiceCategory.PetTrainer))
-        {
-            var doc = await petTrainer.GetAsync(providerId, cancellationToken);
-            var offering = doc?.TrainingSchool?.Offering ?? doc?.Freelance?.Offering;
-            if (offering?.Session is null) return new OfferingResolution.NotConfigured(category, subCategory);
-
-            return new OfferingResolution.Resolved(
-                category, subCategory, offering.MaxConcurrentSessions,
-                offering.Session.SessionDurationHours, IsDurationFixed: true);
-        }
-
-        if (category == nameof(ProviderServiceCategory.Vet))
-        {
-            var doc = await vet.GetAsync(providerId, cancellationToken);
-            var offering = doc?.VetClinic?.Offering ?? doc?.Freelance?.Offering;
-            if (offering?.Appointment is null) return new OfferingResolution.NotConfigured(category, subCategory);
-
-            return new OfferingResolution.Resolved(
-                category, subCategory, offering.MaxConcurrentConsultations,
-                offering.Appointment.AppointmentDurationHours, IsDurationFixed: true);
-        }
-
-        // Pet Adoption & Sale has no offering structure yet.
-        return new OfferingResolution.NotConfigured(category, subCategory);
+            ProviderServiceTypes.DayCare => await ResolvePetSitterAsync(service, includeDayCare: true, cancellationToken),
+            ProviderServiceTypes.NightStay => await ResolvePetSitterAsync(service, includeDayCare: false, cancellationToken),
+            ProviderServiceTypes.GroomingSession => await ResolvePetGroomerAsync(service, cancellationToken),
+            ProviderServiceTypes.TrainingSession => await ResolvePetTrainerAsync(service, cancellationToken),
+            ProviderServiceTypes.VetAppointment => await ResolveVetAsync(service, cancellationToken),
+            _ => new OfferingResolution.NotConfigured(
+                service.ProviderId, service.ServiceCategory, service.SubCategory, service.ServiceType)
+        };
     }
 
-    private static decimal? MinAvailable(int? a, int? b)
+    private async Task<OfferingResolution> ResolvePetSitterAsync(
+        ProviderService service,
+        bool includeDayCare,
+        CancellationToken cancellationToken)
     {
-        if (a is null && b is null) return null;
-        if (a is null) return b!.Value;
-        if (b is null) return a.Value;
-        return Math.Min(a.Value, b.Value);
+        var doc = await petSitter.GetAsync(service.ProviderId, cancellationToken);
+        var offering = doc?.PetHotel?.Offering ?? doc?.Freelance?.Offering;
+        var branch = includeDayCare ? offering?.DayCare : offering?.NightStay;
+        if (offering is null || branch is null)
+        {
+            return new OfferingResolution.NotConfigured(
+                service.ProviderId, service.ServiceCategory, service.SubCategory, service.ServiceType);
+        }
+
+        return new OfferingResolution.Resolved(
+            service.ServiceId, service.ProviderId,
+            service.ServiceCategory, service.SubCategory, service.ServiceType,
+            Capacity: offering.MaxPetsAtOneTime,
+            DurationHours: branch.MinimumBookingHours,
+            IsDurationFixed: false);
+    }
+
+    private async Task<OfferingResolution> ResolvePetGroomerAsync(
+        ProviderService service,
+        CancellationToken cancellationToken)
+    {
+        var doc = await petGroomer.GetAsync(service.ProviderId, cancellationToken);
+        var offering = doc?.GroomerShop?.Offering ?? doc?.Freelance?.Offering;
+        if (offering?.Session is null)
+        {
+            return new OfferingResolution.NotConfigured(
+                service.ProviderId, service.ServiceCategory, service.SubCategory, service.ServiceType);
+        }
+
+        return new OfferingResolution.Resolved(
+            service.ServiceId, service.ProviderId,
+            service.ServiceCategory, service.SubCategory, service.ServiceType,
+            Capacity: offering.MaxPetsAtOneTime,
+            DurationHours: offering.Session.MinimumBookingHours,
+            IsDurationFixed: false);
+    }
+
+    private async Task<OfferingResolution> ResolvePetTrainerAsync(
+        ProviderService service,
+        CancellationToken cancellationToken)
+    {
+        var doc = await petTrainer.GetAsync(service.ProviderId, cancellationToken);
+        var offering = doc?.TrainingSchool?.Offering ?? doc?.Freelance?.Offering;
+        if (offering?.Session is null)
+        {
+            return new OfferingResolution.NotConfigured(
+                service.ProviderId, service.ServiceCategory, service.SubCategory, service.ServiceType);
+        }
+
+        return new OfferingResolution.Resolved(
+            service.ServiceId, service.ProviderId,
+            service.ServiceCategory, service.SubCategory, service.ServiceType,
+            Capacity: offering.MaxConcurrentSessions,
+            DurationHours: offering.Session.SessionDurationHours,
+            IsDurationFixed: true);
+    }
+
+    private async Task<OfferingResolution> ResolveVetAsync(
+        ProviderService service,
+        CancellationToken cancellationToken)
+    {
+        var doc = await vet.GetAsync(service.ProviderId, cancellationToken);
+        var offering = doc?.VetClinic?.Offering ?? doc?.Freelance?.Offering;
+        if (offering?.Appointment is null)
+        {
+            return new OfferingResolution.NotConfigured(
+                service.ProviderId, service.ServiceCategory, service.SubCategory, service.ServiceType);
+        }
+
+        return new OfferingResolution.Resolved(
+            service.ServiceId, service.ProviderId,
+            service.ServiceCategory, service.SubCategory, service.ServiceType,
+            Capacity: offering.MaxConcurrentConsultations,
+            DurationHours: offering.Appointment.AppointmentDurationHours,
+            IsDurationFixed: true);
     }
 }

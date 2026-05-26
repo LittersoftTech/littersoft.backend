@@ -16,12 +16,18 @@ internal sealed class SqlProviderClosureStore(
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
 
-        await using var sqlCommand = new SqlCommand("Provider.CreateClosure", connection)
+        await using var sqlCommand = new SqlCommand("Provider.CreateClosures", connection)
         {
             CommandType = CommandType.StoredProcedure
         };
 
         sqlCommand.Parameters.AddWithValue("@ProviderId", command.ProviderId);
+
+        var serviceIdTable = BuildServiceIdTable(command.ServiceIds);
+        var serviceIdsParam = sqlCommand.Parameters.AddWithValue("@ServiceIds", serviceIdTable);
+        serviceIdsParam.SqlDbType = SqlDbType.Structured;
+        serviceIdsParam.TypeName = "Provider.ServiceIdList";
+
         sqlCommand.Parameters.AddWithValue("@StartDate", command.StartDate.ToDateTime(TimeOnly.MinValue));
         sqlCommand.Parameters.AddWithValue("@EndDate",   command.EndDate.ToDateTime(TimeOnly.MinValue));
         sqlCommand.Parameters.AddWithValue("@StartTime",
@@ -31,23 +37,14 @@ internal sealed class SqlProviderClosureStore(
         sqlCommand.Parameters.AddWithValue("@Reason",
             command.Reason is null ? DBNull.Value : (object)command.Reason);
 
-        var closureIdParam = new SqlParameter("@ClosureId", SqlDbType.UniqueIdentifier)
-        {
-            Direction = ParameterDirection.InputOutput,
-            Value = DBNull.Value
-        };
-        sqlCommand.Parameters.Add(closureIdParam);
-
         try
         {
             // The sproc emits exactly one result set in either branch:
-            //   - on conflict: rows of (BookingId, PetParentId, BookingDate, StartTime, EndTime), output param NULL
-            //   - on success: one row of the new closure, output param set
+            //   - on conflict: rows of (ServiceId, BookingId, PetParentId, BookingDate, StartTime, EndTime) — 6 cols
+            //   - on success: N rows of (ClosureId, ProviderId, ServiceId, StartDate, EndDate, StartTime, EndTime, Reason, CreatedAtUtc) — 9 cols
             await using var reader = await sqlCommand.ExecuteReaderAsync(cancellationToken);
 
-            // Discriminate by column count (sproc returns 5 cols on conflict, 8 on success).
-            // Reading FieldCount before any ReadAsync is safe.
-            var isConflictShape = reader.FieldCount == 5;
+            var isConflictShape = reader.FieldCount == 6;
 
             if (isConflictShape)
             {
@@ -55,40 +52,55 @@ internal sealed class SqlProviderClosureStore(
                 while (await reader.ReadAsync(cancellationToken))
                 {
                     conflicts.Add(new ConflictingBooking(
-                        BookingId: reader.GetGuid(0),
-                        PetParentId: reader.GetGuid(1),
-                        BookingDate: DateOnly.FromDateTime(reader.GetDateTime(2)),
-                        StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(3)),
-                        EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(4))));
+                        ServiceId: reader.GetGuid(0),
+                        BookingId: reader.GetGuid(1),
+                        PetParentId: reader.GetGuid(2),
+                        BookingDate: DateOnly.FromDateTime(reader.GetDateTime(3)),
+                        StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(4)),
+                        EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(5))));
                 }
                 return new CreateClosureResult.BookingsExist(conflicts);
             }
 
-            if (!await reader.ReadAsync(cancellationToken))
+            var closures = new List<ProviderClosure>();
+            while (await reader.ReadAsync(cancellationToken))
             {
-                throw new InvalidOperationException("Closure row was not returned after insert.");
+                closures.Add(new ProviderClosure(
+                    ClosureId: reader.GetGuid(0),
+                    ProviderId: reader.GetGuid(1),
+                    ServiceId: reader.GetGuid(2),
+                    StartDate: DateOnly.FromDateTime(reader.GetDateTime(3)),
+                    EndDate: DateOnly.FromDateTime(reader.GetDateTime(4)),
+                    StartTime: reader.IsDBNull(5) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
+                    EndTime: reader.IsDBNull(6) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(6)),
+                    Reason: reader.IsDBNull(7) ? null : reader.GetString(7),
+                    CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(8), TimeSpan.Zero)));
             }
 
-            var closure = new ProviderClosure(
-                ClosureId: reader.GetGuid(0),
-                ProviderId: reader.GetGuid(1),
-                StartDate: DateOnly.FromDateTime(reader.GetDateTime(2)),
-                EndDate: DateOnly.FromDateTime(reader.GetDateTime(3)),
-                StartTime: reader.IsDBNull(4) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(4)),
-                EndTime: reader.IsDBNull(5) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
-                Reason: reader.IsDBNull(6) ? null : reader.GetString(6),
-                CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(7), TimeSpan.Zero));
+            if (closures.Count == 0)
+            {
+                throw new InvalidOperationException("No closure rows were returned after insert.");
+            }
 
-            return new CreateClosureResult.Created(closure);
+            return new CreateClosureResult.Created(closures);
         }
         catch (SqlException exception) when (exception.Number == 51070)
         {
             throw new ProviderClosureProviderNotFoundException(command.ProviderId);
         }
+        catch (SqlException exception) when (exception.Number == 51072)
+        {
+            throw new ProviderClosureServiceInvalidException(command.ProviderId);
+        }
+        catch (SqlException exception) when (exception.Number == 51075)
+        {
+            throw new ProviderClosureEmptyServiceIdsException();
+        }
     }
 
     public async Task<IReadOnlyList<ProviderClosure>> ListAsync(
         Guid providerId,
+        Guid? serviceId,
         DateOnly? from,
         DateOnly? to,
         CancellationToken cancellationToken)
@@ -101,6 +113,8 @@ internal sealed class SqlProviderClosureStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@ServiceId",
+            serviceId is null ? DBNull.Value : (object)serviceId.Value);
         command.Parameters.AddWithValue("@From",
             from is null ? DBNull.Value : (object)from.Value.ToDateTime(TimeOnly.MinValue));
         command.Parameters.AddWithValue("@To",
@@ -113,12 +127,13 @@ internal sealed class SqlProviderClosureStore(
             rows.Add(new ProviderClosure(
                 ClosureId: reader.GetGuid(0),
                 ProviderId: reader.GetGuid(1),
-                StartDate: DateOnly.FromDateTime(reader.GetDateTime(2)),
-                EndDate: DateOnly.FromDateTime(reader.GetDateTime(3)),
-                StartTime: reader.IsDBNull(4) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(4)),
-                EndTime: reader.IsDBNull(5) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
-                Reason: reader.IsDBNull(6) ? null : reader.GetString(6),
-                CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(7), TimeSpan.Zero)));
+                ServiceId: reader.GetGuid(2),
+                StartDate: DateOnly.FromDateTime(reader.GetDateTime(3)),
+                EndDate: DateOnly.FromDateTime(reader.GetDateTime(4)),
+                StartTime: reader.IsDBNull(5) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
+                EndTime: reader.IsDBNull(6) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(6)),
+                Reason: reader.IsDBNull(7) ? null : reader.GetString(7),
+                CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(8), TimeSpan.Zero)));
         }
         return rows;
     }
@@ -146,7 +161,7 @@ internal sealed class SqlProviderClosureStore(
     }
 
     public async Task<IReadOnlyList<ActiveClosure>> GetActiveClosuresForDateAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly date,
         CancellationToken cancellationToken)
     {
@@ -157,7 +172,7 @@ internal sealed class SqlProviderClosureStore(
         {
             CommandType = CommandType.StoredProcedure
         };
-        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@ServiceId", serviceId);
         command.Parameters.AddWithValue("@Date", date.ToDateTime(TimeOnly.MinValue));
 
         var rows = new List<ActiveClosure>();
@@ -172,6 +187,17 @@ internal sealed class SqlProviderClosureStore(
                 Reason: reader.IsDBNull(5) ? null : reader.GetString(5)));
         }
         return rows;
+    }
+
+    private static DataTable BuildServiceIdTable(IReadOnlyCollection<Guid> serviceIds)
+    {
+        var table = new DataTable();
+        table.Columns.Add("ServiceId", typeof(Guid));
+        foreach (var id in serviceIds)
+        {
+            table.Rows.Add(id);
+        }
+        return table;
     }
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)

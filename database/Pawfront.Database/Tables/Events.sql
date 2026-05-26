@@ -13,6 +13,14 @@ CREATE TABLE [Event].[Events]
     [EndDate] DATE NOT NULL,
     [StartTime] TIME(0) NOT NULL,
     [EndTime] TIME(0) NOT NULL,
+    -- Organiser-dashboard counters. Bumped by [Event].[IncrementEventCounter]
+    -- from the public increment endpoints. Read in [Event].[GetEventMetrics].
+    [ViewCount] INT NOT NULL
+        CONSTRAINT [DF_Events_ViewCount] DEFAULT 0,
+    [ShareCount] INT NOT NULL
+        CONSTRAINT [DF_Events_ShareCount] DEFAULT 0,
+    [InquiryCount] INT NOT NULL
+        CONSTRAINT [DF_Events_InquiryCount] DEFAULT 0,
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_Events_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
     [UpdatedAtUtc] DATETIME2(7) NOT NULL

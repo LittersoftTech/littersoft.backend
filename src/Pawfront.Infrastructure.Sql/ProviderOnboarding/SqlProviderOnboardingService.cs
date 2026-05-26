@@ -97,6 +97,27 @@ internal sealed class SqlProviderOnboardingService(
         }
     }
 
+    public async Task<ProviderProfileResponse> GetProviderProfileAsync(
+        Guid providerId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Provider.GetProviderProfile");
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new ProviderProfileNotFoundException(providerId);
+        }
+
+        return ReadProviderProfile(reader);
+    }
+
     public async Task<SendProviderMobileOtpResponse> SendProviderMobileOtpAsync(
         Guid providerId,
         CancellationToken cancellationToken)

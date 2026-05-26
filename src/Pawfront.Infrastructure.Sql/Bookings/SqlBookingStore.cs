@@ -12,6 +12,7 @@ internal sealed class SqlBookingStore(
     public async Task<BookingResult> CreateAsync(
         Guid providerId,
         Guid petParentId,
+        Guid serviceId,
         string serviceCategory,
         string subCategory,
         DateOnly bookingDate,
@@ -30,6 +31,7 @@ internal sealed class SqlBookingStore(
 
         command.Parameters.AddWithValue("@ProviderId", providerId);
         command.Parameters.AddWithValue("@PetParentId", petParentId);
+        command.Parameters.AddWithValue("@ServiceId", serviceId);
         command.Parameters.AddWithValue("@ServiceCategory", serviceCategory);
         command.Parameters.AddWithValue("@SubCategory", subCategory);
         command.Parameters.AddWithValue("@BookingDate", bookingDate.ToDateTime(TimeOnly.MinValue));
@@ -56,7 +58,11 @@ internal sealed class SqlBookingStore(
         }
         catch (SqlException exception) when (exception.Number == 51062)
         {
-            throw new BookingCapacityExceededException(providerId, bookingDate, startTime, endTime);
+            throw new BookingCapacityExceededException(serviceId, bookingDate, startTime, endTime);
+        }
+        catch (SqlException exception) when (exception.Number == 51066)
+        {
+            throw new BookingServiceInvalidException(serviceId, providerId);
         }
     }
 
@@ -119,6 +125,7 @@ internal sealed class SqlBookingStore(
 
     public async Task<IReadOnlyList<BookingResult>> ListByProviderAsync(
         Guid providerId,
+        DateOnly? date,
         CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
@@ -129,6 +136,9 @@ internal sealed class SqlBookingStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@ServiceId", DBNull.Value);
+        command.Parameters.AddWithValue("@BookingDate",
+            date is null ? DBNull.Value : (object)date.Value.ToDateTime(TimeOnly.MinValue));
 
         return await ReadAllAsync(command, cancellationToken);
     }
@@ -150,7 +160,7 @@ internal sealed class SqlBookingStore(
     }
 
     public async Task<IReadOnlyList<BookingWindow>> GetBookingsForDateAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly bookingDate,
         CancellationToken cancellationToken)
     {
@@ -161,7 +171,7 @@ internal sealed class SqlBookingStore(
         {
             CommandType = CommandType.StoredProcedure
         };
-        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@ServiceId", serviceId);
         command.Parameters.AddWithValue("@BookingDate", bookingDate.ToDateTime(TimeOnly.MinValue));
 
         var windows = new List<BookingWindow>();
@@ -194,17 +204,18 @@ internal sealed class SqlBookingStore(
             BookingId: reader.GetGuid(0),
             ProviderId: reader.GetGuid(1),
             PetParentId: reader.GetGuid(2),
-            ServiceCategory: reader.GetString(3),
-            SubCategory: reader.GetString(4),
-            BookingDate: DateOnly.FromDateTime(reader.GetDateTime(5)),
-            StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(6)),
-            EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(7)),
-            Status: reader.GetString(8),
-            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(9), TimeSpan.Zero),
-            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(10), TimeSpan.Zero),
-            CancelledAtUtc: reader.IsDBNull(11)
+            ServiceId: reader.GetGuid(3),
+            ServiceCategory: reader.GetString(4),
+            SubCategory: reader.GetString(5),
+            BookingDate: DateOnly.FromDateTime(reader.GetDateTime(6)),
+            StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(7)),
+            EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(8)),
+            Status: reader.GetString(9),
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(10), TimeSpan.Zero),
+            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(11), TimeSpan.Zero),
+            CancelledAtUtc: reader.IsDBNull(12)
                 ? null
-                : new DateTimeOffset(reader.GetDateTime(11), TimeSpan.Zero));
+                : new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero));
     }
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)

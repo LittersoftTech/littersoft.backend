@@ -1,3 +1,4 @@
+using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Contracts.Services.PetGroomer;
@@ -125,6 +126,7 @@ internal static class PetGroomerEndpoints
         Guid providerId,
         SaveGroomerShopOfferingRequest request,
         IPetGroomerServiceRegistry registry,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         try
@@ -142,6 +144,9 @@ internal static class PetGroomerEndpoints
                     request.ServiceLocation),
                 cancellationToken);
 
+            await SyncGroomerServiceAsync(providerId, result.SubCategory,
+                result.GroomerShop?.Offering, serviceCatalog, cancellationToken);
+
             return ApiResults.Ok(ToResponse(result));
         }
         catch (GroomerShopNotRegisteredException exception)
@@ -158,6 +163,7 @@ internal static class PetGroomerEndpoints
         Guid providerId,
         SaveFreelanceGroomerOfferingRequest request,
         IPetGroomerServiceRegistry registry,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         try
@@ -175,6 +181,9 @@ internal static class PetGroomerEndpoints
                     request.ServiceLocation),
                 cancellationToken);
 
+            await SyncGroomerServiceAsync(providerId, result.SubCategory,
+                result.Freelance?.Offering, serviceCatalog, cancellationToken);
+
             return ApiResults.Ok(ToResponse(result));
         }
         catch (FreelanceGroomerNotRegisteredException exception)
@@ -184,6 +193,24 @@ internal static class PetGroomerEndpoints
         catch (ArgumentException exception)
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static async Task SyncGroomerServiceAsync(
+        Guid providerId,
+        string subCategory,
+        PetGroomerOfferingResult? offering,
+        IProviderServiceCatalog catalog,
+        CancellationToken cancellationToken)
+    {
+        if (offering?.Session is not null)
+        {
+            await catalog.UpsertAsync(providerId, CategoryName, subCategory,
+                ProviderServiceTypes.GroomingSession, cancellationToken);
+        }
+        else
+        {
+            await catalog.DeactivateAsync(providerId, ProviderServiceTypes.GroomingSession, cancellationToken);
         }
     }
 

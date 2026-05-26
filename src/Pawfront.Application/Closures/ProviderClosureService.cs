@@ -12,6 +12,17 @@ internal sealed class ProviderClosureService(IProviderClosureSqlStore store)
         CreateProviderClosureCommand command,
         CancellationToken cancellationToken)
     {
+        if (command.ServiceIds is null || command.ServiceIds.Count == 0)
+        {
+            throw new ProviderClosureEmptyServiceIdsException();
+        }
+
+        if (command.ServiceIds.Distinct().Count() != command.ServiceIds.Count)
+        {
+            throw new ArgumentException(
+                "ServiceIds contains duplicates.", nameof(command));
+        }
+
         if (command.EndDate < command.StartDate)
         {
             throw new ArgumentException("EndDate must be on or after StartDate.", nameof(command));
@@ -51,6 +62,7 @@ internal sealed class ProviderClosureService(IProviderClosureSqlStore store)
 
     public Task<IReadOnlyList<ProviderClosure>> ListAsync(
         Guid providerId,
+        Guid? serviceId,
         DateOnly? from,
         DateOnly? to,
         CancellationToken cancellationToken)
@@ -59,15 +71,15 @@ internal sealed class ProviderClosureService(IProviderClosureSqlStore store)
         {
             throw new ArgumentException("`to` must be on or after `from`.");
         }
-        return store.ListAsync(providerId, from, to, cancellationToken);
+        return store.ListAsync(providerId, serviceId, from, to, cancellationToken);
     }
 
     public Task DeleteAsync(Guid providerId, Guid closureId, CancellationToken cancellationToken)
         => store.DeleteAsync(providerId, closureId, cancellationToken);
 
     public Task<IReadOnlyList<ActiveClosure>> GetActiveClosuresForDateAsync(
-        Guid providerId,
+        Guid serviceId,
         DateOnly date,
         CancellationToken cancellationToken)
-        => store.GetActiveClosuresForDateAsync(providerId, date, cancellationToken);
+        => store.GetActiveClosuresForDateAsync(serviceId, date, cancellationToken);
 }

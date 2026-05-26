@@ -3,6 +3,10 @@ CREATE TABLE [Provider].[ProviderClosures]
     [ClosureId] UNIQUEIDENTIFIER NOT NULL
         CONSTRAINT [DF_ProviderClosures_ClosureId] DEFAULT NEWSEQUENTIALID(),
     [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+    -- A closure targets ONE specific service the provider offers. To close multiple
+    -- services across the same date range, the caller submits N closures in one
+    -- request and the API persists N rows (see [Provider].[CreateClosures]).
+    [ServiceId] UNIQUEIDENTIFIER NOT NULL,
     [StartDate] DATE NOT NULL,
     [EndDate] DATE NOT NULL,
     -- Partial-day window. Both NULL = full-day closure across the date range.
@@ -15,6 +19,8 @@ CREATE TABLE [Provider].[ProviderClosures]
     CONSTRAINT [PK_ProviderClosures] PRIMARY KEY CLUSTERED ([ClosureId] ASC),
     CONSTRAINT [FK_ProviderClosures_Providers_ProviderId]
         FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]) ON DELETE CASCADE,
+    CONSTRAINT [FK_ProviderClosures_ProviderServices_ServiceId]
+        FOREIGN KEY ([ServiceId]) REFERENCES [Provider].[ProviderServices] ([ServiceId]),
     CONSTRAINT [CK_ProviderClosures_DateOrder] CHECK ([EndDate] >= [StartDate]),
     -- Both time fields together or neither.
     CONSTRAINT [CK_ProviderClosures_Time_BothOrNeither] CHECK (
@@ -30,6 +36,12 @@ CREATE TABLE [Provider].[ProviderClosures]
 
 GO
 
+CREATE INDEX [IX_ProviderClosures_Service_Range]
+    ON [Provider].[ProviderClosures] ([ServiceId], [StartDate], [EndDate])
+    INCLUDE ([StartTime], [EndTime], [Reason]);
+
+GO
+
 CREATE INDEX [IX_ProviderClosures_Provider_Range]
     ON [Provider].[ProviderClosures] ([ProviderId], [StartDate], [EndDate])
-    INCLUDE ([StartTime], [EndTime], [Reason]);
+    INCLUDE ([ServiceId], [StartTime], [EndTime], [Reason]);

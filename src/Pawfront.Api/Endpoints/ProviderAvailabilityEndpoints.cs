@@ -58,6 +58,7 @@ internal static class ProviderAvailabilityEndpoints
 
     private static async Task<IResult> GetAvailableSlots(
         Guid providerId,
+        Guid serviceId,
         DateOnly date,
         decimal durationHours,
         int? granularityMinutes,
@@ -68,12 +69,17 @@ internal static class ProviderAvailabilityEndpoints
         {
             var result = await slotService.GetAvailableSlotsAsync(
                 providerId,
+                serviceId,
                 date,
                 durationHours,
                 granularityMinutes ?? DefaultGranularityMinutes,
                 cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
+        }
+        catch (SlotServiceInvalidException exception)
+        {
+            return ApiResults.BadRequest("InvalidServiceId", exception.Message);
         }
         catch (ProviderServiceNotRegisteredException exception)
         {
@@ -107,9 +113,11 @@ internal static class ProviderAvailabilityEndpoints
     {
         return new AvailableSlotsResponse(
             result.ProviderId,
+            result.ServiceId,
             result.Date,
             result.ServiceCategory,
             result.SubCategory,
+            result.ServiceType,
             result.DurationHours,
             result.Capacity,
             result.GranularityMinutes,

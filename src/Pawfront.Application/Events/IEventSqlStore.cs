@@ -13,4 +13,14 @@ public interface IEventSqlStore
     Task<IReadOnlyList<EventSqlSnapshot>> ListByProviderAsync(
         Guid providerId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Atomic single-column increment. <paramref name="counterType"/> must be
+    /// one of <c>View</c>, <c>Share</c>, <c>Inquiry</c>. Throws
+    /// <see cref="EventNotFoundException"/> if the event id is unknown.
+    /// </summary>
+    Task<EventCounters> IncrementCounterAsync(
+        Guid eventId,
+        string counterType,
+        CancellationToken cancellationToken);
 }

@@ -32,12 +32,17 @@ internal static class BookingEndpoints
                 new CreateBookingCommand(
                     providerId,
                     request.PetParentId,
+                    request.ServiceId,
                     request.BookingDate,
                     request.StartTime,
                     request.EndTime),
                 cancellationToken);
 
             return ApiResults.Created($"/api/v1/bookings/{result.BookingId}", ToResponse(result));
+        }
+        catch (BookingServiceInvalidException exception)
+        {
+            return ApiResults.BadRequest("InvalidServiceId", exception.Message);
         }
         catch (BookingProviderNotRegisteredException exception)
         {
@@ -61,7 +66,7 @@ internal static class BookingEndpoints
         }
         catch (ProviderClosedOnDateException exception)
         {
-            return ApiResults.Conflict("ProviderClosed", exception.Message);
+            return ApiResults.Conflict("ServiceClosed", exception.Message);
         }
         catch (InvalidBookingTimeException exception)
         {
@@ -111,10 +116,11 @@ internal static class BookingEndpoints
 
     private static async Task<IResult> ListByProvider(
         Guid providerId,
+        DateOnly? date,
         IBookingService bookingService,
         CancellationToken cancellationToken)
     {
-        var results = await bookingService.ListByProviderAsync(providerId, cancellationToken);
+        var results = await bookingService.ListByProviderAsync(providerId, date, cancellationToken);
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
     }
 
@@ -131,6 +137,7 @@ internal static class BookingEndpoints
         new(result.BookingId,
             result.ProviderId,
             result.PetParentId,
+            result.ServiceId,
             result.ServiceCategory,
             result.SubCategory,
             result.BookingDate,

@@ -40,6 +40,7 @@ var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExte
 api.MapHealthEndpoints();
 api.MapProviderOnboardingEndpoints();
 api.MapProviderEndpoints();
+api.MapProviderServiceCatalogEndpoints();
 api.MapProviderPolicyEndpoints();
 api.MapProviderAvailabilityEndpoints();
 api.MapPetSitterEndpoints();
@@ -48,6 +49,8 @@ api.MapPetTrainerEndpoints();
 api.MapPetAdoptionSaleEndpoints();
 api.MapVetEndpoints();
 api.MapEventEndpoints();
+api.MapEventBookingEndpoints();
+api.MapEventDashboardEndpoints();
 api.MapBookingEndpoints();
 api.MapBlobImageEndpoints();
 api.MapProviderClosureEndpoints();

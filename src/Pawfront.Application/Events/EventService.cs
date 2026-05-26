@@ -125,6 +125,31 @@ internal sealed class EventService(
         return snapshots.Select(s => ToResult(s, physical: null)).ToArray();
     }
 
+    public Task<EventCounters> IncrementCounterAsync(
+        Guid eventId,
+        string counterType,
+        CancellationToken cancellationToken)
+    {
+        var normalised = NormaliseCounterType(counterType);
+        return sqlStore.IncrementCounterAsync(eventId, normalised, cancellationToken);
+    }
+
+    private static string NormaliseCounterType(string? counterType)
+    {
+        var trimmed = counterType?.Trim();
+        if (trimmed is not null
+            && (string.Equals(trimmed, EventCounterType.View, StringComparison.Ordinal)
+                || string.Equals(trimmed, EventCounterType.Share, StringComparison.Ordinal)
+                || string.Equals(trimmed, EventCounterType.Inquiry, StringComparison.Ordinal)))
+        {
+            return trimmed;
+        }
+
+        throw new ArgumentException(
+            $"CounterType '{counterType}' is not supported. Use View, Share, or Inquiry.",
+            nameof(counterType));
+    }
+
     private static EventResult ToResult(EventSqlSnapshot snapshot, PhysicalEventResult? physical)
     {
         return new EventResult(

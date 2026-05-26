@@ -3,8 +3,9 @@ namespace Pawfront.Application.Closures;
 public interface IProviderClosureService
 {
     /// <summary>
-    /// Attempt to create a closure. If any confirmed booking falls inside the
-    /// requested window the call returns <see cref="CreateClosureResult.BookingsExist"/>
+    /// Attempt to create one closure row per service id in a single transaction.
+    /// If any confirmed booking on any of the requested services falls inside the
+    /// window, the call returns <see cref="CreateClosureResult.BookingsExist"/>
     /// and nothing is persisted — the provider is expected to move/cancel those
     /// bookings first and retry.
     /// </summary>
@@ -14,6 +15,7 @@ public interface IProviderClosureService
 
     Task<IReadOnlyList<ProviderClosure>> ListAsync(
         Guid providerId,
+        Guid? serviceId,
         DateOnly? from,
         DateOnly? to,
         CancellationToken cancellationToken);

@@ -15,6 +15,7 @@ public static class ApplicationServiceRegistration
     {
         services.TryAddScoped<IProviderOnboardingStatusService, ProviderOnboardingStatusService>();
         services.TryAddScoped<IEventService, EventService>();
+        services.TryAddScoped<IEventBookingService, EventBookingService>();
         services.TryAddScoped<IProviderOfferingResolver, ProviderOfferingResolver>();
         services.TryAddScoped<IProviderAvailabilitySlotService, ProviderAvailabilitySlotService>();
 

@@ -4,6 +4,10 @@ CREATE TABLE [Booking].[Bookings]
         CONSTRAINT [DF_Bookings_BookingId] DEFAULT NEWSEQUENTIALID(),
     [ProviderId] UNIQUEIDENTIFIER NOT NULL,
     [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+    -- The specific service the booking targets — closures and capacity are scoped
+    -- by ServiceId, so DayCare and NightStay bookings on the same provider are
+    -- counted and gated independently.
+    [ServiceId] UNIQUEIDENTIFIER NOT NULL,
     [ServiceCategory] NVARCHAR(64) NOT NULL,
     [SubCategory] NVARCHAR(64) NOT NULL,
     [BookingDate] DATE NOT NULL,
@@ -22,6 +26,8 @@ CREATE TABLE [Booking].[Bookings]
         FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
     CONSTRAINT [FK_Bookings_PetParents_PetParentId]
         FOREIGN KEY ([PetParentId]) REFERENCES [Customer].[PetParents] ([PetParentId]),
+    CONSTRAINT [FK_Bookings_ProviderServices_ServiceId]
+        FOREIGN KEY ([ServiceId]) REFERENCES [Provider].[ProviderServices] ([ServiceId]),
     CONSTRAINT [CK_Bookings_TimeOrder] CHECK ([StartTime] < [EndTime]),
     CONSTRAINT [CK_Bookings_Status]
         CHECK ([Status] IN (N'Confirmed', N'Cancelled', N'Completed', N'NoShow')),
@@ -33,12 +39,18 @@ CREATE TABLE [Booking].[Bookings]
 
 GO
 
+CREATE INDEX [IX_Bookings_Service_Date_Status]
+    ON [Booking].[Bookings] ([ServiceId], [BookingDate], [Status])
+    INCLUDE ([StartTime], [EndTime], [BookingId], [PetParentId], [ProviderId]);
+
+GO
+
 CREATE INDEX [IX_Bookings_Provider_Date_Status]
     ON [Booking].[Bookings] ([ProviderId], [BookingDate], [Status])
-    INCLUDE ([StartTime], [EndTime], [BookingId], [PetParentId]);
+    INCLUDE ([ServiceId], [StartTime], [EndTime], [BookingId], [PetParentId]);
 
 GO
 
 CREATE INDEX [IX_Bookings_PetParent_Status]
     ON [Booking].[Bookings] ([PetParentId], [Status])
-    INCLUDE ([BookingDate], [StartTime], [EndTime], [ProviderId]);
+    INCLUDE ([ServiceId], [BookingDate], [StartTime], [EndTime], [ProviderId]);

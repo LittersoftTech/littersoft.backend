@@ -11,8 +11,14 @@ public interface IBookingService
         Guid petParentId,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// List the provider's bookings. <paramref name="date"/> narrows to a single
+    /// calendar day when provided (the provider's "today" view); omit it to return
+    /// the full history.
+    /// </summary>
     Task<IReadOnlyList<BookingResult>> ListByProviderAsync(
         Guid providerId,
+        DateOnly? date,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(

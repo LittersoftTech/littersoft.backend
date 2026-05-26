@@ -3,6 +3,7 @@ namespace Pawfront.Application.Bookings;
 public sealed record CreateBookingCommand(
     Guid ProviderId,
     Guid PetParentId,
+    Guid ServiceId,
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime);
@@ -11,6 +12,7 @@ public sealed record BookingResult(
     Guid BookingId,
     Guid ProviderId,
     Guid PetParentId,
+    Guid ServiceId,
     string ServiceCategory,
     string SubCategory,
     DateOnly BookingDate,
@@ -30,6 +32,9 @@ public sealed class BookingProviderNotRegisteredException(Guid providerId)
 public sealed class BookingOfferingNotConfiguredException(Guid providerId, string serviceCategory)
     : Exception($"Provider '{providerId}' has no offering configured for '{serviceCategory}'.");
 
+public sealed class BookingServiceInvalidException(Guid serviceId, Guid providerId)
+    : Exception($"Service '{serviceId}' is not valid or active for provider '{providerId}'.");
+
 public sealed class BookingPetParentNotFoundException(Guid petParentId)
     : Exception($"Pet parent '{petParentId}' was not found.");
 
@@ -39,8 +44,8 @@ public sealed class BookingProviderNotFoundException(Guid providerId)
 public sealed class BookingNotFoundException(Guid bookingId)
     : Exception($"Booking '{bookingId}' was not found.");
 
-public sealed class BookingCapacityExceededException(Guid providerId, DateOnly date, TimeOnly startTime, TimeOnly endTime)
-    : Exception($"Provider '{providerId}' has no remaining capacity for {date} {startTime}-{endTime}.");
+public sealed class BookingCapacityExceededException(Guid serviceId, DateOnly date, TimeOnly startTime, TimeOnly endTime)
+    : Exception($"Service '{serviceId}' has no remaining capacity for {date} {startTime}-{endTime}.");
 
 public sealed class BookingCancellationForbiddenException(Guid bookingId)
     : Exception($"Only the original booker can cancel booking '{bookingId}'.");

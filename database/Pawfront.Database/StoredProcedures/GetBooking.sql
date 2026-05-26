@@ -7,6 +7,7 @@ BEGIN
     SELECT [BookingId],
            [ProviderId],
            [PetParentId],
+           [ServiceId],
            [ServiceCategory],
            [SubCategory],
            [BookingDate],

@@ -1,3 +1,4 @@
+using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetSitter;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Contracts.Services.PetSitter;
@@ -125,6 +126,7 @@ internal static class PetSitterEndpoints
         Guid providerId,
         SavePetHotelOfferingRequest request,
         IPetSitterServiceRegistry registry,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         try
@@ -144,6 +146,11 @@ internal static class PetSitterEndpoints
                     request.AllowParentFood),
                 cancellationToken);
 
+            await SyncPetSitterServicesAsync(
+                providerId, result.SubCategory,
+                result.PetHotel?.Offering,
+                serviceCatalog, cancellationToken);
+
             return ApiResults.Ok(ToResponse(result));
         }
         catch (PetHotelNotRegisteredException exception)
@@ -160,6 +167,7 @@ internal static class PetSitterEndpoints
         Guid providerId,
         SaveFreelancePetSitterOfferingRequest request,
         IPetSitterServiceRegistry registry,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         try
@@ -179,6 +187,11 @@ internal static class PetSitterEndpoints
                     request.AllowParentFood),
                 cancellationToken);
 
+            await SyncPetSitterServicesAsync(
+                providerId, result.SubCategory,
+                result.Freelance?.Offering,
+                serviceCatalog, cancellationToken);
+
             return ApiResults.Ok(ToResponse(result));
         }
         catch (FreelancePetSitterNotRegisteredException exception)
@@ -188,6 +201,34 @@ internal static class PetSitterEndpoints
         catch (ArgumentException exception)
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static async Task SyncPetSitterServicesAsync(
+        Guid providerId,
+        string subCategory,
+        PetSitterOfferingResult? offering,
+        IProviderServiceCatalog catalog,
+        CancellationToken cancellationToken)
+    {
+        if (offering?.DayCare is not null)
+        {
+            await catalog.UpsertAsync(providerId, CategoryName, subCategory,
+                ProviderServiceTypes.DayCare, cancellationToken);
+        }
+        else
+        {
+            await catalog.DeactivateAsync(providerId, ProviderServiceTypes.DayCare, cancellationToken);
+        }
+
+        if (offering?.NightStay is not null)
+        {
+            await catalog.UpsertAsync(providerId, CategoryName, subCategory,
+                ProviderServiceTypes.NightStay, cancellationToken);
+        }
+        else
+        {
+            await catalog.DeactivateAsync(providerId, ProviderServiceTypes.NightStay, cancellationToken);
         }
     }
 

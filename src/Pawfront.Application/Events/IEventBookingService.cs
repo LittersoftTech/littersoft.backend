@@ -1,0 +1,51 @@
+namespace Pawfront.Application.Events;
+
+public interface IEventBookingService
+{
+    /// <summary>
+    /// Creates an event ticket booking. Capacity is enforced by the SQL sproc
+    /// under UPDLOCK + HOLDLOCK, so concurrent buyers are serialised and the
+    /// (N+1)-th seat is rejected once the event's MaximumCapacity is reached.
+    /// </summary>
+    Task<EventBookingResult> CreateAsync(
+        CreateEventBookingCommand command,
+        CancellationToken cancellationToken);
+
+    /// <summary>Returns the booking with one entry per ticket, or null if unknown.</summary>
+    Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// External payment-gateway callback. Flips PaymentStatus to Paid or Failed
+    /// and records the gateway reference. Idempotent for redelivery of the same
+    /// (status, reference) pair.
+    /// </summary>
+    Task<EventBookingResult> ConfirmPaymentAsync(
+        Guid bookingId,
+        string paymentStatus,
+        string? paymentReference,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Organiser-only attendee list for one event. Verifies the event belongs
+    /// to <paramref name="providerId"/>. One row per ticket; Cancelled
+    /// bookings are excluded but Pending/Failed payments are returned with
+    /// their <c>PaymentStatus</c> so the organiser can see who hasn't paid.
+    /// Throws <see cref="EventNotFoundForProviderException"/> if the event is
+    /// unknown OR owned by someone else.
+    /// </summary>
+    Task<IReadOnlyList<EventAttendee>> ListAttendeesAsync(
+        Guid providerId,
+        Guid eventId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Organiser-only metrics rollup. Combines the three event-level counters
+    /// with confirmed-attendees + earnings aggregated from confirmed paid
+    /// bookings. Throws <see cref="EventNotFoundForProviderException"/> if
+    /// the event is unknown OR owned by someone else.
+    /// </summary>
+    Task<EventMetrics> GetMetricsAsync(
+        Guid providerId,
+        Guid eventId,
+        CancellationToken cancellationToken);
+}

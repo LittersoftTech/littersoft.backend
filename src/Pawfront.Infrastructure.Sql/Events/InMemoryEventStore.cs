@@ -48,4 +48,19 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             .ToArray();
         return Task.FromResult(list);
     }
+
+    public Task<EventCounters> IncrementCounterAsync(
+        Guid eventId,
+        string counterType,
+        CancellationToken cancellationToken)
+    {
+        // Dev fallback only — never used in normal runs. Counters aren't tracked
+        // in this in-memory snapshot, so we just return zeros after confirming
+        // the event exists.
+        if (!events.ContainsKey(eventId))
+        {
+            throw new EventNotFoundException(eventId);
+        }
+        return Task.FromResult(new EventCounters(0, 0, 0));
+    }
 }

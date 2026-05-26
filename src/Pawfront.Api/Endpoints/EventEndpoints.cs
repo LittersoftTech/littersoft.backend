@@ -17,7 +17,41 @@ internal static class EventEndpoints
 
         builder.MapGet("/events/{eventId:guid}", GetById);
 
+        // Public engagement counters — anyone signed in can call these from
+        // the event detail / share / contact-organiser UI.
+        var eventScoped = builder.MapGroup("/events/{eventId:guid}");
+        eventScoped.MapPost("/views", (Guid eventId, IEventService svc, CancellationToken ct)
+            => IncrementCounter(eventId, EventCounterType.View, svc, ct));
+        eventScoped.MapPost("/shares", (Guid eventId, IEventService svc, CancellationToken ct)
+            => IncrementCounter(eventId, EventCounterType.Share, svc, ct));
+        eventScoped.MapPost("/inquiries", (Guid eventId, IEventService svc, CancellationToken ct)
+            => IncrementCounter(eventId, EventCounterType.Inquiry, svc, ct));
+
         return builder;
+    }
+
+    private static async Task<IResult> IncrementCounter(
+        Guid eventId,
+        string counterType,
+        IEventService eventService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var counters = await eventService.IncrementCounterAsync(eventId, counterType, cancellationToken);
+            return ApiResults.Ok(new EventCountersResponse(
+                counters.ViewCount,
+                counters.ShareCount,
+                counters.InquiryCount));
+        }
+        catch (EventNotFoundException exception)
+        {
+            return ApiResults.NotFound("EventNotFound", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
     }
 
     private static async Task<IResult> UploadBanner(
