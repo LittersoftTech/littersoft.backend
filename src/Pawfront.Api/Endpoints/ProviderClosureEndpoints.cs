@@ -1,4 +1,5 @@
 using Pawfront.Application.Closures;
+using Pawfront.Application.ProviderServices;
 using Pawfront.Contracts.Closures;
 
 namespace Pawfront.Api.Endpoints;
@@ -20,6 +21,7 @@ internal static class ProviderClosureEndpoints
         Guid providerId,
         CreateProviderClosureRequest request,
         IProviderClosureService closureService,
+        IProviderServiceCatalog serviceCatalog,
         CancellationToken cancellationToken)
     {
         if (request is null)
@@ -27,11 +29,24 @@ internal static class ProviderClosureEndpoints
             return ApiResults.BadRequest("InvalidRequest", "Request body is required.");
         }
 
+        IReadOnlyList<Guid> serviceIds;
         if (request.ServiceIds is null || request.ServiceIds.Count == 0)
         {
-            return ApiResults.BadRequest(
-                "InvalidRequest",
-                "At least one serviceId is required.");
+            var activeServices = await serviceCatalog.ListByProviderAsync(
+                providerId, includeInactive: false, cancellationToken);
+
+            if (activeServices.Count == 0)
+            {
+                return ApiResults.BadRequest(
+                    "NoActiveServices",
+                    "Provider has no active services to close.");
+            }
+
+            serviceIds = activeServices.Select(s => s.ServiceId).ToArray();
+        }
+        else
+        {
+            serviceIds = request.ServiceIds;
         }
 
         try
@@ -39,7 +54,7 @@ internal static class ProviderClosureEndpoints
             var result = await closureService.CreateAsync(
                 new CreateProviderClosureCommand(
                     providerId,
-                    request.ServiceIds,
+                    serviceIds,
                     request.StartDate,
                     request.EndDate,
                     request.StartTime,
@@ -60,7 +75,8 @@ internal static class ProviderClosureEndpoints
                     Closures: null,
                     ConflictingBookings: conflict.Bookings
                         .Select(b => new ConflictingBookingSummary(
-                            b.ServiceId, b.BookingId, b.PetParentId, b.BookingDate, b.StartTime, b.EndTime))
+                            b.ServiceId, b.BookingId, b.PetParentId, b.Source, b.CustomerName,
+                            b.BookingDate, b.StartTime, b.EndTime))
                         .ToArray(),
                     WarningMessage:
                         $"{conflict.Bookings.Count} existing booking(s) inside the requested closure window across the targeted service(s). " +

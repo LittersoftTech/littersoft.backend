@@ -240,16 +240,6 @@ internal sealed class CosmosPetGroomerServiceRegistry(
 
     private static GroomingOffering ToGroomingOffering(GroomingOfferingInput input, string fieldName)
     {
-        if (input.PricePerHour < 0)
-        {
-            throw new ArgumentException($"{fieldName}.PricePerHour must be non-negative.", fieldName);
-        }
-
-        if (input.MinimumBookingHours < 1)
-        {
-            throw new ArgumentException($"{fieldName}.MinimumBookingHours must be at least 1.", fieldName);
-        }
-
         if (input.LatePickupCharges < 0)
         {
             throw new ArgumentException($"{fieldName}.LatePickupCharges must be non-negative.", fieldName);
@@ -257,13 +247,70 @@ internal sealed class CosmosPetGroomerServiceRegistry(
 
         return new GroomingOffering
         {
-            PricePerHour = input.PricePerHour,
+            Services = NormalizeServices(input.Services, $"{fieldName}.Services"),
             AddOns = NormalizeSet(input.AddOns, AllowedAddOns, $"{fieldName}.AddOns", allowEmpty: true),
-            MinimumBookingHours = input.MinimumBookingHours,
             LatePickupCharges = input.LatePickupCharges,
             DropOffTime = input.DropOffTime,
             PickUpTime = input.PickUpTime
         };
+    }
+
+    private static List<GroomingServiceItem> NormalizeServices(
+        IReadOnlyCollection<GroomingServiceItemInput>? items,
+        string fieldName)
+    {
+        if (items is null || items.Count == 0)
+        {
+            throw new ArgumentException(
+                $"{fieldName} requires at least one grooming service.", fieldName);
+        }
+
+        var result = new List<GroomingServiceItem>(items.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var item in items)
+        {
+            var code = item.Code?.Trim();
+            if (string.IsNullOrEmpty(code))
+            {
+                throw new ArgumentException($"{fieldName}: code is required for every entry.", fieldName);
+            }
+
+            if (!GroomingServiceCatalog.Codes.Contains(code))
+            {
+                throw new ArgumentException(
+                    $"{fieldName}: '{code}' is not a recognised grooming service code.", fieldName);
+            }
+
+            if (!seen.Add(code))
+            {
+                throw new ArgumentException(
+                    $"{fieldName}: '{code}' is listed more than once. Each service code can appear only once per provider.",
+                    fieldName);
+            }
+
+            if (item.Price < 0)
+            {
+                throw new ArgumentException(
+                    $"{fieldName}: price for '{code}' must be non-negative.", fieldName);
+            }
+
+            if (item.DurationMinutes < 5 || item.DurationMinutes > 480)
+            {
+                throw new ArgumentException(
+                    $"{fieldName}: durationMinutes for '{code}' must be between 5 and 480.", fieldName);
+            }
+
+            result.Add(new GroomingServiceItem
+            {
+                Code = code,
+                Price = item.Price,
+                DurationMinutes = item.DurationMinutes,
+                IsActive = item.IsActive
+            });
+        }
+
+        return result;
     }
 
     private static List<string> NormalizeSet(
@@ -408,12 +455,20 @@ internal sealed class CosmosPetGroomerServiceRegistry(
         return offering is null
             ? null
             : new GroomingOfferingResult(
-                offering.PricePerHour,
+                offering.Services
+                    .Select(s => new GroomingServiceItemResult(s.Code, s.Price, s.DurationMinutes, s.IsActive))
+                    .ToArray(),
                 offering.AddOns.ToArray(),
-                offering.MinimumBookingHours,
                 offering.LatePickupCharges,
                 offering.DropOffTime,
                 offering.PickUpTime);
+    }
+
+    public IReadOnlyList<GroomingServiceCatalogEntry> GetServiceCatalog()
+    {
+        return GroomingServiceCatalog.Entries
+            .Select(e => new GroomingServiceCatalogEntry(e.Code, e.DisplayName))
+            .ToArray();
     }
 
     private static string Required(string? value, string name)

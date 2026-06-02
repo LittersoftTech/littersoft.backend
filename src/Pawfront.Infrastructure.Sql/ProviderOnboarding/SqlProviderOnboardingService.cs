@@ -118,6 +118,100 @@ internal sealed class SqlProviderOnboardingService(
         return ReadProviderProfile(reader);
     }
 
+    public async Task<ResolveProviderByFirebaseUidResponse> ResolveProviderByFirebaseUidAsync(
+        string firebaseUserId,
+        CancellationToken cancellationToken)
+    {
+        var normalized = Required(firebaseUserId, nameof(firebaseUserId));
+
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Provider.GetProviderByFirebaseUid");
+        command.Parameters.AddWithValue("@FirebaseUserId", normalized);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new ProviderAuthIdentityForFirebaseUserNotFoundException(normalized);
+        }
+
+        return new ResolveProviderByFirebaseUidResponse(
+            reader.GetGuid(0),
+            reader.IsDBNull(1) ? null : reader.GetGuid(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetBoolean(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.GetString(6),
+            reader.GetBoolean(7),
+            reader.IsDBNull(8) ? null : reader.GetString(8),
+            reader.IsDBNull(9) ? null : new DateTimeOffset(reader.GetDateTime(9), TimeSpan.Zero),
+            reader.IsDBNull(10) ? null : reader.GetBoolean(10));
+    }
+
+    public async Task<SetActiveStatusOutcome> SetActiveStatusAsync(
+        Guid providerId,
+        bool isActive,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Provider.SetProviderActiveStatus");
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@IsActive", isActive);
+
+        try
+        {
+            // The sproc emits exactly one result set:
+            //   - on success: 3 cols (ProviderId, IsActive, UpdatedAtUtc)
+            //   - on conflict: 10 cols (BookingId, ServiceId, ServiceCategory,
+            //                           SubCategory, PetParentId, Source, CustomerName,
+            //                           BookingDate, StartTime, EndTime)
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (reader.FieldCount == 10)
+            {
+                var conflicts = new List<ActiveStatusConflictingBooking>();
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    conflicts.Add(new ActiveStatusConflictingBooking(
+                        BookingId: reader.GetGuid(0),
+                        ServiceId: reader.GetGuid(1),
+                        ServiceCategory: reader.GetString(2),
+                        SubCategory: reader.GetString(3),
+                        PetParentId: reader.IsDBNull(4) ? null : reader.GetGuid(4),
+                        Source: reader.GetString(5),
+                        CustomerName: reader.IsDBNull(6) ? null : reader.GetString(6),
+                        BookingDate: DateOnly.FromDateTime(reader.GetDateTime(7)),
+                        StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(8)),
+                        EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(9))));
+                }
+                return new SetActiveStatusOutcome.BookingsExist(conflicts);
+            }
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException(
+                    "SetProviderActiveStatus did not return the expected result row.");
+            }
+
+            return new SetActiveStatusOutcome.Updated(
+                reader.GetGuid(0),
+                reader.GetBoolean(1),
+                new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero));
+        }
+        catch (SqlException exception) when (exception.Number == 51100)
+        {
+            throw new ProviderProfileNotFoundException(providerId);
+        }
+    }
+
     public async Task<SendProviderMobileOtpResponse> SendProviderMobileOtpAsync(
         Guid providerId,
         CancellationToken cancellationToken)
@@ -255,8 +349,9 @@ internal sealed class SqlProviderOnboardingService(
             DateOnly.FromDateTime(reader.GetDateTime(7)),
             reader.IsDBNull(8) ? null : new DateTimeOffset(reader.GetDateTime(8), TimeSpan.Zero),
             reader.GetString(9),
-            new DateTimeOffset(reader.GetDateTime(10), TimeSpan.Zero),
-            new DateTimeOffset(reader.GetDateTime(11), TimeSpan.Zero));
+            reader.GetBoolean(10),
+            new DateTimeOffset(reader.GetDateTime(11), TimeSpan.Zero),
+            new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero));
     }
 
     private static SendProviderMobileOtpResponse ReadMobileOtp(SqlDataReader reader)

@@ -45,12 +45,17 @@ public sealed record SaveFreelanceGroomerOfferingCommand(
     string ServiceLocation);
 
 public sealed record GroomingOfferingInput(
-    decimal PricePerHour,
+    IReadOnlyCollection<GroomingServiceItemInput> Services,
     IReadOnlyCollection<string> AddOns,
-    int MinimumBookingHours,
     decimal LatePickupCharges,
     TimeOnly DropOffTime,
     TimeOnly PickUpTime);
+
+public sealed record GroomingServiceItemInput(
+    string Code,
+    decimal Price,
+    int DurationMinutes,
+    bool IsActive);
 
 public sealed record PetGroomerServiceResult(
     Guid ProviderId,
@@ -93,12 +98,21 @@ public sealed record PetGroomerOfferingResult(
     string ServiceLocation);
 
 public sealed record GroomingOfferingResult(
-    decimal PricePerHour,
+    IReadOnlyCollection<GroomingServiceItemResult> Services,
     IReadOnlyCollection<string> AddOns,
-    int MinimumBookingHours,
     decimal LatePickupCharges,
     TimeOnly DropOffTime,
     TimeOnly PickUpTime);
+
+public sealed record GroomingServiceItemResult(
+    string Code,
+    decimal Price,
+    int DurationMinutes,
+    bool IsActive);
+
+public sealed record GroomingServiceCatalogEntry(
+    string Code,
+    string DisplayName);
 
 public sealed class GroomerShopNotRegisteredException(Guid providerId)
     : Exception($"Groomer Shop registration was not found for provider '{providerId}'. Complete the basic Groomer Shop registration first.");

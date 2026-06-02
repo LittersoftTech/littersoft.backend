@@ -49,6 +49,54 @@ internal sealed class InMemoryEventStore : IEventSqlStore
         return Task.FromResult(list);
     }
 
+    public Task<IReadOnlyList<EventSqlSnapshot>> ListAsync(
+        EventListFilter filter,
+        CancellationToken cancellationToken)
+    {
+        IEnumerable<EventSqlSnapshot> query = events.Values;
+
+        if (!string.IsNullOrWhiteSpace(filter.EventCategory))
+        {
+            query = query.Where(e => string.Equals(e.EventCategory, filter.EventCategory, StringComparison.Ordinal));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filter.EventType))
+        {
+            query = query.Where(e => string.Equals(e.EventType, filter.EventType, StringComparison.Ordinal));
+        }
+
+        if (filter.IsChildFriendly is not null)
+        {
+            var flag = filter.IsChildFriendly.Value;
+            query = query.Where(e => e.IsChildFriendly == flag);
+        }
+
+        if (filter.StartDate is not null)
+        {
+            var from = filter.StartDate.Value;
+            query = query.Where(e => e.EndDate >= from);
+        }
+
+        if (filter.EndDate is not null)
+        {
+            var to = filter.EndDate.Value;
+            query = query.Where(e => e.StartDate <= to);
+        }
+
+        if (filter.Amenities is { Count: > 0 })
+        {
+            var required = filter.Amenities.ToHashSet(StringComparer.Ordinal);
+            query = query.Where(e => required.All(a => e.Amenities.Contains(a, StringComparer.Ordinal)));
+        }
+
+        IReadOnlyList<EventSqlSnapshot> list = query
+            .OrderByDescending(e => e.StartDate)
+            .ThenByDescending(e => e.StartTime)
+            .ThenBy(e => e.EventId)
+            .ToArray();
+        return Task.FromResult(list);
+    }
+
     public Task<EventCounters> IncrementCounterAsync(
         Guid eventId,
         string counterType,

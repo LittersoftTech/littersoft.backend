@@ -51,7 +51,8 @@ internal sealed class InMemoryProviderClosureStore(
                     || (b.StartTime < command.EndTime!.Value && b.EndTime > command.StartTime.Value))
                 .OrderBy(b => b.ServiceId).ThenBy(b => b.BookingDate).ThenBy(b => b.StartTime)
                 .Select(b => new ConflictingBooking(
-                    b.ServiceId, b.BookingId, b.PetParentId, b.BookingDate, b.StartTime, b.EndTime))
+                    b.ServiceId, b.BookingId, b.PetParentId, b.Source, b.CustomerName,
+                    b.BookingDate, b.StartTime, b.EndTime))
                 .ToArray();
 
             if (conflicts.Length > 0)

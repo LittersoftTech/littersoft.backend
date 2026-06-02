@@ -128,6 +128,67 @@ internal sealed class SqlEventStore(
         return hydrated;
     }
 
+    public async Task<IReadOnlyList<EventSqlSnapshot>> ListAsync(
+        EventListFilter filter,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.ListEvents", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+
+        command.Parameters.AddWithValue("@EventCategory", DbValue(filter.EventCategory));
+        command.Parameters.AddWithValue("@EventType", DbValue(filter.EventType));
+        command.Parameters.AddWithValue("@StartDate",
+            filter.StartDate is null ? DBNull.Value : (object)filter.StartDate.Value.ToDateTime(TimeOnly.MinValue));
+        command.Parameters.AddWithValue("@EndDate",
+            filter.EndDate is null ? DBNull.Value : (object)filter.EndDate.Value.ToDateTime(TimeOnly.MinValue));
+        command.Parameters.AddWithValue("@IsChildFriendly",
+            filter.IsChildFriendly is null ? DBNull.Value : (object)filter.IsChildFriendly.Value);
+        command.Parameters.AddWithValue("@AmenitiesJson",
+            filter.Amenities is { Count: > 0 }
+                ? (object)JsonSerializer.Serialize(filter.Amenities)
+                : DBNull.Value);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        // Result set 1: event rows.
+        var rows = new List<EventSqlSnapshot>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadEventRow(reader, amenities: Array.Empty<string>()));
+        }
+
+        // Result set 2: (EventId, Amenity) pairs.
+        var amenityLookup = new Dictionary<Guid, List<string>>();
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var eventId = reader.GetGuid(0);
+                var amenity = reader.GetString(1);
+                if (!amenityLookup.TryGetValue(eventId, out var list))
+                {
+                    list = new List<string>();
+                    amenityLookup[eventId] = list;
+                }
+                list.Add(amenity);
+            }
+        }
+
+        var hydrated = new List<EventSqlSnapshot>(rows.Count);
+        foreach (var row in rows)
+        {
+            hydrated.Add(amenityLookup.TryGetValue(row.EventId, out var amenities)
+                ? row with { Amenities = amenities }
+                : row);
+        }
+        return hydrated;
+    }
+
     private static EventSqlSnapshot ReadEventRow(SqlDataReader reader, IReadOnlyCollection<string> amenities)
     {
         return new EventSqlSnapshot(

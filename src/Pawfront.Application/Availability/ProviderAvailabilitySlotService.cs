@@ -1,6 +1,7 @@
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Offerings;
+using Pawfront.Domain.Services;
 
 namespace Pawfront.Application.Availability;
 
@@ -19,13 +20,9 @@ internal sealed class ProviderAvailabilitySlotService(
         DateOnly date,
         decimal durationHours,
         int granularityMinutes,
+        string? serviceItemCode,
         CancellationToken cancellationToken)
     {
-        if (durationHours <= 0)
-        {
-            throw new ArgumentException("durationHours must be greater than zero.", nameof(durationHours));
-        }
-
         if (granularityMinutes is < MinGranularityMinutes or > MaxGranularityMinutes)
         {
             throw new ArgumentException(
@@ -45,6 +42,42 @@ internal sealed class ProviderAvailabilitySlotService(
             OfferingResolution.Resolved r => r,
             _ => throw new InvalidOperationException("Unknown offering resolution.")
         };
+
+        // 1b. PetGroomer: ignore the request's durationHours; resolve the menu
+        // item's duration server-side. The code is REQUIRED for this category.
+        if (offering.ServiceType == ProviderServiceTypes.GroomingSession)
+        {
+            if (string.IsNullOrWhiteSpace(serviceItemCode))
+            {
+                throw new SlotGroomingItemCodeRequiredException();
+            }
+
+            var itemResolution = await offeringResolver.ResolveGroomingItemAsync(
+                providerId, serviceItemCode.Trim(), cancellationToken);
+
+            offering = itemResolution switch
+            {
+                GroomingItemResolution.OfferingMissing
+                    => throw new ProviderOfferingNotConfiguredException(providerId, offering.ServiceCategory),
+                GroomingItemResolution.NotOffered no
+                    => throw new SlotGroomingItemNotOfferedException(providerId, no.Code),
+                GroomingItemResolution.Inactive ia
+                    => throw new SlotGroomingItemInactiveException(providerId, ia.Code),
+                GroomingItemResolution.Resolved ri => offering with
+                {
+                    DurationHours = (decimal)ri.DurationMinutes / 60m,
+                    IsDurationFixed = true
+                },
+                _ => throw new InvalidOperationException("Unknown grooming item resolution.")
+            };
+
+            durationHours = offering.DurationHours;
+        }
+        else if (durationHours <= 0)
+        {
+            // Non-grooming categories still require an explicit durationHours.
+            throw new ArgumentException("durationHours must be greater than zero.", nameof(durationHours));
+        }
 
         // 2. Validate the requested duration against the offering's duration rule.
         ValidateDuration(durationHours, offering);

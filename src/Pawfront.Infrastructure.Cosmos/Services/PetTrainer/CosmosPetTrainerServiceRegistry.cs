@@ -24,7 +24,7 @@ internal sealed class CosmosPetTrainerServiceRegistry(
 
     private static readonly IReadOnlySet<string> AllowedTemperaments = new HashSet<string>(StringComparer.Ordinal)
     {
-        "Calm", "Energetic", "Anxious", "Sensitive", "Aggressive", "AllTemperaments"
+        "Calm", "Energetic", "Anxious", "Sensitive", "Aggressive", "AllTemperaments", "Hyperactive", "Friendly"
     };
 
     private static readonly IReadOnlySet<string> AllowedServiceLocations = new HashSet<string>(StringComparer.Ordinal)

@@ -17,3 +17,6 @@ public sealed class ProviderProfileNotFoundException(Guid providerId)
 
 public sealed class ProviderMobileOtpNotFoundException(Guid providerMobileOtpId)
     : Exception($"Provider mobile OTP entry '{providerMobileOtpId}' was not found.");
+
+public sealed class ProviderAuthIdentityForFirebaseUserNotFoundException(string firebaseUserId)
+    : Exception($"No provider auth identity is registered for Firebase user '{firebaseUserId}'.");

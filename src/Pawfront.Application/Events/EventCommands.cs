@@ -74,6 +74,22 @@ public sealed record CreateEventSqlInput(
     TimeOnly StartTime,
     TimeOnly EndTime);
 
+/// <summary>
+/// Catalog-wide event listing filter. Every field is optional; omitting a field
+/// means "no constraint on that dimension". <see cref="StartDate"/> and
+/// <see cref="EndDate"/> form an overlap window — an event is returned when
+/// its <c>[StartDate, EndDate]</c> intersects the requested window.
+/// <see cref="Amenities"/>, when supplied, requires the event to carry EVERY
+/// listed amenity (ALL-match semantics).
+/// </summary>
+public sealed record EventListFilter(
+    string? EventCategory,
+    string? EventType,
+    DateOnly? StartDate,
+    DateOnly? EndDate,
+    bool? IsChildFriendly,
+    IReadOnlyCollection<string>? Amenities);
+
 public sealed class EventProviderNotFoundException(Guid providerId)
     : Exception($"Provider profile '{providerId}' was not found.");
 

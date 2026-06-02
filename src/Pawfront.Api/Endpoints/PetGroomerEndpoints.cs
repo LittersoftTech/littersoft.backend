@@ -220,21 +220,27 @@ internal static class PetGroomerEndpoints
         CancellationToken cancellationToken)
     {
         var result = await registry.GetAsync(providerId, cancellationToken);
-        return result is null ? ApiResults.NotFound() : ApiResults.Ok(ToResponse(result));
+        var catalog = registry.GetServiceCatalog();
+        return result is null ? ApiResults.NotFound() : ApiResults.Ok(ToResponse(result, catalog));
     }
 
     private static GroomingOfferingInput ToGroomingInput(GroomingOfferingRequest request)
     {
+        var services = request.Services?
+            .Select(s => new GroomingServiceItemInput(s.Code, s.Price, s.DurationMinutes, s.IsActive))
+            .ToArray() ?? Array.Empty<GroomingServiceItemInput>();
+
         return new GroomingOfferingInput(
-            request.PricePerHour,
+            services,
             request.AddOns,
-            request.MinimumBookingHours,
             request.LatePickupCharges,
             request.DropOffTime,
             request.PickUpTime);
     }
 
-    private static PetGroomerServiceResponse ToResponse(PetGroomerServiceResult result)
+    private static PetGroomerServiceResponse ToResponse(
+        PetGroomerServiceResult result,
+        IReadOnlyList<GroomingServiceCatalogEntry>? catalog = null)
     {
         return new PetGroomerServiceResponse(
             result.ProviderId,
@@ -261,6 +267,9 @@ internal static class PetGroomerEndpoints
                     result.Freelance.ImageUrl,
                     ToLicenseResponse(result.Freelance.License),
                     ToOfferingResponse(result.Freelance.Offering)),
+            catalog is null
+                ? Array.Empty<GroomingServiceCatalogEntryResponse>()
+                : catalog.Select(e => new GroomingServiceCatalogEntryResponse(e.Code, e.DisplayName)).ToArray(),
             result.CreatedAtUtc,
             result.UpdatedAtUtc);
     }
@@ -292,9 +301,10 @@ internal static class PetGroomerEndpoints
         return offering is null
             ? null
             : new GroomingOfferingResponse(
-                offering.PricePerHour,
+                offering.Services
+                    .Select(s => new GroomingServiceItemResponse(s.Code, s.Price, s.DurationMinutes, s.IsActive))
+                    .ToArray(),
                 offering.AddOns,
-                offering.MinimumBookingHours,
                 offering.LatePickupCharges,
                 offering.DropOffTime,
                 offering.PickUpTime);
