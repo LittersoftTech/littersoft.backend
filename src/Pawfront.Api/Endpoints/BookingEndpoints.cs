@@ -10,6 +10,7 @@ internal static class BookingEndpoints
     {
         var providerScoped = builder.MapGroup("/providers/{providerId:guid}/bookings");
         providerScoped.MapPost("/", CreateBooking);
+        providerScoped.MapPost("/custom", CreateCustomBooking);
         providerScoped.MapGet("/", ListByProvider);
 
         builder.MapGet("/bookings/{bookingId:guid}", GetBooking);
@@ -35,7 +36,8 @@ internal static class BookingEndpoints
                     request.ServiceId,
                     request.BookingDate,
                     request.StartTime,
-                    request.EndTime),
+                    request.EndTime,
+                    request.ServiceItemCode),
                 cancellationToken);
 
             return ApiResults.Created($"/api/v1/bookings/{result.BookingId}", ToResponse(result));
@@ -56,9 +58,92 @@ internal static class BookingEndpoints
         {
             return ApiResults.NotFound("ProviderNotFound", exception.Message);
         }
+        catch (BookingProviderInactiveException exception)
+        {
+            return ApiResults.Conflict("ProviderInactive", exception.Message);
+        }
+        catch (BookingGroomingItemCodeRequiredException exception)
+        {
+            return ApiResults.BadRequest("ServiceItemCodeRequired", exception.Message);
+        }
+        catch (BookingGroomingItemNotOfferedException exception)
+        {
+            return ApiResults.BadRequest("ServiceItemNotOffered", exception.Message);
+        }
+        catch (BookingGroomingItemInactiveException exception)
+        {
+            return ApiResults.Conflict("ServiceItemInactive", exception.Message);
+        }
         catch (BookingPetParentNotFoundException exception)
         {
             return ApiResults.NotFound("PetParentNotFound", exception.Message);
+        }
+        catch (BookingCapacityExceededException exception)
+        {
+            return ApiResults.Conflict("CapacityExceeded", exception.Message);
+        }
+        catch (ProviderClosedOnDateException exception)
+        {
+            return ApiResults.Conflict("ServiceClosed", exception.Message);
+        }
+        catch (InvalidBookingTimeException exception)
+        {
+            return ApiResults.BadRequest("InvalidBookingTime", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> CreateCustomBooking(
+        Guid providerId,
+        CreateCustomBookingRequest request,
+        IBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            return ApiResults.BadRequest("InvalidRequest", "Request body is required.");
+        }
+
+        try
+        {
+            var result = await bookingService.CreateCustomAsync(
+                new CreateCustomBookingCommand(
+                    providerId,
+                    request.ServiceId,
+                    request.CustomerName,
+                    request.CustomerMobileCountryCode,
+                    request.CustomerMobile,
+                    request.AnimalType,
+                    request.PetName,
+                    request.BookingDate,
+                    request.StartTime,
+                    request.EndTime,
+                    request.ServiceLocation,
+                    request.CustomerLocation,
+                    request.PricePerHour,
+                    request.JobNotes),
+                cancellationToken);
+
+            return ApiResults.Created($"/api/v1/bookings/{result.BookingId}", ToResponse(result));
+        }
+        catch (BookingServiceInvalidException exception)
+        {
+            return ApiResults.BadRequest("InvalidServiceId", exception.Message);
+        }
+        catch (BookingOfferingNotConfiguredException exception)
+        {
+            return ApiResults.BadRequest("OfferingNotConfigured", exception.Message);
+        }
+        catch (BookingProviderNotFoundException exception)
+        {
+            return ApiResults.NotFound("ProviderNotFound", exception.Message);
+        }
+        catch (BookingProviderInactiveException exception)
+        {
+            return ApiResults.Conflict("ProviderInactive", exception.Message);
         }
         catch (BookingCapacityExceededException exception)
         {
@@ -146,5 +231,16 @@ internal static class BookingEndpoints
             result.Status,
             result.CreatedAtUtc,
             result.UpdatedAtUtc,
-            result.CancelledAtUtc);
+            result.CancelledAtUtc,
+            result.ServiceItemCode,
+            result.Source,
+            result.CustomerName,
+            result.CustomerMobileCountryCode,
+            result.CustomerMobile,
+            result.AnimalType,
+            result.PetName,
+            result.ServiceLocation,
+            result.CustomerLocation,
+            result.PricePerHour,
+            result.JobNotes);
 }

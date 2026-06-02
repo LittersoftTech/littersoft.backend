@@ -45,12 +45,17 @@ public sealed record SaveFreelanceGroomerOfferingRequest(
     string ServiceLocation);
 
 public sealed record GroomingOfferingRequest(
-    decimal PricePerHour,
+    IReadOnlyCollection<GroomingServiceItemRequest> Services,
     IReadOnlyCollection<string> AddOns,
-    int MinimumBookingHours,
     decimal LatePickupCharges,
     TimeOnly DropOffTime,
     TimeOnly PickUpTime);
+
+public sealed record GroomingServiceItemRequest(
+    string Code,
+    decimal Price,
+    int DurationMinutes,
+    bool IsActive);
 
 public sealed record PetGroomerServiceResponse(
     Guid ProviderId,
@@ -61,8 +66,13 @@ public sealed record PetGroomerServiceResponse(
     string? Website,
     GroomerShopResponse? GroomerShop,
     FreelanceGroomerResponse? Freelance,
+    IReadOnlyCollection<GroomingServiceCatalogEntryResponse> ServiceCatalog,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
+
+public sealed record GroomingServiceCatalogEntryResponse(
+    string Code,
+    string DisplayName);
 
 public sealed record GroomerShopResponse(
     string Name,
@@ -93,9 +103,14 @@ public sealed record PetGroomerOfferingResponse(
     string ServiceLocation);
 
 public sealed record GroomingOfferingResponse(
-    decimal PricePerHour,
+    IReadOnlyCollection<GroomingServiceItemResponse> Services,
     IReadOnlyCollection<string> AddOns,
-    int MinimumBookingHours,
     decimal LatePickupCharges,
     TimeOnly DropOffTime,
     TimeOnly PickUpTime);
+
+public sealed record GroomingServiceItemResponse(
+    string Code,
+    decimal Price,
+    int DurationMinutes,
+    bool IsActive);

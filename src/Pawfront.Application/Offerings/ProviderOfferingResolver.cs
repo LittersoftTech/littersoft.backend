@@ -73,12 +73,43 @@ internal sealed class ProviderOfferingResolver(
                 service.ProviderId, service.ServiceCategory, service.SubCategory, service.ServiceType);
         }
 
+        // Capacity stays shop-wide (all grooming bookings on this provider share
+        // the same slot bucket). Duration is per-item — DurationHours is set to 0
+        // here as a sentinel; callers MUST follow up with ResolveGroomingItemAsync
+        // to get the actual duration for the booking/slot they're computing.
         return new OfferingResolution.Resolved(
             service.ServiceId, service.ProviderId,
             service.ServiceCategory, service.SubCategory, service.ServiceType,
             Capacity: offering.MaxPetsAtOneTime,
-            DurationHours: offering.Session.MinimumBookingHours,
-            IsDurationFixed: false);
+            DurationHours: 0m,
+            IsDurationFixed: true);
+    }
+
+    public async Task<GroomingItemResolution> ResolveGroomingItemAsync(
+        Guid providerId,
+        string code,
+        CancellationToken cancellationToken)
+    {
+        var doc = await petGroomer.GetAsync(providerId, cancellationToken);
+        var offering = doc?.GroomerShop?.Offering ?? doc?.Freelance?.Offering;
+        if (offering?.Session is null || offering.Session.Services.Count == 0)
+        {
+            return new GroomingItemResolution.OfferingMissing();
+        }
+
+        var match = offering.Session.Services.FirstOrDefault(
+            s => string.Equals(s.Code, code, StringComparison.Ordinal));
+        if (match is null)
+        {
+            return new GroomingItemResolution.NotOffered(code);
+        }
+
+        if (!match.IsActive)
+        {
+            return new GroomingItemResolution.Inactive(code);
+        }
+
+        return new GroomingItemResolution.Resolved(match.Code, match.DurationMinutes, match.Price);
     }
 
     private async Task<OfferingResolution> ResolvePetTrainerAsync(

@@ -8,11 +8,16 @@ namespace Pawfront.Api.Auth;
 
 internal static class FirebaseClaims
 {
+    public static string GetFirebaseUserId(ClaimsPrincipal user)
+    {
+        return Required(FindFirst(user, "user_id") ?? FindFirst(user, "sub"), "Firebase user id");
+    }
+
     public static SaveProviderFirebaseAuthCommand BuildCommand(
         ClaimsPrincipal user,
         SaveProviderFirebaseAuthRequest request)
     {
-        var firebaseUserId = Required(FindFirst(user, "user_id") ?? FindFirst(user, "sub"), "Firebase user id");
+        var firebaseUserId = GetFirebaseUserId(user);
         var email = Required(FindFirst(user, "email"), "Firebase email");
         var signInProvider = ResolveSignInProvider(user);
 

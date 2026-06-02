@@ -15,6 +15,9 @@ internal static class EventEndpoints
         providerScoped.MapPost("/", Create);
         providerScoped.MapGet("/", ListByProvider);
 
+        // Catalog-wide listing with optional filters. Anchored before the
+        // {eventId:guid} route so a literal /events GET resolves to List.
+        builder.MapGet("/events", List);
         builder.MapGet("/events/{eventId:guid}", GetById);
 
         // Public engagement counters — anyone signed in can call these from
@@ -126,6 +129,38 @@ internal static class EventEndpoints
     {
         var results = await eventService.ListByProviderAsync(providerId, cancellationToken);
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
+    }
+
+    private static async Task<IResult> List(
+        string? eventCategory,
+        string? eventType,
+        DateOnly? startDate,
+        DateOnly? endDate,
+        bool? isChildFriendly,
+        // Repeated query: ?amenities=Restrooms&amenities=FreeParking. ASP.NET
+        // model-binds repeated scalars into a string[] for minimal APIs.
+        string[]? amenities,
+        IEventService eventService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var results = await eventService.ListAsync(
+                new EventListFilter(
+                    eventCategory,
+                    eventType,
+                    startDate,
+                    endDate,
+                    isChildFriendly,
+                    amenities),
+                cancellationToken);
+
+            return ApiResults.Ok(results.Select(ToResponse).ToArray());
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
     }
 
     private static async Task<IResult> GetById(

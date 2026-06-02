@@ -12,6 +12,12 @@ CREATE TABLE [Provider].[Providers]
     [MobileVerifiedAtUtc] DATETIME2(7) NULL,
     [OnboardingStatus] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_Providers_OnboardingStatus] DEFAULT N'MobileVerificationPending',
+    -- Master Active/Inactive switch. When 0, no new bookings can be created on
+    -- ANY of this provider's services (Booking.CreateBooking enforces). Flipped
+    -- via [Provider].[SetProviderActiveStatus]; the deactivation path rejects
+    -- the toggle if future confirmed bookings still exist.
+    [IsActive] BIT NOT NULL
+        CONSTRAINT [DF_Providers_IsActive] DEFAULT 1,
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_Providers_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
     [UpdatedAtUtc] DATETIME2(7) NOT NULL

@@ -42,6 +42,7 @@ public sealed record ProviderProfileResponse(
     DateOnly DateOfBirth,
     DateTimeOffset? MobileVerifiedAtUtc,
     string OnboardingStatus,
+    bool IsActive,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
@@ -64,3 +65,45 @@ public sealed record VerifyProviderMobileOtpResponse(
     DateTimeOffset DateSentUtc,
     DateTimeOffset? DateValidatedUtc,
     DateTimeOffset ExpiresAtUtc);
+
+public sealed record ResolveProviderByFirebaseUidResponse(
+    Guid ProviderAuthIdentityId,
+    Guid? ProviderId,
+    string FirebaseUserId,
+    string Email,
+    bool IsEmailVerified,
+    string? DisplayName,
+    string SignUpStatus,
+    bool HasProfile,
+    string? OnboardingStatus,
+    DateTimeOffset? MobileVerifiedAtUtc,
+    bool? IsActive);
+
+public sealed record SetProviderActiveStatusRequest(bool IsActive);
+
+public enum SetProviderActiveStatusResult
+{
+    Updated,
+    BookingsExist
+}
+
+public sealed record ActiveStatusConflictingBookingSummary(
+    Guid BookingId,
+    Guid ServiceId,
+    string ServiceCategory,
+    string SubCategory,
+    // Null for Source = 'Custom' (provider-added private job).
+    Guid? PetParentId,
+    string Source,
+    string? CustomerName,
+    DateOnly BookingDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime);
+
+public sealed record SetProviderActiveStatusResponse(
+    SetProviderActiveStatusResult Status,
+    Guid ProviderId,
+    bool? IsActive,
+    DateTimeOffset? UpdatedAtUtc,
+    IReadOnlyList<ActiveStatusConflictingBookingSummary>? ConflictingBookings,
+    string? WarningMessage);

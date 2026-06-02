@@ -1,14 +1,21 @@
-CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
-    @ProviderId UNIQUEIDENTIFIER,
-    @PetParentId UNIQUEIDENTIFIER,
-    @ServiceId UNIQUEIDENTIFIER,
-    @ServiceCategory NVARCHAR(64),
-    @SubCategory NVARCHAR(64),
-    @ServiceItemCode NVARCHAR(64) = NULL,
-    @BookingDate DATE,
-    @StartTime TIME(0),
-    @EndTime TIME(0),
-    @Capacity INT
+CREATE OR ALTER PROCEDURE [Booking].[CreateCustomBooking]
+    @ProviderId                UNIQUEIDENTIFIER,
+    @ServiceId                 UNIQUEIDENTIFIER,
+    @ServiceCategory           NVARCHAR(64),
+    @SubCategory               NVARCHAR(64),
+    @CustomerName              NVARCHAR(200),
+    @CustomerMobileCountryCode NVARCHAR(8),
+    @CustomerMobile            NVARCHAR(32),
+    @AnimalType                NVARCHAR(32),
+    @PetName                   NVARCHAR(100),
+    @BookingDate               DATE,
+    @StartTime                 TIME(0),
+    @EndTime                   TIME(0),
+    @ServiceLocation           NVARCHAR(32),
+    @CustomerLocation          NVARCHAR(500) = NULL,
+    @PricePerHour              DECIMAL(10, 2),
+    @JobNotes                  NVARCHAR(2000) = NULL,
+    @Capacity                  INT
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -16,6 +23,8 @@ BEGIN
 
     BEGIN TRANSACTION;
 
+    -- Provider exists + master Active switch (same race-safe path as
+    -- [Booking].[CreateBooking]).
     DECLARE @ProviderIsActive BIT;
     SELECT @ProviderIsActive = [IsActive]
     FROM [Provider].[Providers] WITH (UPDLOCK, HOLDLOCK)
@@ -26,27 +35,12 @@ BEGIN
         THROW 51061, 'Provider was not found.', 1;
     END
 
-    -- Master Active/Inactive switch — when the provider has flipped themselves
-    -- inactive, NO new bookings are accepted on ANY of their services. The
-    -- UPDLOCK + HOLDLOCK above serialises us against a concurrent
-    -- SetProviderActiveStatus call, so the check is race-safe.
     IF @ProviderIsActive = 0
     BEGIN
         THROW 51067, 'Provider is currently inactive and is not accepting new bookings.', 1;
     END
 
-    IF NOT EXISTS (
-        SELECT 1
-        FROM [Customer].[PetParents]
-        WHERE [PetParentId] = @PetParentId
-    )
-    BEGIN
-        THROW 51060, 'Pet parent was not found.', 1;
-    END
-
-    -- Validate that the ServiceId belongs to the provider and is active.
-    -- UPDLOCK + HOLDLOCK serialises us against concurrent DeactivateProviderService
-    -- so a service can't disappear between our check and the insert.
+    -- ServiceId belongs to the provider AND is active.
     IF NOT EXISTS (
         SELECT 1
         FROM [Provider].[ProviderServices] WITH (UPDLOCK, HOLDLOCK)
@@ -58,10 +52,9 @@ BEGIN
         THROW 51066, 'Service is not valid or active for this provider.', 1;
     END
 
-    -- Race-safe capacity check: count confirmed bookings overlapping the requested
-    -- window FOR THIS SERVICE, holding UPDLOCK + HOLDLOCK so concurrent CreateBooking
-    -- calls on the same service serialise. DayCare and NightStay each have their own
-    -- capacity bucket.
+    -- Race-safe capacity check — identical to [Booking].[CreateBooking].
+    -- Custom and App bookings share the same per-service capacity bucket so the
+    -- COUNT(*) sees both.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
@@ -88,20 +81,40 @@ BEGIN
         [ServiceItemCode],
         [BookingDate],
         [StartTime],
-        [EndTime]
+        [EndTime],
+        [Source],
+        [CustomerName],
+        [CustomerMobileCountryCode],
+        [CustomerMobile],
+        [AnimalType],
+        [PetName],
+        [ServiceLocation],
+        [CustomerLocation],
+        [PricePerHour],
+        [JobNotes]
     )
     OUTPUT inserted.[BookingId] INTO @InsertedBookingId
     VALUES
     (
         @ProviderId,
-        @PetParentId,
+        NULL,                        -- No pet parent for custom bookings.
         @ServiceId,
         @ServiceCategory,
         @SubCategory,
-        @ServiceItemCode,
+        NULL,                        -- ServiceItemCode unused for custom bookings.
         @BookingDate,
         @StartTime,
-        @EndTime
+        @EndTime,
+        N'Custom',
+        @CustomerName,
+        @CustomerMobileCountryCode,
+        @CustomerMobile,
+        @AnimalType,
+        @PetName,
+        @ServiceLocation,
+        @CustomerLocation,
+        @PricePerHour,
+        @JobNotes
     );
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);

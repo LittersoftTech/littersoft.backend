@@ -125,6 +125,53 @@ internal sealed class EventService(
         return snapshots.Select(s => ToResult(s, physical: null)).ToArray();
     }
 
+    public async Task<IReadOnlyCollection<EventResult>> ListAsync(
+        EventListFilter filter,
+        CancellationToken cancellationToken)
+    {
+        var normalised = ValidateFilter(filter);
+        var snapshots = await sqlStore.ListAsync(normalised, cancellationToken);
+        // Listing skips Cosmos for cost; detail endpoint hydrates physical details.
+        return snapshots.Select(s => ToResult(s, physical: null)).ToArray();
+    }
+
+    private static EventListFilter ValidateFilter(EventListFilter filter)
+    {
+        string? category = null;
+        if (!string.IsNullOrWhiteSpace(filter.EventCategory))
+        {
+            category = NormalizeOne(filter.EventCategory, AllowedCategories, nameof(filter.EventCategory));
+        }
+
+        string? eventType = null;
+        if (!string.IsNullOrWhiteSpace(filter.EventType))
+        {
+            eventType = NormalizeOne(filter.EventType, AllowedEventTypes, nameof(filter.EventType));
+        }
+
+        if (filter.StartDate is not null && filter.EndDate is not null && filter.EndDate < filter.StartDate)
+        {
+            throw new ArgumentException(
+                "EndDate must be on or after StartDate.",
+                nameof(filter.EndDate));
+        }
+
+        IReadOnlyCollection<string>? amenities = null;
+        if (filter.Amenities is { Count: > 0 })
+        {
+            // NormalizeAmenities throws on unknown values / 'None' mixed with others.
+            amenities = NormalizeAmenities(filter.Amenities);
+        }
+
+        return new EventListFilter(
+            category,
+            eventType,
+            filter.StartDate,
+            filter.EndDate,
+            filter.IsChildFriendly,
+            amenities);
+    }
+
     public Task<EventCounters> IncrementCounterAsync(
         Guid eventId,
         string counterType,

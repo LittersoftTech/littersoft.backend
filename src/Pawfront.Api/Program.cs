@@ -54,5 +54,6 @@ api.MapEventDashboardEndpoints();
 api.MapBookingEndpoints();
 api.MapBlobImageEndpoints();
 api.MapProviderClosureEndpoints();
+api.MapProviderActiveStatusEndpoints();
 
 app.Run();

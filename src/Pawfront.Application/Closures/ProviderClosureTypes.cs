@@ -35,7 +35,10 @@ public sealed record ProviderClosure(
 public sealed record ConflictingBooking(
     Guid ServiceId,
     Guid BookingId,
-    Guid PetParentId,
+    // Null for Source = 'Custom' (provider-added private job).
+    Guid? PetParentId,
+    string Source,
+    string? CustomerName,
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime);

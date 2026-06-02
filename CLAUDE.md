@@ -165,6 +165,9 @@ Custom `THROW` codes used for typed errors:
   dashboard reads — metrics / attendees)
 - `51096` event not found (counter increment)
 - `51097` invalid counter type (must be `View`, `Share`, or `Inquiry`)
+- `51067` provider is currently inactive (master Active/Inactive switch is off)
+  → API maps to **409 ProviderInactive**
+- `51100` provider profile not found (active-status toggle)
 
 ## Cosmos
 
@@ -244,7 +247,7 @@ Each category has a **basic registration** + **offering** (where applicable):
 | Category | Sub-categories | Offering built? | Cosmos doc shape |
 |---|---|---|---|
 | Pet Sitter | `PetHotel`, `FreelancePetSitter` | ✅ Day/Night branches | Both sub-types share `PetSitterLicense` + `PetSitterOffering` with `BoardingOffering` for `dayCare`/`nightStay` |
-| Pet Groomer | `GroomerShop`, `FreelanceGroomer` | ✅ single session | `PetGroomerLicense` + `PetGroomerOffering` with `GroomingOffering` |
+| Pet Groomer | `GroomerShop`, `FreelanceGroomer` | ✅ multi-item menu (18-service catalog; per-groomer price + duration; shop-wide capacity) | `PetGroomerLicense` + `PetGroomerOffering` with `GroomingOffering.Services[]` |
 | Pet Trainer | `TrainingSchool`, `FreelanceTrainer` | ✅ single session, multi-location, free-form approach/experience | `PetTrainerLicense` + `PetTrainerOffering` with `TrainingSession` |
 | Pet Adoption & Sale | `PetShelter`, `PetShop`, `Freelance` | ❌ basic registration only | (no offering yet) |
 | Vet | `VetClinic`, `FreelanceVeterinarian` | ✅ single appointment, freelance pinned to 1 concurrent | `VetCertificate` + `VetOffering` with `VetAppointment` |
@@ -268,6 +271,70 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
 - `POST /providers/{id}/policy/cancellation` — single nullable value
   (`null | 24 | 48 | 72 | 96` hours), stored in
   `Provider.ProviderCancellationPolicies` (one row per provider).
+
+### Pet Groomer menu (18 services, per-groomer price + duration)
+- Pet Groomer is the only category that uses a **per-item menu** under a single
+  bookable service. The provider still gets exactly ONE `ProviderServices` row
+  (ServiceType=`GroomingSession`), but inside the Cosmos
+  `PetGroomerOffering.Session.Services` array they list which canonical grooming
+  services they offer.
+- **Canonical catalog (server-side constant)** in
+  [`GroomingServiceCatalog.cs`](src/Pawfront.Infrastructure.Cosmos/Services/PetGroomer/GroomingServiceCatalog.cs):
+  18 stable codes (`WireCoatHandStripping`, `PuppyFirstGroom`, `BreedSpecificStyling`,
+  `Dematting`, `BathDryAndBrush`, `BathAndDry`, `DeShedding`, `MedicatedBath`,
+  `TickAndFleaRemoval`, `CatGrooming`, `CoatDyeing`, `NailsClipping`,
+  `EarCleaning`, `OralHygienePack`, `AnalGlandExpression`, `PawPadTrimming`,
+  `SummerCoatPreparation`, `WinterCoatPreparation`) each with a display name.
+  **Adding a new service code = code change + release.** The catalog is embedded
+  in the `GET /providers/{id}/services/pet-groomer` response (`serviceCatalog`
+  field) so the mobile picker can render it without a separate fetch.
+- **Per-groomer offering item** in the offering doc:
+  `{ code, price, durationMinutes (5–480), isActive }`. Each provider sets their
+  own price AND duration for each service they offer; isActive lets them
+  temporarily disable a single service without dropping the whole offering.
+- **Capacity is shop-wide.** `maxPetsAtOneTime` on the parent offering governs
+  how many simultaneous grooming bookings the groomer can take across ALL
+  services. So Full Groom at 2pm and Nail Trim at 2pm share the same slot
+  bucket — one groomer = one slot.
+- **Booking flow.** `POST /providers/{id}/bookings` body for PetGroomer requires
+  `serviceItemCode`. Server validates the code is on the provider's menu,
+  `isActive=true`, and that `EndTime - StartTime` matches the item's
+  `durationMinutes`. Errors:
+  - 400 `ServiceItemCodeRequired` — code missing for a PetGroomer booking.
+  - 400 `ServiceItemNotOffered` — code is not on this provider's menu.
+  - 409 `ServiceItemInactive` — code is disabled by the provider.
+  - 400 `InvalidBookingTime` — duration mismatch.
+- **Slot flow.** `GET /providers/{id}/availability/slots` for a PetGroomer
+  ServiceId requires `?serviceItemCode=` (durationHours is ignored for grooming).
+  Server resolves duration from the menu item. Same error codes as booking.
+- **Bookings table.** `Booking.Bookings.ServiceItemCode NVARCHAR(64) NULL` —
+  populated only for PetGroomer bookings; surfaced on every booking read.
+
+### Provider master Active/Inactive switch
+- `Provider.Providers.IsActive` (BIT, default 1) is a single master switch
+  above the per-service catalog. When 0, `Booking.CreateBooking` rejects
+  every new booking with **51067 → 409 ProviderInactive**, regardless of
+  which `ServiceId` is targeted. Existing confirmed bookings are not
+  affected; the flag only gates *new* booking creation.
+- `POST /providers/{id}/active-status` body `{ isActive: bool }`. Always
+  returns 200 + envelope; the response payload is **discriminated**:
+  - `status: "Updated"` → flag flipped; `isActive` + `updatedAtUtc` populated.
+  - `status: "BookingsExist"` → only emitted on deactivation; flag NOT
+    flipped; `conflictingBookings` lists every future confirmed booking on
+    any of the provider's services (with `serviceCategory`, `subCategory`,
+    `bookingDate`, etc.) plus a `warningMessage`. Provider must move/cancel
+    these and retry. **There is no `force` override**.
+- Sproc `Provider.SetProviderActiveStatus` holds `UPDLOCK + HOLDLOCK` on
+  the provider row + on the Bookings overlap-count query, so concurrent
+  `Booking.CreateBooking` on any of the provider's services serialises
+  behind it (race-safe). Activation is always applied immediately, no
+  conflict check.
+- "Future booking" = `BookingDate > today` OR (`BookingDate = today` AND
+  `EndTime > now`). The provider's already-served bookings on today are
+  not considered conflicts.
+- `IsActive` is surfaced on `GET /providers/{id}/profile` and `GET
+  /provider-onboarding/me` (in the latter as nullable, since a pre-profile
+  auth identity has no IsActive).
 
 ### Provider weekly availability + slot computation (Rounds 1 & 2 of calendar)
 - `POST /providers/{id}/availability` — saves all 7 day rows atomically
@@ -518,6 +585,7 @@ GET    /health
 
 POST   /provider-onboarding/firebase-auth
 POST   /provider-onboarding/profile
+GET    /provider-onboarding/me                                                   resolves caller's Firebase uid → { providerAuthIdentityId, providerId?, hasProfile, onboardingStatus? } — used by mobile after reinstall to recover ProviderId
 
 POST   /providers/                                            (legacy in-memory)
 GET    /providers/                                            (legacy in-memory)
@@ -525,7 +593,7 @@ GET    /providers/                                            (legacy in-memory)
 GET    /providers/{providerId}/profile                                           personal info (name, gender, mobile, DOB, …)
 GET    /providers/{providerId}/services                                          [?includeInactive=]
 
-POST   /providers/{providerId}/bookings                                          body now carries serviceId
+POST   /providers/{providerId}/bookings                                          body carries serviceId; PetGroomer also requires serviceItemCode (one of the 18 canonical codes from the GET /pet-groomer response)
 GET    /providers/{providerId}/bookings                                          [?date=YYYY-MM-DD] — day-view filter
 GET    /bookings/{bookingId}
 POST   /bookings/{bookingId}/cancel
@@ -538,9 +606,11 @@ POST   /providers/{providerId}/policy/payout-methods
 POST   /providers/{providerId}/policy/cancellation
 GET    /providers/{providerId}/policy
 
+POST   /providers/{providerId}/active-status                                     body { isActive } — master switch. Discriminated 200: Updated | BookingsExist (lists future confirmed bookings).
+
 POST   /providers/{providerId}/availability
 GET    /providers/{providerId}/availability
-GET    /providers/{providerId}/availability/slots                      ?serviceId= &date= &durationHours= [&granularityMinutes=]
+GET    /providers/{providerId}/availability/slots                      ?serviceId= &date= [&durationHours= | &serviceItemCode=] [&granularityMinutes=] — PetGroomer uses serviceItemCode (duration resolved server-side from the menu item); other categories use durationHours
 
 POST   /providers/{providerId}/closures                                 body carries serviceIds[]
 GET    /providers/{providerId}/closures                                [?serviceId= &from= &to=]

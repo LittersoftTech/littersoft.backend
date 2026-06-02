@@ -5,9 +5,14 @@ namespace Pawfront.Contracts.Closures;
 /// date range / partial-day window / reason. The batch is all-or-nothing: if any
 /// service has a conflicting confirmed booking inside the window, no rows are
 /// inserted and the response carries the conflict list.
+/// <para>
+/// When <see cref="ServiceIds"/> is omitted (null or empty), the server closes
+/// every active service belonging to the provider — a convenience wrapper for
+/// "close the entire provider" scenarios.
+/// </para>
 /// </summary>
 public sealed record CreateProviderClosureRequest(
-    IReadOnlyList<Guid> ServiceIds,
+    IReadOnlyList<Guid>? ServiceIds,
     DateOnly StartDate,
     DateOnly EndDate,
     TimeOnly? StartTime,
@@ -48,7 +53,10 @@ public sealed record ProviderClosureSummary(
 public sealed record ConflictingBookingSummary(
     Guid ServiceId,
     Guid BookingId,
-    Guid PetParentId,
+    // Null for Source = 'Custom' (provider-added private job).
+    Guid? PetParentId,
+    string Source,
+    string? CustomerName,
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime);

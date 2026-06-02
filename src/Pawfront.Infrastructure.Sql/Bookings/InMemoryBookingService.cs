@@ -21,6 +21,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         Guid serviceId,
         string serviceCategory,
         string subCategory,
+        string? serviceItemCode,
         DateOnly bookingDate,
         TimeOnly startTime,
         TimeOnly endTime,
@@ -53,13 +54,89 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 ServiceId = serviceId,
                 ServiceCategory = serviceCategory,
                 SubCategory = subCategory,
+                ServiceItemCode = serviceItemCode,
                 BookingDate = bookingDate,
                 StartTime = startTime,
                 EndTime = endTime,
                 Status = "Confirmed",
                 CreatedAtUtc = now,
                 UpdatedAtUtc = now,
-                CancelledAtUtc = null
+                CancelledAtUtc = null,
+                Source = "App"
+            };
+
+            bookings[row.BookingId] = row;
+            return ToResult(row);
+        }
+        finally
+        {
+            serviceLock.Release();
+        }
+    }
+
+    public async Task<BookingResult> CreateCustomAsync(
+        Guid providerId,
+        Guid serviceId,
+        string serviceCategory,
+        string subCategory,
+        string customerName,
+        string customerMobileCountryCode,
+        string customerMobile,
+        string animalType,
+        string petName,
+        DateOnly bookingDate,
+        TimeOnly startTime,
+        TimeOnly endTime,
+        string serviceLocation,
+        string? customerLocation,
+        decimal pricePerHour,
+        string? jobNotes,
+        int capacity,
+        CancellationToken cancellationToken)
+    {
+        var serviceLock = serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
+        await serviceLock.WaitAsync(cancellationToken);
+        try
+        {
+            var concurrent = bookings.Values.Count(b =>
+                b.ServiceId == serviceId
+                && b.BookingDate == bookingDate
+                && b.Status == "Confirmed"
+                && b.StartTime < endTime
+                && b.EndTime > startTime);
+
+            if (concurrent >= capacity)
+            {
+                throw new BookingCapacityExceededException(serviceId, bookingDate, startTime, endTime);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var row = new BookingRow
+            {
+                BookingId = Guid.NewGuid(),
+                ProviderId = providerId,
+                PetParentId = null,
+                ServiceId = serviceId,
+                ServiceCategory = serviceCategory,
+                SubCategory = subCategory,
+                ServiceItemCode = null,
+                BookingDate = bookingDate,
+                StartTime = startTime,
+                EndTime = endTime,
+                Status = "Confirmed",
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now,
+                CancelledAtUtc = null,
+                Source = "Custom",
+                CustomerName = customerName,
+                CustomerMobileCountryCode = customerMobileCountryCode,
+                CustomerMobile = customerMobile,
+                AnimalType = animalType,
+                PetName = petName,
+                ServiceLocation = serviceLocation,
+                CustomerLocation = customerLocation,
+                PricePerHour = pricePerHour,
+                JobNotes = jobNotes
             };
 
             bookings[row.BookingId] = row;
@@ -162,16 +239,28 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             row.Status,
             row.CreatedAtUtc,
             row.UpdatedAtUtc,
-            row.CancelledAtUtc);
+            row.CancelledAtUtc,
+            row.ServiceItemCode,
+            row.Source,
+            row.CustomerName,
+            row.CustomerMobileCountryCode,
+            row.CustomerMobile,
+            row.AnimalType,
+            row.PetName,
+            row.ServiceLocation,
+            row.CustomerLocation,
+            row.PricePerHour,
+            row.JobNotes);
 
     private sealed class BookingRow
     {
         public Guid BookingId { get; init; }
         public Guid ProviderId { get; init; }
-        public Guid PetParentId { get; init; }
+        public Guid? PetParentId { get; init; }
         public Guid ServiceId { get; init; }
         public required string ServiceCategory { get; init; }
         public required string SubCategory { get; init; }
+        public string? ServiceItemCode { get; init; }
         public DateOnly BookingDate { get; init; }
         public TimeOnly StartTime { get; init; }
         public TimeOnly EndTime { get; init; }
@@ -179,5 +268,15 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         public DateTimeOffset CreatedAtUtc { get; init; }
         public DateTimeOffset UpdatedAtUtc { get; set; }
         public DateTimeOffset? CancelledAtUtc { get; set; }
+        public required string Source { get; init; }
+        public string? CustomerName { get; init; }
+        public string? CustomerMobileCountryCode { get; init; }
+        public string? CustomerMobile { get; init; }
+        public string? AnimalType { get; init; }
+        public string? PetName { get; init; }
+        public string? ServiceLocation { get; init; }
+        public string? CustomerLocation { get; init; }
+        public decimal? PricePerHour { get; init; }
+        public string? JobNotes { get; init; }
     }
 }

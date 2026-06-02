@@ -100,14 +100,19 @@ public sealed class PetGroomerOffering
 
 public sealed class GroomingOffering
 {
-    [JsonPropertyName("pricePerHour")]
-    public decimal PricePerHour { get; set; }
+    /// <summary>
+    /// The provider's menu of grooming services, one entry per service they offer.
+    /// Each item has a stable canonical <see cref="GroomingServiceItem.Code"/>
+    /// (from <c>GroomingServiceCatalog</c>) plus per-groomer price + duration +
+    /// active flag. Capacity (`maxPetsAtOneTime` on the parent offering) is the
+    /// shop-wide bucket — all grooming bookings on this provider compete for the
+    /// same slot capacity.
+    /// </summary>
+    [JsonPropertyName("services")]
+    public List<GroomingServiceItem> Services { get; set; } = new();
 
     [JsonPropertyName("addOns")]
     public List<string> AddOns { get; set; } = new();
-
-    [JsonPropertyName("minimumBookingHours")]
-    public int MinimumBookingHours { get; set; }
 
     [JsonPropertyName("latePickupCharges")]
     public decimal LatePickupCharges { get; set; }
@@ -117,4 +122,19 @@ public sealed class GroomingOffering
 
     [JsonPropertyName("pickUpTime")]
     public TimeOnly PickUpTime { get; set; }
+}
+
+public sealed class GroomingServiceItem
+{
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [JsonPropertyName("price")]
+    public decimal Price { get; set; }
+
+    [JsonPropertyName("durationMinutes")]
+    public int DurationMinutes { get; set; }
+
+    [JsonPropertyName("isActive")]
+    public bool IsActive { get; set; } = true;
 }

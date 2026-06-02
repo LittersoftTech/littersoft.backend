@@ -17,6 +17,7 @@ BEGIN
            [DateOfBirth],
            [MobileVerifiedAtUtc],
            [OnboardingStatus],
+           [IsActive],
            [CreatedAtUtc],
            [UpdatedAtUtc]
     FROM [Provider].[Providers]

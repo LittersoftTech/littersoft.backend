@@ -11,6 +11,15 @@ public interface IEventService
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Catalog-wide listing with optional filters. Every <see cref="EventListFilter"/>
+    /// field is optional; omitting all of them returns every event. Validates enum-
+    /// shaped filters (category, type, amenities) and the date-window ordering.
+    /// </summary>
+    Task<IReadOnlyCollection<EventResult>> ListAsync(
+        EventListFilter filter,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Bumps the requested counter (View | Share | Inquiry) on the event.
     /// Open to any signed-in caller — these are public engagement signals,
     /// not provider-scoped. Throws <see cref="EventNotFoundException"/> if

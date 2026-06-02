@@ -48,14 +48,17 @@ BEGIN
     DECLARE @Conflicts TABLE (
         ServiceId UNIQUEIDENTIFIER NOT NULL,
         BookingId UNIQUEIDENTIFIER NOT NULL,
-        PetParentId UNIQUEIDENTIFIER NOT NULL,
+        PetParentId UNIQUEIDENTIFIER NULL,
+        Source NVARCHAR(16) NOT NULL,
+        CustomerName NVARCHAR(200) NULL,
         BookingDate DATE NOT NULL,
         StartTime TIME(0) NOT NULL,
         EndTime TIME(0) NOT NULL
     );
 
-    INSERT INTO @Conflicts (ServiceId, BookingId, PetParentId, BookingDate, StartTime, EndTime)
-    SELECT b.[ServiceId], b.[BookingId], b.[PetParentId], b.[BookingDate], b.[StartTime], b.[EndTime]
+    INSERT INTO @Conflicts (ServiceId, BookingId, PetParentId, Source, CustomerName, BookingDate, StartTime, EndTime)
+    SELECT b.[ServiceId], b.[BookingId], b.[PetParentId], b.[Source], b.[CustomerName],
+           b.[BookingDate], b.[StartTime], b.[EndTime]
     FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
     INNER JOIN @ServiceIds AS s ON s.[ServiceId] = b.[ServiceId]
     WHERE b.[Status] = N'Confirmed'
@@ -69,7 +72,8 @@ BEGIN
 
     IF EXISTS (SELECT 1 FROM @Conflicts)
     BEGIN
-        SELECT ServiceId, BookingId, PetParentId, BookingDate, StartTime, EndTime
+        SELECT ServiceId, BookingId, PetParentId, Source, CustomerName,
+               BookingDate, StartTime, EndTime
         FROM @Conflicts
         ORDER BY ServiceId, BookingDate, StartTime;
 

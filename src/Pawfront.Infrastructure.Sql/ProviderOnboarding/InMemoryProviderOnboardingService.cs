@@ -145,6 +145,67 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
         }
     }
 
+    public Task<ResolveProviderByFirebaseUidResponse> ResolveProviderByFirebaseUidAsync(
+        string firebaseUserId,
+        CancellationToken cancellationToken)
+    {
+        var normalized = Required(firebaseUserId, nameof(firebaseUserId));
+
+        lock (syncRoot)
+        {
+            if (!authIdentityIdsByFirebaseUserId.TryGetValue(normalized, out var identityId))
+            {
+                throw new ProviderAuthIdentityForFirebaseUserNotFoundException(normalized);
+            }
+
+            var identity = authIdentities[identityId];
+            ProviderProfileState? profile = null;
+            if (identity.ProviderId is { } providerId
+                && profilesByProviderId.TryGetValue(providerId, out var foundProfile))
+            {
+                profile = foundProfile;
+            }
+
+            return Task.FromResult(new ResolveProviderByFirebaseUidResponse(
+                identity.ProviderAuthIdentityId,
+                identity.ProviderId,
+                identity.FirebaseUserId,
+                identity.Email,
+                identity.IsEmailVerified,
+                identity.DisplayName,
+                identity.SignUpStatus,
+                profile is not null,
+                profile?.OnboardingStatus,
+                profile?.MobileVerifiedAtUtc,
+                profile?.IsActive));
+        }
+    }
+
+    public Task<SetActiveStatusOutcome> SetActiveStatusAsync(
+        Guid providerId,
+        bool isActive,
+        CancellationToken cancellationToken)
+    {
+        // Dev fallback only. Bookings live in InMemoryBookingStore (not reachable
+        // from this service), so the conflict check is skipped here. Production
+        // uses the SQL path, which enforces it inside Provider.SetProviderActiveStatus.
+        var now = DateTimeOffset.UtcNow;
+
+        lock (syncRoot)
+        {
+            if (!profilesByProviderId.TryGetValue(providerId, out var profile))
+            {
+                throw new ProviderProfileNotFoundException(providerId);
+            }
+
+            profile.IsActive = isActive;
+            profile.UpdatedAtUtc = now;
+
+            return Task.FromResult<SetActiveStatusOutcome>(
+                new SetActiveStatusOutcome.Updated(providerId, isActive, now));
+        }
+    }
+
     public async Task<SendProviderMobileOtpResponse> SendProviderMobileOtpAsync(
         Guid providerId,
         CancellationToken cancellationToken)
@@ -270,6 +331,7 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
             profile.DateOfBirth,
             profile.MobileVerifiedAtUtc,
             profile.OnboardingStatus,
+            profile.IsActive,
             profile.CreatedAtUtc,
             profile.UpdatedAtUtc);
     }
@@ -426,6 +488,7 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
         public DateOnly DateOfBirth { get; init; }
         public DateTimeOffset? MobileVerifiedAtUtc { get; set; }
         public required string OnboardingStatus { get; set; }
+        public bool IsActive { get; set; } = true;
         public DateTimeOffset CreatedAtUtc { get; init; }
         public DateTimeOffset UpdatedAtUtc { get; set; }
     }

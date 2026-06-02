@@ -153,6 +153,12 @@ BEGIN
         [MobileVerifiedAtUtc] DATETIME2(7) NULL,
         [OnboardingStatus] NVARCHAR(32) NOT NULL
             CONSTRAINT [DF_Providers_OnboardingStatus] DEFAULT N'MobileVerificationPending',
+        -- Master Active/Inactive switch. When 0, no new bookings can be created on
+        -- ANY of this provider's services (Booking.CreateBooking enforces). Flipped
+        -- via [Provider].[SetProviderActiveStatus]; the deactivation path rejects
+        -- the toggle if future confirmed bookings still exist.
+        [IsActive] BIT NOT NULL
+            CONSTRAINT [DF_Providers_IsActive] DEFAULT 1,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_Providers_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         [UpdatedAtUtc] DATETIME2(7) NOT NULL
@@ -179,6 +185,19 @@ IF NOT EXISTS (
       AND [object_id] = OBJECT_ID(N'[Provider].[Providers]'))
     CREATE UNIQUE INDEX [UX_Providers_MobileNumber]
         ON [Provider].[Providers] ([MobileCountryCode], [MobileNumber]);
+GO
+
+-- Add [IsActive] column to existing Providers tables (idempotent for upgrades).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'IsActive'
+      AND [object_id] = OBJECT_ID(N'[Provider].[Providers]'))
+BEGIN
+    ALTER TABLE [Provider].[Providers]
+        ADD [IsActive] BIT NOT NULL
+            CONSTRAINT [DF_Providers_IsActive] DEFAULT 1;
+    PRINT 'Added column [Provider].[Providers].[IsActive].';
+END
 GO
 
 -- Add the deferred back-FK on ProviderAuthIdentities now that Providers exists.
@@ -865,13 +884,25 @@ BEGIN
         [BookingId] UNIQUEIDENTIFIER NOT NULL
             CONSTRAINT [DF_Bookings_BookingId] DEFAULT NEWSEQUENTIALID(),
         [ProviderId] UNIQUEIDENTIFIER NOT NULL,
-        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [PetParentId] UNIQUEIDENTIFIER NULL,
         [ServiceId] UNIQUEIDENTIFIER NOT NULL,
         [ServiceCategory] NVARCHAR(64) NOT NULL,
         [SubCategory] NVARCHAR(64) NOT NULL,
+        [ServiceItemCode] NVARCHAR(64) NULL,
         [BookingDate] DATE NOT NULL,
         [StartTime] TIME(0) NOT NULL,
         [EndTime] TIME(0) NOT NULL,
+        [Source] NVARCHAR(16) NOT NULL
+            CONSTRAINT [DF_Bookings_Source] DEFAULT N'App',
+        [CustomerName] NVARCHAR(200) NULL,
+        [CustomerMobileCountryCode] NVARCHAR(8) NULL,
+        [CustomerMobile] NVARCHAR(32) NULL,
+        [AnimalType] NVARCHAR(32) NULL,
+        [PetName] NVARCHAR(100) NULL,
+        [ServiceLocation] NVARCHAR(32) NULL,
+        [CustomerLocation] NVARCHAR(500) NULL,
+        [PricePerHour] DECIMAL(10, 2) NULL,
+        [JobNotes] NVARCHAR(2000) NULL,
         [Status] NVARCHAR(32) NOT NULL
             CONSTRAINT [DF_Bookings_Status] DEFAULT N'Confirmed',
         [CreatedAtUtc] DATETIME2(7) NOT NULL
@@ -893,6 +924,44 @@ BEGIN
         CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
             ([Status] = N'Cancelled' AND [CancelledAtUtc] IS NOT NULL)
             OR ([Status] <> N'Cancelled')
+        ),
+        CONSTRAINT [CK_Bookings_Source]
+            CHECK ([Source] IN (N'App', N'Custom')),
+        CONSTRAINT [CK_Bookings_AnimalType]
+            CHECK ([AnimalType] IS NULL
+                OR [AnimalType] IN (N'Dog', N'Cat', N'Hamster', N'GuineaPig')),
+        CONSTRAINT [CK_Bookings_ServiceLocation]
+            CHECK ([ServiceLocation] IS NULL
+                OR [ServiceLocation] IN (N'MyLocation', N'CustomerLocation')),
+        CONSTRAINT [CK_Bookings_PricePerHour_NonNegative]
+            CHECK ([PricePerHour] IS NULL OR [PricePerHour] >= 0),
+        CONSTRAINT [CK_Bookings_SourceShape] CHECK
+        (
+            ([Source] = N'App'
+                AND [PetParentId] IS NOT NULL
+                AND [CustomerName] IS NULL
+                AND [CustomerMobileCountryCode] IS NULL
+                AND [CustomerMobile] IS NULL
+                AND [AnimalType] IS NULL
+                AND [PetName] IS NULL
+                AND [ServiceLocation] IS NULL
+                AND [CustomerLocation] IS NULL
+                AND [PricePerHour] IS NULL)
+         OR ([Source] = N'Custom'
+                AND [PetParentId] IS NULL
+                AND [CustomerName] IS NOT NULL
+                AND [CustomerMobileCountryCode] IS NOT NULL
+                AND [CustomerMobile] IS NOT NULL
+                AND [AnimalType] IS NOT NULL
+                AND [PetName] IS NOT NULL
+                AND [ServiceLocation] IS NOT NULL
+                AND [PricePerHour] IS NOT NULL)
+        ),
+        CONSTRAINT [CK_Bookings_CustomerLocationShape] CHECK
+        (
+            ([ServiceLocation] = N'CustomerLocation' AND [CustomerLocation] IS NOT NULL)
+         OR ([ServiceLocation] = N'MyLocation'       AND [CustomerLocation] IS NULL)
+         OR ([ServiceLocation] IS NULL               AND [CustomerLocation] IS NULL)
         )
     );
     PRINT 'Created table [Booking].[Bookings].';
@@ -923,6 +992,21 @@ BEGIN
     ALTER TABLE [Booking].[Bookings]
         ADD CONSTRAINT [FK_Bookings_ProviderServices_ServiceId]
             FOREIGN KEY ([ServiceId]) REFERENCES [Provider].[ProviderServices] ([ServiceId]);
+END
+GO
+
+-- Add [ServiceItemCode] to existing Bookings tables (idempotent for upgrades).
+-- Nullable so existing non-grooming bookings stay valid; only PetGroomer
+-- bookings populate it. Resolves which menu item under the GroomingSession
+-- service this booking is for.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'ServiceItemCode'
+      AND [object_id] = OBJECT_ID(N'[Booking].[Bookings]'))
+BEGIN
+    ALTER TABLE [Booking].[Bookings]
+        ADD [ServiceItemCode] NVARCHAR(64) NULL;
+    PRINT 'Added column [Booking].[Bookings].[ServiceItemCode].';
 END
 GO
 
@@ -991,6 +1075,123 @@ IF NOT EXISTS (
     CREATE INDEX [IX_Bookings_PetParent_Status]
         ON [Booking].[Bookings] ([PetParentId], [Status])
         INCLUDE ([ServiceId], [BookingDate], [StartTime], [EndTime], [ProviderId]);
+GO
+
+-- Migration: add private/custom-job columns + the [Source] discriminator to an
+-- existing [Booking].[Bookings] table. Idempotent. PetParentId must also be made
+-- nullable so Source='Custom' rows can omit it.
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Bookings' AND [schema_id] = SCHEMA_ID(N'Booking'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'Source'
+      AND [object_id] = OBJECT_ID(N'[Booking].[Bookings]'))
+BEGIN
+    PRINT 'Adding private-job columns + [Source] discriminator to [Booking].[Bookings].';
+
+    ALTER TABLE [Booking].[Bookings]
+        ADD [Source] NVARCHAR(16) NOT NULL
+                CONSTRAINT [DF_Bookings_Source] DEFAULT N'App',
+            [CustomerName] NVARCHAR(200) NULL,
+            [CustomerMobileCountryCode] NVARCHAR(8) NULL,
+            [CustomerMobile] NVARCHAR(32) NULL,
+            [AnimalType] NVARCHAR(32) NULL,
+            [PetName] NVARCHAR(100) NULL,
+            [ServiceLocation] NVARCHAR(32) NULL,
+            [CustomerLocation] NVARCHAR(500) NULL,
+            [PricePerHour] DECIMAL(10, 2) NULL,
+            [JobNotes] NVARCHAR(2000) NULL;
+END
+GO
+
+-- Drop the PetParentId NOT NULL constraint (if present) so Custom rows can be NULL.
+IF EXISTS (
+    SELECT 1
+    FROM sys.columns
+    WHERE [name] = N'PetParentId'
+      AND [object_id] = OBJECT_ID(N'[Booking].[Bookings]')
+      AND is_nullable = 0)
+BEGIN
+    PRINT 'Relaxing [Booking].[Bookings].[PetParentId] to NULLABLE.';
+    ALTER TABLE [Booking].[Bookings]
+        ALTER COLUMN [PetParentId] UNIQUEIDENTIFIER NULL;
+END
+GO
+
+-- Add CHECK constraints (idempotent).
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE [name] = N'CK_Bookings_Source')
+BEGIN
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_Source]
+            CHECK ([Source] IN (N'App', N'Custom'));
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE [name] = N'CK_Bookings_AnimalType')
+BEGIN
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_AnimalType]
+            CHECK ([AnimalType] IS NULL
+                OR [AnimalType] IN (N'Dog', N'Cat', N'Hamster', N'GuineaPig'));
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE [name] = N'CK_Bookings_ServiceLocation')
+BEGIN
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_ServiceLocation]
+            CHECK ([ServiceLocation] IS NULL
+                OR [ServiceLocation] IN (N'MyLocation', N'CustomerLocation'));
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE [name] = N'CK_Bookings_PricePerHour_NonNegative')
+BEGIN
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_PricePerHour_NonNegative]
+            CHECK ([PricePerHour] IS NULL OR [PricePerHour] >= 0);
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE [name] = N'CK_Bookings_SourceShape')
+BEGIN
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_SourceShape] CHECK
+        (
+            ([Source] = N'App'
+                AND [PetParentId] IS NOT NULL
+                AND [CustomerName] IS NULL
+                AND [CustomerMobileCountryCode] IS NULL
+                AND [CustomerMobile] IS NULL
+                AND [AnimalType] IS NULL
+                AND [PetName] IS NULL
+                AND [ServiceLocation] IS NULL
+                AND [CustomerLocation] IS NULL
+                AND [PricePerHour] IS NULL)
+         OR ([Source] = N'Custom'
+                AND [PetParentId] IS NULL
+                AND [CustomerName] IS NOT NULL
+                AND [CustomerMobileCountryCode] IS NOT NULL
+                AND [CustomerMobile] IS NOT NULL
+                AND [AnimalType] IS NOT NULL
+                AND [PetName] IS NOT NULL
+                AND [ServiceLocation] IS NOT NULL
+                AND [PricePerHour] IS NOT NULL)
+        );
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE [name] = N'CK_Bookings_CustomerLocationShape')
+BEGIN
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_CustomerLocationShape] CHECK
+        (
+            ([ServiceLocation] = N'CustomerLocation' AND [CustomerLocation] IS NOT NULL)
+         OR ([ServiceLocation] = N'MyLocation'       AND [CustomerLocation] IS NULL)
+         OR ([ServiceLocation] IS NULL               AND [CustomerLocation] IS NULL)
+        );
+END
 GO
 
 
@@ -1334,6 +1535,7 @@ BEGIN
            [DateOfBirth],
            [MobileVerifiedAtUtc],
            [OnboardingStatus],
+           [IsActive],
            [CreatedAtUtc],
            [UpdatedAtUtc]
     FROM [Provider].[Providers]
@@ -1363,6 +1565,7 @@ BEGIN
            [DateOfBirth],
            [MobileVerifiedAtUtc],
            [OnboardingStatus],
+           [IsActive],
            [CreatedAtUtc],
            [UpdatedAtUtc]
     FROM [Provider].[Providers]
@@ -1370,6 +1573,133 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Provider].[GetProviderProfile].';
+GO
+
+
+-- 3.2c GetProviderByFirebaseUid -----------------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[GetProviderByFirebaseUid]
+    @FirebaseUserId NVARCHAR(128)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Resolves a Firebase user id (sub/user_id claim) to the persisted provider
+    -- identity, so the mobile app can re-hydrate state after a reinstall (which
+    -- wipes local storage). LEFT JOIN to Providers: the auth identity may exist
+    -- without a profile row (mid-onboarding state), in which case ProviderId and
+    -- the profile columns come back NULL. Empty result set means no auth identity
+    -- exists for this Firebase user.
+    SELECT ai.[ProviderAuthIdentityId],
+           ai.[ProviderId],
+           ai.[FirebaseUserId],
+           ai.[Email],
+           ai.[IsEmailVerified],
+           ai.[DisplayName],
+           ai.[SignUpStatus],
+           CAST(CASE WHEN p.[ProviderId] IS NOT NULL THEN 1 ELSE 0 END AS BIT) AS [HasProfile],
+           p.[OnboardingStatus],
+           p.[MobileVerifiedAtUtc],
+           p.[IsActive]
+    FROM [Provider].[ProviderAuthIdentities] AS ai
+    LEFT JOIN [Provider].[Providers] AS p
+        ON p.[ProviderId] = ai.[ProviderId]
+    WHERE ai.[FirebaseUserId] = @FirebaseUserId;
+END;
+GO
+PRINT 'Created/updated [Provider].[GetProviderByFirebaseUid].';
+GO
+
+
+-- 3.2d SetProviderActiveStatus ------------------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[SetProviderActiveStatus]
+    @ProviderId UNIQUEIDENTIFIER,
+    @IsActive BIT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    -- Lock the provider row so a concurrent SetProviderActiveStatus / booking
+    -- create on the same provider serialises behind us.
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[Providers] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [ProviderId] = @ProviderId
+    )
+    BEGIN
+        THROW 51100, 'Provider profile was not found.', 1;
+    END
+
+    -- When DEACTIVATING, check whether any future confirmed bookings exist
+    -- across ALL of this provider's services. A confirmed booking is "in the
+    -- future" when its date is strictly after today, OR it's today but hasn't
+    -- ended yet. UPDLOCK + HOLDLOCK serialises us against concurrent
+    -- Booking.CreateBooking so no booking can sneak in between the check and
+    -- the flip.
+    IF @IsActive = 0
+    BEGIN
+        DECLARE @Today DATE = CAST(SYSUTCDATETIME() AS DATE);
+        DECLARE @NowTime TIME(0) = CAST(SYSUTCDATETIME() AS TIME(0));
+
+        DECLARE @Conflicts TABLE (
+            BookingId UNIQUEIDENTIFIER NOT NULL,
+            ServiceId UNIQUEIDENTIFIER NOT NULL,
+            ServiceCategory NVARCHAR(64) NOT NULL,
+            SubCategory NVARCHAR(64) NOT NULL,
+            PetParentId UNIQUEIDENTIFIER NULL,
+            Source NVARCHAR(16) NOT NULL,
+            CustomerName NVARCHAR(200) NULL,
+            BookingDate DATE NOT NULL,
+            StartTime TIME(0) NOT NULL,
+            EndTime TIME(0) NOT NULL
+        );
+
+        INSERT INTO @Conflicts (BookingId, ServiceId, ServiceCategory, SubCategory,
+                                PetParentId, Source, CustomerName, BookingDate, StartTime, EndTime)
+        SELECT b.[BookingId], b.[ServiceId], b.[ServiceCategory], b.[SubCategory],
+               b.[PetParentId], b.[Source], b.[CustomerName],
+               b.[BookingDate], b.[StartTime], b.[EndTime]
+        FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
+        WHERE b.[ProviderId] = @ProviderId
+          AND b.[Status] = N'Confirmed'
+          AND (
+              b.[BookingDate] > @Today
+              OR (b.[BookingDate] = @Today AND b.[EndTime] > @NowTime)
+          );
+
+        IF EXISTS (SELECT 1 FROM @Conflicts)
+        BEGIN
+            -- Conflict-shape result set: 10 columns (was 8 before custom-job
+            -- support landed). The Application reader detects this shape vs
+            -- the 3-column success shape and emits the BookingsExist variant.
+            -- No write happened — rollback to release the UPDLOCK + HOLDLOCK.
+            SELECT BookingId, ServiceId, ServiceCategory, SubCategory,
+                   PetParentId, Source, CustomerName,
+                   BookingDate, StartTime, EndTime
+            FROM @Conflicts
+            ORDER BY BookingDate ASC, StartTime ASC;
+
+            ROLLBACK TRANSACTION;
+            RETURN;
+        END
+    END
+
+    UPDATE [Provider].[Providers]
+    SET [IsActive] = @IsActive,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    WHERE [ProviderId] = @ProviderId;
+
+    -- Success-shape result set: 3 columns.
+    SELECT @ProviderId AS [ProviderId],
+           @IsActive AS [IsActive],
+           SYSUTCDATETIME() AS [UpdatedAtUtc];
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Provider].[SetProviderActiveStatus].';
 GO
 
 
@@ -1834,6 +2164,7 @@ CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
     @ServiceId UNIQUEIDENTIFIER,
     @ServiceCategory NVARCHAR(64),
     @SubCategory NVARCHAR(64),
+    @ServiceItemCode NVARCHAR(64) = NULL,
     @BookingDate DATE,
     @StartTime TIME(0),
     @EndTime TIME(0),
@@ -1845,8 +2176,20 @@ BEGIN
 
     BEGIN TRANSACTION;
 
-    IF NOT EXISTS (SELECT 1 FROM [Provider].[Providers] WHERE [ProviderId] = @ProviderId)
+    DECLARE @ProviderIsActive BIT;
+    SELECT @ProviderIsActive = [IsActive]
+    FROM [Provider].[Providers] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [ProviderId] = @ProviderId;
+
+    IF @ProviderIsActive IS NULL
         THROW 51061, 'Provider was not found.', 1;
+
+    -- Master Active/Inactive switch — when the provider has flipped themselves
+    -- inactive, NO new bookings are accepted on ANY of their services. The
+    -- UPDLOCK + HOLDLOCK above serialises us against a concurrent
+    -- SetProviderActiveStatus call, so the check is race-safe.
+    IF @ProviderIsActive = 0
+        THROW 51067, 'Provider is currently inactive and is not accepting new bookings.', 1;
 
     IF NOT EXISTS (SELECT 1 FROM [Customer].[PetParents] WHERE [PetParentId] = @PetParentId)
         THROW 51060, 'Pet parent was not found.', 1;
@@ -1876,16 +2219,19 @@ BEGIN
 
     INSERT INTO [Booking].[Bookings]
     ([ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
-     [BookingDate], [StartTime], [EndTime])
+     [ServiceItemCode], [BookingDate], [StartTime], [EndTime])
     OUTPUT inserted.[BookingId] INTO @InsertedBookingId
     VALUES (@ProviderId, @PetParentId, @ServiceId, @ServiceCategory, @SubCategory,
-            @BookingDate, @StartTime, @EndTime);
+            @ServiceItemCode, @BookingDate, @StartTime, @EndTime);
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);
 
     SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
            [BookingDate], [StartTime], [EndTime], [Status],
-           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
+           [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
+           [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
+           [PricePerHour], [JobNotes]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 
@@ -1905,7 +2251,10 @@ BEGIN
 
     SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
            [BookingDate], [StartTime], [EndTime], [Status],
-           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
+           [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
+           [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
+           [PricePerHour], [JobNotes]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 END;
@@ -1951,7 +2300,10 @@ BEGIN
 
     SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
            [BookingDate], [StartTime], [EndTime], [Status],
-           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
+           [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
+           [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
+           [PricePerHour], [JobNotes]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 
@@ -1973,7 +2325,10 @@ BEGIN
 
     SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
            [BookingDate], [StartTime], [EndTime], [Status],
-           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
+           [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
+           [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
+           [PricePerHour], [JobNotes]
     FROM [Booking].[Bookings]
     WHERE [ProviderId] = @ProviderId
       AND (@ServiceId IS NULL OR [ServiceId] = @ServiceId)
@@ -1994,7 +2349,10 @@ BEGIN
 
     SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
            [BookingDate], [StartTime], [EndTime], [Status],
-           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
+           [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
+           [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
+           [PricePerHour], [JobNotes]
     FROM [Booking].[Bookings]
     WHERE [PetParentId] = @PetParentId
     ORDER BY [BookingDate] DESC, [StartTime] DESC;
@@ -2021,6 +2379,102 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Booking].[GetBookingsForDate].';
+GO
+
+
+-- 3.20b Booking.CreateCustomBooking ------------------------------------------
+-- Provider-initiated private/custom booking for an unregistered walk-in. Same
+-- race-safe per-service capacity check as [Booking].[CreateBooking]; differs
+-- only in identifying the customer via free-text fields instead of PetParentId.
+CREATE OR ALTER PROCEDURE [Booking].[CreateCustomBooking]
+    @ProviderId                UNIQUEIDENTIFIER,
+    @ServiceId                 UNIQUEIDENTIFIER,
+    @ServiceCategory           NVARCHAR(64),
+    @SubCategory               NVARCHAR(64),
+    @CustomerName              NVARCHAR(200),
+    @CustomerMobileCountryCode NVARCHAR(8),
+    @CustomerMobile            NVARCHAR(32),
+    @AnimalType                NVARCHAR(32),
+    @PetName                   NVARCHAR(100),
+    @BookingDate               DATE,
+    @StartTime                 TIME(0),
+    @EndTime                   TIME(0),
+    @ServiceLocation           NVARCHAR(32),
+    @CustomerLocation          NVARCHAR(500) = NULL,
+    @PricePerHour              DECIMAL(10, 2),
+    @JobNotes                  NVARCHAR(2000) = NULL,
+    @Capacity                  INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    DECLARE @ProviderIsActive BIT;
+    SELECT @ProviderIsActive = [IsActive]
+    FROM [Provider].[Providers] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [ProviderId] = @ProviderId;
+
+    IF @ProviderIsActive IS NULL
+        THROW 51061, 'Provider was not found.', 1;
+
+    IF @ProviderIsActive = 0
+        THROW 51067, 'Provider is currently inactive and is not accepting new bookings.', 1;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[ProviderServices] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [ServiceId] = @ServiceId
+          AND [ProviderId] = @ProviderId
+          AND [IsActive] = 1
+    )
+        THROW 51066, 'Service is not valid or active for this provider.', 1;
+
+    -- Custom and App bookings share one capacity bucket per ServiceId.
+    DECLARE @Concurrent INT;
+    SELECT @Concurrent = COUNT(*)
+    FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [ServiceId] = @ServiceId
+      AND [BookingDate] = @BookingDate
+      AND [Status] = N'Confirmed'
+      AND [StartTime] < @EndTime
+      AND [EndTime] > @StartTime;
+
+    IF @Concurrent >= @Capacity
+        THROW 51062, 'No remaining capacity for this slot.', 1;
+
+    DECLARE @InsertedBookingId TABLE ([BookingId] UNIQUEIDENTIFIER);
+
+    INSERT INTO [Booking].[Bookings]
+    ([ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
+     [ServiceItemCode], [BookingDate], [StartTime], [EndTime],
+     [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
+     [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
+     [PricePerHour], [JobNotes])
+    OUTPUT inserted.[BookingId] INTO @InsertedBookingId
+    VALUES
+    (@ProviderId, NULL, @ServiceId, @ServiceCategory, @SubCategory,
+     NULL, @BookingDate, @StartTime, @EndTime,
+     N'Custom', @CustomerName, @CustomerMobileCountryCode, @CustomerMobile,
+     @AnimalType, @PetName, @ServiceLocation, @CustomerLocation,
+     @PricePerHour, @JobNotes);
+
+    DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);
+
+    SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
+           [BookingDate], [StartTime], [EndTime], [Status],
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
+           [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
+           [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
+           [PricePerHour], [JobNotes]
+    FROM [Booking].[Bookings]
+    WHERE [BookingId] = @BookingId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Booking].[CreateCustomBooking].';
 GO
 
 
@@ -2141,6 +2595,81 @@ PRINT 'Created/updated [Event].[ListEventsByProvider].';
 GO
 
 
+-- 3.12b Event.ListEvents (catalogue-wide list with optional filters) ---------
+CREATE OR ALTER PROCEDURE [Event].[ListEvents]
+    @EventCategory   NVARCHAR(64)  = NULL,
+    @EventType       NVARCHAR(32)  = NULL,
+    @StartDate       DATE          = NULL,
+    @EndDate         DATE          = NULL,
+    @IsChildFriendly BIT           = NULL,
+    -- JSON array of amenity codes (e.g. N'["Restrooms","FreeParking"]').
+    -- When supplied, only events that carry EVERY listed amenity are returned.
+    @AmenitiesJson   NVARCHAR(MAX) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Amenities TABLE ([Amenity] NVARCHAR(64) NOT NULL PRIMARY KEY);
+
+    IF (@AmenitiesJson IS NOT NULL AND LTRIM(RTRIM(@AmenitiesJson)) <> N'')
+    BEGIN
+        INSERT INTO @Amenities ([Amenity])
+        SELECT DISTINCT [value]
+        FROM OPENJSON(@AmenitiesJson)
+        WHERE [value] IS NOT NULL AND LTRIM(RTRIM([value])) <> N'';
+    END
+
+    DECLARE @AmenityCount INT = (SELECT COUNT(*) FROM @Amenities);
+
+    ;WITH FilteredEvents AS
+    (
+        SELECT e.[EventId]
+        FROM [Event].[Events] e
+        WHERE (@EventCategory   IS NULL OR e.[EventCategory]   = @EventCategory)
+          AND (@EventType       IS NULL OR e.[EventType]       = @EventType)
+          AND (@IsChildFriendly IS NULL OR e.[IsChildFriendly] = @IsChildFriendly)
+          AND (@StartDate IS NULL OR e.[EndDate]   >= @StartDate)
+          AND (@EndDate   IS NULL OR e.[StartDate] <= @EndDate)
+          AND (
+                @AmenityCount = 0
+                OR @AmenityCount = (
+                    SELECT COUNT(DISTINCT a.[Amenity])
+                    FROM [Event].[EventAmenities] a
+                    INNER JOIN @Amenities f ON f.[Amenity] = a.[Amenity]
+                    WHERE a.[EventId] = e.[EventId])
+              )
+    )
+    SELECT e.[EventId], e.[ProviderId], e.[EventCategory], e.[IsChildFriendly],
+           e.[Title], e.[Description], e.[BannerImageUrl], e.[EventType],
+           e.[StartDate], e.[EndDate], e.[StartTime], e.[EndTime],
+           e.[CreatedAtUtc], e.[UpdatedAtUtc]
+    FROM [Event].[Events] e
+    INNER JOIN FilteredEvents f ON f.[EventId] = e.[EventId]
+    ORDER BY e.[StartDate] DESC, e.[StartTime] DESC, e.[EventId] ASC;
+
+    SELECT a.[EventId], a.[Amenity]
+    FROM [Event].[EventAmenities] a
+    INNER JOIN [Event].[Events] e ON e.[EventId] = a.[EventId]
+    WHERE (@EventCategory   IS NULL OR e.[EventCategory]   = @EventCategory)
+      AND (@EventType       IS NULL OR e.[EventType]       = @EventType)
+      AND (@IsChildFriendly IS NULL OR e.[IsChildFriendly] = @IsChildFriendly)
+      AND (@StartDate IS NULL OR e.[EndDate]   >= @StartDate)
+      AND (@EndDate   IS NULL OR e.[StartDate] <= @EndDate)
+      AND (
+            @AmenityCount = 0
+            OR @AmenityCount = (
+                SELECT COUNT(DISTINCT a2.[Amenity])
+                FROM [Event].[EventAmenities] a2
+                INNER JOIN @Amenities ff ON ff.[Amenity] = a2.[Amenity]
+                WHERE a2.[EventId] = e.[EventId])
+          )
+    ORDER BY a.[EventId], a.[Amenity];
+END;
+GO
+PRINT 'Created/updated [Event].[ListEvents].';
+GO
+
+
 -- 3.21 Provider.CreateClosures (batch insert, one row per service id) --------
 -- Replaces the singular [Provider].[CreateClosure] sproc. The old name is
 -- dropped below to keep the schema tidy.
@@ -2186,14 +2715,17 @@ BEGIN
     DECLARE @Conflicts TABLE (
         ServiceId UNIQUEIDENTIFIER NOT NULL,
         BookingId UNIQUEIDENTIFIER NOT NULL,
-        PetParentId UNIQUEIDENTIFIER NOT NULL,
+        PetParentId UNIQUEIDENTIFIER NULL,
+        Source NVARCHAR(16) NOT NULL,
+        CustomerName NVARCHAR(200) NULL,
         BookingDate DATE NOT NULL,
         StartTime TIME(0) NOT NULL,
         EndTime TIME(0) NOT NULL
     );
 
-    INSERT INTO @Conflicts (ServiceId, BookingId, PetParentId, BookingDate, StartTime, EndTime)
-    SELECT b.[ServiceId], b.[BookingId], b.[PetParentId], b.[BookingDate], b.[StartTime], b.[EndTime]
+    INSERT INTO @Conflicts (ServiceId, BookingId, PetParentId, Source, CustomerName, BookingDate, StartTime, EndTime)
+    SELECT b.[ServiceId], b.[BookingId], b.[PetParentId], b.[Source], b.[CustomerName],
+           b.[BookingDate], b.[StartTime], b.[EndTime]
     FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
     INNER JOIN @ServiceIds AS s ON s.[ServiceId] = b.[ServiceId]
     WHERE b.[Status] = N'Confirmed'
@@ -2205,7 +2737,8 @@ BEGIN
 
     IF EXISTS (SELECT 1 FROM @Conflicts)
     BEGIN
-        SELECT ServiceId, BookingId, PetParentId, BookingDate, StartTime, EndTime
+        SELECT ServiceId, BookingId, PetParentId, Source, CustomerName,
+               BookingDate, StartTime, EndTime
         FROM @Conflicts
         ORDER BY ServiceId, BookingDate, StartTime;
         ROLLBACK TRANSACTION;

@@ -13,6 +13,7 @@ internal static class ProviderOnboardingEndpoints
         var onboarding = builder.MapGroup("/provider-onboarding");
         onboarding.MapPost("/firebase-auth", SaveFirebaseAuth);
         onboarding.MapPost("/profile", CompleteProfile);
+        onboarding.MapGet("/me", ResolveProviderFromFirebaseToken);
 
         var mobileVerification = builder.MapGroup("/providers/{providerId:guid}/mobile-verification");
         mobileVerification.MapPost("/otp", SendOtp);
@@ -37,6 +38,29 @@ internal static class ProviderOnboardingEndpoints
         catch (ProviderProfileNotFoundException exception)
         {
             return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> ResolveProviderFromFirebaseToken(
+        HttpContext httpContext,
+        IProviderOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var firebaseUserId = FirebaseClaims.GetFirebaseUserId(httpContext.User);
+            var response = await onboardingService.ResolveProviderByFirebaseUidAsync(
+                firebaseUserId,
+                cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (ProviderAuthIdentityForFirebaseUserNotFoundException exception)
+        {
+            return ApiResults.NotFound("ProviderAuthIdentityNotFound", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
         }
     }
 

@@ -40,11 +40,11 @@ internal sealed class SqlProviderClosureStore(
         try
         {
             // The sproc emits exactly one result set in either branch:
-            //   - on conflict: rows of (ServiceId, BookingId, PetParentId, BookingDate, StartTime, EndTime) — 6 cols
+            //   - on conflict: rows of (ServiceId, BookingId, PetParentId, Source, CustomerName, BookingDate, StartTime, EndTime) — 8 cols
             //   - on success: N rows of (ClosureId, ProviderId, ServiceId, StartDate, EndDate, StartTime, EndTime, Reason, CreatedAtUtc) — 9 cols
             await using var reader = await sqlCommand.ExecuteReaderAsync(cancellationToken);
 
-            var isConflictShape = reader.FieldCount == 6;
+            var isConflictShape = reader.FieldCount == 8;
 
             if (isConflictShape)
             {
@@ -54,10 +54,12 @@ internal sealed class SqlProviderClosureStore(
                     conflicts.Add(new ConflictingBooking(
                         ServiceId: reader.GetGuid(0),
                         BookingId: reader.GetGuid(1),
-                        PetParentId: reader.GetGuid(2),
-                        BookingDate: DateOnly.FromDateTime(reader.GetDateTime(3)),
-                        StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(4)),
-                        EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(5))));
+                        PetParentId: reader.IsDBNull(2) ? null : reader.GetGuid(2),
+                        Source: reader.GetString(3),
+                        CustomerName: reader.IsDBNull(4) ? null : reader.GetString(4),
+                        BookingDate: DateOnly.FromDateTime(reader.GetDateTime(5)),
+                        StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(6)),
+                        EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(7))));
                 }
                 return new CreateClosureResult.BookingsExist(conflicts);
             }

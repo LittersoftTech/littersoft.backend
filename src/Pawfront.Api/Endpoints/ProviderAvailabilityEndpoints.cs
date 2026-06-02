@@ -60,8 +60,9 @@ internal static class ProviderAvailabilityEndpoints
         Guid providerId,
         Guid serviceId,
         DateOnly date,
-        decimal durationHours,
+        decimal? durationHours,
         int? granularityMinutes,
+        string? serviceItemCode,
         IProviderAvailabilitySlotService slotService,
         CancellationToken cancellationToken)
     {
@@ -71,8 +72,9 @@ internal static class ProviderAvailabilityEndpoints
                 providerId,
                 serviceId,
                 date,
-                durationHours,
+                durationHours ?? 0m,
                 granularityMinutes ?? DefaultGranularityMinutes,
+                serviceItemCode,
                 cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
@@ -88,6 +90,18 @@ internal static class ProviderAvailabilityEndpoints
         catch (ProviderOfferingNotConfiguredException exception)
         {
             return ApiResults.BadRequest("OfferingNotConfigured", exception.Message);
+        }
+        catch (SlotGroomingItemCodeRequiredException exception)
+        {
+            return ApiResults.BadRequest("ServiceItemCodeRequired", exception.Message);
+        }
+        catch (SlotGroomingItemNotOfferedException exception)
+        {
+            return ApiResults.BadRequest("ServiceItemNotOffered", exception.Message);
+        }
+        catch (SlotGroomingItemInactiveException exception)
+        {
+            return ApiResults.Conflict("ServiceItemInactive", exception.Message);
         }
         catch (InvalidBookingDurationException exception)
         {

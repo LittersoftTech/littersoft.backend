@@ -23,9 +23,35 @@ public interface IBookingSqlStore
         Guid serviceId,
         string serviceCategory,
         string subCategory,
+        string? serviceItemCode,
         DateOnly bookingDate,
         TimeOnly startTime,
         TimeOnly endTime,
+        int capacity,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Race-safe insert of a Source = 'Custom' booking (provider-added private
+    /// job). Mirrors <see cref="CreateAsync"/> but identifies the customer via
+    /// free-text fields. Same 51061 / 51062 / 51066 / 51067 typed exceptions.
+    /// </summary>
+    Task<BookingResult> CreateCustomAsync(
+        Guid providerId,
+        Guid serviceId,
+        string serviceCategory,
+        string subCategory,
+        string customerName,
+        string customerMobileCountryCode,
+        string customerMobile,
+        string animalType,
+        string petName,
+        DateOnly bookingDate,
+        TimeOnly startTime,
+        TimeOnly endTime,
+        string serviceLocation,
+        string? customerLocation,
+        decimal pricePerHour,
+        string? jobNotes,
         int capacity,
         CancellationToken cancellationToken);
 

@@ -24,3 +24,12 @@ public sealed class ProviderOfferingNotConfiguredException(Guid providerId, stri
     : Exception($"Provider '{providerId}' has no offering details configured for '{serviceCategory}'.");
 
 public sealed class InvalidBookingDurationException(string message) : Exception(message);
+
+public sealed class SlotGroomingItemCodeRequiredException()
+    : Exception("A grooming serviceItemCode is required when querying Pet Groomer slots.");
+
+public sealed class SlotGroomingItemNotOfferedException(Guid providerId, string code)
+    : Exception($"Provider '{providerId}' does not offer grooming service '{code}'.");
+
+public sealed class SlotGroomingItemInactiveException(Guid providerId, string code)
+    : Exception($"Grooming service '{code}' is currently disabled for provider '{providerId}'.");

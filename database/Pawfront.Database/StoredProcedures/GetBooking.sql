@@ -16,7 +16,18 @@ BEGIN
            [Status],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [CancelledAtUtc]
+           [CancelledAtUtc],
+           [ServiceItemCode],
+           [Source],
+           [CustomerName],
+           [CustomerMobileCountryCode],
+           [CustomerMobile],
+           [AnimalType],
+           [PetName],
+           [ServiceLocation],
+           [CustomerLocation],
+           [PricePerHour],
+           [JobNotes]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 END;
