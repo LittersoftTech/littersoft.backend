@@ -7,6 +7,8 @@ using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Events;
 using Pawfront.Application.Onboarding;
+using Pawfront.Application.ParentOnboarding;
+using Pawfront.Application.ParentPets;
 using Pawfront.Application.Policies;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.Providers;
@@ -17,6 +19,8 @@ using Pawfront.Infrastructure.Sql.Bookings;
 using Pawfront.Infrastructure.Sql.Closures;
 using Pawfront.Infrastructure.Sql.Events;
 using Pawfront.Infrastructure.Sql.Onboarding;
+using Pawfront.Infrastructure.Sql.ParentOnboarding;
+using Pawfront.Infrastructure.Sql.ParentPets;
 using Pawfront.Infrastructure.Sql.Policies;
 using Pawfront.Infrastructure.Sql.ProviderOnboarding;
 using Pawfront.Infrastructure.Sql.Providers;
@@ -32,6 +36,7 @@ public static class SqlServiceRegistration
     {
         services.AddSingleton<IProviderService, InMemoryProviderService>();
         services.TryAddSingleton<IProviderMobileOtpSender, NoOpProviderMobileOtpSender>();
+        services.TryAddSingleton<IPetParentMobileOtpSender, NoOpPetParentMobileOtpSender>();
 
         var sqlConnectionString = configuration.GetConnectionString("SqlServer");
         var useKeyVault = configuration.GetValue("AzureKeyVault:Enabled", true);
@@ -98,6 +103,27 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderServiceCatalog>(provider =>
                 new SqlProviderServiceCatalog(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IParentOnboardingService>(provider =>
+                new SqlParentOnboardingService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>(),
+                    provider.GetRequiredService<IPetParentMobileOtpSender>()));
+
+            services.AddScoped<IParentPetService>(provider =>
+                new SqlParentPetService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IPetParentOnboardingStatusReader>(provider =>
+                new SqlPetParentOnboardingStatusReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IPetParentOwnershipReader>(provider =>
+                new SqlPetParentOwnershipReader(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
         }

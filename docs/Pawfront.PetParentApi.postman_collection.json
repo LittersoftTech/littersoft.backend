@@ -1,0 +1,462 @@
+{
+  "info": {
+    "name": "Pawfront — Pet Parent API",
+    "_postman_id": "b3e3a1f4-1111-4222-9333-petparentapi0001",
+    "description": "Postman collection for the Pawfront pet-parent host (Pawfront.PetParentApi). All endpoints are under /api/v1 and require a Firebase ID token from the pet-parent Firebase project (`littersoftpetparent`) — passed as `Authorization: Bearer {{idToken}}`.\n\n**Variables to set on import**\n- `baseUrl` — defaults to `https://localhost:7216` (dev). Set to the deployed URL when promoted.\n- `idToken` — Firebase ID token for the signed-in pet parent.\n- `petParentId` — your PetParentId GUID (returned by POST /parent-onboarding/profile).\n- `petId` — a PetId GUID from /pet-parents/{petParentId}/pets.\n- `eventId` / `eventBookingId` / `providerId` / `serviceId` / `parentMobileOtpId` — populate as needed.\n\nResponse envelope is `{ success: bool, data: T | null, error: { code, message } | null }`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{idToken}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://localhost:7216" },
+    { "key": "idToken", "value": "" },
+    { "key": "petParentId", "value": "" },
+    { "key": "petId", "value": "" },
+    { "key": "parentMobileOtpId", "value": "" },
+    { "key": "eventId", "value": "" },
+    { "key": "eventBookingId", "value": "" },
+    { "key": "providerId", "value": "" },
+    { "key": "serviceId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/api/v1/health", "host": ["{{baseUrl}}"], "path": ["api", "v1", "health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Parent Onboarding",
+      "item": [
+        {
+          "name": "POST /parent-onboarding/firebase-auth",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fcmToken\": \"sample-fcm-token\",\n  \"deviceId\": \"sample-device-id\",\n  \"devicePlatform\": \"iOS\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/parent-onboarding/firebase-auth",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "parent-onboarding", "firebase-auth"]
+            },
+            "description": "Upserts Parent.ParentAuthIdentities + (optional) device token from the JWT. Body fields are all optional."
+          }
+        },
+        {
+          "name": "POST /parent-onboarding/profile",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Jane\",\n  \"lastName\": \"Doe\",\n  \"gender\": \"Female\",\n  \"mobileCountryCode\": \"+41\",\n  \"mobileNumber\": \"791234567\",\n  \"dateOfBirth\": \"1990-05-12\",\n  \"addressLine\": \"Bahnhofstrasse 1\",\n  \"latitude\": 47.3769,\n  \"longitude\": 8.5417,\n  \"zipCode\": \"8001\",\n  \"city\": \"Zurich\",\n  \"description\": \"Loving pet parent\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/parent-onboarding/profile",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "parent-onboarding", "profile"]
+            },
+            "description": "Creates Parent.PetParents and links to the auth identity (resolved from JWT sub/user_id). 404 ParentAuthIdentityNotFound if `firebase-auth` was never called; 409 MobileNumberAlreadyExists; 400 UnsupportedGender."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pet Parent Profile",
+      "item": [
+        {
+          "name": "POST /pet-parents/{petParentId}/profile-image",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": [] }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/profile-image",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "profile-image"]
+            },
+            "description": "multipart/form-data. file required, ≤1MB, JPEG/PNG/WebP. 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat. 404 PetParentNotFound."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/identity",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": [] },
+                { "key": "identityType", "value": "Passport", "type": "text", "description": "Passport | DriverLicense | NationalId | ResidencePermit" }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/identity",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "identity"]
+            },
+            "description": "multipart/form-data. file ≤1MB, JPEG/PNG/WebP; identityType ∈ {Passport, DriverLicense, NationalId, ResidencePermit}. Re-upload replaces existing row."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/onboarding-status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/onboarding-status",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "onboarding-status"]
+            },
+            "description": "Returns { basicInfo, profilePhoto, pets, petMedicalInfo, identity, verification, isFullyOnboarded }."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/event-bookings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/event-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "event-bookings"]
+            },
+            "description": "Lists the caller's event-ticket bookings (slim cards joined with event). Filters by Firebase email claim — 403 EmailClaimMissing if absent."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Mobile Verification",
+      "item": [
+        {
+          "name": "POST /pet-parents/{petParentId}/mobile-verification/otp",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/mobile-verification/otp",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "mobile-verification", "otp"]
+            },
+            "description": "Generates a 6-digit OTP (10-min expiry). Returns { parentMobileOtpId, mobileCountryCode, mobileNumber, dateSentUtc, expiresAtUtc }."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/mobile-verification/otp/{otpId}/verify",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"otpCode\": \"123456\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/mobile-verification/otp/{{parentMobileOtpId}}/verify",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "mobile-verification", "otp", "{{parentMobileOtpId}}", "verify"]
+            },
+            "description": "Always 200; client branches on { isValidated, validationStatus: Validated|Invalid|Expired|Pending }."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pets",
+      "item": [
+        {
+          "name": "POST /pet-parents/{petParentId}/pets",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petType\": \"Dog\",\n  \"petName\": \"Bruno\",\n  \"breed\": \"Labrador\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"2021-03-04\",\n  \"weight\": 28.5,\n  \"microchipId\": \"982000123456789\",\n  \"description\": \"Friendly and energetic\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/pets",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "pets"]
+            },
+            "description": "petType ∈ {Dog, Cat, Hamster, GuineaPig}; gender ∈ {Male, Female}; weight DECIMAL(5,2) > 0; microchipId globally UNIQUE (409 MicrochipIdAlreadyExists)."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/pets",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/pets",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "pets"]
+            },
+            "description": "Returns all pets with embedded photo gallery (oldest-first). Empty array if none — list semantics, no 404."
+          }
+        },
+        {
+          "name": "PATCH /pets/{petId}",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petType\": \"Dog\",\n  \"petName\": \"Bruno\",\n  \"breed\": \"Labrador\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"2021-03-04\",\n  \"weight\": 29.0,\n  \"microchipId\": \"982000123456789\",\n  \"description\": \"Updated description\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pets/{{petId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pets", "{{petId}}"]
+            },
+            "description": "Edits the basic-info subset only — medical-info untouched. Same shape as AddPet."
+          }
+        },
+        {
+          "name": "PATCH /pets/{petId}/medical-info",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"vaccinationStatus\": \"Vaccinated\",\n  \"sterilizationStatus\": \"Sterilized\",\n  \"medicalHistory\": \"Mild seasonal allergies\",\n  \"temperament\": \"Friendly\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pets/{{petId}}/medical-info",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pets", "{{petId}}", "medical-info"]
+            },
+            "description": "vaccinationStatus ∈ {Vaccinated, NotVaccinated}; sterilizationStatus ∈ {Sterilized, Intact}; temperament ∈ {Anxious, Friendly, Aggressive}; medicalHistory optional."
+          }
+        },
+        {
+          "name": "POST /pets/{petId}/photos",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": [] }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pets/{{petId}}/photos",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pets", "{{petId}}", "photos"]
+            },
+            "description": "multipart/form-data. file ≤1MB, JPEG/PNG/WebP. One row per upload; call N times for N photos."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Events (Catalog)",
+      "item": [
+        {
+          "name": "GET /events",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events?eventCategory=AdoptionAndRescue&eventType=Physical&startDate=2026-06-01&endDate=2026-12-31&isChildFriendly=true&amenities=Restrooms&amenities=FreeParking",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events"],
+              "query": [
+                { "key": "eventCategory", "value": "AdoptionAndRescue", "description": "AdoptionAndRescue | PetTraining | Charity | Volunteering | HealthAndWellness | SocialAndCultural | OutdoorActivities | ParentEducation", "disabled": true },
+                { "key": "eventType", "value": "Physical", "description": "Physical | Online", "disabled": true },
+                { "key": "startDate", "value": "2026-06-01", "disabled": true },
+                { "key": "endDate", "value": "2026-12-31", "disabled": true },
+                { "key": "isChildFriendly", "value": "true", "disabled": true },
+                { "key": "amenities", "value": "Restrooms", "disabled": true },
+                { "key": "amenities", "value": "FreeParking", "disabled": true }
+              ]
+            },
+            "description": "Catalog listing. All query params optional. Amenities repeats."
+          }
+        },
+        {
+          "name": "GET /events/{eventId}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/{{eventId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events", "{{eventId}}"]
+            }
+          }
+        },
+        {
+          "name": "POST /events/{eventId}/views",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/views",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events", "{{eventId}}", "views"]
+            },
+            "description": "Returns updated { viewCount, shareCount, inquiryCount }."
+          }
+        },
+        {
+          "name": "POST /events/{eventId}/shares",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/shares",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events", "{{eventId}}", "shares"]
+            }
+          }
+        },
+        {
+          "name": "POST /events/{eventId}/inquiries",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/inquiries",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events", "{{eventId}}", "inquiries"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Event Bookings",
+      "item": [
+        {
+          "name": "POST /events/{eventId}/bookings",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bookerName\": \"Jane Doe\",\n  \"bookerEmail\": \"jane.doe@example.com\",\n  \"bookerMobile\": \"+41791234567\",\n  \"attendeeNames\": [\"Jane Doe\", \"John Doe\"],\n  \"paymentMethod\": \"CreditCard\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events", "{{eventId}}", "bookings"]
+            },
+            "description": "paymentMethod ∈ {CreditCard, Twint}. One ticket row per attendee. 404 EventNotFound; 400 EventNotBookable (online); 409 EventSoldOut."
+          }
+        },
+        {
+          "name": "GET /event-bookings/{bookingId}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/event-bookings/{{eventBookingId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "event-bookings", "{{eventBookingId}}"]
+            },
+            "description": "Booking + one entry per ticket."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Provider Discovery",
+      "item": [
+        {
+          "name": "GET /providers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers?serviceCategory=PetSitter&animals=Dog&animals=Cat&skip=0&take=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers"],
+              "query": [
+                { "key": "serviceCategory", "value": "PetSitter", "description": "PetSitter | PetGroomer | PetTrainer | PetAdoptionAndSale | Vet", "disabled": true },
+                { "key": "animals", "value": "Dog", "disabled": true },
+                { "key": "animals", "value": "Cat", "disabled": true },
+                { "key": "skip", "value": "0", "disabled": true },
+                { "key": "take", "value": "50", "description": "1..200, default 50", "disabled": true }
+              ]
+            },
+            "description": "Slim summary cards. animals filter excludes PetAdoptionAndSale (no offering)."
+          }
+        },
+        {
+          "name": "GET /providers/{providerId}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "{{providerId}}"]
+            },
+            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff. 404 ProviderNotRegistered."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Availability Slots",
+      "item": [
+        {
+          "name": "GET /providers/{providerId}/availability/slots (durationHours)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceId}}&date=2026-07-15&durationHours=2&granularityMinutes=30",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "{{providerId}}", "availability", "slots"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceId}}" },
+                { "key": "date", "value": "2026-07-15" },
+                { "key": "durationHours", "value": "2", "description": "PetSitter / PetTrainer / Vet" },
+                { "key": "granularityMinutes", "value": "30", "description": "default 30" }
+              ]
+            },
+            "description": "Use durationHours for PetSitter, PetTrainer, Vet."
+          }
+        },
+        {
+          "name": "GET /providers/{providerId}/availability/slots (PetGroomer)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceId}}&date=2026-07-15&serviceItemCode=BathAndDry&granularityMinutes=30",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "{{providerId}}", "availability", "slots"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceId}}" },
+                { "key": "date", "value": "2026-07-15" },
+                { "key": "serviceItemCode", "value": "BathAndDry", "description": "One of the 18 canonical PetGroomer codes" },
+                { "key": "granularityMinutes", "value": "30" }
+              ]
+            },
+            "description": "PetGroomer uses serviceItemCode — duration resolved server-side from the menu item.\n\nErrors: 400 InvalidServiceId / ServiceItemCodeRequired / ServiceItemNotOffered / InvalidBookingDuration / OfferingNotConfigured; 409 ServiceItemInactive; 404 ServiceNotRegistered."
+          }
+        }
+      ]
+    }
+  ]
+}

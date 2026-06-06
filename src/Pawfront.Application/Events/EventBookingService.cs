@@ -81,6 +81,18 @@ internal sealed class EventBookingService(
         CancellationToken cancellationToken)
         => sqlStore.GetMetricsAsync(providerId, eventId, cancellationToken);
 
+    public Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
+        string bookerEmail,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(bookerEmail))
+        {
+            throw new ArgumentException("Booker email is required.", nameof(bookerEmail));
+        }
+
+        return sqlStore.ListByBookerEmailAsync(bookerEmail.Trim(), cancellationToken);
+    }
+
     private static List<string> NormalizeAttendees(IReadOnlyList<string>? values)
     {
         if (values is null || values.Count == 0)

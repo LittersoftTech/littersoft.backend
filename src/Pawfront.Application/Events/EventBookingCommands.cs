@@ -62,3 +62,31 @@ public sealed class EventBookingNotFoundException(Guid bookingId)
 
 public sealed class EventBookingPaymentAlreadyConfirmedException(Guid bookingId)
     : Exception($"Event booking '{bookingId}' payment has already been confirmed.");
+
+/// <summary>
+/// Slim per-booking summary returned by the parent host's "my event
+/// bookings" endpoint. Joined with the event row so the mobile card can
+/// render title / banner / start time without a follow-up fetch. The
+/// mobile drills into <c>GET /event-bookings/{bookingId}</c> for the full
+/// shape with the attendee list.
+/// </summary>
+public sealed record EventBookingSummary(
+    Guid BookingId,
+    Guid EventId,
+    string EventTitle,
+    string EventCategory,
+    DateOnly EventStartDate,
+    TimeOnly EventStartTime,
+    string? EventBannerImageUrl,
+    string BookerName,
+    string BookerEmail,
+    string? BookerMobile,
+    int TicketCount,
+    string PaymentMethod,
+    string PaymentStatus,
+    string? PaymentReference,
+    decimal TotalAmount,
+    string Status,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    DateTimeOffset? CancelledAtUtc);

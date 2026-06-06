@@ -179,6 +179,7 @@ internal static class EventEndpoints
         return new EventResponse(
             result.EventId,
             result.ProviderId,
+            result.PetParentId,
             result.EventCategory,
             result.IsChildFriendly,
             result.Title,

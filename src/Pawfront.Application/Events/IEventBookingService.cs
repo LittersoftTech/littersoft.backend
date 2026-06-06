@@ -48,4 +48,13 @@ public interface IEventBookingService
         Guid providerId,
         Guid eventId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists all event bookings made under <paramref name="bookerEmail"/>.
+    /// Powers the pet-parent host's "my event bookings" screen — the
+    /// endpoint pulls the email from the caller's Firebase JWT.
+    /// </summary>
+    Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
+        string bookerEmail,
+        CancellationToken cancellationToken);
 }

@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Pawfront.Api/Pawfront.Api.csproj" />
+    <Project Path="src/Pawfront.PetParentApi/Pawfront.PetParentApi.csproj" />
     <Project Path="src/Pawfront.Application/Pawfront.Application.csproj" />
     <Project Path="src/Pawfront.Contracts/Pawfront.Contracts.csproj" />
     <Project Path="src/Pawfront.Domain/Pawfront.Domain.csproj" />

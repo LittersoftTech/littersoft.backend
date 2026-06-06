@@ -9,9 +9,13 @@ Tables are organised into four schemas:
 | Schema      | Purpose |
 |-------------|---------|
 | `Provider`  | Provider identity, profile, OTPs, devices, services, availability, closures, policies |
-| `Customer`  | Pet-parent scaffolding (`PetParents`, `Pets`) — used by bookings only; no APIs yet |
+| `Parent`    | Pet-parent identity, Firebase auth identities, device tokens, `PetParents`, `Pets` |
 | `Event`     | Provider-created events + amenities junction + ticket bookings |
 | `Booking`   | Real bookings (per-service capacity-checked) |
+
+> The legacy `Customer` schema (originally hosting `PetParents` and `Pets`)
+> has been retired. `DeployAll.sql` transfers any existing `Customer.*`
+> tables into `Parent.*` on first run and drops the empty schema.
 
 Deployment is a single idempotent script:
 [`Deployment/DeployAll.sql`](Deployment/DeployAll.sql). Re-runnable; uses
@@ -24,6 +28,9 @@ erDiagram
     PROVIDER_AUTH_IDENTITIES ||--o| PROVIDERS                    : "step 1 -> step 2"
     PROVIDER_AUTH_IDENTITIES ||--o{ PROVIDER_DEVICE_TOKENS       : "registers"
     PROVIDERS                |o--o{ PROVIDER_DEVICE_TOKENS       : "owns (after step 2)"
+    PARENT_AUTH_IDENTITIES   ||--o| PET_PARENTS                  : "links once profile completes"
+    PARENT_AUTH_IDENTITIES   ||--o{ PARENT_DEVICE_TOKENS         : "registers"
+    PET_PARENTS              |o--o{ PARENT_DEVICE_TOKENS         : "owns (after profile)"
     PROVIDERS                ||--o{ PROVIDER_MOBILE_OTPS         : "verifies via"
     PROVIDERS                ||--o| PROVIDER_SERVICE_REGISTRATIONS : "registers (1 category max)"
     PROVIDERS                ||--o{ PROVIDER_SERVICES            : "offers (1 row per ServiceType)"
@@ -41,6 +48,7 @@ erDiagram
     PET_PARENTS              ||--o{ BOOKINGS                     : "places"
     PROVIDER_SERVICES        ||--o{ BOOKINGS                     : "targets"
     PET_PARENTS              ||--o{ PETS                         : "has"
+    PETS                     ||--o{ PET_PHOTOS                   : "has (ON DELETE CASCADE)"
 
     PROVIDER_AUTH_IDENTITIES {
         UNIQUEIDENTIFIER ProviderAuthIdentityId PK
@@ -140,13 +148,68 @@ erDiagram
         INT              MinimumHoursBeforeCancellation    "null|24|48|72|96"
     }
 
+    PARENT_AUTH_IDENTITIES {
+        UNIQUEIDENTIFIER ParentAuthIdentityId PK
+        UNIQUEIDENTIFIER PetParentId          FK "nullable until profile completes; UNIQUE when set"
+        NVARCHAR         FirebaseUserId       UK
+        NVARCHAR         AuthProvider             "Google|Apple|EmailPassword"
+        NVARCHAR         Email
+        BIT              IsEmailVerified
+        NVARCHAR         SignUpStatus             "FirebaseAuthenticated|ParentProfileCompleted"
+        DATETIME2        LastSignedInAtUtc
+    }
+
+    PARENT_DEVICE_TOKENS {
+        UNIQUEIDENTIFIER ParentDeviceTokenId  PK
+        UNIQUEIDENTIFIER ParentAuthIdentityId FK
+        UNIQUEIDENTIFIER PetParentId          FK "nullable; back-filled after profile"
+        NVARCHAR         FcmToken             UK
+        NVARCHAR         DeviceId
+        NVARCHAR         DevicePlatform           "Android|iOS"
+        BIT              IsActive
+        DATETIME2        LastSeenAtUtc
+    }
+
     PET_PARENTS {
-        UNIQUEIDENTIFIER PetParentId PK
+        UNIQUEIDENTIFIER PetParentId          PK
+        UNIQUEIDENTIFIER ParentAuthIdentityId FK "UNIQUE; links to auth identity"
+        NVARCHAR         FirstName
+        NVARCHAR         LastName
+        NVARCHAR         Gender                    "Male|Female|NonBinary|Other|PreferNotToSay"
+        NVARCHAR         MobileCountryCode         "UNIQUE with MobileNumber"
+        NVARCHAR         MobileNumber
+        DATE             DateOfBirth
+        NVARCHAR         AddressLine
+        DECIMAL          Latitude                  "-90..90"
+        DECIMAL          Longitude                 "-180..180"
+        NVARCHAR         ZipCode
+        NVARCHAR         City
+        NVARCHAR         Description               "free-text profile blurb"
+        NVARCHAR         ProfilePhotoUrl           "nullable; blob URL"
+        DATETIME2        MobileVerifiedAtUtc       "nullable; reserved for OTP flow"
     }
 
     PETS {
         UNIQUEIDENTIFIER PetId       PK
         UNIQUEIDENTIFIER PetParentId FK
+        NVARCHAR         PetType         "Dog|Cat|Hamster|GuineaPig"
+        NVARCHAR         PetName
+        NVARCHAR         Breed
+        NVARCHAR         Gender          "Male|Female"
+        DATE             DateOfBirth
+        DECIMAL          Weight          "> 0"
+        NVARCHAR         MicrochipId         "nullable; UNIQUE when set"
+        NVARCHAR         Description         "nullable"
+        NVARCHAR         VaccinationStatus   "nullable; Vaccinated|NotVaccinated"
+        NVARCHAR         SterilizationStatus "nullable; Sterilized|Intact"
+        NVARCHAR         MedicalHistory      "nullable; free text"
+        NVARCHAR         Temperament         "nullable; Anxious|Friendly|Aggressive"
+    }
+
+    PET_PHOTOS {
+        UNIQUEIDENTIFIER PetPhotoId PK
+        UNIQUEIDENTIFIER PetId      FK    "ON DELETE CASCADE"
+        NVARCHAR         PhotoUrl
     }
 
     EVENTS {
@@ -332,20 +395,103 @@ One row per provider. Nullable cancellation window.
 - `ProviderId` — PK + FK.
 - `MinimumHoursBeforeCancellation` — `NULL`, `24`, `48`, `72`, or `96` (CHECK).
 
-## Customer schema
+## Parent schema
 
-### `Customer.PetParents`
-Pet-parent identity. **Scaffolding only** — there is no API to create pet
-parents yet. Bookings expect rows to exist (referenced by FK), so tests/dev
-must seed `PetParents` directly.
+### `Parent.ParentAuthIdentities`
+Pet-parent Firebase login identity. One row per Firebase user. Created on
+the first call to `POST /api/v1/parent-onboarding/firebase-auth`; the row
+is updated on every subsequent login (refreshes display name, photo, etc.)
+via `Parent.SaveParentAuthIdentity` (`UPDLOCK + HOLDLOCK` on the lookup).
+
+- `ParentAuthIdentityId` — PK.
+- `PetParentId` — nullable FK → `Parent.PetParents`. Stays null until the
+  parent completes the profile step (not yet built). Unique when set.
+- `FirebaseUserId` — UNIQUE; from the `user_id`/`sub` claim.
+- `AuthProvider` — `Google`, `Apple`, or `EmailPassword` (CHECK).
+- `Email` (always populated from the JWT), `IsEmailVerified`, `DisplayName`,
+  `FirebasePhoneNumber`, `PhotoUrl`, `FirebaseTenantId`, `FirebaseProviderId`.
+- `SignUpStatus` — `FirebaseAuthenticated` → `ParentProfileCompleted`
+  (CHECK). Flipped when the parent profile endpoint lands.
+- `LastSignedInAtUtc`, `CreatedAtUtc`, `UpdatedAtUtc`.
+
+### `Parent.ParentDeviceTokens`
+FCM tokens per device for the pet-parent app. Many tokens per parent (one
+per device). Same upsert path as `Provider.ProviderDeviceTokens`: the same
+`FcmToken` value updates the row in place; a new value inserts.
+
+- `ParentDeviceTokenId` — PK.
+- `ParentAuthIdentityId` — FK → `Parent.ParentAuthIdentities`.
+- `PetParentId` — nullable FK → `Parent.PetParents`. Backfilled when the
+  parent's profile is created.
+- `FcmToken` — UNIQUE; up to 2048 chars.
+- `DeviceId`, `DevicePlatform` (`Android` or `iOS`, CHECK).
+- `IsActive`, `LastSeenAtUtc`, timestamps.
+
+### `Parent.PetParents`
+Pet-parent profile row. Created by `POST /api/v1/parent-onboarding/profile`
+(sproc `Parent.CompletePetParentProfile`), one per `ParentAuthIdentityId`.
+Idempotent — if the auth identity already has a `PetParentId`, the sproc
+returns the existing row without re-inserting. Booking creation FKs to
+this table, so a profile must exist before any booking can be placed.
 
 - `PetParentId` — PK.
+- `ParentAuthIdentityId` — UNIQUE + FK → `Parent.ParentAuthIdentities`.
+  Links the profile back to the Firebase login.
+- `FirstName`, `LastName`, `Gender` (5-value CHECK: `Male`, `Female`,
+  `NonBinary`, `Other`, `PreferNotToSay`).
+- `MobileCountryCode` + `MobileNumber` — UNIQUE composite. Plus a nullable
+  `MobileVerifiedAtUtc` reserved for the eventual OTP flow.
+- `DateOfBirth`.
+- `AddressLine`, `Latitude`, `Longitude` (CHECK -90..90 / -180..180,
+  `DECIMAL(9,6)`), `ZipCode`, `City`.
+- `Description` (NVARCHAR(2000)) — free-text profile blurb captured at
+  registration.
+- `ProfilePhotoUrl` — nullable, NVARCHAR(1000). Set by
+  `POST /api/v1/pet-parents/{petParentId}/profile-image` via the sproc
+  `Parent.UpdatePetParentProfilePhoto`. The blob itself lives under
+  `pet-parent-profile-photos/<petParentId>/<guid>.<ext>` in the shared
+  `provider-images` container.
+- Timestamps.
 
-### `Customer.Pets`
-Pets owned by a parent. Scaffolding only; no APIs.
+> Legacy `Parent.PetParents` rows (predating the profile schema) survive
+> the migration with nullable profile columns. New rows always have every
+> field populated because the sproc requires them.
+
+### `Parent.Pets`
+Pets owned by a parent. One row per pet; a parent can have many. Inserted
+by `POST /api/v1/pet-parents/{petParentId}/pets` (sproc
+`Parent.AddPetParentPet`).
 
 - `PetId` — PK.
-- `PetParentId` — FK.
+- `PetParentId` — FK → `Parent.PetParents`.
+- `PetType` — `Dog`, `Cat`, `Hamster`, or `GuineaPig` (CHECK).
+- `PetName`, `Breed`.
+- `Gender` — `Male` or `Female` (CHECK).
+- `DateOfBirth`.
+- `Weight` — `DECIMAL(5,2)`, CHECK > 0. Unit is implicit (kg).
+- `MicrochipId` — nullable. UNIQUE filtered index (NULLs allowed to coexist).
+  Microchip ids are globally unique per ISO 11784/11785, so collisions
+  across pet parents return 409 `MicrochipIdAlreadyExists`.
+- `Description` — nullable free-text.
+- `VaccinationStatus` — nullable, `Vaccinated | NotVaccinated` (CHECK).
+  Populated by `PATCH /pets/{petId}/medical-info`.
+- `SterilizationStatus` — nullable, `Sterilized | Intact` (CHECK). Same
+  PATCH endpoint. "Sterilized" covers both neuter (male) and spay (female);
+  the mobile client renders it as "Neutered/Spayed".
+- `MedicalHistory` — nullable NVARCHAR(MAX). Free text.
+- `Temperament` — nullable, `Anxious | Friendly | Aggressive` (CHECK).
+
+### `Parent.PetPhotos`
+Pet photos (gallery). One row per uploaded image — a pet can have many
+photos. Inserted by `POST /api/v1/pets/{petId}/photos` (multipart) via
+sproc `Parent.AddPetPhoto`.
+
+- `PetPhotoId` — PK.
+- `PetId` — FK → `Parent.Pets`, `ON DELETE CASCADE` (deleting a pet
+  removes its photo rows; blobs themselves are not cleaned up).
+- `PhotoUrl` — NVARCHAR(1000), the blob URL in the `pet-photos`
+  folder of the shared `provider-images` container.
+- Timestamps.
 
 ## Event schema
 
@@ -380,7 +526,7 @@ Junction listing the venue amenities for an event.
 ### `Event.EventBookings`
 Ticket purchases against a physical event. **Booker identity is free text**
 — anyone with a Firebase login can buy tickets for any names. There is no
-FK to `Customer.PetParents`. Capacity is enforced inside
+FK to `Parent.PetParents`. Capacity is enforced inside
 `Event.CreateEventBooking` by SUMming `TicketCount` over confirmed rows for
 the event under `UPDLOCK + HOLDLOCK`.
 
@@ -466,6 +612,9 @@ so the deploy script always reflects the latest version.
 | `Provider.SaveProviderCancellationPolicy` | Upsert one row. |
 | `Provider.GetProviderPolicy`        | Returns payout + cancellation in one round-trip (two result sets). |
 | `Provider.GetProviderOnboardingStatus` | Four-result-set aggregate consumed by the onboarding-status orchestrator. |
+| `Parent.GetPetParentOnboardingStatus` | Two-result-set aggregate (parent + auth flags; per-pet medical-completion) consumed by the parent onboarding-status orchestrator. |
+| `Parent.CreateMobileVerificationOtp` | Inserts a hashed OTP row in `Parent.ParentMobileOtps` (10-minute expiry). |
+| `Parent.VerifyMobileVerificationOtp` | Validates the OTP, flips `Parent.PetParents.MobileVerifiedAtUtc` on success. Always returns a row with `IsValidated` + `ValidationStatus`. |
 | `Provider.CreateClosures`           | All-or-nothing batch insert. Takes a `Provider.ServiceIdList` TVP; race-safe conflict check vs `Booking.Bookings`. Throws `51070`/`51072`/`51075`. |
 | `Provider.ListClosures`             | Optional `@ServiceId`, `@From`, `@To` filters. |
 | `Provider.DeleteClosure`            | Reopen a single closure row. Throws `51071` if missing. |

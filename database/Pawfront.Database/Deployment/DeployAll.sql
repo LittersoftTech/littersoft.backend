@@ -37,14 +37,53 @@ BEGIN
 END
 GO
 
-IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Customer')
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Parent')
 BEGIN
-    EXEC ('CREATE SCHEMA [Customer]');
-    PRINT 'Created schema [Customer].';
+    EXEC ('CREATE SCHEMA [Parent]');
+    PRINT 'Created schema [Parent].';
 END
 ELSE
 BEGIN
-    PRINT 'Schema [Customer] already exists.';
+    PRINT 'Schema [Parent] already exists.';
+END
+GO
+
+-- Migration: relocate legacy [Customer].[PetParents] / [Customer].[Pets] tables
+-- (if they exist from a pre-Parent-schema deploy) into the new [Parent] schema.
+-- The FK from [Booking].[Bookings].[PetParentId] is stored by object id so it
+-- survives ALTER SCHEMA TRANSFER without needing to be re-created.
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Customer'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    ALTER SCHEMA [Parent] TRANSFER [Customer].[Pets];
+    PRINT 'Transferred [Customer].[Pets] to [Parent].[Pets].';
+END
+GO
+
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetParents' AND [schema_id] = SCHEMA_ID(N'Customer'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetParents' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    ALTER SCHEMA [Parent] TRANSFER [Customer].[PetParents];
+    PRINT 'Transferred [Customer].[PetParents] to [Parent].[PetParents].';
+END
+GO
+
+-- Drop the legacy [Customer] schema once both tables have moved. Skipped if
+-- anything still lives there.
+IF EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Customer')
+   AND NOT EXISTS (
+       SELECT 1 FROM sys.objects WHERE [schema_id] = SCHEMA_ID(N'Customer'))
+BEGIN
+    EXEC ('DROP SCHEMA [Customer]');
+    PRINT 'Dropped empty legacy schema [Customer].';
 END
 GO
 
@@ -710,41 +749,275 @@ END
 GO
 
 
--- 2.8 Customer.PetParents ----------------------------------------------------
+-- 2.8 Parent.ParentAuthIdentities --------------------------------------------
+-- Created first because Parent.PetParents now FKs to it. The reciprocal FK
+-- (ParentAuthIdentities.PetParentId -> PetParents) is added as a deferred
+-- ALTER below, once PetParents exists. Mirrors the Provider/ProviderAuthIdentities
+-- circular-FK setup.
 IF NOT EXISTS (
     SELECT 1 FROM sys.tables
-    WHERE [name] = N'PetParents' AND [schema_id] = SCHEMA_ID(N'Customer'))
+    WHERE [name] = N'ParentAuthIdentities' AND [schema_id] = SCHEMA_ID(N'Parent'))
 BEGIN
-    CREATE TABLE [Customer].[PetParents]
+    CREATE TABLE [Parent].[ParentAuthIdentities]
+    (
+        [ParentAuthIdentityId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_ParentAuthIdentities_ParentAuthIdentityId] DEFAULT NEWSEQUENTIALID(),
+        [PetParentId] UNIQUEIDENTIFIER NULL,
+        [FirebaseUserId] NVARCHAR(128) NOT NULL,
+        [FirebaseTenantId] NVARCHAR(128) NULL,
+        [AuthProvider] NVARCHAR(32) NOT NULL,
+        [FirebaseProviderId] NVARCHAR(64) NULL,
+        [Email] NVARCHAR(320) NOT NULL,
+        [IsEmailVerified] BIT NOT NULL
+            CONSTRAINT [DF_ParentAuthIdentities_IsEmailVerified] DEFAULT 0,
+        [DisplayName] NVARCHAR(200) NULL,
+        [FirebasePhoneNumber] NVARCHAR(32) NULL,
+        [PhotoUrl] NVARCHAR(1000) NULL,
+        [SignUpStatus] NVARCHAR(32) NOT NULL
+            CONSTRAINT [DF_ParentAuthIdentities_SignUpStatus] DEFAULT N'FirebaseAuthenticated',
+        [LastSignedInAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentAuthIdentities_LastSignedInAtUtc] DEFAULT SYSUTCDATETIME(),
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentAuthIdentities_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentAuthIdentities_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_ParentAuthIdentities] PRIMARY KEY CLUSTERED ([ParentAuthIdentityId] ASC),
+        CONSTRAINT [UQ_ParentAuthIdentities_FirebaseUserId] UNIQUE ([FirebaseUserId]),
+        CONSTRAINT [CK_ParentAuthIdentities_AuthProvider] CHECK ([AuthProvider] IN (N'Google', N'Apple', N'EmailPassword')),
+        CONSTRAINT [CK_ParentAuthIdentities_SignUpStatus] CHECK ([SignUpStatus] IN (N'FirebaseAuthenticated', N'ParentProfileCompleted'))
+    );
+    PRINT 'Created table [Parent].[ParentAuthIdentities].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Parent].[ParentAuthIdentities] already exists.';
+END
+GO
+
+-- Migration: drop the legacy FK_ParentAuthIdentities_PetParents constraint if
+-- it was created in an earlier version (before PetParents was repurposed as a
+-- profile table). The constraint will be recreated below after PetParents has
+-- the right shape.
+IF EXISTS (
+    SELECT 1 FROM sys.foreign_keys
+    WHERE [name] = N'FK_ParentAuthIdentities_PetParents_PetParentId'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[ParentAuthIdentities]'))
+BEGIN
+    ALTER TABLE [Parent].[ParentAuthIdentities]
+        DROP CONSTRAINT [FK_ParentAuthIdentities_PetParents_PetParentId];
+    PRINT 'Dropped legacy FK [FK_ParentAuthIdentities_PetParents_PetParentId] (will be re-added below).';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'UX_ParentAuthIdentities_PetParentId'
+      AND [object_id] = OBJECT_ID(N'[Parent].[ParentAuthIdentities]'))
+    CREATE UNIQUE INDEX [UX_ParentAuthIdentities_PetParentId]
+        ON [Parent].[ParentAuthIdentities] ([PetParentId])
+        WHERE [PetParentId] IS NOT NULL;
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ParentAuthIdentities_Email'
+      AND [object_id] = OBJECT_ID(N'[Parent].[ParentAuthIdentities]'))
+    CREATE INDEX [IX_ParentAuthIdentities_Email]
+        ON [Parent].[ParentAuthIdentities] ([Email]);
+GO
+
+
+-- 2.9 Parent.PetParents ------------------------------------------------------
+-- Profile row created by [Parent].[CompletePetParentProfile] after Firebase
+-- login. FKs back to [Parent].[ParentAuthIdentities]; UNIQUE on
+-- (MobileCountryCode, MobileNumber) so the same number can't register twice.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetParents' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    CREATE TABLE [Parent].[PetParents]
     (
         [PetParentId] UNIQUEIDENTIFIER NOT NULL
             CONSTRAINT [DF_PetParents_PetParentId] DEFAULT NEWSEQUENTIALID(),
+        [ParentAuthIdentityId] UNIQUEIDENTIFIER NOT NULL,
+        [FirstName] NVARCHAR(100) NOT NULL,
+        [LastName] NVARCHAR(100) NOT NULL,
+        [Gender] NVARCHAR(32) NOT NULL,
+        [MobileCountryCode] NVARCHAR(8) NOT NULL,
+        [MobileNumber] NVARCHAR(32) NOT NULL,
+        [DateOfBirth] DATE NOT NULL,
+        [AddressLine] NVARCHAR(500) NOT NULL,
+        [Latitude] DECIMAL(9, 6) NOT NULL,
+        [Longitude] DECIMAL(9, 6) NOT NULL,
+        [ZipCode] NVARCHAR(16) NOT NULL,
+        [City] NVARCHAR(100) NOT NULL,
+        [Description] NVARCHAR(2000) NOT NULL,
+        [ProfilePhotoUrl] NVARCHAR(1000) NULL,
+        [MobileVerifiedAtUtc] DATETIME2(7) NULL,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_PetParents_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         [UpdatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_PetParents_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
 
-        CONSTRAINT [PK_PetParents] PRIMARY KEY CLUSTERED ([PetParentId] ASC)
+        CONSTRAINT [PK_PetParents] PRIMARY KEY CLUSTERED ([PetParentId] ASC),
+        CONSTRAINT [UQ_PetParents_ParentAuthIdentityId] UNIQUE ([ParentAuthIdentityId]),
+        CONSTRAINT [FK_PetParents_ParentAuthIdentities_ParentAuthIdentityId]
+            FOREIGN KEY ([ParentAuthIdentityId]) REFERENCES [Parent].[ParentAuthIdentities] ([ParentAuthIdentityId]),
+        CONSTRAINT [CK_PetParents_Gender]
+            CHECK ([Gender] IN (N'Male', N'Female', N'NonBinary', N'Other', N'PreferNotToSay')),
+        CONSTRAINT [CK_PetParents_Latitude]
+            CHECK ([Latitude] BETWEEN -90 AND 90),
+        CONSTRAINT [CK_PetParents_Longitude]
+            CHECK ([Longitude] BETWEEN -180 AND 180)
     );
-    PRINT 'Created table [Customer].[PetParents].';
+    PRINT 'Created table [Parent].[PetParents].';
 END
 ELSE
 BEGIN
-    PRINT 'Table [Customer].[PetParents] already exists.';
+    PRINT 'Table [Parent].[PetParents] already exists.';
+END
+GO
+
+-- Migration: extend a legacy [Parent].[PetParents] (previously just PetParentId
+-- + timestamps) with all the profile columns. Existing rows survive — added
+-- columns are nullable. The CompletePetParentProfile sproc enforces non-null
+-- for new rows, and the application layer normalises required inputs.
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetParents' AND [schema_id] = SCHEMA_ID(N'Parent'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'FirstName'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+BEGIN
+    PRINT 'Extending [Parent].[PetParents] with profile columns (nullable for legacy rows).';
+
+    ALTER TABLE [Parent].[PetParents]
+        ADD [ParentAuthIdentityId] UNIQUEIDENTIFIER NULL,
+            [FirstName] NVARCHAR(100) NULL,
+            [LastName] NVARCHAR(100) NULL,
+            [Gender] NVARCHAR(32) NULL,
+            [MobileCountryCode] NVARCHAR(8) NULL,
+            [MobileNumber] NVARCHAR(32) NULL,
+            [DateOfBirth] DATE NULL,
+            [AddressLine] NVARCHAR(500) NULL,
+            [Latitude] DECIMAL(9, 6) NULL,
+            [Longitude] DECIMAL(9, 6) NULL,
+            [ZipCode] NVARCHAR(16) NULL,
+            [City] NVARCHAR(100) NULL,
+            [Description] NVARCHAR(2000) NULL,
+            [MobileVerifiedAtUtc] DATETIME2(7) NULL;
+END
+GO
+
+-- Add constraints defensively (covers both upgrade and fresh-deploy paths).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.key_constraints
+    WHERE [name] = N'UQ_PetParents_ParentAuthIdentityId'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'ParentAuthIdentityId'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+BEGIN
+    -- Filtered unique index: enforces one profile per auth identity but lets
+    -- legacy rows (where the column is NULL) coexist.
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE [name] = N'UX_PetParents_ParentAuthIdentityId'
+          AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+        CREATE UNIQUE INDEX [UX_PetParents_ParentAuthIdentityId]
+            ON [Parent].[PetParents] ([ParentAuthIdentityId])
+            WHERE [ParentAuthIdentityId] IS NOT NULL;
+END
+GO
+
+-- Idempotent: add [ProfilePhotoUrl] to legacy PetParents rows that pre-date
+-- the profile-photo upload endpoint. Nullable — populated only after the
+-- parent uploads a photo.
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetParents' AND [schema_id] = SCHEMA_ID(N'Parent'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'ProfilePhotoUrl'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+BEGIN
+    ALTER TABLE [Parent].[PetParents]
+        ADD [ProfilePhotoUrl] NVARCHAR(1000) NULL;
+    PRINT 'Added column [Parent].[PetParents].[ProfilePhotoUrl].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.foreign_keys
+    WHERE [name] = N'FK_PetParents_ParentAuthIdentities_ParentAuthIdentityId'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'ParentAuthIdentityId'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+BEGIN
+    ALTER TABLE [Parent].[PetParents]
+        ADD CONSTRAINT [FK_PetParents_ParentAuthIdentities_ParentAuthIdentityId]
+            FOREIGN KEY ([ParentAuthIdentityId])
+            REFERENCES [Parent].[ParentAuthIdentities] ([ParentAuthIdentityId]);
+    PRINT 'Added FK [FK_PetParents_ParentAuthIdentities_ParentAuthIdentityId].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'UX_PetParents_MobileNumber'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'MobileNumber'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+    CREATE UNIQUE INDEX [UX_PetParents_MobileNumber]
+        ON [Parent].[PetParents] ([MobileCountryCode], [MobileNumber])
+        WHERE [MobileNumber] IS NOT NULL;
+GO
+
+-- Deferred FK from ParentAuthIdentities back to PetParents (created now that
+-- PetParents exists). Mirrors Provider's FK_ProviderAuthIdentities_Providers_ProviderId.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.foreign_keys
+    WHERE [name] = N'FK_ParentAuthIdentities_PetParents_PetParentId'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[ParentAuthIdentities]'))
+BEGIN
+    ALTER TABLE [Parent].[ParentAuthIdentities]
+        ADD CONSTRAINT [FK_ParentAuthIdentities_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId])
+            REFERENCES [Parent].[PetParents] ([PetParentId]);
+    PRINT 'Added FK [FK_ParentAuthIdentities_PetParents_PetParentId].';
 END
 GO
 
 
--- 2.9 Customer.Pets ----------------------------------------------------------
+-- 2.9.1 Parent.Pets ----------------------------------------------------------
 IF NOT EXISTS (
     SELECT 1 FROM sys.tables
-    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Customer'))
+    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Parent'))
 BEGIN
-    CREATE TABLE [Customer].[Pets]
+    CREATE TABLE [Parent].[Pets]
     (
         [PetId] UNIQUEIDENTIFIER NOT NULL
             CONSTRAINT [DF_Pets_PetId] DEFAULT NEWSEQUENTIALID(),
         [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [PetType] NVARCHAR(32) NOT NULL,
+        [PetName] NVARCHAR(100) NOT NULL,
+        [Breed] NVARCHAR(100) NOT NULL,
+        [Gender] NVARCHAR(16) NOT NULL,
+        [DateOfBirth] DATE NOT NULL,
+        [Weight] DECIMAL(5, 2) NOT NULL,
+        [MicrochipId] NVARCHAR(32) NULL,
+        [Description] NVARCHAR(2000) NULL,
+        [VaccinationStatus] NVARCHAR(32) NULL,
+        [SterilizationStatus] NVARCHAR(32) NULL,
+        [MedicalHistory] NVARCHAR(MAX) NULL,
+        [Temperament] NVARCHAR(32) NULL,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_Pets_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         [UpdatedAtUtc] DATETIME2(7) NOT NULL
@@ -752,22 +1025,378 @@ BEGIN
 
         CONSTRAINT [PK_Pets] PRIMARY KEY CLUSTERED ([PetId] ASC),
         CONSTRAINT [FK_Pets_PetParents_PetParentId]
-            FOREIGN KEY ([PetParentId]) REFERENCES [Customer].[PetParents] ([PetParentId])
+            FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
+        CONSTRAINT [CK_Pets_PetType]
+            CHECK ([PetType] IN (N'Dog', N'Cat', N'Hamster', N'GuineaPig')),
+        CONSTRAINT [CK_Pets_Gender]
+            CHECK ([Gender] IN (N'Male', N'Female')),
+        CONSTRAINT [CK_Pets_Weight_Positive]
+            CHECK ([Weight] > 0),
+        CONSTRAINT [CK_Pets_VaccinationStatus]
+            CHECK ([VaccinationStatus] IS NULL OR [VaccinationStatus] IN (N'Vaccinated', N'NotVaccinated')),
+        CONSTRAINT [CK_Pets_SterilizationStatus]
+            CHECK ([SterilizationStatus] IS NULL OR [SterilizationStatus] IN (N'Sterilized', N'Intact')),
+        CONSTRAINT [CK_Pets_Temperament]
+            CHECK ([Temperament] IS NULL OR [Temperament] IN (N'Anxious', N'Friendly', N'Aggressive'))
     );
-    PRINT 'Created table [Customer].[Pets].';
+    PRINT 'Created table [Parent].[Pets].';
 END
 ELSE
 BEGIN
-    PRINT 'Table [Customer].[Pets] already exists.';
+    PRINT 'Table [Parent].[Pets] already exists.';
+END
+GO
+
+-- Idempotent: extend a legacy [Parent].[Pets] (previously just PetId +
+-- PetParentId + timestamps) with the full pet-profile columns. Added
+-- nullable to preserve existing seed rows; the sproc + application enforce
+-- non-null on new inserts. CHECK constraints and the microchip UNIQUE
+-- filtered index are added separately further down.
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Parent'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'PetType'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    PRINT 'Extending [Parent].[Pets] with pet-profile columns (nullable for legacy rows).';
+
+    ALTER TABLE [Parent].[Pets]
+        ADD [PetType] NVARCHAR(32) NULL,
+            [PetName] NVARCHAR(100) NULL,
+            [Breed] NVARCHAR(100) NULL,
+            [Gender] NVARCHAR(16) NULL,
+            [DateOfBirth] DATE NULL,
+            [Weight] DECIMAL(5, 2) NULL,
+            [MicrochipId] NVARCHAR(32) NULL,
+            [Description] NVARCHAR(2000) NULL;
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Pets_PetType'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'PetType'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    -- WITH NOCHECK skips the validation against existing rows (the legacy
+    -- ones have NULL, which the CHECK already permits implicitly), but the
+    -- constraint is enforced for every future insert/update.
+    ALTER TABLE [Parent].[Pets] WITH NOCHECK
+        ADD CONSTRAINT [CK_Pets_PetType]
+            CHECK ([PetType] IN (N'Dog', N'Cat', N'Hamster', N'GuineaPig'));
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Pets_Gender'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'Gender'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    ALTER TABLE [Parent].[Pets] WITH NOCHECK
+        ADD CONSTRAINT [CK_Pets_Gender]
+            CHECK ([Gender] IN (N'Male', N'Female'));
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Pets_Weight_Positive'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'Weight'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    ALTER TABLE [Parent].[Pets] WITH NOCHECK
+        ADD CONSTRAINT [CK_Pets_Weight_Positive]
+            CHECK ([Weight] > 0);
 END
 GO
 
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes
     WHERE [name] = N'IX_Pets_PetParentId'
-      AND [object_id] = OBJECT_ID(N'[Customer].[Pets]'))
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
     CREATE INDEX [IX_Pets_PetParentId]
-        ON [Customer].[Pets] ([PetParentId]);
+        ON [Parent].[Pets] ([PetParentId]);
+GO
+
+-- Microchip IDs are globally unique (ISO 11784/11785). Filtered unique so
+-- pets without a chip don't collide on NULL.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'UX_Pets_MicrochipId'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'MicrochipId'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+    CREATE UNIQUE INDEX [UX_Pets_MicrochipId]
+        ON [Parent].[Pets] ([MicrochipId])
+        WHERE [MicrochipId] IS NOT NULL;
+GO
+
+-- Idempotent: extend [Parent].[Pets] with the medical-info columns. All four
+-- are nullable in the schema because pets are inserted via AddPetParentPet
+-- (which doesn't touch them) and then patched via UpdatePetMedicalInfo.
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Parent'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'VaccinationStatus'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    PRINT 'Adding medical-info columns to [Parent].[Pets].';
+
+    ALTER TABLE [Parent].[Pets]
+        ADD [VaccinationStatus] NVARCHAR(32) NULL,
+            [SterilizationStatus] NVARCHAR(32) NULL,
+            [MedicalHistory] NVARCHAR(MAX) NULL,
+            [Temperament] NVARCHAR(32) NULL;
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Pets_VaccinationStatus'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'VaccinationStatus'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    ALTER TABLE [Parent].[Pets] WITH NOCHECK
+        ADD CONSTRAINT [CK_Pets_VaccinationStatus]
+            CHECK ([VaccinationStatus] IS NULL OR [VaccinationStatus] IN (N'Vaccinated', N'NotVaccinated'));
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Pets_SterilizationStatus'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'SterilizationStatus'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    ALTER TABLE [Parent].[Pets] WITH NOCHECK
+        ADD CONSTRAINT [CK_Pets_SterilizationStatus]
+            CHECK ([SterilizationStatus] IS NULL OR [SterilizationStatus] IN (N'Sterilized', N'Intact'));
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Pets_Temperament'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'Temperament'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    ALTER TABLE [Parent].[Pets] WITH NOCHECK
+        ADD CONSTRAINT [CK_Pets_Temperament]
+            CHECK ([Temperament] IS NULL OR [Temperament] IN (N'Anxious', N'Friendly', N'Aggressive'));
+END
+GO
+
+
+-- 2.9.1a Parent.PetPhotos ----------------------------------------------------
+-- One row per uploaded pet photo. ON DELETE CASCADE so removing a pet
+-- automatically removes its photo URLs from this table (the blobs
+-- themselves are not cleaned up — that's a future job).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetPhotos' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    CREATE TABLE [Parent].[PetPhotos]
+    (
+        [PetPhotoId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_PetPhotos_PetPhotoId] DEFAULT NEWSEQUENTIALID(),
+        [PetId] UNIQUEIDENTIFIER NOT NULL,
+        [PhotoUrl] NVARCHAR(1000) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetPhotos_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetPhotos_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_PetPhotos] PRIMARY KEY CLUSTERED ([PetPhotoId] ASC),
+        CONSTRAINT [FK_PetPhotos_Pets_PetId]
+            FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId])
+            ON DELETE CASCADE
+    );
+    PRINT 'Created table [Parent].[PetPhotos].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Parent].[PetPhotos] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_PetPhotos_PetId'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetPhotos]'))
+    CREATE INDEX [IX_PetPhotos_PetId]
+        ON [Parent].[PetPhotos] ([PetId])
+        INCLUDE ([PhotoUrl], [CreatedAtUtc]);
+GO
+
+
+-- 2.9.1b Parent.ParentMobileOtps ---------------------------------------------
+-- Mirrors Provider.ProviderMobileOtps. SHA-256 hash of the code (salted with
+-- the OTP id) is stored — the raw code is never persisted. 10-minute expiry,
+-- failed-attempt counter, terminal Validated/Expired states.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ParentMobileOtps' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    CREATE TABLE [Parent].[ParentMobileOtps]
+    (
+        [ParentMobileOtpId] UNIQUEIDENTIFIER NOT NULL,
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [MobileCountryCode] NVARCHAR(8) NOT NULL,
+        [MobileNumber] NVARCHAR(32) NOT NULL,
+        [OtpCodeHash] VARBINARY(32) NOT NULL,
+        [OtpCodeLastTwo] NVARCHAR(2) NOT NULL,
+        [ValidationStatus] NVARCHAR(32) NOT NULL
+            CONSTRAINT [DF_ParentMobileOtps_ValidationStatus] DEFAULT N'Pending',
+        [FailedAttemptCount] INT NOT NULL
+            CONSTRAINT [DF_ParentMobileOtps_FailedAttemptCount] DEFAULT 0,
+        [DateSentUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentMobileOtps_DateSentUtc] DEFAULT SYSUTCDATETIME(),
+        [DateValidatedUtc] DATETIME2(7) NULL,
+        [ExpiresAtUtc] DATETIME2(7) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentMobileOtps_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentMobileOtps_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_ParentMobileOtps] PRIMARY KEY CLUSTERED ([ParentMobileOtpId] ASC),
+        CONSTRAINT [FK_ParentMobileOtps_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
+        CONSTRAINT [CK_ParentMobileOtps_ValidationStatus] CHECK ([ValidationStatus] IN (N'Pending', N'Validated', N'Expired'))
+    );
+    PRINT 'Created table [Parent].[ParentMobileOtps].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Parent].[ParentMobileOtps] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ParentMobileOtps_PetParentId_DateSentUtc'
+      AND [object_id] = OBJECT_ID(N'[Parent].[ParentMobileOtps]'))
+    CREATE INDEX [IX_ParentMobileOtps_PetParentId_DateSentUtc]
+        ON [Parent].[ParentMobileOtps] ([PetParentId], [DateSentUtc] DESC);
+GO
+
+
+-- 2.9.1c Parent.ParentIdentities ---------------------------------------------
+-- One identity per parent (UNIQUE on PetParentId). Re-uploading replaces.
+-- IdentityType drives a CHECK so callers can't store arbitrary strings.
+-- The photo blob URL lives here; the blob itself sits in the shared
+-- container under the [PetParentIdentities] folder.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ParentIdentities' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    CREATE TABLE [Parent].[ParentIdentities]
+    (
+        [ParentIdentityId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_ParentIdentities_ParentIdentityId] DEFAULT NEWSEQUENTIALID(),
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [IdentityType] NVARCHAR(32) NOT NULL,
+        [IdentityPhotoUrl] NVARCHAR(1000) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentIdentities_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentIdentities_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_ParentIdentities] PRIMARY KEY CLUSTERED ([ParentIdentityId] ASC),
+        CONSTRAINT [UQ_ParentIdentities_PetParentId] UNIQUE ([PetParentId]),
+        CONSTRAINT [FK_ParentIdentities_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId])
+            ON DELETE CASCADE,
+        CONSTRAINT [CK_ParentIdentities_IdentityType]
+            CHECK ([IdentityType] IN (N'Passport', N'DriverLicense', N'NationalId', N'ResidencePermit'))
+    );
+    PRINT 'Created table [Parent].[ParentIdentities].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Parent].[ParentIdentities] already exists.';
+END
+GO
+
+
+-- 2.9.2 Parent.ParentDeviceTokens --------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ParentDeviceTokens' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    CREATE TABLE [Parent].[ParentDeviceTokens]
+    (
+        [ParentDeviceTokenId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_ParentDeviceTokens_ParentDeviceTokenId] DEFAULT NEWSEQUENTIALID(),
+        [ParentAuthIdentityId] UNIQUEIDENTIFIER NOT NULL,
+        [PetParentId] UNIQUEIDENTIFIER NULL,
+        [FcmToken] NVARCHAR(2048) NOT NULL,
+        [DeviceId] NVARCHAR(200) NULL,
+        [DevicePlatform] NVARCHAR(32) NULL,
+        [IsActive] BIT NOT NULL
+            CONSTRAINT [DF_ParentDeviceTokens_IsActive] DEFAULT 1,
+        [LastSeenAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentDeviceTokens_LastSeenAtUtc] DEFAULT SYSUTCDATETIME(),
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentDeviceTokens_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ParentDeviceTokens_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_ParentDeviceTokens] PRIMARY KEY CLUSTERED ([ParentDeviceTokenId] ASC),
+        CONSTRAINT [UQ_ParentDeviceTokens_FcmToken] UNIQUE ([FcmToken]),
+        CONSTRAINT [FK_ParentDeviceTokens_ParentAuthIdentities_ParentAuthIdentityId]
+            FOREIGN KEY ([ParentAuthIdentityId]) REFERENCES [Parent].[ParentAuthIdentities] ([ParentAuthIdentityId]),
+        CONSTRAINT [FK_ParentDeviceTokens_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
+        CONSTRAINT [CK_ParentDeviceTokens_DevicePlatform]
+            CHECK ([DevicePlatform] IS NULL OR [DevicePlatform] IN (N'Android', N'iOS'))
+    );
+    PRINT 'Created table [Parent].[ParentDeviceTokens].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Parent].[ParentDeviceTokens] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ParentDeviceTokens_PetParentId_IsActive'
+      AND [object_id] = OBJECT_ID(N'[Parent].[ParentDeviceTokens]'))
+    CREATE INDEX [IX_ParentDeviceTokens_PetParentId_IsActive]
+        ON [Parent].[ParentDeviceTokens] ([PetParentId], [IsActive]);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ParentDeviceTokens_ParentAuthIdentityId_IsActive'
+      AND [object_id] = OBJECT_ID(N'[Parent].[ParentDeviceTokens]'))
+    CREATE INDEX [IX_ParentDeviceTokens_ParentAuthIdentityId_IsActive]
+        ON [Parent].[ParentDeviceTokens] ([ParentAuthIdentityId], [IsActive]);
 GO
 
 
@@ -780,7 +1409,12 @@ BEGIN
     (
         [EventId] UNIQUEIDENTIFIER NOT NULL
             CONSTRAINT [DF_Events_EventId] DEFAULT NEWSEQUENTIALID(),
-        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        -- Either ProviderId or PetParentId is set; the CHECK below enforces
+        -- exactly one. Provider- and parent-organised events live in the
+        -- same table so booking, counter, and discovery flows are organiser-
+        -- agnostic.
+        [ProviderId] UNIQUEIDENTIFIER NULL,
+        [PetParentId] UNIQUEIDENTIFIER NULL,
         [EventCategory] NVARCHAR(64) NOT NULL,
         [IsChildFriendly] BIT NOT NULL,
         [Title] NVARCHAR(200) NOT NULL,
@@ -805,6 +1439,12 @@ BEGIN
         CONSTRAINT [PK_Events] PRIMARY KEY CLUSTERED ([EventId] ASC),
         CONSTRAINT [FK_Events_Providers_ProviderId]
             FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
+        CONSTRAINT [FK_Events_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
+        CONSTRAINT [CK_Events_OrganiserExactlyOne] CHECK (
+            ([ProviderId] IS NOT NULL AND [PetParentId] IS NULL)
+         OR ([ProviderId] IS NULL AND [PetParentId] IS NOT NULL)
+        ),
         CONSTRAINT [CK_Events_EventCategory] CHECK ([EventCategory] IN (
             N'AdoptionAndRescue', N'PetTraining', N'Charity', N'Volunteering',
             N'HealthAndWellness', N'SocialAndCultural', N'OutdoorActivities', N'ParentEducation')),
@@ -817,6 +1457,82 @@ ELSE
 BEGIN
     PRINT 'Table [Event].[Events] already exists.';
 END
+GO
+
+-- 2.10b Retrofit: support parent-organised events alongside provider ones.
+-- ProviderId becomes nullable, PetParentId column + FK is added, the
+-- exactly-one CHECK is enforced for future inserts. Done as a sequence of
+-- idempotent steps so re-runs are safe.
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]')
+      AND [name] = N'ProviderId'
+      AND [is_nullable] = 0)
+BEGIN
+    ALTER TABLE [Event].[Events]
+        ALTER COLUMN [ProviderId] UNIQUEIDENTIFIER NULL;
+    PRINT 'Made [Event].[Events].[ProviderId] nullable.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]')
+      AND [name] = N'PetParentId')
+BEGIN
+    ALTER TABLE [Event].[Events]
+        ADD [PetParentId] UNIQUEIDENTIFIER NULL;
+    PRINT 'Added column [Event].[Events].[PetParentId].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.foreign_keys
+    WHERE [name] = N'FK_Events_PetParents_PetParentId'
+      AND [parent_object_id] = OBJECT_ID(N'[Event].[Events]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]')
+      AND [name] = N'PetParentId')
+BEGIN
+    ALTER TABLE [Event].[Events]
+        ADD CONSTRAINT [FK_Events_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]);
+    PRINT 'Added FK [FK_Events_PetParents_PetParentId].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Events_OrganiserExactlyOne'
+      AND [parent_object_id] = OBJECT_ID(N'[Event].[Events]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]')
+      AND [name] = N'PetParentId')
+BEGIN
+    -- WITH NOCHECK skips validation of existing rows (all of which have
+    -- ProviderId set and PetParentId NULL, so they satisfy the rule
+    -- already). Future inserts/updates are checked normally.
+    ALTER TABLE [Event].[Events] WITH NOCHECK
+        ADD CONSTRAINT [CK_Events_OrganiserExactlyOne] CHECK (
+            ([ProviderId] IS NOT NULL AND [PetParentId] IS NULL)
+         OR ([ProviderId] IS NULL AND [PetParentId] IS NOT NULL)
+        );
+    PRINT 'Added CHECK [CK_Events_OrganiserExactlyOne].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Events_PetParentId_StartDate'
+      AND [object_id] = OBJECT_ID(N'[Event].[Events]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]')
+      AND [name] = N'PetParentId')
+    CREATE INDEX [IX_Events_PetParentId_StartDate]
+        ON [Event].[Events] ([PetParentId], [StartDate] DESC);
 GO
 
 -- 2.10a Retrofit: add organiser-dashboard counter columns if missing -----------
@@ -915,7 +1631,7 @@ BEGIN
         CONSTRAINT [FK_Bookings_Providers_ProviderId]
             FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
         CONSTRAINT [FK_Bookings_PetParents_PetParentId]
-            FOREIGN KEY ([PetParentId]) REFERENCES [Customer].[PetParents] ([PetParentId]),
+            FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
         CONSTRAINT [FK_Bookings_ProviderServices_ServiceId]
             FOREIGN KEY ([ServiceId]) REFERENCES [Provider].[ProviderServices] ([ServiceId]),
         CONSTRAINT [CK_Bookings_TimeOrder] CHECK ([StartTime] < [EndTime]),
@@ -1470,6 +2186,857 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Provider].[SaveProviderAuthIdentity].';
+GO
+
+
+-- 3.1b SaveParentAuthIdentity -------------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[SaveParentAuthIdentity]
+    @FirebaseUserId NVARCHAR(128),
+    @FirebaseTenantId NVARCHAR(128) = NULL,
+    @AuthProvider NVARCHAR(32),
+    @FirebaseProviderId NVARCHAR(64) = NULL,
+    @Email NVARCHAR(320),
+    @IsEmailVerified BIT,
+    @DisplayName NVARCHAR(200) = NULL,
+    @FirebasePhoneNumber NVARCHAR(32) = NULL,
+    @PhotoUrl NVARCHAR(1000) = NULL,
+    @FcmToken NVARCHAR(2048) = NULL,
+    @DeviceId NVARCHAR(200) = NULL,
+    @DevicePlatform NVARCHAR(32) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @ParentAuthIdentityId UNIQUEIDENTIFIER;
+    DECLARE @PetParentId UNIQUEIDENTIFIER;
+
+    BEGIN TRANSACTION;
+
+    SELECT @ParentAuthIdentityId = [ParentAuthIdentityId]
+    FROM [Parent].[ParentAuthIdentities] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [FirebaseUserId] = @FirebaseUserId;
+
+    IF @ParentAuthIdentityId IS NULL
+    BEGIN
+        INSERT INTO [Parent].[ParentAuthIdentities]
+        (
+            [FirebaseUserId],
+            [FirebaseTenantId],
+            [AuthProvider],
+            [FirebaseProviderId],
+            [Email],
+            [IsEmailVerified],
+            [DisplayName],
+            [FirebasePhoneNumber],
+            [PhotoUrl]
+        )
+        VALUES
+        (
+            @FirebaseUserId,
+            @FirebaseTenantId,
+            @AuthProvider,
+            @FirebaseProviderId,
+            @Email,
+            @IsEmailVerified,
+            @DisplayName,
+            @FirebasePhoneNumber,
+            @PhotoUrl
+        );
+
+        SELECT @ParentAuthIdentityId = [ParentAuthIdentityId],
+               @PetParentId = [PetParentId]
+        FROM [Parent].[ParentAuthIdentities]
+        WHERE [FirebaseUserId] = @FirebaseUserId;
+    END
+    ELSE
+    BEGIN
+        UPDATE [Parent].[ParentAuthIdentities]
+        SET [FirebaseTenantId] = @FirebaseTenantId,
+            [AuthProvider] = @AuthProvider,
+            [FirebaseProviderId] = @FirebaseProviderId,
+            [Email] = @Email,
+            [IsEmailVerified] = @IsEmailVerified,
+            [DisplayName] = @DisplayName,
+            [FirebasePhoneNumber] = @FirebasePhoneNumber,
+            [PhotoUrl] = @PhotoUrl,
+            [LastSignedInAtUtc] = SYSUTCDATETIME(),
+            [UpdatedAtUtc] = SYSUTCDATETIME()
+        WHERE [ParentAuthIdentityId] = @ParentAuthIdentityId;
+
+        SELECT @PetParentId = [PetParentId]
+        FROM [Parent].[ParentAuthIdentities]
+        WHERE [ParentAuthIdentityId] = @ParentAuthIdentityId;
+    END
+
+    IF @FcmToken IS NOT NULL AND LEN(LTRIM(RTRIM(@FcmToken))) > 0
+    BEGIN
+        IF EXISTS (
+            SELECT 1
+            FROM [Parent].[ParentDeviceTokens] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [FcmToken] = @FcmToken
+        )
+        BEGIN
+            UPDATE [Parent].[ParentDeviceTokens]
+            SET [ParentAuthIdentityId] = @ParentAuthIdentityId,
+                [PetParentId] = @PetParentId,
+                [DeviceId] = @DeviceId,
+                [DevicePlatform] = @DevicePlatform,
+                [IsActive] = 1,
+                [LastSeenAtUtc] = SYSUTCDATETIME(),
+                [UpdatedAtUtc] = SYSUTCDATETIME()
+            WHERE [FcmToken] = @FcmToken;
+        END
+        ELSE
+        BEGIN
+            INSERT INTO [Parent].[ParentDeviceTokens]
+            (
+                [ParentAuthIdentityId],
+                [PetParentId],
+                [FcmToken],
+                [DeviceId],
+                [DevicePlatform]
+            )
+            VALUES
+            (
+                @ParentAuthIdentityId,
+                @PetParentId,
+                @FcmToken,
+                @DeviceId,
+                @DevicePlatform
+            );
+        END
+    END
+
+    SELECT [ParentAuthIdentityId],
+           [PetParentId],
+           [FirebaseUserId],
+           [AuthProvider],
+           [FirebaseProviderId],
+           [Email],
+           [IsEmailVerified],
+           [DisplayName],
+           [FirebasePhoneNumber],
+           [PhotoUrl],
+           [FirebaseTenantId],
+           [SignUpStatus],
+           [LastSignedInAtUtc],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[ParentAuthIdentities]
+    WHERE [FirebaseUserId] = @FirebaseUserId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[SaveParentAuthIdentity].';
+GO
+
+
+-- 3.1c CompletePetParentProfile -----------------------------------------------
+-- The auth identity is resolved server-side from the caller's Firebase
+-- user id (sub/user_id claim) rather than trusted from the request body.
+-- This closes the gap where a malicious caller could complete a different
+-- user's profile by guessing the auth identity id.
+CREATE OR ALTER PROCEDURE [Parent].[CompletePetParentProfile]
+    @FirebaseUserId NVARCHAR(128),
+    @FirstName NVARCHAR(100),
+    @LastName NVARCHAR(100),
+    @Gender NVARCHAR(32),
+    @MobileCountryCode NVARCHAR(8),
+    @MobileNumber NVARCHAR(32),
+    @DateOfBirth DATE,
+    @AddressLine NVARCHAR(500),
+    @Latitude DECIMAL(9, 6),
+    @Longitude DECIMAL(9, 6),
+    @ZipCode NVARCHAR(16),
+    @City NVARCHAR(100),
+    @Description NVARCHAR(2000)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @ParentAuthIdentityId UNIQUEIDENTIFIER;
+    DECLARE @PetParentId UNIQUEIDENTIFIER;
+
+    BEGIN TRANSACTION;
+
+    SELECT @ParentAuthIdentityId = [ParentAuthIdentityId],
+           @PetParentId = [PetParentId]
+    FROM [Parent].[ParentAuthIdentities] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [FirebaseUserId] = @FirebaseUserId;
+
+    IF @ParentAuthIdentityId IS NULL
+    BEGIN
+        THROW 51200, 'Parent auth identity was not found.', 1;
+    END
+
+    IF @PetParentId IS NULL
+    BEGIN
+        INSERT INTO [Parent].[PetParents]
+        (
+            [ParentAuthIdentityId],
+            [FirstName],
+            [LastName],
+            [Gender],
+            [MobileCountryCode],
+            [MobileNumber],
+            [DateOfBirth],
+            [AddressLine],
+            [Latitude],
+            [Longitude],
+            [ZipCode],
+            [City],
+            [Description]
+        )
+        VALUES
+        (
+            @ParentAuthIdentityId,
+            @FirstName,
+            @LastName,
+            @Gender,
+            @MobileCountryCode,
+            @MobileNumber,
+            @DateOfBirth,
+            @AddressLine,
+            @Latitude,
+            @Longitude,
+            @ZipCode,
+            @City,
+            @Description
+        );
+
+        SELECT @PetParentId = [PetParentId]
+        FROM [Parent].[PetParents]
+        WHERE [ParentAuthIdentityId] = @ParentAuthIdentityId;
+
+        UPDATE [Parent].[ParentAuthIdentities]
+        SET [PetParentId] = @PetParentId,
+            [SignUpStatus] = N'ParentProfileCompleted',
+            [UpdatedAtUtc] = SYSUTCDATETIME()
+        WHERE [ParentAuthIdentityId] = @ParentAuthIdentityId;
+
+        UPDATE [Parent].[ParentDeviceTokens]
+        SET [PetParentId] = @PetParentId,
+            [UpdatedAtUtc] = SYSUTCDATETIME()
+        WHERE [ParentAuthIdentityId] = @ParentAuthIdentityId;
+    END
+
+    SELECT [PetParentId],
+           [ParentAuthIdentityId],
+           [FirstName],
+           [LastName],
+           [Gender],
+           [MobileCountryCode],
+           [MobileNumber],
+           [DateOfBirth],
+           [AddressLine],
+           [Latitude],
+           [Longitude],
+           [ZipCode],
+           [City],
+           [Description],
+           [ProfilePhotoUrl],
+           [MobileVerifiedAtUtc],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[PetParents]
+    WHERE [PetParentId] = @PetParentId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[CompletePetParentProfile].';
+GO
+
+
+-- 3.1d UpdatePetParentProfilePhoto --------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[UpdatePetParentProfilePhoto]
+    @PetParentId UNIQUEIDENTIFIER,
+    @ProfilePhotoUrl NVARCHAR(1000)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    UPDATE [Parent].[PetParents]
+    SET [ProfilePhotoUrl] = @ProfilePhotoUrl,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    WHERE [PetParentId] = @PetParentId;
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        THROW 51201, 'Pet parent was not found.', 1;
+    END
+
+    SELECT [PetParentId],
+           [ProfilePhotoUrl],
+           [UpdatedAtUtc]
+    FROM [Parent].[PetParents]
+    WHERE [PetParentId] = @PetParentId;
+END;
+GO
+PRINT 'Created/updated [Parent].[UpdatePetParentProfilePhoto].';
+GO
+
+
+-- 3.1e AddPetParentPet --------------------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[AddPetParentPet]
+    @PetParentId UNIQUEIDENTIFIER,
+    @PetType NVARCHAR(32),
+    @PetName NVARCHAR(100),
+    @Breed NVARCHAR(100),
+    @Gender NVARCHAR(16),
+    @DateOfBirth DATE,
+    @Weight DECIMAL(5, 2),
+    @MicrochipId NVARCHAR(32) = NULL,
+    @Description NVARCHAR(2000) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId
+    )
+    BEGIN
+        THROW 51202, 'Pet parent was not found.', 1;
+    END
+
+    DECLARE @InsertedPetId TABLE ([PetId] UNIQUEIDENTIFIER);
+
+    INSERT INTO [Parent].[Pets]
+    (
+        [PetParentId],
+        [PetType],
+        [PetName],
+        [Breed],
+        [Gender],
+        [DateOfBirth],
+        [Weight],
+        [MicrochipId],
+        [Description]
+    )
+    OUTPUT inserted.[PetId] INTO @InsertedPetId
+    VALUES
+    (
+        @PetParentId,
+        @PetType,
+        @PetName,
+        @Breed,
+        @Gender,
+        @DateOfBirth,
+        @Weight,
+        @MicrochipId,
+        @Description
+    );
+
+    DECLARE @PetId UNIQUEIDENTIFIER = (SELECT TOP (1) [PetId] FROM @InsertedPetId);
+
+    SELECT [PetId],
+           [PetParentId],
+           [PetType],
+           [PetName],
+           [Breed],
+           [Gender],
+           [DateOfBirth],
+           [Weight],
+           [MicrochipId],
+           [Description],
+           [VaccinationStatus],
+           [SterilizationStatus],
+           [MedicalHistory],
+           [Temperament],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[Pets]
+    WHERE [PetId] = @PetId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[AddPetParentPet].';
+GO
+
+
+-- 3.1f UpdatePetMedicalInfo ---------------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[UpdatePetMedicalInfo]
+    @PetId UNIQUEIDENTIFIER,
+    @VaccinationStatus NVARCHAR(32),
+    @SterilizationStatus NVARCHAR(32),
+    @MedicalHistory NVARCHAR(MAX) = NULL,
+    @Temperament NVARCHAR(32)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    UPDATE [Parent].[Pets]
+    SET [VaccinationStatus] = @VaccinationStatus,
+        [SterilizationStatus] = @SterilizationStatus,
+        [MedicalHistory] = @MedicalHistory,
+        [Temperament] = @Temperament,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    WHERE [PetId] = @PetId;
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        THROW 51203, 'Pet was not found.', 1;
+    END
+
+    SELECT [PetId],
+           [PetParentId],
+           [PetType],
+           [PetName],
+           [Breed],
+           [Gender],
+           [DateOfBirth],
+           [Weight],
+           [MicrochipId],
+           [Description],
+           [VaccinationStatus],
+           [SterilizationStatus],
+           [MedicalHistory],
+           [Temperament],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[Pets]
+    WHERE [PetId] = @PetId;
+END;
+GO
+PRINT 'Created/updated [Parent].[UpdatePetMedicalInfo].';
+GO
+
+
+-- 3.1g AddPetPhoto ------------------------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[AddPetPhoto]
+    @PetId UNIQUEIDENTIFIER,
+    @PhotoUrl NVARCHAR(1000)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Parent].[Pets]
+        WHERE [PetId] = @PetId
+    )
+    BEGIN
+        THROW 51204, 'Pet was not found.', 1;
+    END
+
+    DECLARE @InsertedPetPhotoId TABLE ([PetPhotoId] UNIQUEIDENTIFIER);
+
+    INSERT INTO [Parent].[PetPhotos]
+    (
+        [PetId],
+        [PhotoUrl]
+    )
+    OUTPUT inserted.[PetPhotoId] INTO @InsertedPetPhotoId
+    VALUES
+    (
+        @PetId,
+        @PhotoUrl
+    );
+
+    DECLARE @PetPhotoId UNIQUEIDENTIFIER = (SELECT TOP (1) [PetPhotoId] FROM @InsertedPetPhotoId);
+
+    SELECT [PetPhotoId],
+           [PetId],
+           [PhotoUrl],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[PetPhotos]
+    WHERE [PetPhotoId] = @PetPhotoId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[AddPetPhoto].';
+GO
+
+
+-- 3.1h GetPetParentOnboardingStatus -------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[GetPetParentOnboardingStatus]
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Result set 1: parent profile + joined auth-identity flags. Empty if
+    -- the parent doesn't exist — the application reader treats that as a
+    -- 404 signal.
+    SELECT pp.[PetParentId],
+           pp.[ProfilePhotoUrl],
+           pp.[MobileVerifiedAtUtc],
+           pai.[IsEmailVerified]
+    FROM [Parent].[PetParents] AS pp
+    INNER JOIN [Parent].[ParentAuthIdentities] AS pai
+        ON pai.[ParentAuthIdentityId] = pp.[ParentAuthIdentityId]
+    WHERE pp.[PetParentId] = @PetParentId;
+
+    -- Result set 2: pets summary. Each row carries a server-computed flag
+    -- for whether the three required medical fields are populated.
+    -- MedicalHistory is intentionally NOT part of the completion check —
+    -- it's a free-text field that the spec marked optional.
+    SELECT [PetId],
+           [PetName],
+           CASE
+               WHEN [VaccinationStatus]   IS NOT NULL
+                AND [SterilizationStatus] IS NOT NULL
+                AND [Temperament]         IS NOT NULL
+               THEN CAST(1 AS BIT)
+               ELSE CAST(0 AS BIT)
+           END AS [IsMedicalInfoComplete]
+    FROM [Parent].[Pets]
+    WHERE [PetParentId] = @PetParentId
+    ORDER BY [CreatedAtUtc] ASC;
+
+    -- Result set 3: identity. Zero rows = no identity uploaded yet (stage
+    -- Remaining); one row = uploaded (stage Complete) with the
+    -- IdentityType the parent declared.
+    SELECT [IdentityType]
+    FROM [Parent].[ParentIdentities]
+    WHERE [PetParentId] = @PetParentId;
+END;
+GO
+PRINT 'Created/updated [Parent].[GetPetParentOnboardingStatus].';
+GO
+
+
+-- 3.1i Parent.CreateMobileVerificationOtp -------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[CreateMobileVerificationOtp]
+    @PetParentId UNIQUEIDENTIFIER,
+    @OtpCode NVARCHAR(10)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @ParentMobileOtpId UNIQUEIDENTIFIER = NEWID();
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @MobileCountryCode NVARCHAR(8);
+    DECLARE @MobileNumber NVARCHAR(32);
+
+    SELECT @MobileCountryCode = [MobileCountryCode],
+           @MobileNumber = [MobileNumber]
+    FROM [Parent].[PetParents]
+    WHERE [PetParentId] = @PetParentId;
+
+    IF @MobileNumber IS NULL
+    BEGIN
+        THROW 51210, 'Pet parent profile was not found.', 1;
+    END
+
+    INSERT INTO [Parent].[ParentMobileOtps]
+    (
+        [ParentMobileOtpId],
+        [PetParentId],
+        [MobileCountryCode],
+        [MobileNumber],
+        [OtpCodeHash],
+        [OtpCodeLastTwo],
+        [DateSentUtc],
+        [ExpiresAtUtc],
+        [CreatedAtUtc],
+        [UpdatedAtUtc]
+    )
+    VALUES
+    (
+        @ParentMobileOtpId,
+        @PetParentId,
+        @MobileCountryCode,
+        @MobileNumber,
+        HASHBYTES('SHA2_256', CONVERT(NVARCHAR(36), @ParentMobileOtpId) + N':' + @OtpCode),
+        RIGHT(@OtpCode, 2),
+        @Now,
+        DATEADD(MINUTE, 10, @Now),
+        @Now,
+        @Now
+    );
+
+    SELECT [ParentMobileOtpId],
+           [PetParentId],
+           [MobileCountryCode],
+           [MobileNumber],
+           [DateSentUtc],
+           [ExpiresAtUtc]
+    FROM [Parent].[ParentMobileOtps]
+    WHERE [ParentMobileOtpId] = @ParentMobileOtpId;
+END;
+GO
+PRINT 'Created/updated [Parent].[CreateMobileVerificationOtp].';
+GO
+
+
+-- 3.1j Parent.VerifyMobileVerificationOtp -------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[VerifyMobileVerificationOtp]
+    @PetParentId UNIQUEIDENTIFIER,
+    @ParentMobileOtpId UNIQUEIDENTIFIER,
+    @OtpCode NVARCHAR(10)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @OtpCodeHash VARBINARY(32);
+    DECLARE @ValidationStatus NVARCHAR(32);
+    DECLARE @DateSentUtc DATETIME2(7);
+    DECLARE @DateValidatedUtc DATETIME2(7);
+    DECLARE @ExpiresAtUtc DATETIME2(7);
+    DECLARE @ResponseStatus NVARCHAR(32);
+    DECLARE @IsValidated BIT = 0;
+
+    BEGIN TRANSACTION;
+
+    SELECT @OtpCodeHash = [OtpCodeHash],
+           @ValidationStatus = [ValidationStatus],
+           @DateSentUtc = [DateSentUtc],
+           @DateValidatedUtc = [DateValidatedUtc],
+           @ExpiresAtUtc = [ExpiresAtUtc]
+    FROM [Parent].[ParentMobileOtps] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [ParentMobileOtpId] = @ParentMobileOtpId
+      AND [PetParentId] = @PetParentId;
+
+    IF @OtpCodeHash IS NULL
+    BEGIN
+        THROW 51211, 'Pet parent mobile OTP entry was not found.', 1;
+    END
+
+    IF @ValidationStatus = N'Validated'
+    BEGIN
+        SET @IsValidated = 1;
+        SET @ResponseStatus = N'Validated';
+    END
+    ELSE IF @ValidationStatus = N'Expired' OR @Now >= @ExpiresAtUtc
+    BEGIN
+        UPDATE [Parent].[ParentMobileOtps]
+        SET [ValidationStatus] = N'Expired',
+            [UpdatedAtUtc] = @Now
+        WHERE [ParentMobileOtpId] = @ParentMobileOtpId;
+
+        SET @ResponseStatus = N'Expired';
+    END
+    ELSE IF @OtpCodeHash = HASHBYTES('SHA2_256', CONVERT(NVARCHAR(36), @ParentMobileOtpId) + N':' + @OtpCode)
+    BEGIN
+        UPDATE [Parent].[ParentMobileOtps]
+        SET [ValidationStatus] = N'Validated',
+            [DateValidatedUtc] = @Now,
+            [UpdatedAtUtc] = @Now
+        WHERE [ParentMobileOtpId] = @ParentMobileOtpId;
+
+        UPDATE [Parent].[PetParents]
+        SET [MobileVerifiedAtUtc] = COALESCE([MobileVerifiedAtUtc], @Now),
+            [UpdatedAtUtc] = @Now
+        WHERE [PetParentId] = @PetParentId;
+
+        SET @IsValidated = 1;
+        SET @ResponseStatus = N'Validated';
+        SET @DateValidatedUtc = @Now;
+    END
+    ELSE
+    BEGIN
+        UPDATE [Parent].[ParentMobileOtps]
+        SET [FailedAttemptCount] = [FailedAttemptCount] + 1,
+            [UpdatedAtUtc] = @Now
+        WHERE [ParentMobileOtpId] = @ParentMobileOtpId;
+
+        SET @ResponseStatus = N'Invalid';
+    END
+
+    SELECT [ParentMobileOtpId],
+           [PetParentId],
+           @IsValidated AS [IsValidated],
+           @ResponseStatus AS [ValidationStatus],
+           [DateSentUtc],
+           [DateValidatedUtc],
+           [ExpiresAtUtc]
+    FROM [Parent].[ParentMobileOtps]
+    WHERE [ParentMobileOtpId] = @ParentMobileOtpId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[VerifyMobileVerificationOtp].';
+GO
+
+
+-- 3.1k Parent.ListPetParentPets ------------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[ListPetParentPets]
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Result set 1: pets for this parent. Empty when the parent has no
+    -- pets (or doesn't exist) — the application returns [] rather than 404,
+    -- matching typical REST list semantics.
+    SELECT [PetId],
+           [PetParentId],
+           [PetType],
+           [PetName],
+           [Breed],
+           [Gender],
+           [DateOfBirth],
+           [Weight],
+           [MicrochipId],
+           [Description],
+           [VaccinationStatus],
+           [SterilizationStatus],
+           [MedicalHistory],
+           [Temperament],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[Pets]
+    WHERE [PetParentId] = @PetParentId
+    ORDER BY [CreatedAtUtc] ASC;
+
+    -- Result set 2: photos for those pets. Grouped by PetId in the C# layer
+    -- and nested under each pet in the response. Ordered oldest-first so the
+    -- mobile gallery renders in upload order.
+    SELECT ph.[PetPhotoId],
+           ph.[PetId],
+           ph.[PhotoUrl],
+           ph.[CreatedAtUtc],
+           ph.[UpdatedAtUtc]
+    FROM [Parent].[PetPhotos] AS ph
+    INNER JOIN [Parent].[Pets] AS p
+        ON p.[PetId] = ph.[PetId]
+    WHERE p.[PetParentId] = @PetParentId
+    ORDER BY ph.[CreatedAtUtc] ASC;
+END;
+GO
+PRINT 'Created/updated [Parent].[ListPetParentPets].';
+GO
+
+
+-- 3.1l Parent.UpdatePetParentPet -----------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[UpdatePetParentPet]
+    @PetId UNIQUEIDENTIFIER,
+    @PetType NVARCHAR(32),
+    @PetName NVARCHAR(100),
+    @Breed NVARCHAR(100),
+    @Gender NVARCHAR(16),
+    @DateOfBirth DATE,
+    @Weight DECIMAL(5, 2),
+    @MicrochipId NVARCHAR(32) = NULL,
+    @Description NVARCHAR(2000) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    UPDATE [Parent].[Pets]
+    SET [PetType] = @PetType,
+        [PetName] = @PetName,
+        [Breed] = @Breed,
+        [Gender] = @Gender,
+        [DateOfBirth] = @DateOfBirth,
+        [Weight] = @Weight,
+        [MicrochipId] = @MicrochipId,
+        [Description] = @Description,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    WHERE [PetId] = @PetId;
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        THROW 51205, 'Pet was not found.', 1;
+    END
+
+    SELECT [PetId],
+           [PetParentId],
+           [PetType],
+           [PetName],
+           [Breed],
+           [Gender],
+           [DateOfBirth],
+           [Weight],
+           [MicrochipId],
+           [Description],
+           [VaccinationStatus],
+           [SterilizationStatus],
+           [MedicalHistory],
+           [Temperament],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[Pets]
+    WHERE [PetId] = @PetId;
+END;
+GO
+PRINT 'Created/updated [Parent].[UpdatePetParentPet].';
+GO
+
+
+-- 3.1m Parent.UpsertPetParentIdentity ------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[UpsertPetParentIdentity]
+    @PetParentId UNIQUEIDENTIFIER,
+    @IdentityType NVARCHAR(32),
+    @IdentityPhotoUrl NVARCHAR(1000)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId
+    )
+    BEGIN
+        THROW 51206, 'Pet parent was not found.', 1;
+    END
+
+    IF EXISTS (
+        SELECT 1
+        FROM [Parent].[ParentIdentities] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [PetParentId] = @PetParentId
+    )
+    BEGIN
+        UPDATE [Parent].[ParentIdentities]
+        SET [IdentityType] = @IdentityType,
+            [IdentityPhotoUrl] = @IdentityPhotoUrl,
+            [UpdatedAtUtc] = SYSUTCDATETIME()
+        WHERE [PetParentId] = @PetParentId;
+    END
+    ELSE
+    BEGIN
+        INSERT INTO [Parent].[ParentIdentities]
+        (
+            [PetParentId],
+            [IdentityType],
+            [IdentityPhotoUrl]
+        )
+        VALUES
+        (
+            @PetParentId,
+            @IdentityType,
+            @IdentityPhotoUrl
+        );
+    END
+
+    SELECT [ParentIdentityId],
+           [PetParentId],
+           [IdentityType],
+           [IdentityPhotoUrl],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[ParentIdentities]
+    WHERE [PetParentId] = @PetParentId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[UpsertPetParentIdentity].';
 GO
 
 
@@ -2191,7 +3758,7 @@ BEGIN
     IF @ProviderIsActive = 0
         THROW 51067, 'Provider is currently inactive and is not accepting new bookings.', 1;
 
-    IF NOT EXISTS (SELECT 1 FROM [Customer].[PetParents] WHERE [PetParentId] = @PetParentId)
+    IF NOT EXISTS (SELECT 1 FROM [Parent].[PetParents] WHERE [PetParentId] = @PetParentId)
         THROW 51060, 'Pet parent was not found.', 1;
 
     IF NOT EXISTS (
@@ -2529,7 +4096,7 @@ BEGIN
     FROM OPENJSON(@AmenitiesJson)
     WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
 
-    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+    SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
            [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
            [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
     FROM [Event].[Events]
@@ -2547,6 +4114,77 @@ PRINT 'Created/updated [Event].[CreateEvent].';
 GO
 
 
+-- 3.10b Event.CreatePetParentEvent --------------------------------------------
+-- Mirror of [Event].[CreateEvent] for parent-organised events. The shape of
+-- the inserted row is identical; only the organiser column differs.
+CREATE OR ALTER PROCEDURE [Event].[CreatePetParentEvent]
+    @PetParentId UNIQUEIDENTIFIER,
+    @EventCategory NVARCHAR(64),
+    @IsChildFriendly BIT,
+    @Title NVARCHAR(200),
+    @Description NVARCHAR(MAX),
+    @BannerImageUrl NVARCHAR(1000) = NULL,
+    @EventType NVARCHAR(32),
+    @StartDate DATE,
+    @EndDate DATE,
+    @StartTime TIME(0),
+    @EndTime TIME(0),
+    @AmenitiesJson NVARCHAR(MAX) = N'[]'
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId
+    )
+    BEGIN
+        THROW 51207, 'Pet parent was not found.', 1;
+    END
+
+    DECLARE @InsertedEventId TABLE (EventId UNIQUEIDENTIFIER);
+
+    INSERT INTO [Event].[Events]
+    (
+        [PetParentId], [EventCategory], [IsChildFriendly], [Title], [Description],
+        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime]
+    )
+    OUTPUT inserted.[EventId] INTO @InsertedEventId
+    VALUES
+    (
+        @PetParentId, @EventCategory, @IsChildFriendly, @Title, @Description,
+        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime
+    );
+
+    DECLARE @EventId UNIQUEIDENTIFIER = (SELECT TOP (1) [EventId] FROM @InsertedEventId);
+
+    INSERT INTO [Event].[EventAmenities] ([EventId], [Amenity])
+    SELECT DISTINCT @EventId, [value]
+    FROM OPENJSON(@AmenitiesJson)
+    WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
+
+    SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
+           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Event].[Events]
+    WHERE [EventId] = @EventId;
+
+    SELECT [Amenity]
+    FROM [Event].[EventAmenities]
+    WHERE [EventId] = @EventId
+    ORDER BY [Amenity];
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Event].[CreatePetParentEvent].';
+GO
+
+
 -- 3.11 Event.GetEvent --------------------------------------------------------
 CREATE OR ALTER PROCEDURE [Event].[GetEvent]
     @EventId UNIQUEIDENTIFIER
@@ -2554,7 +4192,7 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+    SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
            [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
            [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
     FROM [Event].[Events]
@@ -2577,7 +4215,7 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT [EventId], [ProviderId], [EventCategory], [IsChildFriendly], [Title],
+    SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
            [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
            [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
     FROM [Event].[Events]
@@ -2639,7 +4277,7 @@ BEGIN
                     WHERE a.[EventId] = e.[EventId])
               )
     )
-    SELECT e.[EventId], e.[ProviderId], e.[EventCategory], e.[IsChildFriendly],
+    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly],
            e.[Title], e.[Description], e.[BannerImageUrl], e.[EventType],
            e.[StartDate], e.[EndDate], e.[StartTime], e.[EndTime],
            e.[CreatedAtUtc], e.[UpdatedAtUtc]
@@ -3228,6 +4866,47 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Event].[ListEventAttendees].';
+GO
+
+
+-- 3.35 Event.ListEventBookingsByBookerEmail ------------------------------------
+-- Powers the pet-parent host's "my event bookings" screen. Joins each
+-- booking to its event so the mobile card can render without a follow-up
+-- fetch. Booker identity is free text (see CLAUDE.md) so we match by
+-- BookerEmail, which the endpoint pulls from the caller's JWT.
+CREATE OR ALTER PROCEDURE [Event].[ListEventBookingsByBookerEmail]
+    @BookerEmail NVARCHAR(320)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT b.[BookingId],
+           b.[EventId],
+           e.[Title]            AS [EventTitle],
+           e.[EventCategory],
+           e.[StartDate]        AS [EventStartDate],
+           e.[StartTime]        AS [EventStartTime],
+           e.[BannerImageUrl]   AS [EventBannerImageUrl],
+           b.[BookerName],
+           b.[BookerEmail],
+           b.[BookerMobile],
+           b.[TicketCount],
+           b.[PaymentMethod],
+           b.[PaymentStatus],
+           b.[PaymentReference],
+           b.[TotalAmount],
+           b.[Status],
+           b.[CreatedAtUtc],
+           b.[UpdatedAtUtc],
+           b.[CancelledAtUtc]
+    FROM [Event].[EventBookings] AS b
+    INNER JOIN [Event].[Events] AS e
+        ON e.[EventId] = b.[EventId]
+    WHERE b.[BookerEmail] = @BookerEmail
+    ORDER BY b.[CreatedAtUtc] DESC;
+END;
+GO
+PRINT 'Created/updated [Event].[ListEventBookingsByBookerEmail].';
 GO
 
 

@@ -34,70 +34,140 @@ internal sealed class EventService(
 
     public async Task<EventResult> CreateAsync(CreateEventCommand command, CancellationToken cancellationToken)
     {
-        // Validate enum-shaped fields up front so SQL never sees garbage.
-        var category = NormalizeOne(command.EventCategory, AllowedCategories, nameof(command.EventCategory));
-        var eventType = NormalizeOne(command.EventType, AllowedEventTypes, nameof(command.EventType));
-        var amenities = NormalizeAmenities(command.Amenities);
-        var title = Required(command.Title, nameof(command.Title));
-        var description = Required(command.Description, nameof(command.Description));
-
-        if (command.EndDate < command.StartDate)
-        {
-            throw new ArgumentException("EndDate must be on or after StartDate.", nameof(command.EndDate));
-        }
-
-        PhysicalEventInput? physicalInput = null;
-        if (eventType == nameof(EventType.Physical))
-        {
-            if (command.Physical is null)
-            {
-                throw new ArgumentException(
-                    "Physical events require capacity and ticketing details.",
-                    nameof(command.Physical));
-            }
-            physicalInput = ValidatePhysical(command.Physical);
-        }
+        var validated = ValidateForCreate(
+            command.EventCategory, command.EventType, command.Amenities,
+            command.Title, command.Description, command.StartDate, command.EndDate,
+            command.Physical);
 
         // Write SQL first (source of truth + EventId generation).
         var snapshot = await sqlStore.CreateAsync(
             new CreateEventSqlInput(
                 command.ProviderId,
-                category,
+                validated.Category,
                 command.IsChildFriendly,
-                title,
-                description,
+                validated.Title,
+                validated.Description,
                 Trim(command.BannerImageUrl),
-                amenities,
-                eventType,
+                validated.Amenities,
+                validated.EventType,
                 command.StartDate,
                 command.EndDate,
                 command.StartTime,
                 command.EndTime),
             cancellationToken);
 
-        // For physical events, write the Cosmos extension doc.
-        PhysicalEventResult? physicalResult = null;
-        if (physicalInput is not null)
-        {
-            try
-            {
-                physicalResult = await cosmosStore.UpsertPhysicalAsync(
-                    snapshot.EventId,
-                    category,
-                    physicalInput,
-                    cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(
-                    ex,
-                    "Event {EventId} was created in SQL but the Cosmos extension write failed. The event will be returned without physical details.",
-                    snapshot.EventId);
-            }
-        }
+        var physicalResult = await WritePhysicalExtensionAsync(
+            snapshot.EventId, validated.Category, validated.PhysicalInput, cancellationToken);
 
         return ToResult(snapshot, physicalResult);
     }
+
+    public async Task<EventResult> CreateByParentAsync(
+        CreateParentEventCommand command,
+        CancellationToken cancellationToken)
+    {
+        var validated = ValidateForCreate(
+            command.EventCategory, command.EventType, command.Amenities,
+            command.Title, command.Description, command.StartDate, command.EndDate,
+            command.Physical);
+
+        var snapshot = await sqlStore.CreateByParentAsync(
+            new CreateParentEventSqlInput(
+                command.PetParentId,
+                validated.Category,
+                command.IsChildFriendly,
+                validated.Title,
+                validated.Description,
+                Trim(command.BannerImageUrl),
+                validated.Amenities,
+                validated.EventType,
+                command.StartDate,
+                command.EndDate,
+                command.StartTime,
+                command.EndTime),
+            cancellationToken);
+
+        var physicalResult = await WritePhysicalExtensionAsync(
+            snapshot.EventId, validated.Category, validated.PhysicalInput, cancellationToken);
+
+        return ToResult(snapshot, physicalResult);
+    }
+
+    /// <summary>
+    /// Shared validation for both the provider- and parent-create paths.
+    /// Normalises enum-shaped fields, checks the date window, and validates
+    /// the physical block for Physical events.
+    /// </summary>
+    private static ValidatedEventCreate ValidateForCreate(
+        string eventCategory,
+        string eventType,
+        IReadOnlyCollection<string> amenities,
+        string title,
+        string description,
+        DateOnly startDate,
+        DateOnly endDate,
+        PhysicalEventInput? physical)
+    {
+        var category = NormalizeOne(eventCategory, AllowedCategories, nameof(eventCategory));
+        var normalisedType = NormalizeOne(eventType, AllowedEventTypes, nameof(eventType));
+        var normalisedAmenities = NormalizeAmenities(amenities);
+        var normalisedTitle = Required(title, nameof(title));
+        var normalisedDescription = Required(description, nameof(description));
+
+        if (endDate < startDate)
+        {
+            throw new ArgumentException("EndDate must be on or after StartDate.", nameof(endDate));
+        }
+
+        PhysicalEventInput? physicalInput = null;
+        if (normalisedType == nameof(EventType.Physical))
+        {
+            if (physical is null)
+            {
+                throw new ArgumentException(
+                    "Physical events require capacity and ticketing details.",
+                    nameof(physical));
+            }
+            physicalInput = ValidatePhysical(physical);
+        }
+
+        return new ValidatedEventCreate(
+            category, normalisedType, normalisedAmenities,
+            normalisedTitle, normalisedDescription, physicalInput);
+    }
+
+    private async Task<PhysicalEventResult?> WritePhysicalExtensionAsync(
+        Guid eventId,
+        string category,
+        PhysicalEventInput? physicalInput,
+        CancellationToken cancellationToken)
+    {
+        if (physicalInput is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await cosmosStore.UpsertPhysicalAsync(eventId, category, physicalInput, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "Event {EventId} was created in SQL but the Cosmos extension write failed. The event will be returned without physical details.",
+                eventId);
+            return null;
+        }
+    }
+
+    private sealed record ValidatedEventCreate(
+        string Category,
+        string EventType,
+        IReadOnlyCollection<string> Amenities,
+        string Title,
+        string Description,
+        PhysicalEventInput? PhysicalInput);
 
     public async Task<EventResult?> GetAsync(Guid eventId, CancellationToken cancellationToken)
     {
@@ -202,6 +272,7 @@ internal sealed class EventService(
         return new EventResult(
             snapshot.EventId,
             snapshot.ProviderId,
+            snapshot.PetParentId,
             snapshot.EventCategory,
             snapshot.IsChildFriendly,
             snapshot.Title,

@@ -6,6 +6,15 @@ public interface IEventSqlStore
         CreateEventSqlInput input,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Inserts a parent-organised event (PetParentId set, ProviderId NULL).
+    /// Throws <see cref="EventPetParentNotFoundException"/> when the parent
+    /// row is missing.
+    /// </summary>
+    Task<EventSqlSnapshot> CreateByParentAsync(
+        CreateParentEventSqlInput input,
+        CancellationToken cancellationToken);
+
     Task<EventSqlSnapshot?> GetAsync(
         Guid eventId,
         CancellationToken cancellationToken);
