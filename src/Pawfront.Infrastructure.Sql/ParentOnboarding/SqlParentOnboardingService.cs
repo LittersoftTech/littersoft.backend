@@ -348,6 +348,38 @@ internal sealed class SqlParentOnboardingService(
         }
     }
 
+    public async Task<ResolvePetParentByFirebaseUidResponse> ResolvePetParentByFirebaseUidAsync(
+        string firebaseUserId,
+        CancellationToken cancellationToken)
+    {
+        var normalised = Required(firebaseUserId, nameof(firebaseUserId));
+
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.GetPetParentByFirebaseUid");
+        command.Parameters.AddWithValue("@FirebaseUserId", normalised);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new ParentAuthIdentityNotFoundException(normalised);
+        }
+
+        return new ResolvePetParentByFirebaseUidResponse(
+            reader.GetGuid(0),
+            reader.IsDBNull(1) ? null : reader.GetGuid(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetBoolean(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.GetString(6),
+            reader.GetBoolean(7),
+            reader.IsDBNull(8) ? null : new DateTimeOffset(reader.GetDateTime(8), TimeSpan.Zero));
+    }
+
     private static string NormaliseIdentityType(string? value)
     {
         return Required(value, nameof(value)) switch

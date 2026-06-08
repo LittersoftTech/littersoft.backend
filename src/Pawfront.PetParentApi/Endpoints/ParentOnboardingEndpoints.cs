@@ -11,8 +11,32 @@ internal static class ParentOnboardingEndpoints
         var onboarding = builder.MapGroup("/parent-onboarding");
         onboarding.MapPost("/firebase-auth", SaveFirebaseAuth);
         onboarding.MapPost("/profile", CompleteProfile);
+        onboarding.MapGet("/me", ResolvePetParentFromFirebaseToken);
 
         return builder;
+    }
+
+    private static async Task<IResult> ResolvePetParentFromFirebaseToken(
+        HttpContext httpContext,
+        IParentOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var firebaseUserId = FirebaseClaims.GetFirebaseUserId(httpContext.User);
+            var response = await onboardingService.ResolvePetParentByFirebaseUidAsync(
+                firebaseUserId,
+                cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (ParentAuthIdentityNotFoundException exception)
+        {
+            return ApiResults.NotFound("ParentAuthIdentityNotFound", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
     }
 
     private static async Task<IResult> CompleteProfile(

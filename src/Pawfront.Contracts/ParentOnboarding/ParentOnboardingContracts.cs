@@ -67,6 +67,26 @@ public sealed record UpdatePetParentProfilePhotoResponse(
     string ProfilePhotoUrl,
     DateTimeOffset UpdatedAtUtc);
 
+/// <summary>
+/// Response for <c>GET /api/v1/parent-onboarding/me</c>. Resolves the
+/// caller's Firebase uid → the persisted pet-parent auth identity and (if
+/// one exists) the linked profile row. Used by the mobile app after a
+/// reinstall to recover its <c>PetParentId</c> from the current Firebase
+/// session. <c>PetParentId</c>, <c>HasProfile</c>, and
+/// <c>MobileVerifiedAtUtc</c> are populated only once the parent has
+/// completed <c>POST /parent-onboarding/profile</c>.
+/// </summary>
+public sealed record ResolvePetParentByFirebaseUidResponse(
+    Guid ParentAuthIdentityId,
+    Guid? PetParentId,
+    string FirebaseUserId,
+    string Email,
+    bool IsEmailVerified,
+    string? DisplayName,
+    string SignUpStatus,
+    bool HasProfile,
+    DateTimeOffset? MobileVerifiedAtUtc);
+
 public sealed record PetParentOnboardingStatusResponse(
     Guid PetParentId,
     OnboardingStageResponse BasicInfo,
