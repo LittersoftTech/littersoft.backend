@@ -37,7 +37,7 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1
-        FROM [Customer].[PetParents]
+        FROM [Parent].[PetParents]
         WHERE [PetParentId] = @PetParentId
     )
     BEGIN

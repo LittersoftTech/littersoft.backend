@@ -4,9 +4,12 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Result set 1: event rows
+    -- Result set 1: event rows (PetParentId is always NULL on rows
+    -- returned here because the filter is on ProviderId — but included
+    -- for column-shape consistency with GetEvent / ListEvents readers).
     SELECT [EventId],
            [ProviderId],
+           [PetParentId],
            [EventCategory],
            [IsChildFriendly],
            [Title],

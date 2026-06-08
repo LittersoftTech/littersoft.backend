@@ -4,6 +4,14 @@ public interface IEventService
 {
     Task<EventResult> CreateAsync(CreateEventCommand command, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Creates a parent-organised event. Same validation + Cosmos
+    /// physical-extension flow as <see cref="CreateAsync"/>, but the row is
+    /// keyed by PetParentId instead of ProviderId. Throws
+    /// <see cref="EventPetParentNotFoundException"/> when the parent row is missing.
+    /// </summary>
+    Task<EventResult> CreateByParentAsync(CreateParentEventCommand command, CancellationToken cancellationToken);
+
     Task<EventResult?> GetAsync(Guid eventId, CancellationToken cancellationToken);
 
     Task<IReadOnlyCollection<EventResult>> ListByProviderAsync(

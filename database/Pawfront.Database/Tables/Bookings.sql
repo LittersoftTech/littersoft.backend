@@ -50,7 +50,7 @@ CREATE TABLE [Booking].[Bookings]
     CONSTRAINT [FK_Bookings_Providers_ProviderId]
         FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
     CONSTRAINT [FK_Bookings_PetParents_PetParentId]
-        FOREIGN KEY ([PetParentId]) REFERENCES [Customer].[PetParents] ([PetParentId]),
+        FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
     CONSTRAINT [FK_Bookings_ProviderServices_ServiceId]
         FOREIGN KEY ([ServiceId]) REFERENCES [Provider].[ProviderServices] ([ServiceId]),
     CONSTRAINT [CK_Bookings_TimeOrder] CHECK ([StartTime] < [EndTime]),

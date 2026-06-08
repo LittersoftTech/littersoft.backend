@@ -46,7 +46,7 @@ BEGIN
                     WHERE a.[EventId] = e.[EventId])
               )
     )
-    SELECT e.[EventId], e.[ProviderId], e.[EventCategory], e.[IsChildFriendly],
+    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly],
            e.[Title], e.[Description], e.[BannerImageUrl], e.[EventType],
            e.[StartDate], e.[EndDate], e.[StartTime], e.[EndTime],
            e.[CreatedAtUtc], e.[UpdatedAtUtc]

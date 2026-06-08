@@ -10,8 +10,13 @@ Pawfront is a provider-facing mobile-app backend for pet-services businesses
 details and event extension data), **Azure Blob Storage** (images), and
 **Firebase Auth** (identity).
 
-A parallel pet-parent (consumer) app exists in plans only — backend has minimal
-scaffolding for it (`Customer.PetParents`, `Customer.Pets` tables) but no APIs.
+A parallel pet-parent (consumer) app is now under construction in its own
+host (`Pawfront.PetParentApi`, separate Firebase project, `PetParentUser`
+authorization policy). All pet-parent tables live in the **`[Parent]`**
+schema (`Parent.PetParents`, `Parent.Pets`, `Parent.ParentAuthIdentities`,
+`Parent.ParentDeviceTokens`). The legacy `[Customer]` schema has been
+retired — `DeployAll.sql` transfers the old tables on first run and drops
+the empty schema.
 
 ## Stack & solution layout
 
@@ -77,6 +82,44 @@ dotnet build Pawfront.slnx --configfile NuGet.Config
   Token validation is JWKS-based. Bring it back only when wiring FCM push.
 - `Firebase:ProjectId = "littersoftprovider"` (set in `appsettings.json`).
 
+### Pet-parent host ownership enforcement
+
+On `Pawfront.PetParentApi`, every `/pet-parents/{petParentId:guid}/*` and
+`/pets/{petId:guid}/*` route runs through an ownership filter before its
+handler resolves. The caller's `PetParentId` is derived **from the JWT**,
+never from the route or body.
+
+Resolution chain (cached once per request via the scoped
+[`ICurrentPetParentContext`](src/Pawfront.PetParentApi/Auth/CurrentPetParentContext.cs)):
+
+```
+JWT sub / user_id  →  Parent.ParentAuthIdentities.FirebaseUserId  →  PetParentId
+```
+
+Backed by [`IPetParentOwnershipReader`](src/Pawfront.Application/ParentOnboarding/IPetParentOwnershipReader.cs)
+(SQL impl `SqlPetParentOwnershipReader`) — two indexed point reads:
+`ParentAuthIdentities` lookup hits the UNIQUE `FirebaseUserId` index, and
+the per-pet check hits `PK_Pets`.
+
+**Filters** (in [`src/Pawfront.PetParentApi/Auth/`](src/Pawfront.PetParentApi/Auth)):
+- `OwnedPetParentFilter` — wired via `.RequireOwnedPetParent()` on the
+  `/pet-parents/{petParentId:guid}` MapGroup. Compares the route's
+  `petParentId` to the resolved id.
+- `OwnedPetFilter` — wired via `.RequireOwnedPet()` on the
+  `/pets/{petId:guid}` MapGroup. Looks up the pet's owning `PetParentId`
+  and compares.
+
+**Status codes the filters emit:**
+- 403 `Forbidden` — authenticated but the route's id doesn't belong to the caller.
+- 403 `ParentProfileNotCompleted` — JWT is valid but the parent hasn't
+  finished `POST /parent-onboarding/profile` (PetParentId is unset).
+- 404 `PetNotFound` — `/pets/{petId}/*` route, pet row doesn't exist
+  (don't leak existence via 403).
+
+**Not filtered** — by design, since the caller may not have a profile yet:
+`/parent-onboarding/*`, `/providers/*`, `/events/*`, `/event-bookings/*`,
+`/blob-images`, `/health`.
+
 ## Configuration
 
 `appsettings.json` (committed) and `appsettings.Development.json` (committed)
@@ -96,8 +139,9 @@ Key config sections:
   connection-string format.
 - `Cosmos:Containers.{ProviderServices,Events}` — auto-created by the
   `CosmosBootstrapper` at startup. Other containers listed but not active.
-- `BlobStorage:Container = "provider-images"`, with
-  `Folders.{ProfilePhotos,ServicePhotos,EventBanners}`.
+- `BlobStorage:Container = "provider-images"` (still named that for legacy
+  reasons; also now hosts pet-parent images), with
+  `Folders.{ProfilePhotos,ServicePhotos,EventBanners,PetParentProfilePhotos,PetPhotos,PetParentIdentities}`.
 - `ApplicationInsights:ConnectionString` — empty by default; when set,
   enables Azure Monitor exporter. Otherwise dev gets console exporter.
 
@@ -120,7 +164,9 @@ Keep that file in sync whenever a table or relationship changes.
 - `Provider.*` — provider profile, auth identity, OTP, device tokens,
   policies, service-registration index, **per-service catalog
   (`ProviderServices`) and closures**
-- `Customer.*` — `PetParents`, `Pets` (scaffolding only, no APIs)
+- `Parent.*` — `ParentAuthIdentities`, `ParentDeviceTokens` (pet-parent
+  Firebase login + per-device FCM tokens), plus `PetParents`, `Pets`
+  (profile/pet tables — still scaffolding until profile endpoint lands)
 - `Event.*` — `Events`, `EventAmenities` (event subscriptions designed but
   not yet built)
 - `Booking.*` — `Bookings` (real, race-safe via `Booking.CreateBooking` sproc
@@ -168,6 +214,16 @@ Custom `THROW` codes used for typed errors:
 - `51067` provider is currently inactive (master Active/Inactive switch is off)
   → API maps to **409 ProviderInactive**
 - `51100` provider profile not found (active-status toggle)
+- `51200` parent auth identity not found (pet-parent profile completion)
+- `51201` pet parent not found (profile-photo update)
+- `51202` pet parent not found (pet add)
+- `51203` pet not found (pet medical-info update)
+- `51204` pet not found (pet photo add)
+- `51205` pet not found (pet basic-info update)
+- `51206` pet parent not found (identity upsert)
+- `51207` pet parent not found (parent event create)
+- `51210` pet parent profile not found (mobile OTP create)
+- `51211` pet parent mobile OTP not found (verify)
 
 ## Cosmos
 
@@ -189,12 +245,19 @@ Custom `THROW` codes used for typed errors:
 
 ## Blob
 
-Container: `provider-images` (private). Folders:
+Container: `provider-images` (private; name is legacy — also stores
+pet-parent and pet images now). Folders:
 - `profile-photos/<providerId>/<guid>.<ext>`
 - `service-photos/<providerId>/<guid>.<ext>`
 - `events/<providerId>/<guid>.<ext>`
+- `pet-parent-profile-photos/<petParentId>/<guid>.<ext>`
+- `pet-photos/<petId>/<guid>.<ext>`
+- `pet-parent-identities/<petParentId>/<guid>.<ext>`
 
-`BlobUploadKind` enum: `ProfilePhoto`, `ServicePhoto`, `EventBanner`.
+`BlobUploadKind` enum: `ProfilePhoto`, `ServicePhoto`, `EventBanner`,
+`PetParentProfilePhoto`, `PetPhoto`. The `IPawfrontBlobStorage.UploadAsync`
+parameter is `ownerId` (generic) — it's a ProviderId for provider kinds,
+a PetParentId for pet-parent kinds, a PetId for pet kinds.
 
 **Universal fetch endpoint:** the container is private, so the mobile client
 can't `GET` the blob URL directly. Instead it POSTs to
@@ -439,12 +502,27 @@ all reference a specific **ServiceId**, not the whole provider.
   one round-trip) + a fan-out of point reads to each registered category's
   Cosmos registry.
 
-### Events (provider-created, parents subscribe)
-- `POST /providers/{id}/events/banner-image` (multipart) → URL
-- `POST /providers/{id}/events` — creates event. Body has 8 SQL fields +
+### Events (provider- OR parent-created)
+- `Event.Events` carries **nullable `ProviderId` AND nullable `PetParentId`**
+  with a CHECK enforcing exactly one is set. Provider-organised and
+  parent-organised events live in the same table; booking, counter, and
+  catalog/detail flows are organiser-agnostic (keyed by EventId).
+- Provider create: `POST /providers/{id}/events` (sproc `Event.CreateEvent`,
+  THROW 51030). Parent create: `POST /pet-parents/{petParentId}/events`
+  (sproc `Event.CreatePetParentEvent`, THROW 51207) on the pet-parent host.
+  Identical request body + Cosmos physical-extension flow; only the organiser
+  column differs.
+- `POST /providers/{id}/events/banner-image` and
+  `POST /pet-parents/{petParentId}/events/banner-image` (multipart) → URL.
+- Both create-event request bodies have 8 SQL fields +
   `physical: { maximumCapacity, isPaid, price? }` for physical events.
+- `EventResponse` exposes both `providerId` and `petParentId` as nullable —
+  exactly one is populated.
 - `GET /providers/{id}/events` — list this provider's events (SQL only).
 - `GET /events/{eventId}` — single event detail. SQL + Cosmos if physical.
+- Organiser dashboard (attendees / metrics) is **provider-only** — those
+  sprocs filter by ProviderId, so parent events simply never match. Not
+  exposed on the parent host.
 - Storage split: SQL has bulk + amenities junction; Cosmos has physical
   capacity + ticketing. Online events have only SQL row.
 - Categories (8): `AdoptionAndRescue`, `PetTraining`, `Charity`,
@@ -578,7 +656,53 @@ it.
 
 ## Endpoint catalogue (current)
 
-All under `/api/v1`, all require `FirebaseUser` policy.
+Two hosts. Provider host (`Pawfront.Api`) — all under `/api/v1`, all require
+the `FirebaseUser` policy (Firebase project `littersoftprovider`). Pet-parent
+host (`Pawfront.PetParentApi`) — also `/api/v1`, requires the `PetParentUser`
+policy (separate Firebase project, currently `littersoftpetparent`).
+
+### Pet-parent host (`Pawfront.PetParentApi`)
+
+```
+GET    /health
+
+POST   /parent-onboarding/firebase-auth                                          body { fcmToken?, deviceId?, devicePlatform? } — upserts Parent.ParentAuthIdentities + optional Parent.ParentDeviceTokens (one parent → many FCM tokens). Reads identity claims from the Firebase JWT.
+POST   /parent-onboarding/profile                                                body { firstName, lastName, gender, mobileCountryCode, mobileNumber, dateOfBirth, addressLine, latitude, longitude, zipCode, city, description }. **The owning auth identity is resolved server-side from the JWT sub/user_id claim** — the body intentionally has no parentAuthIdentityId field, so a caller cannot complete another parent's profile by guessing the id. Creates Parent.PetParents, flips ParentAuthIdentities.SignUpStatus → ParentProfileCompleted, back-fills PetParentId on device tokens. Idempotent (returns existing row if already linked). Sproc `Parent.CompletePetParentProfile` takes `@FirebaseUserId` and resolves the auth identity row under `UPDLOCK + HOLDLOCK`. 409 MobileNumberAlreadyExists on UNIQUE violation; 400 UnsupportedGender / InvalidRequest; 404 ParentAuthIdentityNotFound when no auth identity exists for the Firebase user (caller must hit `firebase-auth` first).
+
+POST   /pet-parents/{petParentId}/profile-image                                  multipart form-data { file }. Validations: file required, <=1 MB, content type ∈ { image/jpeg, image/png, image/webp }. Uploads to the shared blob container under the [PetParentProfilePhotos] folder and saves the resulting URL on Parent.PetParents.ProfilePhotoUrl via Parent.UpdatePetParentProfilePhoto. 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetParentNotFound (sproc 51201).
+POST   /pet-parents/{petParentId}/pets                                           body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? }. Inserts into Parent.Pets via Parent.AddPetParentPet. PetType ∈ {Dog, Cat, Hamster, GuineaPig}; Gender ∈ {Male, Female}; Weight DECIMAL(5,2) > 0. MicrochipId is globally UNIQUE (filtered) — collision returns 409 MicrochipIdAlreadyExists. 404 PetParentNotFound (sproc 51202); 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest. Response carries medical-info fields too — all null until PATCH below runs.
+GET    /pet-parents/{petParentId}/pets                                           returns every pet on file for the parent with the full medical-info snapshot and embedded photo gallery. Backed by Parent.ListPetParentPets (two result sets: pets + their photos, joined in C# by PetId). Photos within each pet are ordered oldest-first. Empty array when the parent has no pets (or doesn't exist) — list semantics, no 404. Distinct response type PetParentPetWithPhotosResponse so AddPet / PATCH medical-info responses stay unchanged.
+GET    /pet-parents/{petParentId}/event-bookings                                 returns the caller's event-ticket bookings — slim summary cards with the joined event (title, category, start date/time, banner URL) so the mobile "My Bookings" screen can render without a follow-up fetch. Backed by Event.ListEventBookingsByBookerEmail. **Booker identity on Event.EventBookings is free text (no FK to PetParents), so the filter matches on the caller's Firebase email claim** — the route's petParentId is verified by the ownership filter, then the JWT email is used as the SQL filter. Ordered most-recent first; cancelled bookings included. Mobile drills into GET /event-bookings/{bookingId} for the full shape with attendee names. 403 EmailClaimMissing when the JWT carries no email claim (rare).
+PATCH  /pets/{petId}                                                             body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? } — same shape as AddPet. Updates the basic-info subset via Parent.UpdatePetParentPet; medical-info columns are deliberately untouched (use PATCH /medical-info). Same validations and error map as AddPet: 404 PetNotFound (sproc 51205); 409 MicrochipIdAlreadyExists; 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest.
+PATCH  /pets/{petId}/medical-info                                                body { vaccinationStatus, sterilizationStatus, medicalHistory?, temperament }. Fills in medical fields on an existing pet via Parent.UpdatePetMedicalInfo. VaccinationStatus ∈ {Vaccinated, NotVaccinated}; SterilizationStatus ∈ {Sterilized, Intact}; Temperament ∈ {Anxious, Friendly, Aggressive}; MedicalHistory is free text and nullable. 404 PetNotFound (sproc 51203); 400 UnsupportedVaccinationStatus / UnsupportedSterilizationStatus / UnsupportedTemperament / InvalidRequest.
+POST   /pets/{petId}/photos                                                      multipart form-data { file }. Same per-file validations as the profile-photo endpoint: file required, <=1 MB, content type ∈ { image/jpeg, image/png, image/webp }. Uploads to the shared blob container under the [PetPhotos] folder ("pet-photos/<petId>/<guid>.<ext>") and inserts a row into Parent.PetPhotos via Parent.AddPetPhoto. One row per upload — a pet can have many photos (client makes N calls for N photos). 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetNotFound (sproc 51204). Parent.PetPhotos.PetId has ON DELETE CASCADE so deleting a pet removes its photo rows (blobs not cleaned up — future job).
+
+POST   /pet-parents/{petParentId}/identity                                       multipart form-data { file, identityType }. Validations: file required, <=1 MB, content-type ∈ { image/jpeg, image/png, image/webp }; identityType ∈ { Passport, DriverLicense, NationalId, ResidencePermit }. Uploads to the shared blob container under [PetParentIdentities] folder ("pet-parent-identities/<petParentId>/<guid>.<ext>") and upserts a row in Parent.ParentIdentities via Parent.UpsertPetParentIdentity (one identity per parent — re-uploading replaces). 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat / UnsupportedIdentityType / InvalidRequest; 404 PetParentNotFound (sproc 51206).
+GET    /pet-parents/{petParentId}/onboarding-status                              orchestrator over a single sproc (Parent.GetPetParentOnboardingStatus, three result sets). Returns { basicInfo, profilePhoto, pets, petMedicalInfo, identity, verification, isFullyOnboarded }. basicInfo is a sentinel (always Complete when the endpoint resolves). profilePhoto/pets/petMedicalInfo/identity each carry { status: Complete|Remaining }. petMedicalInfo also lists per-pet `{ petId, petName, isMedicalInfoComplete }` (3-field check: vaccination + sterilization + temperament; medical-history is optional). identity also carries `identityType` (null when Remaining). verification = { isEmailVerified, isMobileVerified }. isFullyOnboarded = basicInfo + pets + petMedicalInfo + identity + emailVerified + mobileVerified (profilePhoto is informational, NOT gating). 404 PetParentNotFound when the parent row is missing.
+
+POST   /pet-parents/{petParentId}/mobile-verification/otp                        generates a 6-digit OTP, stores SHA-256 hash + last-2-digits hint with 10-minute expiry in Parent.ParentMobileOtps via Parent.CreateMobileVerificationOtp, dispatches the raw code via IPetParentMobileOtpSender (NoOp today — real SMS provider TBD). Returns { parentMobileOtpId, petParentId, mobileCountryCode, mobileNumber, dateSentUtc, expiresAtUtc }. 404 PetParentNotFound (sproc 51210).
+POST   /pet-parents/{petParentId}/mobile-verification/otp/{otpId}/verify         body { otpCode }. ALWAYS returns 200 — client branches on { isValidated, validationStatus: Validated|Invalid|Expired|Pending }. On the first successful verification, Parent.PetParents.MobileVerifiedAtUtc is set (COALESCE, so re-verification doesn't bump it). 404 ParentMobileOtpNotFound (sproc 51211); 400 InvalidRequest for empty otpCode.
+
+GET    /events                                                                   [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=...] — same provider-agnostic catalog listing as the provider host; duplicated on the parent host because the two hosts authenticate against different Firebase projects. Backed by the shared IEventService — no new business logic.
+GET    /events/{eventId}                                                         single event detail (SQL + Cosmos for physical).
+POST   /events/{eventId}/views                                                   public engagement counter (parent host copy).
+POST   /events/{eventId}/shares                                                  public engagement counter (parent host copy).
+POST   /events/{eventId}/inquiries                                               public engagement counter (parent host copy).
+
+POST   /events/{eventId}/bookings                                                body { bookerName, bookerEmail, bookerMobile?, attendeeNames[], paymentMethod }. Same shared IEventBookingService as the provider host; parent app uses its own auth. 404 EventNotFound; 400 EventNotBookable for online events; 409 EventSoldOut on capacity exhaustion.
+GET    /event-bookings/{bookingId}                                               booking + one entry per ticket (parent host copy).
+
+POST   /pet-parents/{petParentId}/events/banner-image                            (multipart) → { url }. Ownership-filtered. Uploads to the shared blob container under [EventBanners] folder. Mirror of the provider banner upload (no 1 MB cap — banners can be larger than profile photos).
+POST   /pet-parents/{petParentId}/events                                         body identical to the provider create-event (8 SQL fields + physical:{maximumCapacity,isPaid,price?}). Ownership-filtered. Creates a parent-organised event via Event.CreatePetParentEvent — row goes into Event.Events with PetParentId set, ProviderId NULL. Physical events also write the Cosmos extension doc. Returns the EventResponse (now carries nullable providerId + nullable petParentId; exactly one set). 404 PetParentNotFound (sproc 51207); 400 InvalidRequest.
+
+GET    /providers                                                                [?serviceCategory= &animals=Dog&animals=Cat &skip= &take=] — parent-facing provider discovery. Both filters optional; animals match is OR (any of the requested animals supported). When serviceCategory is omitted, all 5 categories are queried (each as a single-partition Cosmos read). PetAdoptionAndSale providers are excluded when an animal filter is set (they have no offering = no animal data). Returns slim summary cards: { providerId, serviceCategory, subCategory, displayName (business name; null for freelancers), imageUrl, city, about (Description/AboutYou), animalsHandled }. Take defaults to 50, max 200. 400 UnsupportedServiceCategory on a bad category value. Backed by IProviderDiscoveryService → CosmosProviderDiscoveryService (queries Cosmos only — animals filter applied in-memory because the relevant array path varies per category).
+GET    /providers/{providerId}                                                   parent-facing provider profile. Composes the registration row (category, sub-category, lat/lng), the category-specific offering (one of petSitter / petGroomer / petTrainer / petAdoptionSale / vet — exactly one populated), workingHours (7 days), and timeOff (future closures across all the provider's services). Provider personal info (name, mobile, DOB) intentionally omitted — parents see business-facing data only. Backed by IProviderPublicProfileService, which fans out to the existing per-category registries, IProviderAvailabilityService, and IProviderClosureService. 404 ProviderNotRegistered when no service registration row exists.
+GET    /providers/{providerId}/availability/slots                                ?serviceId= &date= [&durationHours= | &serviceItemCode=] [&granularityMinutes=] — parent-facing free-slot query (mirror of the provider host). Backed by the shared IProviderAvailabilitySlotService. PetGroomer uses ?serviceItemCode= (duration resolved server-side from the menu item); other categories use ?durationHours=. Closures, capacity, and overlapping confirmed bookings are subtracted per-service. Same error map as provider host (InvalidServiceId, ServiceNotRegistered, OfferingNotConfigured, ServiceItemCodeRequired/NotOffered/Inactive, InvalidBookingDuration, InvalidRequest). Save/get weekly-hours endpoints on the same group (`POST /` and `GET /`) are intentionally **NOT** mirrored on the parent host — those are organiser-only; the 7-day shape is already returned by GET /providers/{providerId} under workingHours.
+```
+
+> Note: the gateway webhook `POST /event-bookings/{bookingId}/payment-confirmation` is intentionally **not** mirrored on the parent host — already reachable on the provider host, and a Firebase-JWT-gated webhook only needs one entry point.
+
+### Provider host (`Pawfront.Api`)
 
 ```
 GET    /health

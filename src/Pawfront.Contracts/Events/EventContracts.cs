@@ -21,7 +21,11 @@ public sealed record PhysicalEventRequest(
 
 public sealed record EventResponse(
     Guid EventId,
-    Guid ProviderId,
+    // Exactly one of ProviderId / PetParentId is non-null, identifying the
+    // organiser. Provider-created events have ProviderId set; parent-created
+    // events have PetParentId set.
+    Guid? ProviderId,
+    Guid? PetParentId,
     string EventCategory,
     bool IsChildFriendly,
     string Title,

@@ -13,6 +13,34 @@ internal sealed class InMemoryEventStore : IEventSqlStore
         var snapshot = new EventSqlSnapshot(
             EventId: Guid.NewGuid(),
             ProviderId: input.ProviderId,
+            PetParentId: null,
+            EventCategory: input.EventCategory,
+            IsChildFriendly: input.IsChildFriendly,
+            Title: input.Title,
+            Description: input.Description,
+            BannerImageUrl: input.BannerImageUrl,
+            Amenities: input.Amenities.ToArray(),
+            EventType: input.EventType,
+            StartDate: input.StartDate,
+            EndDate: input.EndDate,
+            StartTime: input.StartTime,
+            EndTime: input.EndTime,
+            CreatedAtUtc: now,
+            UpdatedAtUtc: now);
+
+        events[snapshot.EventId] = snapshot;
+        return Task.FromResult(snapshot);
+    }
+
+    public Task<EventSqlSnapshot> CreateByParentAsync(
+        CreateParentEventSqlInput input,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var snapshot = new EventSqlSnapshot(
+            EventId: Guid.NewGuid(),
+            ProviderId: null,
+            PetParentId: input.PetParentId,
             EventCategory: input.EventCategory,
             IsChildFriendly: input.IsChildFriendly,
             Title: input.Title,

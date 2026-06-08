@@ -60,6 +60,49 @@ internal sealed class SqlEventBookingStore(
         }
     }
 
+    public async Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
+        string bookerEmail,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.ListEventBookingsByBookerEmail", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+
+        var rows = new List<EventBookingSummary>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new EventBookingSummary(
+                BookingId: reader.GetGuid(0),
+                EventId: reader.GetGuid(1),
+                EventTitle: reader.GetString(2),
+                EventCategory: reader.GetString(3),
+                EventStartDate: DateOnly.FromDateTime(reader.GetDateTime(4)),
+                EventStartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
+                EventBannerImageUrl: reader.IsDBNull(6) ? null : reader.GetString(6),
+                BookerName: reader.GetString(7),
+                BookerEmail: reader.GetString(8),
+                BookerMobile: reader.IsDBNull(9) ? null : reader.GetString(9),
+                TicketCount: reader.GetInt32(10),
+                PaymentMethod: reader.GetString(11),
+                PaymentStatus: reader.GetString(12),
+                PaymentReference: reader.IsDBNull(13) ? null : reader.GetString(13),
+                TotalAmount: reader.GetDecimal(14),
+                Status: reader.GetString(15),
+                CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(16), TimeSpan.Zero),
+                UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(17), TimeSpan.Zero),
+                CancelledAtUtc: reader.IsDBNull(18)
+                    ? null
+                    : new DateTimeOffset(reader.GetDateTime(18), TimeSpan.Zero)));
+        }
+        return rows;
+    }
+
     public async Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));

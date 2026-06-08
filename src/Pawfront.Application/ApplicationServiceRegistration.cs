@@ -6,6 +6,8 @@ using Pawfront.Application.Closures;
 using Pawfront.Application.Events;
 using Pawfront.Application.Offerings;
 using Pawfront.Application.Onboarding;
+using Pawfront.Application.ParentOnboarding;
+using Pawfront.Application.Providers;
 
 namespace Pawfront.Application;
 
@@ -14,6 +16,8 @@ public static class ApplicationServiceRegistration
     public static IServiceCollection AddPawfrontApplication(this IServiceCollection services)
     {
         services.TryAddScoped<IProviderOnboardingStatusService, ProviderOnboardingStatusService>();
+        services.TryAddScoped<IPetParentOnboardingStatusService, PetParentOnboardingStatusService>();
+        services.TryAddScoped<IProviderPublicProfileService, ProviderPublicProfileService>();
         services.TryAddScoped<IEventService, EventService>();
         services.TryAddScoped<IEventBookingService, EventBookingService>();
         services.TryAddScoped<IProviderOfferingResolver, ProviderOfferingResolver>();

@@ -66,9 +66,10 @@ BEGIN
     FROM OPENJSON(@AmenitiesJson)
     WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
 
-    -- Result set 1: event row
+    -- Result set 1: event row (both organiser columns surfaced; PetParentId is NULL for provider-created events)
     SELECT [EventId],
            [ProviderId],
+           [PetParentId],
            [EventCategory],
            [IsChildFriendly],
            [Title],

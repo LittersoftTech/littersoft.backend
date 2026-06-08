@@ -2,7 +2,12 @@ CREATE TABLE [Event].[Events]
 (
     [EventId] UNIQUEIDENTIFIER NOT NULL
         CONSTRAINT [DF_Events_EventId] DEFAULT NEWSEQUENTIALID(),
-    [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+    -- Either ProviderId or PetParentId is set on each row; the CHECK below
+    -- enforces exactly one. Provider-organised and parent-organised events
+    -- coexist in the same table so the discovery list, get-by-id, booking,
+    -- and counter flows don't need to know which kind of organiser this is.
+    [ProviderId] UNIQUEIDENTIFIER NULL,
+    [PetParentId] UNIQUEIDENTIFIER NULL,
     [EventCategory] NVARCHAR(64) NOT NULL,
     [IsChildFriendly] BIT NOT NULL,
     [Title] NVARCHAR(200) NOT NULL,
@@ -29,6 +34,12 @@ CREATE TABLE [Event].[Events]
     CONSTRAINT [PK_Events] PRIMARY KEY CLUSTERED ([EventId] ASC),
     CONSTRAINT [FK_Events_Providers_ProviderId]
         FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId]),
+    CONSTRAINT [FK_Events_PetParents_PetParentId]
+        FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
+    CONSTRAINT [CK_Events_OrganiserExactlyOne] CHECK (
+        ([ProviderId] IS NOT NULL AND [PetParentId] IS NULL)
+     OR ([ProviderId] IS NULL AND [PetParentId] IS NOT NULL)
+    ),
     CONSTRAINT [CK_Events_EventCategory] CHECK ([EventCategory] IN (
         N'AdoptionAndRescue', N'PetTraining', N'Charity', N'Volunteering',
         N'HealthAndWellness', N'SocialAndCultural', N'OutdoorActivities', N'ParentEducation')),
@@ -43,6 +54,11 @@ CREATE INDEX [IX_Events_ProviderId_StartDate]
 
 GO
 
+CREATE INDEX [IX_Events_PetParentId_StartDate]
+    ON [Event].[Events] ([PetParentId], [StartDate] DESC);
+
+GO
+
 CREATE INDEX [IX_Events_Category_StartDate]
     ON [Event].[Events] ([EventCategory], [StartDate] DESC)
-    INCLUDE ([ProviderId], [Title], [EventType]);
+    INCLUDE ([ProviderId], [PetParentId], [Title], [EventType]);

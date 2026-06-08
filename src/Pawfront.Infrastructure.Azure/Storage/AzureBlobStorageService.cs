@@ -17,7 +17,7 @@ internal sealed class AzureBlobStorageService(
 
     public async Task<string> UploadAsync(
         BlobUploadKind kind,
-        Guid providerId,
+        Guid ownerId,
         string fileName,
         Stream content,
         string contentType,
@@ -29,7 +29,7 @@ internal sealed class AzureBlobStorageService(
         }
 
         var container = await GetContainerAsync(cancellationToken);
-        var blobName = BuildBlobName(kind, providerId, fileName);
+        var blobName = BuildBlobName(kind, ownerId, fileName);
         var blobClient = container.GetBlobClient(blobName);
 
         await blobClient.UploadAsync(
@@ -91,13 +91,16 @@ internal sealed class AzureBlobStorageService(
         }
     }
 
-    private string BuildBlobName(BlobUploadKind kind, Guid providerId, string fileName)
+    private string BuildBlobName(BlobUploadKind kind, Guid ownerId, string fileName)
     {
         var folder = kind switch
         {
             BlobUploadKind.ProfilePhoto => options.Folders.ProfilePhotos,
             BlobUploadKind.ServicePhoto => options.Folders.ServicePhotos,
             BlobUploadKind.EventBanner => options.Folders.EventBanners,
+            BlobUploadKind.PetParentProfilePhoto => options.Folders.PetParentProfilePhotos,
+            BlobUploadKind.PetPhoto => options.Folders.PetPhotos,
+            BlobUploadKind.PetParentIdentity => options.Folders.PetParentIdentities,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported blob upload kind.")
         };
 
@@ -106,7 +109,7 @@ internal sealed class AzureBlobStorageService(
 
         var leaf = string.IsNullOrWhiteSpace(extension) ? unique : $"{unique}{extension}";
 
-        return $"{folder.Trim('/')}/{providerId}/{leaf}";
+        return $"{folder.Trim('/')}/{ownerId}/{leaf}";
     }
 
     private async Task<BlobContainerClient> GetContainerAsync(CancellationToken cancellationToken)

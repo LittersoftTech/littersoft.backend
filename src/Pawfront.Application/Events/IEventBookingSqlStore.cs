@@ -47,4 +47,14 @@ public interface IEventBookingSqlStore
         Guid providerId,
         Guid eventId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Lists all event bookings made under <paramref name="bookerEmail"/>,
+    /// joined with their event so the mobile summary card can render
+    /// without a follow-up fetch. Ordered most-recent first. Cancelled
+    /// bookings are included so the parent sees their full history.
+    /// </summary>
+    Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
+        string bookerEmail,
+        CancellationToken cancellationToken);
 }

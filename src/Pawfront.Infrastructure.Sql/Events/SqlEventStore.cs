@@ -55,6 +55,51 @@ internal sealed class SqlEventStore(
         }
     }
 
+    public async Task<EventSqlSnapshot> CreateByParentAsync(
+        CreateParentEventSqlInput input,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.CreatePetParentEvent", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+
+        command.Parameters.AddWithValue("@PetParentId", input.PetParentId);
+        command.Parameters.AddWithValue("@EventCategory", input.EventCategory);
+        command.Parameters.AddWithValue("@IsChildFriendly", input.IsChildFriendly);
+        command.Parameters.AddWithValue("@Title", input.Title);
+        command.Parameters.AddWithValue("@Description", input.Description);
+        command.Parameters.AddWithValue("@BannerImageUrl", DbValue(input.BannerImageUrl));
+        command.Parameters.AddWithValue("@EventType", input.EventType);
+        command.Parameters.AddWithValue("@StartDate", input.StartDate.ToDateTime(TimeOnly.MinValue));
+        command.Parameters.AddWithValue("@EndDate", input.EndDate.ToDateTime(TimeOnly.MinValue));
+        command.Parameters.AddWithValue("@StartTime", input.StartTime.ToTimeSpan());
+        command.Parameters.AddWithValue("@EndTime", input.EndTime.ToTimeSpan());
+        command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Event row was not returned after create.");
+            }
+
+            var snapshot = ReadEventRow(reader, amenities: Array.Empty<string>());
+            var amenities = await ReadAmenitiesAsync(reader, cancellationToken);
+
+            return snapshot with { Amenities = amenities };
+        }
+        catch (SqlException exception) when (exception.Number == 51207)
+        {
+            throw new EventPetParentNotFoundException(input.PetParentId);
+        }
+    }
+
     public async Task<EventSqlSnapshot?> GetAsync(Guid eventId, CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
@@ -193,20 +238,21 @@ internal sealed class SqlEventStore(
     {
         return new EventSqlSnapshot(
             EventId: reader.GetGuid(0),
-            ProviderId: reader.GetGuid(1),
-            EventCategory: reader.GetString(2),
-            IsChildFriendly: reader.GetBoolean(3),
-            Title: reader.GetString(4),
-            Description: reader.GetString(5),
-            BannerImageUrl: reader.IsDBNull(6) ? null : reader.GetString(6),
+            ProviderId: reader.IsDBNull(1) ? null : reader.GetGuid(1),
+            PetParentId: reader.IsDBNull(2) ? null : reader.GetGuid(2),
+            EventCategory: reader.GetString(3),
+            IsChildFriendly: reader.GetBoolean(4),
+            Title: reader.GetString(5),
+            Description: reader.GetString(6),
+            BannerImageUrl: reader.IsDBNull(7) ? null : reader.GetString(7),
             Amenities: amenities,
-            EventType: reader.GetString(7),
-            StartDate: DateOnly.FromDateTime(reader.GetDateTime(8)),
-            EndDate: DateOnly.FromDateTime(reader.GetDateTime(9)),
-            StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(10)),
-            EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(11)),
-            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero),
-            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero));
+            EventType: reader.GetString(8),
+            StartDate: DateOnly.FromDateTime(reader.GetDateTime(9)),
+            EndDate: DateOnly.FromDateTime(reader.GetDateTime(10)),
+            StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(11)),
+            EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(12)),
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero),
+            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero));
     }
 
     private static async Task<List<string>> ReadAmenitiesAsync(
