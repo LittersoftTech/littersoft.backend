@@ -25,3 +25,6 @@ public sealed class ParentMobileOtpNotFoundException(Guid parentMobileOtpId)
 
 public sealed class UnsupportedPetParentIdentityTypeException(string identityType)
     : Exception($"Identity type '{identityType}' is not supported.");
+
+public sealed class PetParentIdentityNotFoundException(Guid petParentId)
+    : Exception($"No identity document is on file for pet parent '{petParentId}'.");

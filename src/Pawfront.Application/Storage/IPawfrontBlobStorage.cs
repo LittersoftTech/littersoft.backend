@@ -20,4 +20,14 @@ public interface IPawfrontBlobStorage
     Task<BlobDownload?> DownloadAsync(
         string blobUrl,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes the blob the URL points at. Returns true when a blob was
+    /// deleted, false when it didn't exist. Throws
+    /// <see cref="ArgumentException"/> for URLs that don't resolve inside
+    /// the configured container (same guard as <see cref="DownloadAsync"/>).
+    /// </summary>
+    Task<bool> DeleteAsync(
+        string blobUrl,
+        CancellationToken cancellationToken);
 }

@@ -35,10 +35,13 @@ internal static class PetParentEndpoints
         // group runs. Mismatch → 403; missing profile → 403
         // ParentProfileNotCompleted.
         var group = builder.MapGroup("/pet-parents/{petParentId:guid}").RequireOwnedPetParent();
+        group.MapGet("/profile", GetProfile);
+        group.MapPatch("/profile", UpdateProfile);
         group.MapPost("/profile-image", UploadProfilePhoto).DisableAntiforgery();
         group.MapPost("/pets", AddPet);
         group.MapGet("/pets", ListPets);
         group.MapPost("/identity", UploadIdentity).DisableAntiforgery();
+        group.MapDelete("/identity", DeleteIdentity);
         group.MapGet("/event-bookings", ListEventBookings);
         group.MapGet("/onboarding-status", GetOnboardingStatus);
 
@@ -103,6 +106,47 @@ internal static class PetParentEndpoints
             summary.CreatedAtUtc,
             summary.UpdatedAtUtc,
             summary.CancelledAtUtc);
+
+    private static async Task<IResult> GetProfile(
+        Guid petParentId,
+        IParentOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await onboardingService.GetProfileAsync(petParentId, cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (PetParentNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetParentNotFound", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> UpdateProfile(
+        Guid petParentId,
+        UpdatePetParentProfileRequest request,
+        IParentOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await onboardingService.UpdateProfileAsync(petParentId, request, cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (PetParentNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetParentNotFound", exception.Message);
+        }
+        catch (UnsupportedPetParentGenderException exception)
+        {
+            return ApiResults.BadRequest("UnsupportedGender", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
 
     private static async Task<IResult> SendMobileOtp(
         Guid petParentId,
@@ -401,6 +445,38 @@ internal static class PetParentEndpoints
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
         }
+    }
+
+    private static async Task<IResult> DeleteIdentity(
+        Guid petParentId,
+        IPawfrontBlobStorage blobStorage,
+        IParentOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        DeletePetParentIdentityResponse response;
+        try
+        {
+            response = await onboardingService.DeleteIdentityAsync(petParentId, cancellationToken);
+        }
+        catch (PetParentIdentityNotFoundException exception)
+        {
+            return ApiResults.NotFound("ParentIdentityNotFound", exception.Message);
+        }
+
+        // Identity documents are sensitive — delete the stored blob too, not
+        // just the SQL row. Best-effort: the row is the source of truth and
+        // is already gone, so a storage hiccup must not fail the request
+        // (the blob is merely orphaned, same as a re-upload).
+        try
+        {
+            await blobStorage.DeleteAsync(response.IdentityPhotoUrl, cancellationToken);
+        }
+        catch
+        {
+            // Swallow — see above.
+        }
+
+        return ApiResults.Ok(response);
     }
 
     private static async Task<IResult> UploadProfilePhoto(

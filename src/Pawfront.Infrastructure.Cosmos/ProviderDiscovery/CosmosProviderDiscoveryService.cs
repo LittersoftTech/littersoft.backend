@@ -36,6 +36,8 @@ internal sealed class CosmosProviderDiscoveryService(
         CancellationToken cancellationToken)
     {
         var animalsFilter = NormaliseAnimals(filter.Animals);
+        var cityFilter = string.IsNullOrWhiteSpace(filter.City) ? null : filter.City.Trim();
+        var locationFilter = string.IsNullOrWhiteSpace(filter.ServiceLocation) ? null : filter.ServiceLocation;
         var categories = string.IsNullOrWhiteSpace(filter.ServiceCategory)
             ? AllCategories
             : new[] { filter.ServiceCategory };
@@ -45,10 +47,10 @@ internal sealed class CosmosProviderDiscoveryService(
         var all = new List<ProviderSummary>();
         foreach (var category in categories)
         {
-            // PetAdoptionAndSale has no offering and therefore no animal
-            // data — a non-empty animal filter excludes every shelter/shop.
+            // PetAdoptionAndSale has no offering and therefore no animal or
+            // service-location data — either filter excludes every shelter/shop.
             if (string.Equals(category, nameof(ProviderServiceCategory.PetAdoptionAndSale), StringComparison.Ordinal)
-                && animalsFilter is { Count: > 0 })
+                && (animalsFilter is { Count: > 0 } || locationFilter is not null))
             {
                 continue;
             }
@@ -56,15 +58,30 @@ internal sealed class CosmosProviderDiscoveryService(
             var summaries = category switch
             {
                 nameof(ProviderServiceCategory.PetSitter) =>
-                    await QueryAsync<PetSitterServiceDocument>(container, category, ToPetSitterSummary, animalsFilter, cancellationToken),
+                    await QueryAsync<PetSitterServiceDocument>(
+                        container, category, ToPetSitterSummary, animalsFilter, cityFilter,
+                        locationFilter is null ? null : doc => MatchesPetSitterLocation(doc, locationFilter),
+                        cancellationToken),
                 nameof(ProviderServiceCategory.PetGroomer) =>
-                    await QueryAsync<PetGroomerServiceDocument>(container, category, ToPetGroomerSummary, animalsFilter, cancellationToken),
+                    await QueryAsync<PetGroomerServiceDocument>(
+                        container, category, ToPetGroomerSummary, animalsFilter, cityFilter,
+                        locationFilter is null ? null : doc => MatchesPetGroomerLocation(doc, locationFilter),
+                        cancellationToken),
                 nameof(ProviderServiceCategory.PetTrainer) =>
-                    await QueryAsync<PetTrainerServiceDocument>(container, category, ToPetTrainerSummary, animalsFilter, cancellationToken),
+                    await QueryAsync<PetTrainerServiceDocument>(
+                        container, category, ToPetTrainerSummary, animalsFilter, cityFilter,
+                        locationFilter is null ? null : doc => MatchesPetTrainerLocation(doc, locationFilter),
+                        cancellationToken),
                 nameof(ProviderServiceCategory.PetAdoptionAndSale) =>
-                    await QueryAsync<PetAdoptionSaleServiceDocument>(container, category, ToPetAdoptionSaleSummary, animalsFilter, cancellationToken),
+                    await QueryAsync<PetAdoptionSaleServiceDocument>(
+                        container, category, ToPetAdoptionSaleSummary, animalsFilter, cityFilter,
+                        locationPredicate: null,
+                        cancellationToken),
                 nameof(ProviderServiceCategory.Vet) =>
-                    await QueryAsync<VetServiceDocument>(container, category, ToVetSummary, animalsFilter, cancellationToken),
+                    await QueryAsync<VetServiceDocument>(
+                        container, category, ToVetSummary, animalsFilter, cityFilter,
+                        locationFilter is null ? null : doc => MatchesVetLocation(doc, locationFilter),
+                        cancellationToken),
                 _ => new List<ProviderSummary>()
             };
             all.AddRange(summaries);
@@ -81,6 +98,8 @@ internal sealed class CosmosProviderDiscoveryService(
         string category,
         Func<TDoc, ProviderSummary> map,
         HashSet<string>? animalsFilter,
+        string? cityFilter,
+        Func<TDoc, bool>? locationPredicate,
         CancellationToken cancellationToken)
     {
         var iterator = container.GetItemQueryIterator<TDoc>(
@@ -96,8 +115,17 @@ internal sealed class CosmosProviderDiscoveryService(
             var page = await iterator.ReadNextAsync(cancellationToken);
             foreach (var doc in page)
             {
+                if (locationPredicate is not null && !locationPredicate(doc))
+                {
+                    continue;
+                }
                 var summary = map(doc);
                 if (animalsFilter is { Count: > 0 } && !MatchesAnimals(summary.AnimalsHandled, animalsFilter))
+                {
+                    continue;
+                }
+                if (cityFilter is not null
+                    && !string.Equals(summary.City, cityFilter, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -105,6 +133,68 @@ internal sealed class CosmosProviderDiscoveryService(
             }
         }
         return matched;
+    }
+
+    // ---------------------------------------------------------------------
+    // Service-location matching. The wire filter speaks ParentsPlace /
+    // ProvidersPlace; each category stores its own vocabulary (see the
+    // AllowedServiceLocations set in the matching Cosmos registry). A stored
+    // "Both" matches either side. Docs without an offering yet have no
+    // location data and never match a location filter.
+    // ---------------------------------------------------------------------
+
+    private static bool MatchesPetSitterLocation(PetSitterServiceDocument doc, string locationFilter)
+    {
+        var stored = doc.PetHotel?.Offering?.ServiceLocation ?? doc.Freelance?.Offering?.ServiceLocation;
+        return locationFilter switch
+        {
+            ProviderServiceLocationFilters.ParentsPlace => stored is "CustomerPlace" or "Both",
+            ProviderServiceLocationFilters.ProvidersPlace => stored is "PetHotel" or "Both",
+            _ => false
+        };
+    }
+
+    private static bool MatchesPetGroomerLocation(PetGroomerServiceDocument doc, string locationFilter)
+    {
+        var stored = doc.GroomerShop?.Offering?.ServiceLocation ?? doc.Freelance?.Offering?.ServiceLocation;
+        return locationFilter switch
+        {
+            ProviderServiceLocationFilters.ParentsPlace => stored is "CustomerPlace" or "Both",
+            ProviderServiceLocationFilters.ProvidersPlace => stored is "GroomerShop" or "Both",
+            _ => false
+        };
+    }
+
+    private static bool MatchesPetTrainerLocation(PetTrainerServiceDocument doc, string locationFilter)
+    {
+        // Trainer stores a multi-select; NatureOrParks / UrbanOrCity are
+        // neutral venues that count as neither side of the filter.
+        var stored = doc.TrainingSchool?.Offering?.ServiceLocations
+            ?? doc.Freelance?.Offering?.ServiceLocations;
+        if (stored is null)
+        {
+            return false;
+        }
+
+        return locationFilter switch
+        {
+            ProviderServiceLocationFilters.ParentsPlace =>
+                stored.Contains("CustomerLocation"),
+            ProviderServiceLocationFilters.ProvidersPlace =>
+                stored.Contains("TrainerLocation") || stored.Contains("TrainingSchool"),
+            _ => false
+        };
+    }
+
+    private static bool MatchesVetLocation(VetServiceDocument doc, string locationFilter)
+    {
+        var stored = doc.VetClinic?.Offering?.ServiceLocation ?? doc.Freelance?.Offering?.ServiceLocation;
+        return locationFilter switch
+        {
+            ProviderServiceLocationFilters.ParentsPlace => stored is "CustomerLocation" or "Both",
+            ProviderServiceLocationFilters.ProvidersPlace => stored is "VetClinic" or "Both",
+            _ => false
+        };
     }
 
     private static bool MatchesAnimals(

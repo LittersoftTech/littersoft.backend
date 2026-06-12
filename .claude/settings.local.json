@@ -6,7 +6,8 @@
       "Bash(powershell -ExecutionPolicy Bypass -File _retrofit.ps1)",
       "Bash(awk '/```mermaid/,/```$/' database/Pawfront.Database/README.md)",
       "Bash(xargs -I {} echo \"Entity definition lines: {}\")",
-      "PowerShell(dotnet build .\\\\Pawfront.slnx --configfile .\\\\NuGet.Config --nologo 2>&1)"
+      "PowerShell(dotnet build .\\\\Pawfront.slnx --configfile .\\\\NuGet.Config --nologo 2>&1)",
+      "Bash(python -)"
     ]
   }
 }

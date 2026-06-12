@@ -49,6 +49,12 @@ public abstract record OfferingResolution
         string SubCategory,
         string ServiceType) : OfferingResolution;
 
+    /// <param name="Price">
+    /// The offering's headline price: PricePerHour for DayCare/NightStay,
+    /// PricePerSession for TrainingSession, PricePerAppointment for
+    /// VetAppointment. Null for GroomingSession, where price is per menu
+    /// item — use <see cref="IProviderOfferingResolver.ResolveGroomingItemAsync"/>.
+    /// </param>
     public sealed record Resolved(
         Guid ServiceId,
         Guid ProviderId,
@@ -57,5 +63,6 @@ public abstract record OfferingResolution
         string ServiceType,
         int Capacity,
         decimal DurationHours,
-        bool IsDurationFixed) : OfferingResolution;
+        bool IsDurationFixed,
+        decimal? Price) : OfferingResolution;
 }

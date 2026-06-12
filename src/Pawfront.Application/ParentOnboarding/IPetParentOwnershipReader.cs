@@ -27,4 +27,16 @@ public interface IPetParentOwnershipReader
     Task<Guid?> GetOwningPetParentIdByPetIdAsync(
         Guid petId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns the owning <c>PetParentId</c> together with the pet's type
+    /// (Dog | Cat | Hamster | GuineaPig) in one point read, or null if the
+    /// pet row doesn't exist. Used by provider discovery's petId filter,
+    /// which needs both the ownership check and the animal type.
+    /// </summary>
+    Task<PetOwnershipLookup?> GetPetLookupAsync(
+        Guid petId,
+        CancellationToken cancellationToken);
 }
+
+public sealed record PetOwnershipLookup(Guid OwningPetParentId, string PetType);

@@ -22,6 +22,8 @@ public static class ApplicationServiceRegistration
         services.TryAddScoped<IEventBookingService, EventBookingService>();
         services.TryAddScoped<IProviderOfferingResolver, ProviderOfferingResolver>();
         services.TryAddScoped<IProviderAvailabilitySlotService, ProviderAvailabilitySlotService>();
+        services.TryAddScoped<IProviderWindowAvailabilityChecker, ProviderWindowAvailabilityChecker>();
+        services.TryAddScoped<IProviderSearchService, ProviderSearchService>();
 
         // BookingService implements two interfaces — register once, expose both.
         services.TryAddScoped<BookingService>();

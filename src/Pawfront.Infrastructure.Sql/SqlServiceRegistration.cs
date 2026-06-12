@@ -126,6 +126,11 @@ public static class SqlServiceRegistration
                 new SqlPetParentOwnershipReader(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderBookingStatsReader>(provider =>
+                new SqlProviderBookingStatsReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
         }
 
         return services;

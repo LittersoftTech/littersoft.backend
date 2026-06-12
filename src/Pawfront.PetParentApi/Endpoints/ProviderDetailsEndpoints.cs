@@ -1,6 +1,8 @@
 using Pawfront.Application.Availability;
 using Pawfront.Application.Closures;
+using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.Providers;
+using Pawfront.PetParentApi.Auth;
 using Pawfront.Application.Services.PetAdoptionSale;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.PetSitter;
@@ -41,37 +43,120 @@ internal static class ProviderDetailsEndpoints
     }
 
     private static async Task<IResult> List(
-        string? serviceCategory,
-        // Repeated query: ?animals=Dog&animals=Cat. ASP.NET binds repeated
-        // scalars into a string[] for minimal APIs.
-        string[]? animals,
+        Guid? petId,
+        string? providerType,
+        DateOnly? date,
+        TimeOnly? startTime,
+        TimeOnly? endTime,
+        string? city,
+        string? serviceLocation,
         int? skip,
         int? take,
         IProviderDiscoveryService discoveryService,
+        IProviderWindowAvailabilityChecker windowAvailabilityChecker,
+        ICurrentPetParentContext currentPetParent,
+        IPetParentOwnershipReader ownershipReader,
         CancellationToken cancellationToken)
     {
-        string? normalisedCategory;
+        string? normalisedProviderType;
+        string? normalisedLocation;
         try
         {
-            normalisedCategory = NormaliseServiceCategoryOrNull(serviceCategory);
+            normalisedProviderType = NormaliseProviderTypeOrNull(providerType);
         }
         catch (ArgumentException exception)
         {
-            return ApiResults.BadRequest("UnsupportedServiceCategory", exception.Message);
+            return ApiResults.BadRequest("UnsupportedProviderType", exception.Message);
+        }
+        try
+        {
+            normalisedLocation = NormaliseServiceLocationOrNull(serviceLocation);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("UnsupportedServiceLocation", exception.Message);
+        }
+
+        // date + startTime + endTime travel as a trio: either a full
+        // availability window or no time filtering at all.
+        var windowParamCount = (date is null ? 0 : 1) + (startTime is null ? 0 : 1) + (endTime is null ? 0 : 1);
+        if (windowParamCount is not 0 and not 3)
+        {
+            return ApiResults.BadRequest(
+                "InvalidRequest",
+                "date, startTime and endTime must be provided together.");
+        }
+        if (windowParamCount == 3 && startTime!.Value >= endTime!.Value)
+        {
+            return ApiResults.BadRequest("InvalidRequest", "startTime must be earlier than endTime.");
+        }
+
+        // petId → the pet's type becomes the animal filter. Ownership is
+        // enforced here (the route isn't under /pets/{petId}, so the group
+        // filters don't apply): same codes as OwnedPetFilter.
+        string[]? animals = null;
+        if (petId is not null)
+        {
+            var callerPetParentId = await currentPetParent.GetPetParentIdAsync(cancellationToken);
+            if (callerPetParentId is null)
+            {
+                return ApiResults.Forbidden(
+                    "ParentProfileNotCompleted",
+                    "Complete the parent profile (POST /api/v1/parent-onboarding/profile) before accessing this resource.");
+            }
+
+            var pet = await ownershipReader.GetPetLookupAsync(petId.Value, cancellationToken);
+            if (pet is null)
+            {
+                return ApiResults.NotFound("PetNotFound", $"Pet '{petId.Value}' was not found.");
+            }
+            if (pet.OwningPetParentId != callerPetParentId.Value)
+            {
+                return ApiResults.Forbidden(
+                    "Forbidden",
+                    "You can only filter by pets belonging to your own profile.");
+            }
+
+            animals = [pet.PetType];
         }
 
         var clampedTake = take is null
             ? DefaultPageSize
             : Math.Clamp(take.Value, 1, MaxPageSize);
         var clampedSkip = Math.Max(0, skip ?? 0);
+        var hasWindow = windowParamCount == 3;
 
+        // When a time window is set, pagination must apply AFTER the
+        // availability filter — pull all static-filter matches and page here.
         var filter = new ProviderDiscoveryFilter(
-            ServiceCategory: normalisedCategory,
+            ServiceCategory: normalisedProviderType,
             Animals: animals,
-            Skip: clampedSkip,
-            Take: clampedTake);
+            City: city,
+            ServiceLocation: normalisedLocation,
+            Skip: hasWindow ? 0 : clampedSkip,
+            Take: hasWindow ? int.MaxValue : clampedTake);
 
         var results = await discoveryService.ListAsync(filter, cancellationToken);
+
+        if (hasWindow)
+        {
+            var needed = clampedSkip + clampedTake;
+            var available = new List<ProviderSummary>(Math.Min(needed, results.Count));
+            foreach (var summary in results)
+            {
+                if (await windowAvailabilityChecker.HasBookableWindowAsync(
+                        summary.ProviderId, date!.Value, startTime!.Value, endTime!.Value, cancellationToken))
+                {
+                    available.Add(summary);
+                    if (available.Count >= needed)
+                    {
+                        break;
+                    }
+                }
+            }
+            results = available.Skip(clampedSkip).ToList();
+        }
+
         return ApiResults.Ok(results.Select(ToSummaryResponse).ToArray());
     }
 
@@ -102,7 +187,28 @@ internal static class ProviderDetailsEndpoints
             summary.About,
             summary.AnimalsHandled);
 
-    private static string? NormaliseServiceCategoryOrNull(string? raw)
+    private static string? NormaliseProviderTypeOrNull(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        // Bookable categories only — PetAdoptionAndSale has no offering /
+        // services and is not a valid providerType filter. Unfiltered
+        // browsing (providerType omitted) still includes it.
+        return raw.Trim() switch
+        {
+            "PetSitter" => "PetSitter",
+            "PetGroomer" => "PetGroomer",
+            "PetTrainer" => "PetTrainer",
+            "Vet" => "Vet",
+            var unsupported => throw new ArgumentException(
+                $"Provider type '{unsupported}' is not supported. Use PetSitter, PetGroomer, PetTrainer or Vet.")
+        };
+    }
+
+    private static string? NormaliseServiceLocationOrNull(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -111,13 +217,10 @@ internal static class ProviderDetailsEndpoints
 
         return raw.Trim() switch
         {
-            "PetSitter" => "PetSitter",
-            "PetGroomer" => "PetGroomer",
-            "PetTrainer" => "PetTrainer",
-            "PetAdoptionAndSale" => "PetAdoptionAndSale",
-            "Vet" => "Vet",
+            ProviderServiceLocationFilters.ParentsPlace => ProviderServiceLocationFilters.ParentsPlace,
+            ProviderServiceLocationFilters.ProvidersPlace => ProviderServiceLocationFilters.ProvidersPlace,
             var unsupported => throw new ArgumentException(
-                $"Service category '{unsupported}' is not supported.")
+                $"Service location '{unsupported}' is not supported. Use ParentsPlace or ProvidersPlace.")
         };
     }
 

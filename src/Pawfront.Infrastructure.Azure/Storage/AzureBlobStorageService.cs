@@ -42,6 +42,42 @@ internal sealed class AzureBlobStorageService(
 
     public async Task<BlobDownload?> DownloadAsync(string blobUrl, CancellationToken cancellationToken)
     {
+        var container = await GetContainerAsync(cancellationToken);
+        var blobClient = ResolveBlobClient(container, blobUrl);
+
+        try
+        {
+            var response = await blobClient.DownloadStreamingAsync(cancellationToken: cancellationToken);
+            var details = response.Value.Details;
+            var contentType = string.IsNullOrWhiteSpace(details.ContentType)
+                ? "application/octet-stream"
+                : details.ContentType;
+            return new BlobDownload(response.Value.Content, contentType, details.ContentLength);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return null;
+        }
+    }
+
+    public async Task<bool> DeleteAsync(string blobUrl, CancellationToken cancellationToken)
+    {
+        var container = await GetContainerAsync(cancellationToken);
+        var blobClient = ResolveBlobClient(container, blobUrl);
+
+        var response = await blobClient.DeleteIfExistsAsync(
+            DeleteSnapshotsOption.IncludeSnapshots,
+            cancellationToken: cancellationToken);
+        return response.Value;
+    }
+
+    /// <summary>
+    /// Maps a stored blob URL back to a client within the configured
+    /// container, rejecting anything outside it (SSRF guard — the URL must
+    /// live under our own container, not an arbitrary host).
+    /// </summary>
+    private static BlobClient ResolveBlobClient(BlobContainerClient container, string blobUrl)
+    {
         if (string.IsNullOrWhiteSpace(blobUrl))
         {
             throw new ArgumentException("Blob URL is required.", nameof(blobUrl));
@@ -53,9 +89,6 @@ internal sealed class AzureBlobStorageService(
             throw new ArgumentException("Blob URL must be an absolute http(s) URL.", nameof(blobUrl));
         }
 
-        var container = await GetContainerAsync(cancellationToken);
-
-        // SSRF guard: the URL must live under our own container, not an arbitrary host.
         var containerUri = container.Uri;
         if (!string.Equals(uri.Host, containerUri.Host, StringComparison.OrdinalIgnoreCase))
         {
@@ -74,21 +107,7 @@ internal sealed class AzureBlobStorageService(
             throw new ArgumentException("Blob URL is missing a blob name.", nameof(blobUrl));
         }
 
-        var blobClient = container.GetBlobClient(blobName);
-
-        try
-        {
-            var response = await blobClient.DownloadStreamingAsync(cancellationToken: cancellationToken);
-            var details = response.Value.Details;
-            var contentType = string.IsNullOrWhiteSpace(details.ContentType)
-                ? "application/octet-stream"
-                : details.ContentType;
-            return new BlobDownload(response.Value.Content, contentType, details.ContentLength);
-        }
-        catch (RequestFailedException ex) when (ex.Status == 404)
-        {
-            return null;
-        }
+        return container.GetBlobClient(blobName);
     }
 
     private string BuildBlobName(BlobUploadKind kind, Guid ownerId, string fileName)
