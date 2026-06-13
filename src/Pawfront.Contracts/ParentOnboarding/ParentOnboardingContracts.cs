@@ -67,6 +67,69 @@ public sealed record UpdatePetParentProfilePhotoResponse(
     string ProfilePhotoUrl,
     DateTimeOffset UpdatedAtUtc);
 
+/// <summary>
+/// Body for <c>PATCH /pet-parents/{petParentId}/profile</c>. The editable
+/// subset only — mobile number is intentionally excluded (a change must go
+/// back through OTP verification), as are latitude/longitude (no
+/// coordinates accompany an address edit today) and the profile photo
+/// (own endpoint).
+/// </summary>
+public sealed record UpdatePetParentProfileRequest(
+    string FirstName,
+    string LastName,
+    string Gender,
+    DateOnly DateOfBirth,
+    string AddressLine,
+    string ZipCode,
+    string City,
+    string Description);
+
+/// <summary>
+/// Full profile read-back returned by <c>GET /pet-parents/{petParentId}/profile</c>
+/// and by the profile edit. Email + IsEmailVerified come from the linked
+/// auth identity; everything else from <c>Parent.PetParents</c>.
+/// </summary>
+public sealed record PetParentProfileDetailsResponse(
+    Guid PetParentId,
+    string FirstName,
+    string LastName,
+    string Gender,
+    string Email,
+    bool IsEmailVerified,
+    string MobileCountryCode,
+    string MobileNumber,
+    DateOnly DateOfBirth,
+    string AddressLine,
+    decimal Latitude,
+    decimal Longitude,
+    string ZipCode,
+    string City,
+    string Description,
+    string? ProfilePhotoUrl,
+    DateTimeOffset? MobileVerifiedAtUtc,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc);
+
+/// <summary>
+/// Response for <c>GET /api/v1/parent-onboarding/me</c>. Resolves the
+/// caller's Firebase uid → the persisted pet-parent auth identity and (if
+/// one exists) the linked profile row. Used by the mobile app after a
+/// reinstall to recover its <c>PetParentId</c> from the current Firebase
+/// session. <c>PetParentId</c>, <c>HasProfile</c>, and
+/// <c>MobileVerifiedAtUtc</c> are populated only once the parent has
+/// completed <c>POST /parent-onboarding/profile</c>.
+/// </summary>
+public sealed record ResolvePetParentByFirebaseUidResponse(
+    Guid ParentAuthIdentityId,
+    Guid? PetParentId,
+    string FirebaseUserId,
+    string Email,
+    bool IsEmailVerified,
+    string? DisplayName,
+    string SignUpStatus,
+    bool HasProfile,
+    DateTimeOffset? MobileVerifiedAtUtc);
+
 public sealed record PetParentOnboardingStatusResponse(
     Guid PetParentId,
     OnboardingStageResponse BasicInfo,
@@ -134,3 +197,18 @@ public sealed record UpsertPetParentIdentityResponse(
     string IdentityPhotoUrl,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
+
+/// <summary>
+/// Result of <c>DELETE /api/v1/pet-parents/{petParentId}/identity</c>. The
+/// onboarding-status identity stage reverts to Remaining (and
+/// isFullyOnboarded to false) until a new document is uploaded.
+/// </summary>
+public sealed record DeletePetParentIdentityResponse(
+    Guid ParentIdentityId,
+    Guid PetParentId,
+    string IdentityType,
+    // URL the deleted row pointed at. The blob itself is also deleted
+    // (best-effort) — kept on the wire mainly so the client can clear any
+    // cached copy.
+    string IdentityPhotoUrl,
+    DateTimeOffset DeletedAtUtc);

@@ -52,6 +52,8 @@ api.MapPetParentEndpoints();
 api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapProviderDetailsEndpoints();
+api.MapProviderSearchEndpoints();
+api.MapBlobImageEndpoints();
 api.MapAvailabilitySlotsEndpoints();
 
 app.Run();

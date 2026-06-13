@@ -252,7 +252,13 @@ internal sealed class SqlEventStore(
             StartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(11)),
             EndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(12)),
             CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero),
-            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero));
+            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
+            // Engagement counters appended after the timestamps in every
+            // event-returning sproc's result set 1.
+            Counters: new EventCounters(
+                ViewCount: reader.GetInt32(15),
+                ShareCount: reader.GetInt32(16),
+                InquiryCount: reader.GetInt32(17)));
     }
 
     private static async Task<List<string>> ReadAmenitiesAsync(

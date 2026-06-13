@@ -21,7 +21,10 @@ BEGIN
            [StartTime],
            [EndTime],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [ViewCount],
+           [ShareCount],
+           [InquiryCount]
     FROM [Event].[Events]
     WHERE [ProviderId] = @ProviderId
     ORDER BY [StartDate] DESC, [StartTime] DESC;

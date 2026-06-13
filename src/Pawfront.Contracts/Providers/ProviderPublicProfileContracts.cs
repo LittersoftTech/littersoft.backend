@@ -58,3 +58,23 @@ public sealed record ProviderSummaryResponse(
     string City,
     string? About,
     IReadOnlyCollection<string> AnimalsHandled);
+
+/// <summary>
+/// Per-provider hit returned by the four per-service booking-search
+/// endpoints (<c>GET /providers/search/day-care|night-stay|groomers|vets</c>)
+/// on the pet-parent host. ServiceId lets mobile jump straight to the
+/// slots / booking endpoints.
+/// </summary>
+/// <param name="BusinessName">Null for freelance sub-categories.</param>
+/// <param name="CompletedBookings">Bookings already served (not cancelled/no-show) across all the provider's services.</param>
+/// <param name="Charges">Null for a grooming search without a serviceItemCode (prices are per menu item).</param>
+/// <param name="ChargesUnit"><c>PerHour | PerService | PerAppointment</c>.</param>
+public sealed record ProviderSearchResultResponse(
+    Guid ProviderId,
+    Guid ServiceId,
+    string SubCategory,
+    string? BusinessName,
+    int CompletedBookings,
+    decimal? Charges,
+    string ChargesUnit,
+    string? ServiceItemCode);

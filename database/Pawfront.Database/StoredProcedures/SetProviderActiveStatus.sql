@@ -19,12 +19,11 @@ BEGIN
         THROW 51100, 'Provider profile was not found.', 1;
     END
 
-    -- When DEACTIVATING, check whether any future confirmed bookings exist
-    -- across ALL of this provider's services. A confirmed booking is "in the
-    -- future" when its date is strictly after today, OR it's today but hasn't
-    -- ended yet. UPDLOCK + HOLDLOCK serialises us against concurrent
-    -- Booking.CreateBooking so no booking can sneak in between the check and
-    -- the flip.
+    -- When DEACTIVATING, check whether any future active (non-cancelled) bookings
+    -- exist across ALL of this provider's services. A booking is "in the future"
+    -- when its date is strictly after today, OR it's today but hasn't ended yet.
+    -- UPDLOCK + HOLDLOCK serialises us against concurrent Booking.CreateBooking so
+    -- no booking can sneak in between the check and the flip.
     IF @IsActive = 0
     BEGIN
         DECLARE @Today DATE = CAST(SYSUTCDATETIME() AS DATE);
@@ -50,7 +49,7 @@ BEGIN
                b.[BookingDate], b.[StartTime], b.[EndTime]
         FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
         WHERE b.[ProviderId] = @ProviderId
-          AND b.[Status] = N'Confirmed'
+          AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
           AND (
               b.[BookingDate] > @Today
               OR (b.[BookingDate] = @Today AND b.[EndTime] > @NowTime)

@@ -1,6 +1,7 @@
 CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
     @ProviderId UNIQUEIDENTIFIER,
     @PetParentId UNIQUEIDENTIFIER,
+    @PetId UNIQUEIDENTIFIER = NULL,
     @ServiceId UNIQUEIDENTIFIER,
     @ServiceCategory NVARCHAR(64),
     @SubCategory NVARCHAR(64),
@@ -44,6 +45,18 @@ BEGIN
         THROW 51060, 'Pet parent was not found.', 1;
     END
 
+    -- Defense-in-depth: the API validates pet ownership before calling, but a
+    -- direct sproc caller must not be able to pin someone else's pet on a booking.
+    IF @PetId IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+        FROM [Parent].[Pets]
+        WHERE [PetId] = @PetId
+          AND [PetParentId] = @PetParentId
+    )
+    BEGIN
+        THROW 51068, 'Pet was not found or does not belong to the pet parent.', 1;
+    END
+
     -- Validate that the ServiceId belongs to the provider and is active.
     -- UPDLOCK + HOLDLOCK serialises us against concurrent DeactivateProviderService
     -- so a service can't disappear between our check and the insert.
@@ -58,16 +71,17 @@ BEGIN
         THROW 51066, 'Service is not valid or active for this provider.', 1;
     END
 
-    -- Race-safe capacity check: count confirmed bookings overlapping the requested
-    -- window FOR THIS SERVICE, holding UPDLOCK + HOLDLOCK so concurrent CreateBooking
-    -- calls on the same service serialise. DayCare and NightStay each have their own
-    -- capacity bucket.
+    -- Race-safe capacity check: count active (non-cancelled) bookings overlapping
+    -- the requested window FOR THIS SERVICE, holding UPDLOCK + HOLDLOCK so
+    -- concurrent CreateBooking calls on the same service serialise. DayCare and
+    -- NightStay each have their own capacity bucket. A booking holds its slot in
+    -- every status except the two cancelled ones.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] = N'Confirmed'
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
       AND [StartTime] < @EndTime
       AND [EndTime] > @StartTime;
 
@@ -82,6 +96,7 @@ BEGIN
     (
         [ProviderId],
         [PetParentId],
+        [PetId],
         [ServiceId],
         [ServiceCategory],
         [SubCategory],
@@ -95,6 +110,7 @@ BEGIN
     (
         @ProviderId,
         @PetParentId,
+        @PetId,
         @ServiceId,
         @ServiceCategory,
         @SubCategory,
@@ -105,6 +121,12 @@ BEGIN
     );
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);
+
+    -- Seed the audit trail with the creation entry (Status defaults to CREATED).
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    VALUES
+        (@BookingId, NULL, N'CREATED', N'System', NULL, N'Booking created');
 
     SELECT [BookingId],
            [ProviderId],
@@ -129,7 +151,8 @@ BEGIN
            [ServiceLocation],
            [CustomerLocation],
            [PricePerHour],
-           [JobNotes]
+           [JobNotes],
+           [PetId]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

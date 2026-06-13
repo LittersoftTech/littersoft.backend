@@ -27,16 +27,22 @@ BEGIN
         THROW 51064, 'Only the original booker can cancel this booking.', 1;
     END
 
-    IF @CurrentStatus = N'Cancelled'
+    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
     BEGIN
         THROW 51065, 'Booking is already cancelled.', 1;
     END
 
     UPDATE [Booking].[Bookings]
-    SET [Status] = N'Cancelled',
+    SET [Status] = N'PARENT_CANCELLED',
         [CancelledAtUtc] = @Now,
         [UpdatedAtUtc] = @Now
     WHERE [BookingId] = @BookingId;
+
+    -- Audit the cancellation (the booker is, by definition, the parent here).
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    VALUES
+        (@BookingId, @CurrentStatus, N'PARENT_CANCELLED', N'Parent', @PetParentId, NULL);
 
     SELECT [BookingId],
            [ProviderId],
@@ -61,7 +67,8 @@ BEGIN
            [ServiceLocation],
            [CustomerLocation],
            [PricePerHour],
-           [JobNotes]
+           [JobNotes],
+           [PetId]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

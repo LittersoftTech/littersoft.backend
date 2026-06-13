@@ -20,6 +20,7 @@ public interface IBookingSqlStore
     Task<BookingResult> CreateAsync(
         Guid providerId,
         Guid petParentId,
+        Guid? petId,
         Guid serviceId,
         string serviceCategory,
         string subCategory,
@@ -74,5 +75,22 @@ public interface IBookingSqlStore
     Task<IReadOnlyList<BookingWindow>> GetBookingsForDateAsync(
         Guid serviceId,
         DateOnly bookingDate,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Race-safe status change + audit insert in one transaction. Maps the
+    /// sproc's typed THROWs (51120 not found, 51121 forbidden, 51122 not allowed
+    /// for actor, 51123 terminal, 51124 unchanged) to the matching exceptions.
+    /// </summary>
+    Task<BookingResult> UpdateStatusAsync(
+        Guid bookingId,
+        string newStatus,
+        BookingStatusActor actor,
+        Guid actorId,
+        string? note,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
+        Guid bookingId,
         CancellationToken cancellationToken);
 }

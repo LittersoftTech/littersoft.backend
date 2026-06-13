@@ -286,7 +286,8 @@ internal sealed class EventService(
             snapshot.EndTime,
             physical,
             snapshot.CreatedAtUtc,
-            snapshot.UpdatedAtUtc);
+            snapshot.UpdatedAtUtc,
+            snapshot.Counters);
     }
 
     private static PhysicalEventInput ValidatePhysical(PhysicalEventInput input)

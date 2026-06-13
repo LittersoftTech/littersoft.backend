@@ -26,7 +26,9 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             StartTime: input.StartTime,
             EndTime: input.EndTime,
             CreatedAtUtc: now,
-            UpdatedAtUtc: now);
+            UpdatedAtUtc: now,
+            // Counters aren't tracked in the in-memory dev fallback.
+            Counters: new EventCounters(0, 0, 0));
 
         events[snapshot.EventId] = snapshot;
         return Task.FromResult(snapshot);
@@ -53,7 +55,9 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             StartTime: input.StartTime,
             EndTime: input.EndTime,
             CreatedAtUtc: now,
-            UpdatedAtUtc: now);
+            UpdatedAtUtc: now,
+            // Counters aren't tracked in the in-memory dev fallback.
+            Counters: new EventCounters(0, 0, 0));
 
         events[snapshot.EventId] = snapshot;
         return Task.FromResult(snapshot);

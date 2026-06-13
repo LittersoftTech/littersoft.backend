@@ -12,6 +12,8 @@ internal static class BookingEndpoints
         providerScoped.MapPost("/", CreateBooking);
         providerScoped.MapPost("/custom", CreateCustomBooking);
         providerScoped.MapGet("/", ListByProvider);
+        providerScoped.MapPost("/{bookingId:guid}/status", UpdateStatus);
+        providerScoped.MapGet("/{bookingId:guid}/status-history", GetStatusHistory);
 
         builder.MapGet("/bookings/{bookingId:guid}", GetBooking);
         builder.MapPost("/bookings/{bookingId:guid}/cancel", CancelBooking);
@@ -199,6 +201,74 @@ internal static class BookingEndpoints
         }
     }
 
+    private static async Task<IResult> UpdateStatus(
+        Guid providerId,
+        Guid bookingId,
+        UpdateBookingStatusRequest request,
+        IBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Status))
+        {
+            return ApiResults.BadRequest("InvalidRequest", "A status is required.");
+        }
+
+        try
+        {
+            var result = await bookingService.UpdateStatusAsync(
+                new UpdateBookingStatusCommand(
+                    bookingId,
+                    request.Status,
+                    BookingStatusActor.Provider,
+                    providerId,
+                    request.Note),
+                cancellationToken);
+            return ApiResults.Ok(ToResponse(result));
+        }
+        catch (UnsupportedBookingStatusException exception)
+        {
+            return ApiResults.BadRequest("UnsupportedBookingStatus", exception.Message);
+        }
+        catch (BookingNotFoundException exception)
+        {
+            return ApiResults.NotFound("BookingNotFound", exception.Message);
+        }
+        catch (BookingStatusForbiddenException exception)
+        {
+            return ApiResults.Forbidden("Forbidden", exception.Message);
+        }
+        catch (BookingStatusNotAllowedException exception)
+        {
+            return ApiResults.BadRequest("BookingStatusNotAllowed", exception.Message);
+        }
+        catch (BookingStatusTerminalException exception)
+        {
+            return ApiResults.Conflict("BookingStatusTerminal", exception.Message);
+        }
+        catch (BookingStatusUnchangedException exception)
+        {
+            return ApiResults.Conflict("BookingStatusUnchanged", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> GetStatusHistory(
+        Guid providerId,
+        Guid bookingId,
+        IBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        // Don't leak other providers' bookings: confirm the booking belongs to
+        // this provider before returning its audit trail.
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.ProviderId != providerId)
+        {
+            return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
+        }
+
+        var history = await bookingService.ListStatusHistoryAsync(bookingId, cancellationToken);
+        return ApiResults.Ok(history.Select(ToHistoryResponse).ToArray());
+    }
+
     private static async Task<IResult> ListByProvider(
         Guid providerId,
         DateOnly? date,
@@ -217,6 +287,16 @@ internal static class BookingEndpoints
         var results = await bookingService.ListByPetParentAsync(petParentId, cancellationToken);
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
     }
+
+    private static BookingStatusHistoryEntryResponse ToHistoryResponse(BookingStatusHistoryEntry entry) =>
+        new(entry.BookingStatusHistoryId,
+            entry.BookingId,
+            entry.FromStatus,
+            entry.ToStatus,
+            entry.ChangedByActor,
+            entry.ChangedByActorId,
+            entry.Note,
+            entry.ChangedAtUtc);
 
     private static BookingResponse ToResponse(BookingResult result) =>
         new(result.BookingId,
@@ -242,5 +322,6 @@ internal static class BookingEndpoints
             result.ServiceLocation,
             result.CustomerLocation,
             result.PricePerHour,
-            result.JobNotes);
+            result.JobNotes,
+            result.PetId);
 }

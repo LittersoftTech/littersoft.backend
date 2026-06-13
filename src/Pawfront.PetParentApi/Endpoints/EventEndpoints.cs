@@ -202,6 +202,10 @@ internal static class EventEndpoints
                     result.Physical.MaximumCapacity,
                     result.Physical.IsPaid,
                     result.Physical.Price),
+            new PawPrintsResponse(
+                result.Counters.ViewCount,
+                result.Counters.ShareCount,
+                result.Counters.InquiryCount),
             result.CreatedAtUtc,
             result.UpdatedAtUtc);
     }

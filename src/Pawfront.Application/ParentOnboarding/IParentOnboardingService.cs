@@ -40,6 +40,26 @@ public interface IParentOnboardingService
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Full profile read-back (joined with the auth identity for Email /
+    /// IsEmailVerified). Throws <see cref="PetParentNotFoundException"/>
+    /// when the row is missing.
+    /// </summary>
+    Task<PetParentProfileDetailsResponse> GetProfileAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Edits the basic-profile subset (name, gender, birth date, address
+    /// fields, description). Mobile number, coordinates, and profile photo
+    /// are deliberately not editable here. Throws
+    /// <see cref="PetParentNotFoundException"/> when the row is missing.
+    /// </summary>
+    Task<PetParentProfileDetailsResponse> UpdateProfileAsync(
+        Guid petParentId,
+        UpdatePetParentProfileRequest request,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Generates a fresh 6-digit OTP, persists the SHA-256 hash with a
     /// 10-minute expiry on <c>Parent.ParentMobileOtps</c>, and dispatches the
     /// raw code to the parent's mobile via <see cref="IPetParentMobileOtpSender"/>.
@@ -74,5 +94,27 @@ public interface IParentOnboardingService
         Guid petParentId,
         string identityType,
         string identityPhotoUrl,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Deletes the parent's single identity row (one per parent). The blob
+    /// itself is deleted by the endpoint layer using the returned
+    /// <c>IdentityPhotoUrl</c> (best-effort). Throws
+    /// <see cref="PetParentIdentityNotFoundException"/> when no identity is
+    /// on file.
+    /// </summary>
+    Task<DeletePetParentIdentityResponse> DeleteIdentityAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resolves a Firebase user id to the associated pet-parent auth identity
+    /// and (if one exists) the pet-parent profile. Used by the mobile app after
+    /// a reinstall to recover its PetParentId from the current Firebase session.
+    /// Throws <see cref="ParentAuthIdentityNotFoundException"/> when no auth
+    /// identity exists for the Firebase user id.
+    /// </summary>
+    Task<ResolvePetParentByFirebaseUidResponse> ResolvePetParentByFirebaseUidAsync(
+        string firebaseUserId,
         CancellationToken cancellationToken);
 }

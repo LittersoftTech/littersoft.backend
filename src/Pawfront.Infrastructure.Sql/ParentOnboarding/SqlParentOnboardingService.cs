@@ -151,6 +151,102 @@ internal sealed class SqlParentOnboardingService(
         }
     }
 
+    public async Task<PetParentProfileDetailsResponse> GetProfileAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.GetPetParentProfile");
+
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new PetParentNotFoundException(petParentId);
+        }
+
+        return ReadPetParentProfileDetails(reader);
+    }
+
+    public async Task<PetParentProfileDetailsResponse> UpdateProfileAsync(
+        Guid petParentId,
+        UpdatePetParentProfileRequest request,
+        CancellationToken cancellationToken)
+    {
+        // Same validation set as the create path for the fields that are
+        // editable here. Mobile / coordinates are not part of this flow.
+        var firstName = Required(request.FirstName, nameof(request.FirstName));
+        var lastName = Required(request.LastName, nameof(request.LastName));
+        var gender = NormalizeGender(request.Gender);
+        var addressLine = Required(request.AddressLine, nameof(request.AddressLine));
+        var zipCode = Required(request.ZipCode, nameof(request.ZipCode));
+        var city = Required(request.City, nameof(request.City));
+        var description = Required(request.Description, nameof(request.Description));
+
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.UpdatePetParentProfile");
+
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
+        command.Parameters.AddWithValue("@FirstName", firstName);
+        command.Parameters.AddWithValue("@LastName", lastName);
+        command.Parameters.AddWithValue("@Gender", gender);
+        command.Parameters.AddWithValue("@DateOfBirth", request.DateOfBirth.ToDateTime(TimeOnly.MinValue));
+        command.Parameters.AddWithValue("@AddressLine", addressLine);
+        command.Parameters.AddWithValue("@ZipCode", zipCode);
+        command.Parameters.AddWithValue("@City", city);
+        command.Parameters.AddWithValue("@Description", description);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Pet parent profile was not returned after update.");
+            }
+
+            return ReadPetParentProfileDetails(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51208)
+        {
+            throw new PetParentNotFoundException(petParentId);
+        }
+    }
+
+    private static PetParentProfileDetailsResponse ReadPetParentProfileDetails(SqlDataReader reader)
+    {
+        return new PetParentProfileDetailsResponse(
+            reader.GetGuid(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetString(4),
+            reader.GetBoolean(5),
+            reader.GetString(6),
+            reader.GetString(7),
+            DateOnly.FromDateTime(reader.GetDateTime(8)),
+            reader.GetString(9),
+            reader.GetDecimal(10),
+            reader.GetDecimal(11),
+            reader.GetString(12),
+            reader.GetString(13),
+            reader.GetString(14),
+            reader.IsDBNull(15) ? null : reader.GetString(15),
+            reader.IsDBNull(16) ? null : new DateTimeOffset(reader.GetDateTime(16), TimeSpan.Zero),
+            new DateTimeOffset(reader.GetDateTime(17), TimeSpan.Zero),
+            new DateTimeOffset(reader.GetDateTime(18), TimeSpan.Zero));
+    }
+
     private static PetParentProfileResponse ReadPetParentProfile(SqlDataReader reader)
     {
         return new PetParentProfileResponse(
@@ -346,6 +442,73 @@ internal sealed class SqlParentOnboardingService(
         {
             throw new PetParentNotFoundException(petParentId);
         }
+    }
+
+    public async Task<DeletePetParentIdentityResponse> DeleteIdentityAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.DeletePetParentIdentity");
+
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Pet parent identity row was not returned after delete.");
+            }
+
+            return new DeletePetParentIdentityResponse(
+                reader.GetGuid(0),
+                reader.GetGuid(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero));
+        }
+        catch (SqlException exception) when (exception.Number == 51209)
+        {
+            throw new PetParentIdentityNotFoundException(petParentId);
+        }
+    }
+
+    public async Task<ResolvePetParentByFirebaseUidResponse> ResolvePetParentByFirebaseUidAsync(
+        string firebaseUserId,
+        CancellationToken cancellationToken)
+    {
+        var normalised = Required(firebaseUserId, nameof(firebaseUserId));
+
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.GetPetParentByFirebaseUid");
+        command.Parameters.AddWithValue("@FirebaseUserId", normalised);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new ParentAuthIdentityNotFoundException(normalised);
+        }
+
+        return new ResolvePetParentByFirebaseUidResponse(
+            reader.GetGuid(0),
+            reader.IsDBNull(1) ? null : reader.GetGuid(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetBoolean(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.GetString(6),
+            reader.GetBoolean(7),
+            reader.IsDBNull(8) ? null : new DateTimeOffset(reader.GetDateTime(8), TimeSpan.Zero));
     }
 
     private static string NormaliseIdentityType(string? value)

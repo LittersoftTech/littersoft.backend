@@ -59,6 +59,33 @@ internal sealed class SqlPetParentOwnershipReader(
         return (Guid)raw;
     }
 
+    public async Task<PetOwnershipLookup?> GetPetLookupAsync(
+        Guid petId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        // Lookup hits PK_Pets. Owner + pet type in one point read so the
+        // discovery endpoint's petId filter pays a single round-trip.
+        await using var command = new SqlCommand(
+            "SELECT [PetParentId], [PetType] " +
+            "FROM [Parent].[Pets] " +
+            "WHERE [PetId] = @PetId;",
+            connection);
+        command.Parameters.AddWithValue("@PetId", petId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new PetOwnershipLookup(
+            reader.GetGuid(0),
+            reader.GetString(1));
+    }
+
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(configuredConnectionString))

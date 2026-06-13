@@ -83,6 +83,7 @@ internal sealed class BookingService(
         return await sqlStore.CreateAsync(
             command.ProviderId,
             command.PetParentId,
+            command.PetId,
             command.ServiceId,
             offering.ServiceCategory,
             offering.SubCategory,
@@ -179,6 +180,27 @@ internal sealed class BookingService(
 
     public Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(Guid petParentId, CancellationToken cancellationToken)
         => sqlStore.ListByPetParentAsync(petParentId, cancellationToken);
+
+    public Task<BookingResult> UpdateStatusAsync(
+        UpdateBookingStatusCommand command,
+        CancellationToken cancellationToken)
+    {
+        // Reject an unknown status with a clean 400 before touching SQL; the
+        // sproc still enforces role + transition rules authoritatively.
+        var newStatus = BookingStatuses.Normalize(command.NewStatus);
+        return sqlStore.UpdateStatusAsync(
+            command.BookingId,
+            newStatus,
+            command.Actor,
+            command.ActorId,
+            command.Note,
+            cancellationToken);
+    }
+
+    public Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken)
+        => sqlStore.ListStatusHistoryAsync(bookingId, cancellationToken);
 
     public Task<IReadOnlyList<BookingWindow>> GetBookingsForDateAsync(
         Guid serviceId,

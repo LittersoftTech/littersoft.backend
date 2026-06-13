@@ -14,10 +14,38 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
 {
     private readonly ConcurrentDictionary<Guid, BookingRow> bookings = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> serviceLocks = new();
+    private readonly ConcurrentDictionary<Guid, List<BookingStatusHistoryEntry>> history = new();
+
+    // A booking holds its slot unless it has been cancelled by either party.
+    private static bool IsActive(BookingRow row) => !BookingStatuses.Cancelled.Contains(row.Status);
+
+    private void AppendHistory(
+        Guid bookingId,
+        string? fromStatus,
+        string toStatus,
+        string actor,
+        Guid? actorId,
+        string? note)
+    {
+        var list = history.GetOrAdd(bookingId, _ => new List<BookingStatusHistoryEntry>());
+        lock (list)
+        {
+            list.Add(new BookingStatusHistoryEntry(
+                Guid.NewGuid(),
+                bookingId,
+                fromStatus,
+                toStatus,
+                actor,
+                actorId,
+                note,
+                DateTimeOffset.UtcNow));
+        }
+    }
 
     public async Task<BookingResult> CreateAsync(
         Guid providerId,
         Guid petParentId,
+        Guid? petId,
         Guid serviceId,
         string serviceCategory,
         string subCategory,
@@ -32,11 +60,11 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         await serviceLock.WaitAsync(cancellationToken);
         try
         {
-            // Count overlapping confirmed bookings for this service+date.
+            // Count overlapping active (non-cancelled) bookings for this service+date.
             var concurrent = bookings.Values.Count(b =>
                 b.ServiceId == serviceId
                 && b.BookingDate == bookingDate
-                && b.Status == "Confirmed"
+                && IsActive(b)
                 && b.StartTime < endTime
                 && b.EndTime > startTime);
 
@@ -51,6 +79,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 BookingId = Guid.NewGuid(),
                 ProviderId = providerId,
                 PetParentId = petParentId,
+                PetId = petId,
                 ServiceId = serviceId,
                 ServiceCategory = serviceCategory,
                 SubCategory = subCategory,
@@ -58,7 +87,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 BookingDate = bookingDate,
                 StartTime = startTime,
                 EndTime = endTime,
-                Status = "Confirmed",
+                Status = BookingStatuses.Created,
                 CreatedAtUtc = now,
                 UpdatedAtUtc = now,
                 CancelledAtUtc = null,
@@ -66,6 +95,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             };
 
             bookings[row.BookingId] = row;
+            AppendHistory(row.BookingId, null, row.Status, "System", null, "Booking created");
             return ToResult(row);
         }
         finally
@@ -101,7 +131,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             var concurrent = bookings.Values.Count(b =>
                 b.ServiceId == serviceId
                 && b.BookingDate == bookingDate
-                && b.Status == "Confirmed"
+                && IsActive(b)
                 && b.StartTime < endTime
                 && b.EndTime > startTime);
 
@@ -123,7 +153,8 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 BookingDate = bookingDate,
                 StartTime = startTime,
                 EndTime = endTime,
-                Status = "Confirmed",
+                // Provider-added walk-in is the provider's own job — already confirmed.
+                Status = BookingStatuses.Confirmed,
                 CreatedAtUtc = now,
                 UpdatedAtUtc = now,
                 CancelledAtUtc = null,
@@ -140,6 +171,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             };
 
             bookings[row.BookingId] = row;
+            AppendHistory(row.BookingId, null, row.Status, "System", null, "Booking created");
             return ToResult(row);
         }
         finally
@@ -169,17 +201,90 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             throw new BookingCancellationForbiddenException(bookingId);
         }
 
-        if (row.Status == "Cancelled")
+        if (BookingStatuses.Cancelled.Contains(row.Status))
         {
             throw new BookingAlreadyCancelledException(bookingId);
         }
 
         var now = DateTimeOffset.UtcNow;
-        row.Status = "Cancelled";
+        var from = row.Status;
+        row.Status = BookingStatuses.ParentCancelled;
         row.CancelledAtUtc = now;
         row.UpdatedAtUtc = now;
+        AppendHistory(bookingId, from, row.Status, "Parent", petParentId, null);
 
         return Task.FromResult(ToResult(row));
+    }
+
+    public Task<BookingResult> UpdateStatusAsync(
+        Guid bookingId,
+        string newStatus,
+        BookingStatusActor actor,
+        Guid actorId,
+        string? note,
+        CancellationToken cancellationToken)
+    {
+        if (!bookings.TryGetValue(bookingId, out var row))
+        {
+            throw new BookingNotFoundException(bookingId);
+        }
+
+        // Actor must be a party to the booking.
+        var ownsBooking = actor == BookingStatusActor.Provider
+            ? row.ProviderId == actorId
+            : row.PetParentId is not null && row.PetParentId == actorId;
+        if (!ownsBooking)
+        {
+            throw new BookingStatusForbiddenException(bookingId);
+        }
+
+        var allowed = actor == BookingStatusActor.Provider
+            ? BookingStatuses.ProviderSettable
+            : BookingStatuses.ParentSettable;
+        if (!allowed.Contains(newStatus))
+        {
+            throw new BookingStatusNotAllowedException(newStatus, actor);
+        }
+
+        if (BookingStatuses.Terminal.Contains(row.Status))
+        {
+            throw new BookingStatusTerminalException(bookingId, row.Status);
+        }
+
+        if (row.Status == newStatus)
+        {
+            throw new BookingStatusUnchangedException(bookingId, newStatus);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var from = row.Status;
+        row.Status = newStatus;
+        row.UpdatedAtUtc = now;
+        if (BookingStatuses.Cancelled.Contains(newStatus))
+        {
+            row.CancelledAtUtc = now;
+        }
+        AppendHistory(bookingId, from, newStatus, actor.ToString(), actorId, note);
+
+        return Task.FromResult(ToResult(row));
+    }
+
+    public Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken)
+    {
+        if (!history.TryGetValue(bookingId, out var list))
+        {
+            return Task.FromResult<IReadOnlyList<BookingStatusHistoryEntry>>(Array.Empty<BookingStatusHistoryEntry>());
+        }
+
+        lock (list)
+        {
+            IReadOnlyList<BookingStatusHistoryEntry> snapshot = list
+                .OrderBy(e => e.ChangedAtUtc)
+                .ToArray();
+            return Task.FromResult(snapshot);
+        }
     }
 
     public Task<IReadOnlyList<BookingResult>> ListByProviderAsync(
@@ -219,7 +324,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             .Where(b =>
                 b.ServiceId == serviceId
                 && b.BookingDate == bookingDate
-                && b.Status == "Confirmed")
+                && IsActive(b))
             .OrderBy(b => b.StartTime)
             .Select(b => new BookingWindow(b.StartTime, b.EndTime))
             .ToArray();
@@ -250,13 +355,15 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             row.ServiceLocation,
             row.CustomerLocation,
             row.PricePerHour,
-            row.JobNotes);
+            row.JobNotes,
+            row.PetId);
 
     private sealed class BookingRow
     {
         public Guid BookingId { get; init; }
         public Guid ProviderId { get; init; }
         public Guid? PetParentId { get; init; }
+        public Guid? PetId { get; init; }
         public Guid ServiceId { get; init; }
         public required string ServiceCategory { get; init; }
         public required string SubCategory { get; init; }

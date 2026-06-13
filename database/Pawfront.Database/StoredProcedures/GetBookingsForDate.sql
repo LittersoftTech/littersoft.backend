@@ -5,13 +5,14 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Used by the slot service to subtract overlapping confirmed bookings against
+    -- Used by the slot service to subtract overlapping active bookings against
     -- the service's capacity. Scoped by ServiceId so DayCare and NightStay slot
-    -- grids on the same provider are computed independently.
+    -- grids on the same provider are computed independently. A booking holds its
+    -- slot in every status except the two cancelled ones.
     SELECT [StartTime], [EndTime]
     FROM [Booking].[Bookings]
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] = N'Confirmed'
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
     ORDER BY [StartTime];
 END;

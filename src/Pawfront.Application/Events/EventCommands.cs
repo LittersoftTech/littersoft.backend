@@ -61,7 +61,9 @@ public sealed record EventResult(
     TimeOnly EndTime,
     PhysicalEventResult? Physical,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    // The view / share / inquiry engagement counters ("PawPrints" on the wire).
+    EventCounters Counters);
 
 public sealed record PhysicalEventResult(
     int MaximumCapacity,
@@ -84,7 +86,8 @@ public sealed record EventSqlSnapshot(
     TimeOnly StartTime,
     TimeOnly EndTime,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    EventCounters Counters);
 
 public sealed record CreateEventSqlInput(
     Guid ProviderId,

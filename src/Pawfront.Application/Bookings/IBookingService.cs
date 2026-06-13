@@ -34,4 +34,28 @@ public interface IBookingService
     Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(
         Guid petParentId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Moves a booking to a new lifecycle status and writes an audit row, both in
+    /// one transaction. The actor + their id are enforced against the booking
+    /// (forbidden otherwise), the status must be one the actor may set, and the
+    /// booking must not already be terminal. Returns the updated booking.
+    /// Throws <see cref="UnsupportedBookingStatusException"/> (unknown status),
+    /// <see cref="BookingNotFoundException"/>, <see cref="BookingStatusForbiddenException"/>,
+    /// <see cref="BookingStatusNotAllowedException"/>,
+    /// <see cref="BookingStatusTerminalException"/>, or
+    /// <see cref="BookingStatusUnchangedException"/>.
+    /// </summary>
+    Task<BookingResult> UpdateStatusAsync(
+        UpdateBookingStatusCommand command,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns the full status-change audit trail for a booking, oldest-first
+    /// (the seeded creation entry is first). Empty when the booking has no
+    /// history (or doesn't exist) — list semantics, no exception.
+    /// </summary>
+    Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken);
 }
