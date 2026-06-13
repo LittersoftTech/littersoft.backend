@@ -15,4 +15,6 @@ public sealed class BlobStorageFolderOptions
     public string PetParentProfilePhotos { get; init; } = "pet-parent-profile-photos";
     public string PetPhotos { get; init; } = "pet-photos";
     public string PetParentIdentities { get; init; } = "pet-parent-identities";
+    public string PetParentPhotos { get; init; } = "pet-parent-photos";
+    public string ProviderPhotos { get; init; } = "provider-photos";
 }

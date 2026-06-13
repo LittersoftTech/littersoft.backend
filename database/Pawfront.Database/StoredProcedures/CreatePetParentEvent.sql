@@ -81,7 +81,10 @@ BEGIN
            [StartTime],
            [EndTime],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [ViewCount],
+           [ShareCount],
+           [InquiryCount]
     FROM [Event].[Events]
     WHERE [EventId] = @EventId;
 

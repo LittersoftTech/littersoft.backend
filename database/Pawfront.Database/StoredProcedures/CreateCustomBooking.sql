@@ -54,13 +54,14 @@ BEGIN
 
     -- Race-safe capacity check — identical to [Booking].[CreateBooking].
     -- Custom and App bookings share the same per-service capacity bucket so the
-    -- COUNT(*) sees both.
+    -- COUNT(*) sees both. A booking holds its slot in every status except the
+    -- two cancelled ones.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] = N'Confirmed'
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
       AND [StartTime] < @EndTime
       AND [EndTime] > @StartTime;
 
@@ -82,6 +83,8 @@ BEGIN
         [BookingDate],
         [StartTime],
         [EndTime],
+        -- Provider-added walk-in is the provider's own job — already confirmed.
+        [Status],
         [Source],
         [CustomerName],
         [CustomerMobileCountryCode],
@@ -105,6 +108,7 @@ BEGIN
         @BookingDate,
         @StartTime,
         @EndTime,
+        N'CONFIRMED',
         N'Custom',
         @CustomerName,
         @CustomerMobileCountryCode,
@@ -118,6 +122,12 @@ BEGIN
     );
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);
+
+    -- Seed the audit trail with the creation entry (walk-ins start CONFIRMED).
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    VALUES
+        (@BookingId, NULL, N'CONFIRMED', N'System', NULL, N'Booking created');
 
     SELECT [BookingId],
            [ProviderId],
@@ -142,7 +152,8 @@ BEGIN
            [ServiceLocation],
            [CustomerLocation],
            [PricePerHour],
-           [JobNotes]
+           [JobNotes],
+           [PetId]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

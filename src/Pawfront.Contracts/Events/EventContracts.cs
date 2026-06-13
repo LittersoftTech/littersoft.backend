@@ -38,6 +38,8 @@ public sealed record EventResponse(
     TimeOnly StartTime,
     TimeOnly EndTime,
     PhysicalEventResponse? Physical,
+    // Engagement counters (views / shares / inquiries) for this event.
+    PawPrintsResponse PawPrints,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
@@ -45,3 +47,14 @@ public sealed record PhysicalEventResponse(
     int MaximumCapacity,
     bool IsPaid,
     decimal? Price);
+
+/// <summary>
+/// Engagement counters for an event ("PawPrints"): how many times it was
+/// viewed, shared, and inquired about. Bumped via the public counter endpoints
+/// (<c>POST /events/{eventId}/{views,shares,inquiries}</c>) and surfaced
+/// read-only on the event detail/list responses.
+/// </summary>
+public sealed record PawPrintsResponse(
+    int ViewCount,
+    int ShareCount,
+    int InquiryCount);

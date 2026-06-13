@@ -253,6 +253,47 @@ END
 GO
 
 
+-- 2.2a Provider.ProviderPhotos -----------------------------------------------
+-- General photo gallery owned directly by a provider (not tied to a service).
+-- One row per uploaded photo. ON DELETE CASCADE so removing a provider removes
+-- the photo URLs (the blobs themselves are cleaned up best-effort by the
+-- delete endpoint / a future sweep job).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ProviderPhotos' AND [schema_id] = SCHEMA_ID(N'Provider'))
+BEGIN
+    CREATE TABLE [Provider].[ProviderPhotos]
+    (
+        [ProviderPhotoId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_ProviderPhotos_ProviderPhotoId] DEFAULT NEWSEQUENTIALID(),
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [PhotoUrl] NVARCHAR(1000) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ProviderPhotos_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_ProviderPhotos] PRIMARY KEY CLUSTERED ([ProviderPhotoId] ASC),
+        CONSTRAINT [FK_ProviderPhotos_Providers_ProviderId]
+            FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId])
+            ON DELETE CASCADE
+    );
+    PRINT 'Created table [Provider].[ProviderPhotos].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Provider].[ProviderPhotos] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ProviderPhotos_ProviderId'
+      AND [object_id] = OBJECT_ID(N'[Provider].[ProviderPhotos]'))
+    CREATE INDEX [IX_ProviderPhotos_ProviderId]
+        ON [Provider].[ProviderPhotos] ([ProviderId])
+        INCLUDE ([PhotoUrl], [CreatedAtUtc]);
+GO
+
+
 -- 2.3 ProviderDeviceTokens ----------------------------------------------------
 IF NOT EXISTS (
     SELECT 1 FROM sys.tables
@@ -1254,6 +1295,47 @@ IF NOT EXISTS (
 GO
 
 
+-- 2.9.1a2 Parent.PetParentPhotos ---------------------------------------------
+-- General photo gallery owned directly by a pet parent (not tied to a pet).
+-- One row per uploaded photo. ON DELETE CASCADE so removing a parent removes
+-- the photo URLs (the blobs themselves are cleaned up best-effort by the
+-- delete endpoint / a future sweep job).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetParentPhotos' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    CREATE TABLE [Parent].[PetParentPhotos]
+    (
+        [PetParentPhotoId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_PetParentPhotos_PetParentPhotoId] DEFAULT NEWSEQUENTIALID(),
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [PhotoUrl] NVARCHAR(1000) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetParentPhotos_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_PetParentPhotos] PRIMARY KEY CLUSTERED ([PetParentPhotoId] ASC),
+        CONSTRAINT [FK_PetParentPhotos_PetParents_PetParentId]
+            FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId])
+            ON DELETE CASCADE
+    );
+    PRINT 'Created table [Parent].[PetParentPhotos].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Parent].[PetParentPhotos] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_PetParentPhotos_PetParentId'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParentPhotos]'))
+    CREATE INDEX [IX_PetParentPhotos_PetParentId]
+        ON [Parent].[PetParentPhotos] ([PetParentId])
+        INCLUDE ([PhotoUrl], [CreatedAtUtc]);
+GO
+
+
 -- 2.9.1b Parent.ParentMobileOtps ---------------------------------------------
 -- Mirrors Provider.ProviderMobileOtps. SHA-256 hash of the code (salted with
 -- the OTP id) is stored — the raw code is never persisted. 10-minute expiry,
@@ -1605,6 +1687,9 @@ BEGIN
         [ServiceCategory] NVARCHAR(64) NOT NULL,
         [SubCategory] NVARCHAR(64) NOT NULL,
         [ServiceItemCode] NVARCHAR(64) NULL,
+        -- Which of the parent's pets the booking is for. Populated for
+        -- parent-app bookings; NULL for legacy rows and Custom walk-ins.
+        [PetId] UNIQUEIDENTIFIER NULL,
         [BookingDate] DATE NOT NULL,
         [StartTime] TIME(0) NOT NULL,
         [EndTime] TIME(0) NOT NULL,
@@ -1619,8 +1704,12 @@ BEGIN
         [CustomerLocation] NVARCHAR(500) NULL,
         [PricePerHour] DECIMAL(10, 2) NULL,
         [JobNotes] NVARCHAR(2000) NULL,
+        -- Lifecycle: CREATED -> CONFIRMED -> COMPLETED, with APPROVAL_NEEDED for
+        -- schedule changes and PROVIDER_CANCELLED / PARENT_CANCELLED as the two
+        -- terminal cancellation states. Every status except the cancelled two
+        -- still holds the booking's capacity slot.
         [Status] NVARCHAR(32) NOT NULL
-            CONSTRAINT [DF_Bookings_Status] DEFAULT N'Confirmed',
+            CONSTRAINT [DF_Bookings_Status] DEFAULT N'CREATED',
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_Bookings_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         [UpdatedAtUtc] DATETIME2(7) NOT NULL
@@ -1634,12 +1723,15 @@ BEGIN
             FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
         CONSTRAINT [FK_Bookings_ProviderServices_ServiceId]
             FOREIGN KEY ([ServiceId]) REFERENCES [Provider].[ProviderServices] ([ServiceId]),
+        CONSTRAINT [FK_Bookings_Pets_PetId]
+            FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]),
         CONSTRAINT [CK_Bookings_TimeOrder] CHECK ([StartTime] < [EndTime]),
         CONSTRAINT [CK_Bookings_Status]
-            CHECK ([Status] IN (N'Confirmed', N'Cancelled', N'Completed', N'NoShow')),
+            CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED',
+                                N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')),
         CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
-            ([Status] = N'Cancelled' AND [CancelledAtUtc] IS NOT NULL)
-            OR ([Status] <> N'Cancelled')
+            ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
+            OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
         ),
         CONSTRAINT [CK_Bookings_Source]
             CHECK ([Source] IN (N'App', N'Custom')),
@@ -1835,6 +1927,33 @@ BEGIN
 END
 GO
 
+-- Migration: add the [PetId] column (which pet the booking is for) to an
+-- existing [Booking].[Bookings] table. Idempotent; legacy rows stay NULL.
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Bookings' AND [schema_id] = SCHEMA_ID(N'Booking'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'PetId'
+      AND [object_id] = OBJECT_ID(N'[Booking].[Bookings]'))
+BEGIN
+    PRINT 'Adding [PetId] to [Booking].[Bookings].';
+    ALTER TABLE [Booking].[Bookings]
+        ADD [PetId] UNIQUEIDENTIFIER NULL;
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE [name] = N'FK_Bookings_Pets_PetId')
+AND EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Bookings' AND [schema_id] = SCHEMA_ID(N'Booking'))
+BEGIN
+    ALTER TABLE [Booking].[Bookings] WITH NOCHECK
+        ADD CONSTRAINT [FK_Bookings_Pets_PetId]
+            FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]);
+END
+GO
+
 -- Add CHECK constraints (idempotent).
 IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE [name] = N'CK_Bookings_Source')
 BEGIN
@@ -1908,6 +2027,105 @@ BEGIN
          OR ([ServiceLocation] IS NULL               AND [CustomerLocation] IS NULL)
         );
 END
+GO
+
+-- Migration: move an existing [Booking].[Bookings] table from the legacy status
+-- set (Confirmed/Cancelled/Completed/NoShow) to the 6-status lifecycle. Detected
+-- by the old CHECK constraint still mentioning 'NoShow' (which exists only in the
+-- legacy set), so this fires once and never on fresh/already-migrated installs.
+IF EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Bookings_Status'
+      AND [parent_object_id] = OBJECT_ID(N'[Booking].[Bookings]')
+      AND [definition] LIKE N'%NoShow%')
+BEGIN
+    PRINT 'Migrating [Booking].[Bookings] to the 6-status lifecycle.';
+
+    ALTER TABLE [Booking].[Bookings] DROP CONSTRAINT [CK_Bookings_Status];
+    ALTER TABLE [Booking].[Bookings] DROP CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp];
+
+    UPDATE [Booking].[Bookings] SET [Status] = N'CONFIRMED' WHERE [Status] = N'Confirmed';
+    UPDATE [Booking].[Bookings] SET [Status] = N'COMPLETED' WHERE [Status] = N'Completed';
+    -- Legacy Cancelled rows came from the parent cancel flow; map both Cancelled
+    -- and NoShow onto PARENT_CANCELLED (closest available terminal state).
+    UPDATE [Booking].[Bookings] SET [Status] = N'PARENT_CANCELLED' WHERE [Status] IN (N'Cancelled', N'NoShow');
+
+    -- The new CancelledRequiresTimestamp constraint demands a timestamp for both
+    -- cancelled statuses; legacy NoShow rows were never required to have one.
+    UPDATE [Booking].[Bookings]
+    SET [CancelledAtUtc] = SYSUTCDATETIME()
+    WHERE [Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NULL;
+
+    ALTER TABLE [Booking].[Bookings] DROP CONSTRAINT [DF_Bookings_Status];
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [DF_Bookings_Status] DEFAULT N'CREATED' FOR [Status];
+
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_Status]
+            CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED',
+                                N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'));
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
+            ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
+            OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
+        );
+END
+GO
+
+
+-- 2.10a Booking.BookingStatusHistory -----------------------------------------
+-- Append-only audit trail of every booking status change (one row per
+-- transition, plus a seeded creation row with FromStatus = NULL).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'BookingStatusHistory' AND [schema_id] = SCHEMA_ID(N'Booking'))
+BEGIN
+    CREATE TABLE [Booking].[BookingStatusHistory]
+    (
+        [BookingStatusHistoryId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_BookingStatusHistory_Id] DEFAULT NEWSEQUENTIALID(),
+        [BookingId] UNIQUEIDENTIFIER NOT NULL,
+        [FromStatus] NVARCHAR(32) NULL,
+        [ToStatus] NVARCHAR(32) NOT NULL,
+        [ChangedByActor] NVARCHAR(16) NOT NULL,
+        [ChangedByActorId] UNIQUEIDENTIFIER NULL,
+        [Note] NVARCHAR(500) NULL,
+        [ChangedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_BookingStatusHistory_ChangedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_BookingStatusHistory] PRIMARY KEY CLUSTERED ([BookingStatusHistoryId] ASC),
+        CONSTRAINT [FK_BookingStatusHistory_Bookings_BookingId]
+            FOREIGN KEY ([BookingId]) REFERENCES [Booking].[Bookings] ([BookingId])
+            ON DELETE CASCADE,
+        CONSTRAINT [CK_BookingStatusHistory_Actor]
+            CHECK ([ChangedByActor] IN (N'Provider', N'Parent', N'System'))
+    );
+    PRINT 'Created table [Booking].[BookingStatusHistory].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Booking].[BookingStatusHistory] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_BookingStatusHistory_Booking_ChangedAt'
+      AND [object_id] = OBJECT_ID(N'[Booking].[BookingStatusHistory]'))
+    CREATE INDEX [IX_BookingStatusHistory_Booking_ChangedAt]
+        ON [Booking].[BookingStatusHistory] ([BookingId], [ChangedAtUtc] ASC)
+        INCLUDE ([FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note]);
+GO
+
+-- Backfill a creation audit entry for any pre-existing booking that has none, so
+-- the status-history endpoint returns at least the current status for legacy
+-- rows. Idempotent — only inserts where no history exists yet.
+INSERT INTO [Booking].[BookingStatusHistory]
+    ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+SELECT b.[BookingId], NULL, b.[Status], N'System', NULL, N'Backfilled at migration'
+FROM [Booking].[Bookings] AS b
+WHERE NOT EXISTS (
+    SELECT 1 FROM [Booking].[BookingStatusHistory] AS h WHERE h.[BookingId] = b.[BookingId]);
 GO
 
 
@@ -3222,6 +3440,236 @@ PRINT 'Created/updated [Parent].[DeletePetParentIdentity].';
 GO
 
 
+-- 3.1o Parent.AddPetParentPhoto ----------------------------------------------
+-- Inserts one row into [Parent].[PetParentPhotos] for a freshly-uploaded photo.
+-- THROW 51212 = pet parent not found (parent photo add).
+CREATE OR ALTER PROCEDURE [Parent].[AddPetParentPhoto]
+    @PetParentId UNIQUEIDENTIFIER,
+    @PhotoUrl NVARCHAR(1000)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId
+    )
+    BEGIN
+        THROW 51212, 'Pet parent was not found.', 1;
+    END
+
+    DECLARE @InsertedId TABLE ([PetParentPhotoId] UNIQUEIDENTIFIER);
+
+    INSERT INTO [Parent].[PetParentPhotos]
+    (
+        [PetParentId],
+        [PhotoUrl]
+    )
+    OUTPUT inserted.[PetParentPhotoId] INTO @InsertedId
+    VALUES
+    (
+        @PetParentId,
+        @PhotoUrl
+    );
+
+    DECLARE @PetParentPhotoId UNIQUEIDENTIFIER = (SELECT TOP (1) [PetParentPhotoId] FROM @InsertedId);
+
+    SELECT [PetParentPhotoId],
+           [PetParentId],
+           [PhotoUrl],
+           [CreatedAtUtc]
+    FROM [Parent].[PetParentPhotos]
+    WHERE [PetParentPhotoId] = @PetParentPhotoId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[AddPetParentPhoto].';
+GO
+
+
+-- 3.1p Parent.ListPetParentPhotos --------------------------------------------
+-- Returns every gallery photo on file for the parent, oldest-first. Empty when
+-- the parent has no photos (or doesn't exist) — the API returns [] not 404.
+CREATE OR ALTER PROCEDURE [Parent].[ListPetParentPhotos]
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [PetParentPhotoId],
+           [PetParentId],
+           [PhotoUrl],
+           [CreatedAtUtc]
+    FROM [Parent].[PetParentPhotos]
+    WHERE [PetParentId] = @PetParentId
+    ORDER BY [CreatedAtUtc] ASC;
+END;
+GO
+PRINT 'Created/updated [Parent].[ListPetParentPhotos].';
+GO
+
+
+-- 3.1q Parent.DeletePetParentPhoto -------------------------------------------
+-- Removes a single gallery photo, scoped by BOTH PetParentId and
+-- PetParentPhotoId. Returns the deleted row's URL for best-effort blob cleanup.
+-- THROW 51213 = pet parent photo not found (parent photo delete).
+CREATE OR ALTER PROCEDURE [Parent].[DeletePetParentPhoto]
+    @PetParentId UNIQUEIDENTIFIER,
+    @PetParentPhotoId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @PhotoUrl NVARCHAR(1000);
+
+    BEGIN TRANSACTION;
+
+    SELECT @PhotoUrl = [PhotoUrl]
+    FROM [Parent].[PetParentPhotos] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [PetParentPhotoId] = @PetParentPhotoId
+      AND [PetParentId] = @PetParentId;
+
+    IF @PhotoUrl IS NULL
+    BEGIN
+        THROW 51213, 'Pet parent photo was not found.', 1;
+    END
+
+    DELETE FROM [Parent].[PetParentPhotos]
+    WHERE [PetParentPhotoId] = @PetParentPhotoId;
+
+    SELECT @PetParentPhotoId AS [PetParentPhotoId],
+           @PetParentId AS [PetParentId],
+           @PhotoUrl AS [PhotoUrl],
+           SYSUTCDATETIME() AS [DeletedAtUtc];
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[DeletePetParentPhoto].';
+GO
+
+
+-- 3.1r Provider.AddProviderPhoto ---------------------------------------------
+-- Inserts one row into [Provider].[ProviderPhotos] for a freshly-uploaded photo.
+-- THROW 51110 = provider not found (provider photo add).
+CREATE OR ALTER PROCEDURE [Provider].[AddProviderPhoto]
+    @ProviderId UNIQUEIDENTIFIER,
+    @PhotoUrl NVARCHAR(1000)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[Providers]
+        WHERE [ProviderId] = @ProviderId
+    )
+    BEGIN
+        THROW 51110, 'Provider was not found.', 1;
+    END
+
+    DECLARE @InsertedId TABLE ([ProviderPhotoId] UNIQUEIDENTIFIER);
+
+    INSERT INTO [Provider].[ProviderPhotos]
+    (
+        [ProviderId],
+        [PhotoUrl]
+    )
+    OUTPUT inserted.[ProviderPhotoId] INTO @InsertedId
+    VALUES
+    (
+        @ProviderId,
+        @PhotoUrl
+    );
+
+    DECLARE @ProviderPhotoId UNIQUEIDENTIFIER = (SELECT TOP (1) [ProviderPhotoId] FROM @InsertedId);
+
+    SELECT [ProviderPhotoId],
+           [ProviderId],
+           [PhotoUrl],
+           [CreatedAtUtc]
+    FROM [Provider].[ProviderPhotos]
+    WHERE [ProviderPhotoId] = @ProviderPhotoId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Provider].[AddProviderPhoto].';
+GO
+
+
+-- 3.1s Provider.ListProviderPhotos -------------------------------------------
+-- Returns every gallery photo on file for the provider, oldest-first. Empty
+-- when the provider has no photos (or doesn't exist) — the API returns [] not 404.
+CREATE OR ALTER PROCEDURE [Provider].[ListProviderPhotos]
+    @ProviderId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [ProviderPhotoId],
+           [ProviderId],
+           [PhotoUrl],
+           [CreatedAtUtc]
+    FROM [Provider].[ProviderPhotos]
+    WHERE [ProviderId] = @ProviderId
+    ORDER BY [CreatedAtUtc] ASC;
+END;
+GO
+PRINT 'Created/updated [Provider].[ListProviderPhotos].';
+GO
+
+
+-- 3.1t Provider.DeleteProviderPhoto ------------------------------------------
+-- Removes a single gallery photo, scoped by BOTH ProviderId and
+-- ProviderPhotoId. Returns the deleted row's URL for best-effort blob cleanup.
+-- THROW 51111 = provider photo not found (provider photo delete).
+CREATE OR ALTER PROCEDURE [Provider].[DeleteProviderPhoto]
+    @ProviderId UNIQUEIDENTIFIER,
+    @ProviderPhotoId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @PhotoUrl NVARCHAR(1000);
+
+    BEGIN TRANSACTION;
+
+    SELECT @PhotoUrl = [PhotoUrl]
+    FROM [Provider].[ProviderPhotos] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [ProviderPhotoId] = @ProviderPhotoId
+      AND [ProviderId] = @ProviderId;
+
+    IF @PhotoUrl IS NULL
+    BEGIN
+        THROW 51111, 'Provider photo was not found.', 1;
+    END
+
+    DELETE FROM [Provider].[ProviderPhotos]
+    WHERE [ProviderPhotoId] = @ProviderPhotoId;
+
+    SELECT @ProviderPhotoId AS [ProviderPhotoId],
+           @ProviderId AS [ProviderId],
+           @PhotoUrl AS [PhotoUrl],
+           SYSUTCDATETIME() AS [DeletedAtUtc];
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Provider].[DeleteProviderPhoto].';
+GO
+
+
 -- 3.2 CompleteProviderProfile -------------------------------------------------
 CREATE OR ALTER PROCEDURE [Provider].[CompleteProviderProfile]
     @ProviderAuthIdentityId UNIQUEIDENTIFIER,
@@ -3412,7 +3860,7 @@ BEGIN
                b.[BookingDate], b.[StartTime], b.[EndTime]
         FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
         WHERE b.[ProviderId] = @ProviderId
-          AND b.[Status] = N'Confirmed'
+          AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
           AND (
               b.[BookingDate] > @Today
               OR (b.[BookingDate] = @Today AND b.[EndTime] > @NowTime)
@@ -3910,6 +4358,7 @@ GO
 CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
     @ProviderId UNIQUEIDENTIFIER,
     @PetParentId UNIQUEIDENTIFIER,
+    @PetId UNIQUEIDENTIFIER = NULL,
     @ServiceId UNIQUEIDENTIFIER,
     @ServiceCategory NVARCHAR(64),
     @SubCategory NVARCHAR(64),
@@ -3943,6 +4392,11 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM [Parent].[PetParents] WHERE [PetParentId] = @PetParentId)
         THROW 51060, 'Pet parent was not found.', 1;
 
+    IF @PetId IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM [Parent].[Pets]
+        WHERE [PetId] = @PetId AND [PetParentId] = @PetParentId)
+        THROW 51068, 'Pet was not found or does not belong to the pet parent.', 1;
+
     IF NOT EXISTS (
         SELECT 1
         FROM [Provider].[ProviderServices] WITH (UPDLOCK, HOLDLOCK)
@@ -3952,12 +4406,13 @@ BEGIN
     )
         THROW 51066, 'Service is not valid or active for this provider.', 1;
 
+    -- A booking holds its slot in every status except the two cancelled ones.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] = N'Confirmed'
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
       AND [StartTime] < @EndTime
       AND [EndTime] > @StartTime;
 
@@ -3967,20 +4422,25 @@ BEGIN
     DECLARE @InsertedBookingId TABLE ([BookingId] UNIQUEIDENTIFIER);
 
     INSERT INTO [Booking].[Bookings]
-    ([ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
+    ([ProviderId], [PetParentId], [PetId], [ServiceId], [ServiceCategory], [SubCategory],
      [ServiceItemCode], [BookingDate], [StartTime], [EndTime])
     OUTPUT inserted.[BookingId] INTO @InsertedBookingId
-    VALUES (@ProviderId, @PetParentId, @ServiceId, @ServiceCategory, @SubCategory,
+    VALUES (@ProviderId, @PetParentId, @PetId, @ServiceId, @ServiceCategory, @SubCategory,
             @ServiceItemCode, @BookingDate, @StartTime, @EndTime);
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);
+
+    -- Seed the audit trail with the creation entry (Status defaults to CREATED).
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    VALUES (@BookingId, NULL, N'CREATED', N'System', NULL, N'Booking created');
 
     SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
            [BookingDate], [StartTime], [EndTime], [Status],
            [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
            [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
            [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
-           [PricePerHour], [JobNotes]
+           [PricePerHour], [JobNotes], [PetId]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 
@@ -4003,7 +4463,7 @@ BEGIN
            [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
            [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
            [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
-           [PricePerHour], [JobNotes]
+           [PricePerHour], [JobNotes], [PetId]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 END;
@@ -4038,21 +4498,26 @@ BEGIN
     IF @CurrentParent <> @PetParentId
         THROW 51064, 'Only the original booker can cancel this booking.', 1;
 
-    IF @CurrentStatus = N'Cancelled'
+    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
         THROW 51065, 'Booking is already cancelled.', 1;
 
     UPDATE [Booking].[Bookings]
-    SET [Status] = N'Cancelled',
+    SET [Status] = N'PARENT_CANCELLED',
         [CancelledAtUtc] = @Now,
         [UpdatedAtUtc] = @Now
     WHERE [BookingId] = @BookingId;
+
+    -- Audit the cancellation (the booker is, by definition, the parent here).
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    VALUES (@BookingId, @CurrentStatus, N'PARENT_CANCELLED', N'Parent', @PetParentId, NULL);
 
     SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
            [BookingDate], [StartTime], [EndTime], [Status],
            [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
            [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
            [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
-           [PricePerHour], [JobNotes]
+           [PricePerHour], [JobNotes], [PetId]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 
@@ -4077,7 +4542,7 @@ BEGIN
            [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
            [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
            [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
-           [PricePerHour], [JobNotes]
+           [PricePerHour], [JobNotes], [PetId]
     FROM [Booking].[Bookings]
     WHERE [ProviderId] = @ProviderId
       AND (@ServiceId IS NULL OR [ServiceId] = @ServiceId)
@@ -4101,7 +4566,7 @@ BEGIN
            [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
            [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
            [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
-           [PricePerHour], [JobNotes]
+           [PricePerHour], [JobNotes], [PetId]
     FROM [Booking].[Bookings]
     WHERE [PetParentId] = @PetParentId
     ORDER BY [BookingDate] DESC, [StartTime] DESC;
@@ -4119,11 +4584,12 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
+    -- A booking holds its slot in every status except the two cancelled ones.
     SELECT [StartTime], [EndTime]
     FROM [Booking].[Bookings]
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] = N'Confirmed'
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
     ORDER BY [StartTime];
 END;
 GO
@@ -4180,13 +4646,14 @@ BEGIN
     )
         THROW 51066, 'Service is not valid or active for this provider.', 1;
 
-    -- Custom and App bookings share one capacity bucket per ServiceId.
+    -- Custom and App bookings share one capacity bucket per ServiceId. A booking
+    -- holds its slot in every status except the two cancelled ones.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] = N'Confirmed'
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
       AND [StartTime] < @EndTime
       AND [EndTime] > @StartTime;
 
@@ -4195,28 +4662,34 @@ BEGIN
 
     DECLARE @InsertedBookingId TABLE ([BookingId] UNIQUEIDENTIFIER);
 
+    -- Provider-added walk-in is the provider's own job — already confirmed.
     INSERT INTO [Booking].[Bookings]
     ([ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
-     [ServiceItemCode], [BookingDate], [StartTime], [EndTime],
+     [ServiceItemCode], [BookingDate], [StartTime], [EndTime], [Status],
      [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
      [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
      [PricePerHour], [JobNotes])
     OUTPUT inserted.[BookingId] INTO @InsertedBookingId
     VALUES
     (@ProviderId, NULL, @ServiceId, @ServiceCategory, @SubCategory,
-     NULL, @BookingDate, @StartTime, @EndTime,
+     NULL, @BookingDate, @StartTime, @EndTime, N'CONFIRMED',
      N'Custom', @CustomerName, @CustomerMobileCountryCode, @CustomerMobile,
      @AnimalType, @PetName, @ServiceLocation, @CustomerLocation,
      @PricePerHour, @JobNotes);
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);
 
+    -- Seed the audit trail with the creation entry (walk-ins start CONFIRMED).
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    VALUES (@BookingId, NULL, N'CONFIRMED', N'System', NULL, N'Booking created');
+
     SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
            [BookingDate], [StartTime], [EndTime], [Status],
            [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
            [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
            [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
-           [PricePerHour], [JobNotes]
+           [PricePerHour], [JobNotes], [PetId]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 
@@ -4224,6 +4697,116 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Booking].[CreateCustomBooking].';
+GO
+
+
+-- 3.20c Booking.UpdateBookingStatus ------------------------------------------
+-- Moves a booking to a new lifecycle status and writes an audit row, atomically.
+-- @Actor ('Provider'|'Parent') + @ActorId come from the authenticated route.
+-- THROWs: 51120 not found, 51121 not a party, 51122 status not allowed for actor,
+-- 51123 terminal, 51124 unchanged, 51125 invalid actor/status value.
+CREATE OR ALTER PROCEDURE [Booking].[UpdateBookingStatus]
+    @BookingId UNIQUEIDENTIFIER,
+    @NewStatus NVARCHAR(32),
+    @Actor NVARCHAR(16),
+    @ActorId UNIQUEIDENTIFIER,
+    @Note NVARCHAR(500) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    IF @Actor NOT IN (N'Provider', N'Parent')
+        THROW 51125, 'Actor must be Provider or Parent.', 1;
+
+    IF @NewStatus NOT IN (N'CREATED', N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED',
+                          N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+        THROW 51125, 'Unknown booking status.', 1;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @CurrentStatus NVARCHAR(32);
+    DECLARE @ProviderId UNIQUEIDENTIFIER;
+    DECLARE @PetParentId UNIQUEIDENTIFIER;
+
+    BEGIN TRANSACTION;
+
+    SELECT @CurrentStatus = [Status],
+           @ProviderId = [ProviderId],
+           @PetParentId = [PetParentId]
+    FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [BookingId] = @BookingId;
+
+    IF @CurrentStatus IS NULL
+        THROW 51120, 'Booking was not found.', 1;
+
+    IF (@Actor = N'Provider' AND @ActorId <> @ProviderId)
+       OR (@Actor = N'Parent' AND (@PetParentId IS NULL OR @ActorId <> @PetParentId))
+        THROW 51121, 'You are not a party to this booking.', 1;
+
+    IF (@Actor = N'Provider'
+            AND @NewStatus NOT IN (N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED', N'PROVIDER_CANCELLED'))
+       OR (@Actor = N'Parent'
+            AND @NewStatus NOT IN (N'APPROVAL_NEEDED', N'COMPLETED', N'PARENT_CANCELLED'))
+        THROW 51122, 'This status is not permitted for this actor.', 1;
+
+    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+        THROW 51123, 'Booking is in a terminal state and cannot change.', 1;
+
+    IF @CurrentStatus = @NewStatus
+        THROW 51124, 'Booking is already in the requested status.', 1;
+
+    UPDATE [Booking].[Bookings]
+    SET [Status] = @NewStatus,
+        [UpdatedAtUtc] = @Now,
+        [CancelledAtUtc] = CASE
+            WHEN @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') THEN @Now
+            ELSE [CancelledAtUtc]
+        END
+    WHERE [BookingId] = @BookingId;
+
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    VALUES (@BookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    SELECT [BookingId], [ProviderId], [PetParentId], [ServiceId], [ServiceCategory], [SubCategory],
+           [BookingDate], [StartTime], [EndTime], [Status],
+           [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc], [ServiceItemCode],
+           [Source], [CustomerName], [CustomerMobileCountryCode], [CustomerMobile],
+           [AnimalType], [PetName], [ServiceLocation], [CustomerLocation],
+           [PricePerHour], [JobNotes], [PetId]
+    FROM [Booking].[Bookings]
+    WHERE [BookingId] = @BookingId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Booking].[UpdateBookingStatus].';
+GO
+
+
+-- 3.20d Booking.ListBookingStatusHistory -------------------------------------
+-- Full status-change audit trail for a booking, oldest-first. Empty when none
+-- (or unknown booking). Authorization is enforced at the endpoint layer.
+CREATE OR ALTER PROCEDURE [Booking].[ListBookingStatusHistory]
+    @BookingId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [BookingStatusHistoryId],
+           [BookingId],
+           [FromStatus],
+           [ToStatus],
+           [ChangedByActor],
+           [ChangedByActorId],
+           [Note],
+           [ChangedAtUtc]
+    FROM [Booking].[BookingStatusHistory]
+    WHERE [BookingId] = @BookingId
+    ORDER BY [ChangedAtUtc] ASC, [BookingStatusHistoryId] ASC;
+END;
+GO
+PRINT 'Created/updated [Booking].[ListBookingStatusHistory].';
 GO
 
 
@@ -4280,7 +4863,8 @@ BEGIN
 
     SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
            [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
-           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc],
+           [ViewCount], [ShareCount], [InquiryCount]
     FROM [Event].[Events]
     WHERE [EventId] = @EventId;
 
@@ -4351,7 +4935,8 @@ BEGIN
 
     SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
            [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
-           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc],
+           [ViewCount], [ShareCount], [InquiryCount]
     FROM [Event].[Events]
     WHERE [EventId] = @EventId;
 
@@ -4376,7 +4961,8 @@ BEGIN
 
     SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
            [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
-           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc],
+           [ViewCount], [ShareCount], [InquiryCount]
     FROM [Event].[Events]
     WHERE [EventId] = @EventId;
 
@@ -4399,7 +4985,8 @@ BEGIN
 
     SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
            [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
-           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc]
+           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc],
+           [ViewCount], [ShareCount], [InquiryCount]
     FROM [Event].[Events]
     WHERE [ProviderId] = @ProviderId
     ORDER BY [StartDate] DESC, [StartTime] DESC;
@@ -4462,7 +5049,8 @@ BEGIN
     SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly],
            e.[Title], e.[Description], e.[BannerImageUrl], e.[EventType],
            e.[StartDate], e.[EndDate], e.[StartTime], e.[EndTime],
-           e.[CreatedAtUtc], e.[UpdatedAtUtc]
+           e.[CreatedAtUtc], e.[UpdatedAtUtc],
+           e.[ViewCount], e.[ShareCount], e.[InquiryCount]
     FROM [Event].[Events] e
     INNER JOIN FilteredEvents f ON f.[EventId] = e.[EventId]
     ORDER BY e.[StartDate] DESC, e.[StartTime] DESC, e.[EventId] ASC;
@@ -4548,7 +5136,7 @@ BEGIN
            b.[BookingDate], b.[StartTime], b.[EndTime]
     FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
     INNER JOIN @ServiceIds AS s ON s.[ServiceId] = b.[ServiceId]
-    WHERE b.[Status] = N'Confirmed'
+    WHERE b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
       AND b.[BookingDate] BETWEEN @StartDate AND @EndDate
       AND (
           @StartTime IS NULL

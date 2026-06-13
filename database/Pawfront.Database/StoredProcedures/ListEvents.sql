@@ -49,7 +49,8 @@ BEGIN
     SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly],
            e.[Title], e.[Description], e.[BannerImageUrl], e.[EventType],
            e.[StartDate], e.[EndDate], e.[StartTime], e.[EndTime],
-           e.[CreatedAtUtc], e.[UpdatedAtUtc]
+           e.[CreatedAtUtc], e.[UpdatedAtUtc],
+           e.[ViewCount], e.[ShareCount], e.[InquiryCount]
     FROM [Event].[Events] e
     INNER JOIN FilteredEvents f ON f.[EventId] = e.[EventId]
     ORDER BY e.[StartDate] DESC, e.[StartTime] DESC, e.[EventId] ASC;

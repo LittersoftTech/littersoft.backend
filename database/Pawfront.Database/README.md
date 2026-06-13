@@ -306,6 +306,20 @@ throughout the application.
 - `MobileVerifiedAtUtc` — populated after OTP validation.
 - `OnboardingStatus` — `MobileVerificationPending` → `MobileVerified`.
 
+### `Provider.ProviderPhotos`
+General provider photo gallery (not tied to a service). One row per uploaded
+image — a provider can have many photos. Inserted by
+`POST /api/v1/providers/{providerId}/photos` (multipart) via sproc
+`Provider.AddProviderPhoto`; listed via `Provider.ListProviderPhotos`; removed
+one-by-one via `Provider.DeleteProviderPhoto`.
+
+- `ProviderPhotoId` — PK.
+- `ProviderId` — FK → `Provider.Providers`, `ON DELETE CASCADE` (deleting a
+  provider removes its photo rows; blobs themselves cleaned up best-effort).
+- `PhotoUrl` — NVARCHAR(1000), the blob URL in the `provider-photos` folder
+  of the shared `provider-images` container.
+- `CreatedAtUtc` — upload timestamp.
+
 ### `Provider.ProviderDeviceTokens`
 FCM device tokens captured at sign-in. Linked to the auth identity first;
 back-filled with `ProviderId` once the profile is completed.
@@ -493,6 +507,20 @@ sproc `Parent.AddPetPhoto`.
   folder of the shared `provider-images` container.
 - Timestamps.
 
+### `Parent.PetParentPhotos`
+General pet-parent photo gallery (not tied to a pet). One row per uploaded
+image — a parent can have many photos. Inserted by
+`POST /api/v1/pet-parents/{petParentId}/photos` (multipart) via sproc
+`Parent.AddPetParentPhoto`; listed via `Parent.ListPetParentPhotos`; removed
+one-by-one via `Parent.DeletePetParentPhoto`.
+
+- `PetParentPhotoId` — PK.
+- `PetParentId` — FK → `Parent.PetParents`, `ON DELETE CASCADE` (deleting a
+  parent removes its photo rows; blobs themselves cleaned up best-effort).
+- `PhotoUrl` — NVARCHAR(1000), the blob URL in the `pet-parent-photos` folder
+  of the shared `provider-images` container.
+- `CreatedAtUtc` — upload timestamp.
+
 ## Event schema
 
 ### `Event.Events`
@@ -510,10 +538,12 @@ have no Cosmos doc.
 - `Title`, `Description` (NVARCHAR(MAX)), `BannerImageUrl` (nullable).
 - `EventType` — `Physical` or `Online`.
 - `StartDate <= EndDate` (CHECK), `StartTime`, `EndTime`.
-- `ViewCount`, `ShareCount`, `InquiryCount` — organiser-dashboard
-  engagement counters. Default 0; atomically incremented by
+- `ViewCount`, `ShareCount`, `InquiryCount` — engagement counters
+  ("PawPrints"). Default 0; atomically incremented by
   `Event.IncrementEventCounter` from the three public increment
-  endpoints. Read in `Event.GetEventMetrics`.
+  endpoints. Read in `Event.GetEventMetrics`, and surfaced read-only on
+  every event read (all five event-returning sprocs append them to
+  result set 1) under a `pawPrints` object on the API's `EventResponse`.
 
 ### `Event.EventAmenities`
 Junction listing the venue amenities for an event.
@@ -573,8 +603,28 @@ overlap-count query).
   bookings remain meaningful even if the provider deregisters or changes
   sub-category.
 - `BookingDate`, `StartTime`, `EndTime` — `StartTime < EndTime` (CHECK).
-- `Status` — `Confirmed`, `Cancelled`, `Completed`, `NoShow`. `Cancelled`
-  requires `CancelledAtUtc` (CHECK).
+- `Status` — 6-state lifecycle: `CREATED` → `CONFIRMED` → `COMPLETED`, with
+  `APPROVAL_NEEDED` (schedule change pending) and the two terminal cancel
+  states `PROVIDER_CANCELLED` / `PARENT_CANCELLED` (which require
+  `CancelledAtUtc`, CHECK). New app bookings default to `CREATED`; custom
+  walk-ins start `CONFIRMED`. **A booking holds its capacity slot in every
+  status except the two cancelled ones** — that's the predicate every
+  capacity / closure-conflict / active-status / slot query uses.
+
+### `Booking.BookingStatusHistory`
+Append-only audit trail of every status change on a booking. One row per
+transition (plus a seeded creation row with `FromStatus = NULL`). Written
+atomically with the status update by `Booking.UpdateBookingStatus`,
+`Booking.CancelBooking`, and the two create sprocs.
+
+- `BookingStatusHistoryId` — PK.
+- `BookingId` — FK → `Booking.Bookings`, `ON DELETE CASCADE`.
+- `FromStatus` — NULL only for the creation entry.
+- `ToStatus` — the new status.
+- `ChangedByActor` — `Provider`, `Parent`, or `System` (CHECK).
+- `ChangedByActorId` — the ProviderId / PetParentId; NULL for System rows.
+- `Note` — optional free-text reason.
+- `ChangedAtUtc` — when the change happened.
 
 ## User-defined types
 
@@ -625,8 +675,10 @@ so the deploy script always reflects the latest version.
 | `Booking.ListBookingsByProvider`    | Optional `@ServiceId` + `@BookingDate` filters. |
 | `Booking.ListBookingsByPetParent`   | Full history for a pet parent. |
 | `Booking.GetBookingsForDate`        | Used by the slot service to subtract overlaps per service. |
+| `Booking.UpdateBookingStatus`       | Role-guarded status change + audit insert in one transaction. Throws `51120`–`51125`. |
+| `Booking.ListBookingStatusHistory`  | Full status audit trail for a booking, oldest-first. |
 | `Event.CreateEvent`                 | Inserts the SQL row + amenities junction (Cosmos write happens in the API layer for physical events). |
-| `Event.GetEvent`                    | Single event + amenities. |
+| `Event.GetEvent`                    | Single event + amenities. Result set 1 includes the `ViewCount`/`ShareCount`/`InquiryCount` "PawPrints". |
 | `Event.ListEventsByProvider`        | Provider's events. |
 | `Event.CreateEventBooking`          | Race-safe ticket purchase. Takes the `EventBookingAttendeeNames` TVP; capacity check + insert booking + insert N ticket rows in one transaction. Throws `51090/51091/51094`. |
 | `Event.GetEventBooking`             | Booking row + all tickets (two result sets). |
@@ -634,6 +686,12 @@ so the deploy script always reflects the latest version.
 | `Event.IncrementEventCounter`       | Atomic `+1` on `ViewCount` / `ShareCount` / `InquiryCount`. Returns the updated row. Throws `51096/51097`. |
 | `Event.GetEventMetrics`             | Organiser-only. Counters + confirmed-paid booking aggregates (`ConfirmedAttendees`, `Earnings`). Throws `51095` on ownership miss. |
 | `Event.ListEventAttendees`          | Organiser-only. One row per ticket joined to the parent booking; excludes Cancelled bookings. Throws `51095` on ownership miss. |
+| `Provider.AddProviderPhoto`         | Insert one general provider gallery photo row. Throws `51110` if the provider is missing. |
+| `Provider.ListProviderPhotos`       | List the provider's gallery photos, oldest-first. |
+| `Provider.DeleteProviderPhoto`      | Delete one photo scoped by `ProviderId` + `ProviderPhotoId`; returns the URL for blob cleanup. Throws `51111` if missing. |
+| `Parent.AddPetParentPhoto`          | Insert one general pet-parent gallery photo row. Throws `51212` if the parent is missing. |
+| `Parent.ListPetParentPhotos`        | List the parent's gallery photos, oldest-first. |
+| `Parent.DeletePetParentPhoto`       | Delete one photo scoped by `PetParentId` + `PetParentPhotoId`; returns the URL for blob cleanup. Throws `51213` if missing. |
 
 Custom THROW codes used by sprocs:
 
@@ -667,6 +725,16 @@ Custom THROW codes used by sprocs:
 | 51095 | Event not found for the requesting provider (organiser dashboard reads). |
 | 51096 | Event not found (counter increment). |
 | 51097 | Invalid counter type (must be `View`, `Share`, or `Inquiry`). |
+| 51110 | Provider not found (provider photo add). |
+| 51111 | Provider photo not found (provider photo delete). |
+| 51120 | Booking not found (status update). |
+| 51121 | Caller is not a party to the booking → API `403 Forbidden`. |
+| 51122 | Status not permitted for this actor → API `400 BookingStatusNotAllowed`. |
+| 51123 | Booking is terminal, no further changes → API `409 BookingStatusTerminal`. |
+| 51124 | Booking already in the requested status → API `409 BookingStatusUnchanged`. |
+| 51125 | Invalid actor or status value (status update). |
+| 51212 | Pet parent not found (parent photo add). |
+| 51213 | Pet parent photo not found (parent photo delete). |
 
 ## Deployment
 

@@ -1,11 +1,17 @@
 using System.Security.Claims;
+using Pawfront.Application.Bookings;
+using Pawfront.Application.Closures;
 using Pawfront.Application.Events;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
+using Pawfront.Application.ParentPhotos;
+using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Storage;
+using Pawfront.Contracts.Bookings;
 using Pawfront.Contracts.Events;
 using Pawfront.Contracts.ParentOnboarding;
 using Pawfront.Contracts.ParentPets;
+using Pawfront.Contracts.ParentPhotos;
 using Pawfront.PetParentApi.Auth;
 
 namespace Pawfront.PetParentApi.Endpoints;
@@ -42,7 +48,13 @@ internal static class PetParentEndpoints
         group.MapGet("/pets", ListPets);
         group.MapPost("/identity", UploadIdentity).DisableAntiforgery();
         group.MapDelete("/identity", DeleteIdentity);
+        group.MapPost("/photos", UploadPhoto).DisableAntiforgery();
+        group.MapGet("/photos", ListPhotos);
+        group.MapDelete("/photos/{photoId:guid}", DeletePhoto);
         group.MapGet("/event-bookings", ListEventBookings);
+        group.MapPost("/bookings", CreateServiceBooking);
+        group.MapPost("/bookings/{bookingId:guid}/status", UpdateBookingStatus);
+        group.MapGet("/bookings/{bookingId:guid}/status-history", GetBookingStatusHistory);
         group.MapGet("/onboarding-status", GetOnboardingStatus);
 
         var mobileVerification = group.MapGroup("/mobile-verification");
@@ -106,6 +118,220 @@ internal static class PetParentEndpoints
             summary.CreatedAtUtc,
             summary.UpdatedAtUtc,
             summary.CancelledAtUtc);
+
+    /// <summary>
+    /// Parent-initiated service booking ("book now" from a search result /
+    /// slot). The booker is the route's petParentId — JWT-verified by the
+    /// group's ownership filter, never taken from the body. The provider is
+    /// resolved server-side from the booked ServiceId. The pet must belong
+    /// to the caller; the sproc re-checks both as defense-in-depth.
+    /// </summary>
+    private static async Task<IResult> CreateServiceBooking(
+        Guid petParentId,
+        CreateParentBookingRequest request,
+        IBookingService bookingService,
+        IProviderServiceCatalog serviceCatalog,
+        IPetParentOwnershipReader ownershipReader,
+        CancellationToken cancellationToken)
+    {
+        var pet = await ownershipReader.GetPetLookupAsync(request.PetId, cancellationToken);
+        if (pet is null)
+        {
+            return ApiResults.NotFound("PetNotFound", $"Pet '{request.PetId}' was not found.");
+        }
+        if (pet.OwningPetParentId != petParentId)
+        {
+            return ApiResults.Forbidden(
+                "Forbidden",
+                "You can only book for pets belonging to your own profile.");
+        }
+
+        var service = await serviceCatalog.GetByIdAsync(request.ServiceId, cancellationToken);
+        if (service is null)
+        {
+            return ApiResults.BadRequest(
+                "InvalidServiceId",
+                $"Service '{request.ServiceId}' was not found.");
+        }
+
+        try
+        {
+            var result = await bookingService.CreateAsync(
+                new CreateBookingCommand(
+                    service.ProviderId,
+                    petParentId,
+                    request.ServiceId,
+                    request.BookingDate,
+                    request.StartTime,
+                    request.EndTime,
+                    request.ServiceItemCode,
+                    request.PetId),
+                cancellationToken);
+            return ApiResults.Ok(ToBookingResponse(result));
+        }
+        catch (BookingServiceInvalidException exception)
+        {
+            return ApiResults.BadRequest("InvalidServiceId", exception.Message);
+        }
+        catch (BookingProviderNotRegisteredException exception)
+        {
+            return ApiResults.NotFound("ServiceNotRegistered", exception.Message);
+        }
+        catch (BookingOfferingNotConfiguredException exception)
+        {
+            return ApiResults.BadRequest("OfferingNotConfigured", exception.Message);
+        }
+        catch (BookingProviderNotFoundException exception)
+        {
+            return ApiResults.NotFound("ProviderNotFound", exception.Message);
+        }
+        catch (BookingProviderInactiveException exception)
+        {
+            return ApiResults.Conflict("ProviderInactive", exception.Message);
+        }
+        catch (BookingGroomingItemCodeRequiredException exception)
+        {
+            return ApiResults.BadRequest("ServiceItemCodeRequired", exception.Message);
+        }
+        catch (BookingGroomingItemNotOfferedException exception)
+        {
+            return ApiResults.BadRequest("ServiceItemNotOffered", exception.Message);
+        }
+        catch (BookingGroomingItemInactiveException exception)
+        {
+            return ApiResults.Conflict("ServiceItemInactive", exception.Message);
+        }
+        catch (BookingPetParentNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetParentNotFound", exception.Message);
+        }
+        catch (BookingPetInvalidException exception)
+        {
+            return ApiResults.BadRequest("InvalidPetId", exception.Message);
+        }
+        catch (BookingCapacityExceededException exception)
+        {
+            return ApiResults.Conflict("CapacityExceeded", exception.Message);
+        }
+        catch (ProviderClosedOnDateException exception)
+        {
+            return ApiResults.Conflict("ServiceClosed", exception.Message);
+        }
+        catch (InvalidBookingTimeException exception)
+        {
+            return ApiResults.BadRequest("InvalidBookingTime", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> UpdateBookingStatus(
+        Guid petParentId,
+        Guid bookingId,
+        UpdateBookingStatusRequest request,
+        IBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.Status))
+        {
+            return ApiResults.BadRequest("InvalidRequest", "A status is required.");
+        }
+
+        try
+        {
+            var result = await bookingService.UpdateStatusAsync(
+                new UpdateBookingStatusCommand(
+                    bookingId,
+                    request.Status,
+                    BookingStatusActor.Parent,
+                    petParentId,
+                    request.Note),
+                cancellationToken);
+            return ApiResults.Ok(ToBookingResponse(result));
+        }
+        catch (UnsupportedBookingStatusException exception)
+        {
+            return ApiResults.BadRequest("UnsupportedBookingStatus", exception.Message);
+        }
+        catch (BookingNotFoundException exception)
+        {
+            return ApiResults.NotFound("BookingNotFound", exception.Message);
+        }
+        catch (BookingStatusForbiddenException exception)
+        {
+            return ApiResults.Forbidden("Forbidden", exception.Message);
+        }
+        catch (BookingStatusNotAllowedException exception)
+        {
+            return ApiResults.BadRequest("BookingStatusNotAllowed", exception.Message);
+        }
+        catch (BookingStatusTerminalException exception)
+        {
+            return ApiResults.Conflict("BookingStatusTerminal", exception.Message);
+        }
+        catch (BookingStatusUnchangedException exception)
+        {
+            return ApiResults.Conflict("BookingStatusUnchanged", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> GetBookingStatusHistory(
+        Guid petParentId,
+        Guid bookingId,
+        IBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        // The group is ownership-filtered on petParentId, but the bookingId is
+        // not — confirm the booking belongs to this parent before returning its
+        // audit trail (404 rather than leaking existence).
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.PetParentId != petParentId)
+        {
+            return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
+        }
+
+        var history = await bookingService.ListStatusHistoryAsync(bookingId, cancellationToken);
+        return ApiResults.Ok(history.Select(ToBookingStatusHistoryResponse).ToArray());
+    }
+
+    private static BookingStatusHistoryEntryResponse ToBookingStatusHistoryResponse(BookingStatusHistoryEntry entry) =>
+        new(entry.BookingStatusHistoryId,
+            entry.BookingId,
+            entry.FromStatus,
+            entry.ToStatus,
+            entry.ChangedByActor,
+            entry.ChangedByActorId,
+            entry.Note,
+            entry.ChangedAtUtc);
+
+    private static BookingResponse ToBookingResponse(BookingResult result) =>
+        new(result.BookingId,
+            result.ProviderId,
+            result.PetParentId,
+            result.ServiceId,
+            result.ServiceCategory,
+            result.SubCategory,
+            result.BookingDate,
+            result.StartTime,
+            result.EndTime,
+            result.Status,
+            result.CreatedAtUtc,
+            result.UpdatedAtUtc,
+            result.CancelledAtUtc,
+            result.ServiceItemCode,
+            result.Source,
+            result.CustomerName,
+            result.CustomerMobileCountryCode,
+            result.CustomerMobile,
+            result.AnimalType,
+            result.PetName,
+            result.ServiceLocation,
+            result.CustomerLocation,
+            result.PricePerHour,
+            result.JobNotes,
+            result.PetId);
 
     private static async Task<IResult> GetProfile(
         Guid petParentId,
@@ -470,6 +696,82 @@ internal static class PetParentEndpoints
         try
         {
             await blobStorage.DeleteAsync(response.IdentityPhotoUrl, cancellationToken);
+        }
+        catch
+        {
+            // Swallow — see above.
+        }
+
+        return ApiResults.Ok(response);
+    }
+
+    private static async Task<IResult> UploadPhoto(
+        Guid petParentId,
+        IFormFile file,
+        IPawfrontBlobStorage blobStorage,
+        IPetParentPhotoService photoService,
+        CancellationToken cancellationToken)
+    {
+        var validation = ValidatePhotoFile(file);
+        if (validation is not null)
+        {
+            return validation;
+        }
+
+        await using var stream = file.OpenReadStream();
+        var url = await blobStorage.UploadAsync(
+            BlobUploadKind.PetParentPhoto,
+            petParentId,
+            file.FileName,
+            stream,
+            file.ContentType,
+            cancellationToken);
+
+        try
+        {
+            var response = await photoService.AddAsync(petParentId, url, cancellationToken);
+            return ApiResults.Created(
+                $"/api/v1/pet-parents/{petParentId}/photos/{response.PetParentPhotoId}",
+                response);
+        }
+        catch (PetParentNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetParentNotFound", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> ListPhotos(
+        Guid petParentId,
+        IPetParentPhotoService photoService,
+        CancellationToken cancellationToken)
+    {
+        var photos = await photoService.ListAsync(petParentId, cancellationToken);
+        return ApiResults.Ok(photos);
+    }
+
+    private static async Task<IResult> DeletePhoto(
+        Guid petParentId,
+        Guid photoId,
+        IPawfrontBlobStorage blobStorage,
+        IPetParentPhotoService photoService,
+        CancellationToken cancellationToken)
+    {
+        DeletePetParentPhotoResponse response;
+        try
+        {
+            response = await photoService.DeleteAsync(petParentId, photoId, cancellationToken);
+        }
+        catch (PetParentPhotoNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetParentPhotoNotFound", exception.Message);
+        }
+
+        // Best-effort blob cleanup: the SQL row is already gone (the source of
+        // truth), so a storage hiccup must not fail the request — the blob is
+        // merely orphaned for a future sweep.
+        try
+        {
+            await blobStorage.DeleteAsync(response.PhotoUrl, cancellationToken);
         }
         catch
         {

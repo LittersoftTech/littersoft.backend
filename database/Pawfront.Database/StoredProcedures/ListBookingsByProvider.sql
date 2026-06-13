@@ -31,7 +31,8 @@ BEGIN
            [ServiceLocation],
            [CustomerLocation],
            [PricePerHour],
-           [JobNotes]
+           [JobNotes],
+           [PetId]
     FROM [Booking].[Bookings]
     WHERE [ProviderId] = @ProviderId
       AND (@ServiceId IS NULL OR [ServiceId] = @ServiceId)

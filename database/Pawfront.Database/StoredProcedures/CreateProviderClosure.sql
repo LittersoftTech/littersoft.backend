@@ -61,10 +61,10 @@ BEGIN
            b.[BookingDate], b.[StartTime], b.[EndTime]
     FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
     INNER JOIN @ServiceIds AS s ON s.[ServiceId] = b.[ServiceId]
-    WHERE b.[Status] = N'Confirmed'
+    WHERE b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
       AND b.[BookingDate] BETWEEN @StartDate AND @EndDate
       AND (
-          -- Full-day closure: ANY confirmed booking on a covered date conflicts.
+          -- Full-day closure: ANY active booking on a covered date conflicts.
           @StartTime IS NULL
           -- Partial-day closure: only bookings overlapping the time window conflict.
           OR (b.[StartTime] < @EndTime AND b.[EndTime] > @StartTime)

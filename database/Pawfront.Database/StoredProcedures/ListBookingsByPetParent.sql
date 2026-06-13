@@ -27,7 +27,8 @@ BEGIN
            [ServiceLocation],
            [CustomerLocation],
            [PricePerHour],
-           [JobNotes]
+           [JobNotes],
+           [PetId]
     FROM [Booking].[Bookings]
     WHERE [PetParentId] = @PetParentId
     ORDER BY [BookingDate] DESC, [StartTime] DESC;

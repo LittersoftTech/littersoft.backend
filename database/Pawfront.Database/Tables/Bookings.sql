@@ -19,6 +19,9 @@ CREATE TABLE [Booking].[Bookings]
     -- where the ServiceId already fully identifies what was booked. Resolved
     -- server-side from the provider's offering, never trusted from the request.
     [ServiceItemCode] NVARCHAR(64) NULL,
+    -- Which of the parent's pets the booking is for. Populated for
+    -- parent-app bookings; NULL for legacy rows and Custom walk-ins.
+    [PetId] UNIQUEIDENTIFIER NULL,
     [BookingDate] DATE NOT NULL,
     [StartTime] TIME(0) NOT NULL,
     [EndTime] TIME(0) NOT NULL,
@@ -38,8 +41,13 @@ CREATE TABLE [Booking].[Bookings]
     [PricePerHour] DECIMAL(10, 2) NULL,
     [JobNotes] NVARCHAR(2000) NULL,
     -- -----------------------------------------------------------------------
+    -- Lifecycle: CREATED (parent booked) -> CONFIRMED (provider accepted) ->
+    -- COMPLETED (both agree it's done). APPROVAL_NEEDED is a transient state when
+    -- either party needs a schedule change. PROVIDER_CANCELLED / PARENT_CANCELLED
+    -- are the two terminal cancellation states. Every status except the two
+    -- cancelled ones still holds the booking's capacity slot.
     [Status] NVARCHAR(32) NOT NULL
-        CONSTRAINT [DF_Bookings_Status] DEFAULT N'Confirmed',
+        CONSTRAINT [DF_Bookings_Status] DEFAULT N'CREATED',
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_Bookings_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
     [UpdatedAtUtc] DATETIME2(7) NOT NULL
@@ -53,12 +61,15 @@ CREATE TABLE [Booking].[Bookings]
         FOREIGN KEY ([PetParentId]) REFERENCES [Parent].[PetParents] ([PetParentId]),
     CONSTRAINT [FK_Bookings_ProviderServices_ServiceId]
         FOREIGN KEY ([ServiceId]) REFERENCES [Provider].[ProviderServices] ([ServiceId]),
+    CONSTRAINT [FK_Bookings_Pets_PetId]
+        FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]),
     CONSTRAINT [CK_Bookings_TimeOrder] CHECK ([StartTime] < [EndTime]),
     CONSTRAINT [CK_Bookings_Status]
-        CHECK ([Status] IN (N'Confirmed', N'Cancelled', N'Completed', N'NoShow')),
+        CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED',
+                            N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')),
     CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
-        ([Status] = N'Cancelled' AND [CancelledAtUtc] IS NOT NULL)
-        OR ([Status] <> N'Cancelled')
+        ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
+        OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
     ),
     CONSTRAINT [CK_Bookings_Source]
         CHECK ([Source] IN (N'App', N'Custom')),

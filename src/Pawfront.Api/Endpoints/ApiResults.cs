@@ -26,4 +26,9 @@ internal static class ApiResults
 
     public static IResult Conflict(string code, string message) =>
         Results.Conflict(new ApiResponse<object>(false, default, new ApiError(code, message)));
+
+    public static IResult Forbidden(string code, string message) =>
+        Results.Json(
+            new ApiResponse<object>(false, default, new ApiError(code, message)),
+            statusCode: StatusCodes.Status403Forbidden);
 }

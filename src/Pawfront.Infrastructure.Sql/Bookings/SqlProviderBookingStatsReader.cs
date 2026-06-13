@@ -21,7 +21,7 @@ internal sealed class SqlProviderBookingStatsReader(
         await connection.OpenAsync(cancellationToken);
 
         // "Completed" = the booking window has already ended and the booking
-        // wasn't cancelled or a no-show. Counts both app and provider-added
+        // wasn't cancelled by either party. Counts both app and provider-added
         // custom bookings — the number reads as overall provider experience.
         await using var command = new SqlCommand(
             "DECLARE @Today DATE = CONVERT(date, SYSUTCDATETIME()); " +
@@ -30,7 +30,7 @@ internal sealed class SqlProviderBookingStatsReader(
             "FROM [Booking].[Bookings] b " +
             "INNER JOIN STRING_SPLIT(@ProviderIds, ',') ids " +
             "    ON b.[ProviderId] = TRY_CONVERT(UNIQUEIDENTIFIER, ids.[value]) " +
-            "WHERE b.[Status] IN (N'Confirmed', N'Completed') " +
+            "WHERE b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') " +
             "  AND (b.[BookingDate] < @Today " +
             "       OR (b.[BookingDate] = @Today AND b.[EndTime] <= @Now)) " +
             "GROUP BY b.[ProviderId];",
