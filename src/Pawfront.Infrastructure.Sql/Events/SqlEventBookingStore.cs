@@ -33,7 +33,9 @@ internal sealed class SqlEventBookingStore(
         command.Parameters.AddWithValue("@BookerEmail", input.BookerEmail);
         command.Parameters.AddWithValue("@BookerMobile", DbValue(input.BookerMobile));
         command.Parameters.AddWithValue("@PaymentMethod", input.PaymentMethod);
-        command.Parameters.AddWithValue("@MaximumCapacity", input.MaximumCapacity);
+        command.Parameters.AddWithValue(
+            "@MaximumCapacity",
+            input.MaximumCapacity is null ? DBNull.Value : input.MaximumCapacity.Value);
         command.Parameters.AddWithValue("@TotalAmount", input.TotalAmount);
 
         var attendeeParam = command.Parameters.AddWithValue("@AttendeeNames", BuildAttendeeTable(input.AttendeeNames));
@@ -52,7 +54,8 @@ internal sealed class SqlEventBookingStore(
         }
         catch (SqlException exception) when (exception.Number == 51091)
         {
-            throw new EventBookingCapacityExceededException(input.EventId, input.MaximumCapacity);
+            // 51091 is only thrown when a capacity is set (physical events).
+            throw new EventBookingCapacityExceededException(input.EventId, input.MaximumCapacity ?? 0);
         }
         catch (SqlException exception) when (exception.Number == 51094)
         {

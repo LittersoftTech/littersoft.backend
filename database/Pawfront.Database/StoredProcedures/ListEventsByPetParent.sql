@@ -1,12 +1,12 @@
-CREATE OR ALTER PROCEDURE [Event].[ListEventsByProvider]
-    @ProviderId UNIQUEIDENTIFIER
+CREATE OR ALTER PROCEDURE [Event].[ListEventsByPetParent]
+    @PetParentId UNIQUEIDENTIFIER
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    -- Result set 1: event rows (PetParentId is always NULL on rows
-    -- returned here because the filter is on ProviderId — but included
-    -- for column-shape consistency with GetEvent / ListEvents readers).
+    -- Result set 1: event rows (ProviderId is always NULL on rows returned
+    -- here because the filter is on PetParentId — but included for
+    -- column-shape consistency with GetEvent / ListEvents readers).
     SELECT e.[EventId],
            e.[ProviderId],
            e.[PetParentId],
@@ -34,13 +34,13 @@ BEGIN
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
-    WHERE e.[ProviderId] = @ProviderId
+    WHERE e.[PetParentId] = @PetParentId
     ORDER BY e.[StartDate] DESC, e.[StartTime] DESC;
 
-    -- Result set 2: amenities for this provider's events (EventId + Amenity)
+    -- Result set 2: amenities for this parent's events (EventId + Amenity)
     SELECT a.[EventId], a.[Amenity]
     FROM [Event].[EventAmenities] a
     INNER JOIN [Event].[Events] e ON e.[EventId] = a.[EventId]
-    WHERE e.[ProviderId] = @ProviderId
+    WHERE e.[PetParentId] = @PetParentId
     ORDER BY a.[EventId], a.[Amenity];
 END;

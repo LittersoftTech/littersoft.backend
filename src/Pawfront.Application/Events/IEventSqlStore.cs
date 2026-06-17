@@ -24,6 +24,15 @@ public interface IEventSqlStore
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists the events organised by a single pet parent (PetParentId set).
+    /// Skips Cosmos — physical-event details are hydrated only on the detail
+    /// endpoint. List semantics: an empty list when the parent has none.
+    /// </summary>
+    Task<IReadOnlyList<EventSqlSnapshot>> ListByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Catalog-wide list with optional filters. See <see cref="EventListFilter"/>
     /// for filter semantics. Skips Cosmos — physical-event details are hydrated
     /// only on the detail endpoint.
@@ -40,5 +49,17 @@ public interface IEventSqlStore
     Task<EventCounters> IncrementCounterAsync(
         Guid eventId,
         string counterType,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Replaces the event's payout-method set with the given Cash/Digital
+    /// flags and returns the saved methods. Throws
+    /// <see cref="EventNotFoundException"/> if the event is unknown and
+    /// <see cref="EventNotPaidException"/> if the event is free.
+    /// </summary>
+    Task<IReadOnlyList<string>> SavePayoutMethodsAsync(
+        Guid eventId,
+        bool acceptsCash,
+        bool acceptsDigital,
         CancellationToken cancellationToken);
 }

@@ -47,6 +47,7 @@ app.UseMiddleware<PetParentTelemetryEnrichmentMiddleware>();
 var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.PetParentUserPolicy);
 
 api.MapHealthEndpoints();
+api.MapMetadataEndpoints();
 api.MapParentOnboardingEndpoints();
 api.MapPetParentEndpoints();
 api.MapEventEndpoints();

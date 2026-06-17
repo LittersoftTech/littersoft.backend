@@ -167,8 +167,9 @@ Keep that file in sync whenever a table or relationship changes.
 - `Parent.*` — `ParentAuthIdentities`, `ParentDeviceTokens` (pet-parent
   Firebase login + per-device FCM tokens), plus `PetParents`, `Pets`
   (profile/pet tables — still scaffolding until profile endpoint lands)
-- `Event.*` — `Events`, `EventAmenities` (event subscriptions designed but
-  not yet built)
+- `Event.*` — `Events`, `EventAmenities`, `EventPayoutMethods` (organiser
+  payout Cash/Digital, paid events only), `EventBookings`,
+  `EventBookingTickets`
 - `Booking.*` — `Bookings` (real, race-safe via `Booking.CreateBooking` sproc
   with `UPDLOCK, HOLDLOCK` capacity check, scoped by `ServiceId`)
 
@@ -211,6 +212,9 @@ Custom `THROW` codes used for typed errors:
   dashboard reads — metrics / attendees)
 - `51096` event not found (counter increment)
 - `51097` invalid counter type (must be `View`, `Share`, or `Inquiry`)
+- `51098` event not found (event payout-method save) → API maps to **404 EventNotFound**
+- `51099` event is free; payout methods only apply to paid events → API maps to
+  **400 FreeEventNoPayout**
 - `51067` provider is currently inactive (master Active/Inactive switch is off)
   → API maps to **409 ProviderInactive**
 - `51068` pet not found or not owned by the pet parent (booking create with petId)
@@ -250,8 +254,11 @@ Custom `THROW` codes used for typed errors:
   document id = providerId. Houses per-category details for all five
   service categories.
 - Active container: **`Events`**, partition `/eventCategory`, document id =
-  EventId. Houses physical-event details (capacity + ticketing). Online
-  events get **no** Cosmos doc today.
+  EventId. Houses physical-event details — `maximumCapacity` + venue
+  `location` (houseNumber/street/city/zip/country + optional lat/long).
+  Ticketing (`isPaid`/`price`) lives on the SQL `Event.Events` row, not
+  Cosmos, so it's returned for every event type. Online events get **no**
+  Cosmos doc today.
 - Bootstrapper (`CosmosBootstrapper`, `IHostedService`) auto-creates DB +
   containers on startup. Add new specs in
   `CosmosBootstrapper.BuildSpecs(...)` as features land.
@@ -563,29 +570,57 @@ all reference a specific **ServiceId**, not the whole provider.
   column differs.
 - `POST /providers/{id}/events/banner-image` and
   `POST /pet-parents/{petParentId}/events/banner-image` (multipart) → URL.
-- Both create-event request bodies have 8 SQL fields +
-  `physical: { maximumCapacity, isPaid, price? }` for physical events.
+- Both create-event request bodies carry top-level ticketing
+  (`isPaid`, `price?` — applies to ALL event types, online included) plus
+  `physical: { maximumCapacity, location }` for physical events. `price` is
+  required when `isPaid` is true (>= 0); ignored/null otherwise. Top-level
+  `isPaid` and `price` are returned on every event read regardless of
+  `eventType`. `physical.location` (the venue address —
+  `houseNumber`/`street`/`city`/`zip`/`country` required, `latitude`/
+  `longitude` optional) is **required for physical events** (→ `400
+  InvalidRequest` if missing) and is null/absent for online events.
+- Both create-event bodies also carry a top-level **`cancellationPolicy`**
+  (refund policy) — **required for every event type**, one of
+  `FullRefundUpTo4Hours` / `FullRefundUpTo2Hours` / `NoRefund` (→ `400
+  InvalidRequest` otherwise). Stored on the SQL `Event.Events` row and
+  returned on every event read. (The refund *execution* flow isn't built
+  yet — this just captures the advertised policy.)
 - `EventResponse` exposes both `providerId` and `petParentId` as nullable —
   exactly one is populated.
 - `GET /providers/{id}/events` — list this provider's events (SQL only).
+  Parent mirror: `GET /pet-parents/{petParentId}/events` (sproc
+  `Event.ListEventsByPetParent`, ownership-filtered).
 - `GET /events/{eventId}` — single event detail. SQL + Cosmos if physical.
 - Organiser dashboard (attendees / metrics) is **provider-only** — those
   sprocs filter by ProviderId, so parent events simply never match. Not
   exposed on the parent host.
-- Storage split: SQL has bulk + amenities junction; Cosmos has physical
-  capacity + ticketing. Online events have only SQL row.
+- Storage split: SQL has bulk + amenities junction + ticketing
+  (`IsPaid`/`Price`) + `CancellationPolicy`; Cosmos has physical capacity +
+  venue location. Online events have only the SQL row.
 - Categories (8): `AdoptionAndRescue`, `PetTraining`, `Charity`,
   `Volunteering`, `HealthAndWellness`, `SocialAndCultural`,
   `OutdoorActivities`, `ParentEducation`.
 - Amenities (8): `FreeParking`, `PaidParking`, `Restrooms`, `DrinkingWater`,
   `FoodAndBeverage`, `SeatingAreas`, `FirstAidBooth`, `None`. `None` can't
-  coexist with others (enforced in validation).
+  coexist with others (enforced in validation). **Amenities are mandatory for
+  Physical events** (at least one; use `None` to mean "no amenities") but
+  **optional for Online events** (online has no venue) → `400 InvalidRequest`
+  if a physical event is created with an empty amenities list.
 
 ### Event ticket bookings
-Anyone with a Firebase login can buy tickets for a physical event. **No FK
-to PetParents** — attendee names are free text and never validated against
-any user table. Bookings are **per ticket**: 4 attendees → 4 child ticket
-rows under one parent booking.
+Anyone with a Firebase login can buy tickets for an event (physical OR
+online). **No FK to PetParents** — attendee names are free text and never
+validated against any user table. Bookings are **per ticket**: 4 attendees
+→ 4 child ticket rows under one parent booking.
+
+**Ticket-count rule by event type:**
+- **Physical** — any number of tickets per booking (≥1), gated against the
+  venue `maximumCapacity`.
+- **Online** — exactly **one** ticket per booking (the ticket is just the
+  signed-in attendee's seat). More than one attendee name →
+  **400 OnlineEventSingleTicket**. Online events have no `maximumCapacity`,
+  so there is no sold-out limit — capacity is passed as NULL and the sproc
+  skips its capacity check.
 
 - `POST /events/{eventId}/bookings` — body:
   `{ bookerName, bookerEmail, bookerMobile?, attendeeNames: [...], paymentMethod }`.
@@ -601,18 +636,20 @@ rows under one parent booking.
   the booking was already finalised with a different result.
 - Storage: SQL only. `Event.EventBookings` (one row per transaction) +
   `Event.EventBookingTickets` (one row per attendee/ticket). **No Cosmos
-  doc is written** — the event Cosmos doc is read for `maximumCapacity` and
-  `price` but never mutated, so per-event ETag contention is avoided.
-- Capacity is enforced inside `Event.CreateEventBooking` by SUMming
-  `TicketCount` over confirmed rows for the event under `UPDLOCK +
+  doc is written** — the event Cosmos doc is read for `maximumCapacity`
+  (pricing `isPaid`/`price` comes from the SQL `Event.Events` row) but never
+  mutated, so per-event ETag contention is avoided.
+- Capacity is enforced (physical events only) inside `Event.CreateEventBooking`
+  by SUMming `TicketCount` over confirmed rows for the event under `UPDLOCK +
   HOLDLOCK`, then rejecting when the requested ticket count would push the
   total past `@MaximumCapacity`. Concurrent buyers serialise and the
   (N+1)-th seat is rejected once the event is full. Maps to **409
-  EventSoldOut** (`51091`).
+  EventSoldOut** (`51091`). `@MaximumCapacity` is **NULL for online events**,
+  which skips this check entirely.
 - `TotalAmount` is a snapshot of `price × ticketCount` at booking time.
-  For free events (`Physical.IsPaid = false`) it is 0.
-- Online events have no `Physical` block (no capacity) and therefore can't
-  be ticketed. Booking attempts return **400 EventNotBookable**.
+  For free events (`IsPaid = false`) it is 0.
+- A physical event whose Cosmos capacity doc is missing can't be priced for
+  capacity and returns **400 EventNotBookable** (`EventBookingNotPhysicalException`).
 - Cancellation / refund flow is **not** built yet — only the
   `Status = Cancelled` column shape exists for it.
 
@@ -645,10 +682,25 @@ mobile client can update its UI without a follow-up read. Backed by
 The same three counters are also surfaced **read-only** on every event read
 (detail + list, both hosts) under a `pawPrints` object on `EventResponse`:
 `{ pawPrints: { viewCount, shareCount, inquiryCount } }`. They're appended to
-result set 1 of all five event-returning sprocs (`GetEvent`, `CreateEvent`,
-`CreatePetParentEvent`, `ListEvents`, `ListEventsByProvider`) so the shared
-`EventSqlSnapshot` / `ReadEventRow` carries them uniformly. A freshly created
-event reads `0/0/0`.
+result set 1 of all six event-returning sprocs (`GetEvent`, `CreateEvent`,
+`CreatePetParentEvent`, `ListEvents`, `ListEventsByProvider`,
+`ListEventsByPetParent`) so the shared `EventSqlSnapshot` / `ReadEventRow`
+carries them uniformly. A freshly created event reads `0/0/0`.
+
+### Event organiser block
+Every event read (detail + list, both hosts) carries an **`organizer`** object
+on `EventResponse`: `{ organizer: { type, id, name, imageUrl } }`. `type` is
+`Provider` or `PetParent` (derived from whichever of `ProviderId` /
+`PetParentId` is set — exactly one); `id` is the matching organiser id; `name`
+is the organiser's display name (`FirstName + ' ' + LastName`); `imageUrl` is
+their profile photo — populated for **pet-parent** organisers (`ProfilePhotoUrl`),
+**null for providers** (the `Provider.Providers` row has no profile-photo
+column; a provider's business name/photo live in Cosmos and aren't joined by
+these SQL-only sprocs). `OrganizerName` / `OrganizerImageUrl` are `LEFT JOIN`ed
+from `Provider.Providers` / `Parent.PetParents` and appended to result set 1 of
+all six event-returning sprocs, so `EventSqlSnapshot` / `ReadEventRow` carry
+them uniformly; `EventService.BuildOrganizer` resolves the `type` + `id`. The
+in-memory dev fallback leaves `name` / `imageUrl` null.
 
 **Inquiries are currently a counter only.** If a richer "inquiry has
 content (text, contact info, reply thread)" model is needed later, it
@@ -722,6 +774,7 @@ policy (separate Firebase project, currently `littersoftpetparent`).
 
 ```
 GET    /health
+GET    /metadata                                                                 static reference vocabularies for mobile pickers → { animals: [{code, displayName}], behaviours: [{code, displayName}] }. Derived from the Pawfront.Domain.Vocabularies enums (Animal/Behaviour). Not ownership-filtered (needed during onboarding before a profile exists).
 
 POST   /parent-onboarding/firebase-auth                                          body { fcmToken?, deviceId?, devicePlatform? } — upserts Parent.ParentAuthIdentities + optional Parent.ParentDeviceTokens (one parent → many FCM tokens). Reads identity claims from the Firebase JWT.
 POST   /parent-onboarding/profile                                                body { firstName, lastName, gender, mobileCountryCode, mobileNumber, dateOfBirth, addressLine, latitude, longitude, zipCode, city, description }. **The owning auth identity is resolved server-side from the JWT sub/user_id claim** — the body intentionally has no parentAuthIdentityId field, so a caller cannot complete another parent's profile by guessing the id. Creates Parent.PetParents, flips ParentAuthIdentities.SignUpStatus → ParentProfileCompleted, back-fills PetParentId on device tokens. Idempotent (returns existing row if already linked). Sproc `Parent.CompletePetParentProfile` takes `@FirebaseUserId` and resolves the auth identity row under `UPDLOCK + HOLDLOCK`. 409 MobileNumberAlreadyExists on UNIQUE violation; 400 UnsupportedGender / InvalidRequest; 404 ParentAuthIdentityNotFound when no auth identity exists for the Firebase user (caller must hit `firebase-auth` first).
@@ -729,20 +782,21 @@ GET    /parent-onboarding/me                                                    
 
 GET    /pet-parents/{petParentId}/profile                                        full profile read-back: firstName, lastName, gender, email + isEmailVerified (JOINed from Parent.ParentAuthIdentities), mobileCountryCode/mobileNumber, dateOfBirth, addressLine, latitude, longitude, zipCode, city, description (About Me), profilePhotoUrl, mobileVerifiedAtUtc, timestamps. Backed by Parent.GetPetParentProfile (empty result → 404 PetParentNotFound). Ownership-filtered.
 PATCH  /pet-parents/{petParentId}/profile                                        body { firstName, lastName, gender, dateOfBirth, addressLine, zipCode, city, description } — edits the basic-profile subset via Parent.UpdatePetParentProfile (THROW 51208). Deliberately NOT editable here: mobile number (must re-verify via OTP), latitude/longitude (no coordinates accompany an address edit — they go stale until a future geocoding pass), profile photo (own endpoint). Returns the same full read-back shape as the GET. 404 PetParentNotFound; 400 UnsupportedGender / InvalidRequest. Ownership-filtered.
-POST   /pet-parents/{petParentId}/profile-image                                  multipart form-data { file }. Validations: file required, <=1 MB, content type ∈ { image/jpeg, image/png, image/webp }. Uploads to the shared blob container under the [PetParentProfilePhotos] folder and saves the resulting URL on Parent.PetParents.ProfilePhotoUrl via Parent.UpdatePetParentProfilePhoto. 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetParentNotFound (sproc 51201).
+POST   /pet-parents/{petParentId}/profile-image                                  multipart form-data { file }. Validations: file required, <=3 MB, content type ∈ { image/jpeg, image/png, image/webp }. Uploads to the shared blob container under the [PetParentProfilePhotos] folder and saves the resulting URL on Parent.PetParents.ProfilePhotoUrl via Parent.UpdatePetParentProfilePhoto. 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetParentNotFound (sproc 51201).
 POST   /pet-parents/{petParentId}/pets                                           body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? }. Inserts into Parent.Pets via Parent.AddPetParentPet. PetType ∈ {Dog, Cat, Hamster, GuineaPig}; Gender ∈ {Male, Female}; Weight DECIMAL(5,2) > 0. MicrochipId is globally UNIQUE (filtered) — collision returns 409 MicrochipIdAlreadyExists. 404 PetParentNotFound (sproc 51202); 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest. Response carries medical-info fields too — all null until PATCH below runs.
 GET    /pet-parents/{petParentId}/pets                                           returns every pet on file for the parent with the full medical-info snapshot and embedded photo gallery. Backed by Parent.ListPetParentPets (two result sets: pets + their photos, joined in C# by PetId). Photos within each pet are ordered oldest-first. Empty array when the parent has no pets (or doesn't exist) — list semantics, no 404. Distinct response type PetParentPetWithPhotosResponse so AddPet / PATCH medical-info responses stay unchanged.
 GET    /pet-parents/{petParentId}/event-bookings                                 returns the caller's event-ticket bookings — slim summary cards with the joined event (title, category, start date/time, banner URL) so the mobile "My Bookings" screen can render without a follow-up fetch. Backed by Event.ListEventBookingsByBookerEmail. **Booker identity on Event.EventBookings is free text (no FK to PetParents), so the filter matches on the caller's Firebase email claim** — the route's petParentId is verified by the ownership filter, then the JWT email is used as the SQL filter. Ordered most-recent first; cancelled bookings included. Mobile drills into GET /event-bookings/{bookingId} for the full shape with attendee names. 403 EmailClaimMissing when the JWT carries no email claim (rare).
 POST   /pet-parents/{petParentId}/bookings                                       body { petId, serviceId, bookingDate, startTime, endTime, serviceItemCode? } — parent-initiated SERVICE booking ("book now" from a search result/slot). Booker = route petParentId (ownership-filtered; never from body). Provider resolved server-side from serviceId. petId must be one of the caller's pets (404 PetNotFound / 403 Forbidden inline; sproc re-checks via THROW 51068 → 400 InvalidPetId). Same shared IBookingService.CreateAsync + race-safe Booking.CreateBooking sproc as the provider host — full validation chain (working hours, closures → 409 ServiceClosed, duration rules, groomer serviceItemCode, capacity → 409 CapacityExceeded, 409 ProviderInactive). Booking.Bookings now carries nullable PetId (FK → Parent.Pets), surfaced as petId on every booking read.
 POST   /pet-parents/{petParentId}/bookings/{bookingId}/status                    body { status, note? } — parent sets APPROVAL_NEEDED|COMPLETED|PARENT_CANCELLED on their own booking; audited. Actor=Parent, actorId=route petParentId. 403 Forbidden (not the parent's booking), 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged. Shared Booking.UpdateBookingStatus sproc with the provider host.
 GET    /pet-parents/{petParentId}/bookings/{bookingId}/status-history            full status audit trail, oldest-first (404 if not the parent's booking). Ownership-filtered group; bookingId re-checked against the booking's PetParentId.
+GET    /pets/{petId}                                                             single pet profile — full basic-info + medical-info snapshot + embedded photo gallery (oldest-first), the same PetParentPetWithPhotosResponse shape as the list endpoint. Backed by Parent.GetPetParentPet (two result sets: pet + photos). Ownership-filtered (RequireOwnedPet → 404 PetNotFound for unknown pet, 403 Forbidden for someone else's). The handler also maps an empty result set to 404 defensively.
 PATCH  /pets/{petId}                                                             body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? } — same shape as AddPet. Updates the basic-info subset via Parent.UpdatePetParentPet; medical-info columns are deliberately untouched (use PATCH /medical-info). Same validations and error map as AddPet: 404 PetNotFound (sproc 51205); 409 MicrochipIdAlreadyExists; 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest.
 PATCH  /pets/{petId}/medical-info                                                body { vaccinationStatus, sterilizationStatus, medicalHistory?, temperament }. Fills in medical fields on an existing pet via Parent.UpdatePetMedicalInfo. VaccinationStatus ∈ {Vaccinated, NotVaccinated}; SterilizationStatus ∈ {Sterilized, Intact}; Temperament ∈ {Anxious, Friendly, Aggressive}; MedicalHistory is free text and nullable. 404 PetNotFound (sproc 51203); 400 UnsupportedVaccinationStatus / UnsupportedSterilizationStatus / UnsupportedTemperament / InvalidRequest.
-POST   /pets/{petId}/photos                                                      multipart form-data { file }. Same per-file validations as the profile-photo endpoint: file required, <=1 MB, content type ∈ { image/jpeg, image/png, image/webp }. Uploads to the shared blob container under the [PetPhotos] folder ("pet-photos/<petId>/<guid>.<ext>") and inserts a row into Parent.PetPhotos via Parent.AddPetPhoto. One row per upload — a pet can have many photos (client makes N calls for N photos). 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetNotFound (sproc 51204). Parent.PetPhotos.PetId has ON DELETE CASCADE so deleting a pet removes its photo rows (blobs not cleaned up — future job).
+POST   /pets/{petId}/photos                                                      multipart form-data { file }. Same per-file validations as the profile-photo endpoint: file required, <=3 MB, content type ∈ { image/jpeg, image/png, image/webp }. Uploads to the shared blob container under the [PetPhotos] folder ("pet-photos/<petId>/<guid>.<ext>") and inserts a row into Parent.PetPhotos via Parent.AddPetPhoto. One row per upload — a pet can have many photos (client makes N calls for N photos). 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetNotFound (sproc 51204). Parent.PetPhotos.PetId has ON DELETE CASCADE so deleting a pet removes its photo rows (blobs not cleaned up — future job).
 
-POST   /pet-parents/{petParentId}/identity                                       multipart form-data { file, identityType }. Validations: file required, <=1 MB, content-type ∈ { image/jpeg, image/png, image/webp }; identityType ∈ { Passport, DriverLicense, NationalId, ResidencePermit }. Uploads to the shared blob container under [PetParentIdentities] folder ("pet-parent-identities/<petParentId>/<guid>.<ext>") and upserts a row in Parent.ParentIdentities via Parent.UpsertPetParentIdentity (one identity per parent — re-uploading replaces). 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat / UnsupportedIdentityType / InvalidRequest; 404 PetParentNotFound (sproc 51206).
+POST   /pet-parents/{petParentId}/identity                                       multipart form-data { file, identityType }. Validations: file required, <=3 MB, content-type ∈ { image/jpeg, image/png, image/webp }; identityType ∈ { Passport, DriverLicense, NationalId, ResidencePermit }. Uploads to the shared blob container under [PetParentIdentities] folder ("pet-parent-identities/<petParentId>/<guid>.<ext>") and upserts a row in Parent.ParentIdentities via Parent.UpsertPetParentIdentity (one identity per parent — re-uploading replaces). 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat / UnsupportedIdentityType / InvalidRequest; 404 PetParentNotFound (sproc 51206).
 DELETE /pet-parents/{petParentId}/identity                                       removes the parent's single identity row via Parent.DeletePetParentIdentity (THROW 51209 → 404 ParentIdentityNotFound) AND best-effort deletes the blob itself (identity docs are sensitive — first real use of the new IPawfrontBlobStorage.DeleteAsync; a storage failure is swallowed, the SQL row is the source of truth). Returns { parentIdentityId, petParentId, identityType, identityPhotoUrl, deletedAtUtc }. Onboarding-status identity stage reverts to Remaining. Ownership-filtered.
-POST   /pet-parents/{petParentId}/photos                                         (multipart { file }) general pet-parent photo gallery — uploads to [PetParentPhotos] blob folder, inserts a row in Parent.PetParentPhotos { PetParentPhotoId, PetParentId, PhotoUrl, CreatedAtUtc }. <=1 MB, JPEG/PNG/WebP. 404 PetParentNotFound (sproc 51212); 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat. Ownership-filtered.
+POST   /pet-parents/{petParentId}/photos                                         (multipart { file }) general pet-parent photo gallery — uploads to [PetParentPhotos] blob folder, inserts a row in Parent.PetParentPhotos { PetParentPhotoId, PetParentId, PhotoUrl, CreatedAtUtc }. <=3 MB, JPEG/PNG/WebP. 404 PetParentNotFound (sproc 51212); 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat. Ownership-filtered.
 GET    /pet-parents/{petParentId}/photos                                         list the parent's gallery photos, oldest-first ([] when none). Ownership-filtered.
 DELETE /pet-parents/{petParentId}/photos/{photoId}                               removes one photo (scoped by PetParentId + PhotoId) via Parent.DeletePetParentPhoto + best-effort blob delete. 404 PetParentPhotoNotFound (sproc 51213). Ownership-filtered.
 GET    /pet-parents/{petParentId}/onboarding-status                              orchestrator over a single sproc (Parent.GetPetParentOnboardingStatus, three result sets). Returns { basicInfo, profilePhoto, pets, petMedicalInfo, identity, verification, isFullyOnboarded }. basicInfo is a sentinel (always Complete when the endpoint resolves). profilePhoto/pets/petMedicalInfo/identity each carry { status: Complete|Remaining }. petMedicalInfo also lists per-pet `{ petId, petName, isMedicalInfoComplete }` (3-field check: vaccination + sterilization + temperament; medical-history is optional). identity also carries `identityType` (null when Remaining). verification = { isEmailVerified, isMobileVerified }. isFullyOnboarded = basicInfo + pets + petMedicalInfo + identity + emailVerified + mobileVerified (profilePhoto is informational, NOT gating). 404 PetParentNotFound when the parent row is missing.
@@ -755,12 +809,14 @@ GET    /events/{eventId}                                                        
 POST   /events/{eventId}/views                                                   public engagement counter (parent host copy).
 POST   /events/{eventId}/shares                                                  public engagement counter (parent host copy).
 POST   /events/{eventId}/inquiries                                               public engagement counter (parent host copy).
+POST   /events/{eventId}/payout-methods                                          body { payoutMethods: ["Cash"|"Digital", ...] } — organiser payout method(s) for ticket proceeds (parent host copy). 404 EventNotFound; 400 FreeEventNoPayout (free event) / InvalidRequest.
 
-POST   /events/{eventId}/bookings                                                body { bookerName, bookerEmail, bookerMobile?, attendeeNames[], paymentMethod }. Same shared IEventBookingService as the provider host; parent app uses its own auth. 404 EventNotFound; 400 EventNotBookable for online events; 409 EventSoldOut on capacity exhaustion.
+POST   /events/{eventId}/bookings                                                body { bookerName, bookerEmail, bookerMobile?, attendeeNames[], paymentMethod }. Same shared IEventBookingService as the provider host; parent app uses its own auth. Physical events accept any number of tickets (capacity-gated); online events accept exactly ONE ticket per booking. 404 EventNotFound; 400 OnlineEventSingleTicket (>1 attendee on an online event); 409 EventSoldOut on capacity exhaustion (physical only).
 GET    /event-bookings/{bookingId}                                               booking + one entry per ticket (parent host copy).
 
 POST   /pet-parents/{petParentId}/events/banner-image                            (multipart) → { url }. Ownership-filtered. Uploads to the shared blob container under [EventBanners] folder. Mirror of the provider banner upload (no 1 MB cap — banners can be larger than profile photos).
 POST   /pet-parents/{petParentId}/events                                         body identical to the provider create-event (8 SQL fields + physical:{maximumCapacity,isPaid,price?}). Ownership-filtered. Creates a parent-organised event via Event.CreatePetParentEvent — row goes into Event.Events with PetParentId set, ProviderId NULL. Physical events also write the Cosmos extension doc. Returns the EventResponse (now carries nullable providerId + nullable petParentId; exactly one set). 404 PetParentNotFound (sproc 51207); 400 InvalidRequest.
+GET    /pet-parents/{petParentId}/events                                         lists the events this parent has organised (the parent-host mirror of GET /providers/{providerId}/events). Ownership-filtered. Backed by Event.ListEventsByPetParent (SQL only — physical details hydrated only on GET /events/{eventId}); each event includes pawPrints { viewCount, shareCount, inquiryCount }. Ordered StartDate/StartTime DESC; [] when the parent has organised none.
 
 GET    /providers                                                                [?petId= &providerType= &date= &startTime= &endTime= &city= &serviceLocation= &skip= &take=] — parent-facing provider discovery / booking search. ALL filters optional and combinable. petId: must belong to the caller (ownership enforced inline — 403 Forbidden / 403 ParentProfileNotCompleted / 404 PetNotFound, same codes as OwnedPetFilter); the pet's PetType becomes the animal filter (replaces the old raw ?animals= param). providerType ∈ { PetSitter, PetGroomer, PetTrainer, Vet } — 400 UnsupportedProviderType otherwise (PetAdoptionAndSale is NOT a valid filter value, but unfiltered browsing still includes it). date+startTime+endTime travel as a trio (400 InvalidRequest if partial, or startTime >= endTime); when set, each candidate runs through IProviderWindowAvailabilityChecker — a full free-slot check (working hours, closures, confirmed bookings vs capacity via the shared slot service). Window semantics: fixed-duration services (TrainingSession/VetAppointment/grooming item) match when a free slot of that duration fits anywhere inside the window; min-duration services (DayCare/NightStay) match when the FULL window is bookable and >= the offering minimum; PetGroomer probes the shortest active menu item that fits (capacity is shop-wide, so that's sufficient). Pagination applies AFTER availability filtering when a window is set. city: case-insensitive exact match on the Cosmos doc's City. serviceLocation ∈ { ParentsPlace, ProvidersPlace } (400 UnsupportedServiceLocation) — mapped per category onto the offering's stored values (CustomerPlace/CustomerLocation vs PetHotel/GroomerShop/VetClinic/TrainerLocation/TrainingSchool; stored "Both" matches either; trainer's NatureOrParks/UrbanOrCity count as neither). PetAdoptionAndSale providers are excluded when an animal OR serviceLocation filter is set (no offering = no data). Returns slim summary cards: { providerId, serviceCategory, subCategory, displayName (business name; null for freelancers), imageUrl, city, about (Description/AboutYou), animalsHandled }. Take defaults to 50, max 200. Backed by IProviderDiscoveryService → CosmosProviderDiscoveryService (static filters; Cosmos only, in-memory predicates because the relevant paths vary per category) + IProviderWindowAvailabilityChecker (Application orchestrator over IProviderServiceCatalog + IProviderOfferingResolver + IProviderAvailabilitySlotService + IPetGroomerServiceRegistry). BREAKING: the old ?serviceCategory= and ?animals= params were removed.
 GET    /providers/search/day-care                                                 [?petId= &date= &startTime= &endTime= &city= &serviceLocation= &skip= &take=] — per-service booking search #1 (PetSitter/DayCare). All filters optional. date+startTime+endTime trio; when set, a provider matches only if the FULL window is bookable on the DayCare service (window >= offering minimum, exact-start free slot, capacity/closures/bookings respected). Charges = PricePerHour.
@@ -770,7 +826,7 @@ GET    /providers/search/vets                                                   
 
 > All four searches: petId is ownership-enforced inline (same codes as OwnedPetFilter) and the pet's PetType becomes the animal filter; city is case-insensitive; serviceLocation ∈ { ParentsPlace, ProvidersPlace }. A provider must have the matching ACTIVE ProviderServices row + configured offering to appear at all. Response per hit: { providerId, serviceId, subCategory, businessName (null for freelancers), completedBookings, charges, chargesUnit (PerHour|PerService|PerAppointment), serviceItemCode }. completedBookings = past non-cancelled/non-no-show bookings across ALL the provider's services (SqlProviderBookingStatsReader, batched). Pagination applies after availability filtering. Backed by IProviderSearchService → ProviderSearchService (Application orchestrator over IProviderDiscoveryService + IProviderServiceCatalog + IProviderOfferingResolver + IProviderAvailabilitySlotService + IPetGroomerServiceRegistry + IProviderBookingStatsReader). OfferingResolution.Resolved now carries Price (PricePerHour / PerSession / PerAppointment; null for grooming).
 
-GET    /providers/{providerId}                                                   parent-facing provider profile. Composes the registration row (category, sub-category, lat/lng), the category-specific offering (one of petSitter / petGroomer / petTrainer / petAdoptionSale / vet — exactly one populated), workingHours (7 days), and timeOff (future closures across all the provider's services). Provider personal info (name, mobile, DOB) intentionally omitted — parents see business-facing data only. Backed by IProviderPublicProfileService, which fans out to the existing per-category registries, IProviderAvailabilityService, and IProviderClosureService. 404 ProviderNotRegistered when no service registration row exists.
+GET    /providers/{providerId}                                                   parent-facing provider profile. Composes the registration row (category, sub-category, lat/lng), the category-specific offering (one of petSitter / petGroomer / petTrainer / petAdoptionSale / vet — exactly one populated), workingHours (7 days), timeOff (future closures across all the provider's services), the advertised booking policy (minimumHoursBeforeCancellation: null|24|48|72|96, and acceptedPaymentMethods: ["Cash"|"Digital", ...] — the provider's payout-method set, empty when unset), and reviews (ALWAYS an empty array for now — review feature not built yet; the field is wired so mobile can bind ahead of time). Provider personal info (name, mobile, DOB) intentionally omitted — parents see business-facing data only. Backed by IProviderPublicProfileService, which fans out to the existing per-category registries, IProviderAvailabilityService, IProviderClosureService, and IProviderPolicyService (cancellation + payout). 404 ProviderNotRegistered when no service registration row exists.
 GET    /providers/{providerId}/availability/slots                                ?serviceId= &date= [&durationHours= | &serviceItemCode=] [&granularityMinutes=] — parent-facing free-slot query (mirror of the provider host). Backed by the shared IProviderAvailabilitySlotService. PetGroomer uses ?serviceItemCode= (duration resolved server-side from the menu item); other categories use ?durationHours=. Closures, capacity, and overlapping confirmed bookings are subtracted per-service. Same error map as provider host (InvalidServiceId, ServiceNotRegistered, OfferingNotConfigured, ServiceItemCodeRequired/NotOffered/Inactive, InvalidBookingDuration, InvalidRequest). Save/get weekly-hours endpoints on the same group (`POST /` and `GET /`) are intentionally **NOT** mirrored on the parent host — those are organiser-only; the 7-day shape is already returned by GET /providers/{providerId} under workingHours.
 POST   /blob-images                                                              body: { blobUrl } — streams bytes from the private blob container (mirror of the provider host's universal fetch endpoint; duplicated because the hosts use different Firebase projects). 404 BlobNotFound; 400 InvalidRequest.
 ```
@@ -781,6 +837,7 @@ POST   /blob-images                                                             
 
 ```
 GET    /health
+GET    /metadata                                                                 static reference vocabularies for mobile pickers → { animals: [{code, displayName}], behaviours: [{code, displayName}] }. Derived from the Pawfront.Domain.Vocabularies enums (Animal/Behaviour).
 
 POST   /provider-onboarding/firebase-auth
 POST   /provider-onboarding/profile
@@ -809,7 +866,7 @@ GET    /providers/{providerId}/policy
 
 POST   /providers/{providerId}/active-status                                     body { isActive } — master switch. Discriminated 200: Updated | BookingsExist (lists future confirmed bookings).
 
-POST   /providers/{providerId}/photos                                            (multipart { file }) general provider photo gallery — uploads to [ProviderPhotos] blob folder, inserts a row in Provider.ProviderPhotos { ProviderPhotoId, ProviderId, PhotoUrl, CreatedAtUtc }. <=1 MB, JPEG/PNG/WebP. 404 ProviderNotFound (sproc 51110); 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat.
+POST   /providers/{providerId}/photos                                            (multipart { file }) general provider photo gallery — uploads to [ProviderPhotos] blob folder, inserts a row in Provider.ProviderPhotos { ProviderPhotoId, ProviderId, PhotoUrl, CreatedAtUtc }. <=3 MB, JPEG/PNG/WebP. 404 ProviderNotFound (sproc 51110); 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat.
 GET    /providers/{providerId}/photos                                            list the provider's gallery photos, oldest-first ([] when none).
 DELETE /providers/{providerId}/photos/{photoId}                                  removes one photo (scoped by ProviderId + PhotoId) + best-effort blob delete. 404 ProviderPhotoNotFound (sproc 51111).
 
@@ -874,6 +931,7 @@ POST   /event-bookings/{bookingId}/payment-confirmation                gateway c
 POST   /events/{eventId}/views                                         public engagement counter
 POST   /events/{eventId}/shares                                        public engagement counter
 POST   /events/{eventId}/inquiries                                     public engagement counter
+POST   /events/{eventId}/payout-methods                               body { payoutMethods: ["Cash"|"Digital", ...] } — organiser payout method(s) for ticket proceeds. Replaces the set. 404 EventNotFound; 400 FreeEventNoPayout (free event) / InvalidRequest (empty or unknown method)
 
 GET    /providers/{providerId}/events/{eventId}/attendees              organiser only — one entry per ticket
 GET    /providers/{providerId}/events/{eventId}/metrics                organiser only — views, shares, inquiries, confirmedAttendees, earnings
@@ -887,7 +945,18 @@ POST   /blob-images                                                    body: { b
   `Results.*` calls in endpoint handlers.
 - **System.Text.Json everywhere.** All Cosmos docs use
   `[JsonPropertyName]`; do not switch back to Newtonsoft on Cosmos.
-- **All allowed-enum string sets stay in the Cosmos/SQL layer impls** —
+- **Cross-cutting vocabularies live in `Pawfront.Domain.Vocabularies` as
+  enums** — `Animal` and `Behaviour` are the single source of truth for the
+  animals-handled / pets-trained / animals-treated lists (all categories) and
+  the pet-temperament / provider `DogTemperaments` lists. Registries validate
+  against `VocabularyCatalog.AnimalCodes` / `BehaviourCodes` (derived from the
+  enums); values are stored as the enum NAME (`"Dog"`) in Cosmos + SQL and
+  surfaced to mobile via `GET /metadata` on both hosts. Add a value to the enum
+  to extend it everywhere at once. **Do not reintroduce per-category copies of
+  these sets.** (PetTrainer's richer training-temperament list, and per-category
+  sets that genuinely differ — `AddOns`, `ServiceLocation` — still live in the
+  impls.)
+- **Other allowed-enum string sets stay in the Cosmos/SQL layer impls** —
   not in domain enums. (Domain enums name the categories; impls own the
   string constants used in JSON/SQL.)
 - **When adding new validation helpers, mirror the existing

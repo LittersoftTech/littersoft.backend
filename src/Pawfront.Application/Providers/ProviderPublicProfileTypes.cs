@@ -27,6 +27,11 @@ public sealed record ProviderPublicProfile(
     decimal Longitude,
     IReadOnlyList<DayAvailabilityResult> WorkingHours,
     IReadOnlyList<ProviderClosure> TimeOff,
+    // Booking policy the provider advertises (read from the provider-policy
+    // store). MinimumHoursBeforeCancellation is null when no policy is set;
+    // AcceptedPaymentMethods is the Cash/Digital payout set (empty when none).
+    int? MinimumHoursBeforeCancellation,
+    IReadOnlyCollection<string> AcceptedPaymentMethods,
     PetSitterServiceResult? PetSitter,
     PetGroomerServiceResult? PetGroomer,
     PetTrainerServiceResult? PetTrainer,

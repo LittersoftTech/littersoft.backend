@@ -6,9 +6,9 @@ namespace Pawfront.Api.Endpoints;
 
 internal static class ProviderPhotoEndpoints
 {
-    // Hard upper bound on uploaded image size (1 MB), matching the pet-parent
+    // Hard upper bound on uploaded image size (3 MB), matching the pet-parent
     // host's photo validation.
-    private const long MaxPhotoBytes = 1L * 1024 * 1024;
+    private const long MaxPhotoBytes = 3L * 1024 * 1024;
 
     private static readonly HashSet<string> AllowedPhotoContentTypes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -115,7 +115,7 @@ internal static class ProviderPhotoEndpoints
         {
             return ApiResults.BadRequest(
                 "ImageTooLarge",
-                $"Photo must be {MaxPhotoBytes / 1024} KB or smaller.");
+                $"Photo must be {MaxPhotoBytes / (1024 * 1024)} MB or smaller.");
         }
 
         var contentType = file.ContentType;

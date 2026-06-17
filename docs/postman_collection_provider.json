@@ -19,6 +19,7 @@
     { "key": "eventId", "value": "" },
     { "key": "eventBookingId", "value": "", "description": "Populated by POST /events/{eventId}/bookings." },
     { "key": "bookingId", "value": "" },
+    { "key": "providerPhotoId", "value": "", "description": "Populated by POST /providers/{id}/photos." },
     { "key": "petParentId", "value": "11111111-1111-1111-1111-111111111111" },
     { "key": "closureId", "value": "" },
     { "key": "blobUrl", "value": "" },
@@ -105,7 +106,32 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/profile", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","profile"] },
-            "description": "Returns the persisted personal information for this provider — name, gender, mobile, date of birth, mobile-verified timestamp, onboarding status, created/updated timestamps. Returns 404 ProviderProfileNotFound when the row is missing."
+            "description": "Returns the persisted personal information for this provider — name, gender, mobile, date of birth, mobile-verified timestamp, onboarding status, isActive, created/updated timestamps. Returns 404 ProviderProfileNotFound when the row is missing."
+          }
+        },
+        {
+          "name": "GET /provider-onboarding/me",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.providerAuthIdentityId) {",
+                  "  pm.collectionVariables.set('providerAuthIdentityId', json.data.providerAuthIdentityId);",
+                  "}",
+                  "if (json && json.data && json.data.providerId) {",
+                  "  pm.collectionVariables.set('providerId', json.data.providerId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/provider-onboarding/me", "host": ["{{baseUrl}}"], "path": ["api","v1","provider-onboarding","me"] },
+            "description": "Resolves the caller's Firebase uid → { providerAuthIdentityId, providerId?, hasProfile, onboardingStatus?, isActive? }. Used by mobile after reinstall to recover the ProviderId. Re-captures providerAuthIdentityId / providerId."
           }
         }
       ]
@@ -605,6 +631,83 @@
       ]
     },
     {
+      "name": "4b. Provider Active Status (master switch)",
+      "description": "Single master Active/Inactive switch above the per-service catalog. When Inactive, every NEW booking is rejected with 409 ProviderInactive. Always returns 200 with a discriminated payload: `status: \"Updated\"` (flag flipped) or `status: \"BookingsExist\"` (deactivation blocked — `conflictingBookings` lists future confirmed bookings; there is NO force override).",
+      "item": [
+        {
+          "name": "POST active-status (deactivate)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/active-status", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","active-status"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isActive\": false\n}"
+            },
+            "description": "On deactivation the server checks for future confirmed bookings. If any exist it returns `status: \"BookingsExist\"` (flag NOT flipped) with the conflict list. Otherwise `status: \"Updated\"`."
+          }
+        },
+        {
+          "name": "POST active-status (reactivate)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/active-status", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","active-status"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isActive\": true\n}"
+            },
+            "description": "Activation is always applied immediately (no conflict check). Returns `status: \"Updated\"`."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4c. Provider Photos (gallery)",
+      "description": "General provider photo gallery (separate from the per-service profile/service images). One row per upload.",
+      "item": [
+        {
+          "name": "POST photos (multipart)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.providerPhotoId) {",
+                  "  pm.collectionVariables.set('providerPhotoId', json.data.providerPhotoId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/photos", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","photos"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
+            "description": "multipart/form-data — attach a `file` (≤3 MB, JPEG/PNG/WebP). Captures `providerPhotoId`. 404 ProviderNotFound; 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat."
+          }
+        },
+        {
+          "name": "GET photos",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/photos", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","photos"] },
+            "description": "Lists the provider's gallery photos, oldest-first ([] when none)."
+          }
+        },
+        {
+          "name": "DELETE photo",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/photos/{{providerPhotoId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","photos","{{providerPhotoId}}"] },
+            "description": "Removes one photo (scoped by ProviderId + PhotoId) + best-effort blob delete. 404 ProviderPhotoNotFound."
+          }
+        }
+      ]
+    },
+    {
       "name": "5. Provider Availability",
       "item": [
         {
@@ -883,6 +986,27 @@
           }
         },
         {
+          "name": "POST booking status (provider)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/status", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","status"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"CONFIRMED\",\n  \"note\": \"Accepted the booking.\"\n}"
+            },
+            "description": "Provider sets CONFIRMED | COMPLETED | APPROVAL_NEEDED | PROVIDER_CANCELLED on a booking they're a party to; audited. Actor + id come from the route, never the body. 403 Forbidden (not this provider's booking); 400 BookingStatusNotAllowed; 409 BookingStatusTerminal | BookingStatusUnchanged."
+          }
+        },
+        {
+          "name": "GET booking status-history (provider)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/status-history", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","status-history"] },
+            "description": "Full status audit trail, oldest-first. 404 if the booking isn't this provider's."
+          }
+        },
+        {
           "name": "POST cancel booking",
           "request": {
             "method": "POST",
@@ -936,7 +1060,7 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"eventCategory\": \"AdoptionAndRescue\",\n  \"isChildFriendly\": true,\n  \"title\": \"Spring Adoption Drive 2026\",\n  \"description\": \"Meet 30+ adoptable rescue dogs and cats. Free vet check-ups on-site.\",\n  \"bannerImageUrl\": \"https://example.com/images/event-banner.jpg\",\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\", \"FirstAidBooth\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-06-15\",\n  \"endDate\": \"2026-06-15\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"physical\": {\n    \"maximumCapacity\": 200,\n    \"isPaid\": true,\n    \"price\": 100\n  }\n}"
+              "raw": "{\n  \"eventCategory\": \"AdoptionAndRescue\",\n  \"isChildFriendly\": true,\n  \"title\": \"Spring Adoption Drive 2026\",\n  \"description\": \"Meet 30+ adoptable rescue dogs and cats. Free vet check-ups on-site.\",\n  \"bannerImageUrl\": \"https://example.com/images/event-banner.jpg\",\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\", \"FirstAidBooth\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-06-15\",\n  \"endDate\": \"2026-06-15\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"isPaid\": true,\n  \"price\": 100,\n  \"cancellationPolicy\": \"FullRefundUpTo4Hours\",\n  \"physical\": {\n    \"maximumCapacity\": 200,\n    \"location\": {\n      \"houseNumber\": \"42\",\n      \"street\": \"Park Lane\",\n      \"city\": \"Pune\",\n      \"zip\": \"411001\",\n      \"country\": \"India\",\n      \"latitude\": 18.5204,\n      \"longitude\": 73.8567\n    }\n  }\n}"
             }
           }
         },
@@ -948,7 +1072,7 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"eventCategory\": \"ParentEducation\",\n  \"isChildFriendly\": true,\n  \"title\": \"Webinar: Bringing Home a Puppy\",\n  \"description\": \"Live online session for new pet parents.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"None\"],\n  \"eventType\": \"Online\",\n  \"startDate\": \"2026-06-20\",\n  \"endDate\": \"2026-06-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"20:30:00\",\n  \"physical\": null\n}"
+              "raw": "{\n  \"eventCategory\": \"ParentEducation\",\n  \"isChildFriendly\": true,\n  \"title\": \"Webinar: Bringing Home a Puppy\",\n  \"description\": \"Live online session for new pet parents.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"None\"],\n  \"eventType\": \"Online\",\n  \"startDate\": \"2026-06-20\",\n  \"endDate\": \"2026-06-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"20:30:00\",\n  \"isPaid\": false,\n  \"price\": null,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"physical\": null\n}"
             }
           }
         },
@@ -956,21 +1080,36 @@
           "name": "GET events by provider",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] }
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] },
+            "description": "Lists this provider's events. Each event includes pawPrints { viewCount, shareCount, inquiryCount } and an organizer { type, id, name, imageUrl } block."
           }
         },
         {
           "name": "GET event by id",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}"] }
+            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}"] },
+            "description": "Single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount } and an organizer { type, id, name, imageUrl } block."
+          }
+        },
+        {
+          "name": "POST payout-methods (organiser)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/payout-methods", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}","payout-methods"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payoutMethods\": [\"Cash\", \"Digital\"]\n}"
+            },
+            "description": "Sets how the organiser wants ticket proceeds paid out — one or more of Cash / Digital (replaces the previously saved set). **Only valid for PAID events** — a free event returns 400 FreeEventNoPayout. Use the `eventId` captured by the Paid event create above. 404 EventNotFound; 400 InvalidRequest (empty list / unknown method)."
           }
         }
       ]
     },
     {
       "name": "7b. Event Ticket Bookings",
-      "description": "Ticket purchases against a physical event. **Anyone** signed in can buy tickets for any names — attendee names are free text and not validated against the database. The booking is created with `PaymentStatus = Pending`; flip it to `Paid` (or `Failed`) via the gateway callback request.\n\nRequires the parent `eventId` to be a **Physical** event with a `physical.maximumCapacity` set (Online events return 400 EventNotBookable). Capacity is enforced atomically inside `Event.CreateEventBooking` — concurrent buyers serialise and the (N+1)-th seat returns 409 EventSoldOut.",
+      "description": "Ticket purchases for an event. **Anyone** signed in can buy tickets for any names — attendee names are free text and not validated against the database. The booking is created with `PaymentStatus = Pending`; flip it to `Paid` (or `Failed`) via the gateway callback request.\n\n**Physical** events accept any number of tickets per booking and are capacity-gated (concurrent buyers serialise inside `Event.CreateEventBooking`; the (N+1)-th seat returns 409 EventSoldOut). **Online** events accept exactly ONE ticket per booking — more than one attendee name returns 400 OnlineEventSingleTicket, and there is no capacity limit.",
       "item": [
         {
           "name": "POST create event booking (Credit Card, 4 tickets)",

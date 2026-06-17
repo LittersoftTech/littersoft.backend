@@ -1507,6 +1507,13 @@ BEGIN
         [EndDate] DATE NOT NULL,
         [StartTime] TIME(0) NOT NULL,
         [EndTime] TIME(0) NOT NULL,
+        -- Ticketing on the main row (not the Cosmos physical extension) so it's
+        -- returned for every event type, including online events.
+        [IsPaid] BIT NOT NULL
+            CONSTRAINT [DF_Events_IsPaid] DEFAULT 0,
+        [Price] DECIMAL(18, 2) NULL,
+        [CancellationPolicy] NVARCHAR(32) NOT NULL
+            CONSTRAINT [DF_Events_CancellationPolicy] DEFAULT N'NoRefund',
         [ViewCount] INT NOT NULL
             CONSTRAINT [DF_Events_ViewCount] DEFAULT 0,
         [ShareCount] INT NOT NULL
@@ -1531,7 +1538,13 @@ BEGIN
             N'AdoptionAndRescue', N'PetTraining', N'Charity', N'Volunteering',
             N'HealthAndWellness', N'SocialAndCultural', N'OutdoorActivities', N'ParentEducation')),
         CONSTRAINT [CK_Events_EventType] CHECK ([EventType] IN (N'Physical', N'Online')),
-        CONSTRAINT [CK_Events_DateRange] CHECK ([StartDate] <= [EndDate])
+        CONSTRAINT [CK_Events_DateRange] CHECK ([StartDate] <= [EndDate]),
+        CONSTRAINT [CK_Events_Ticketing] CHECK (
+            ([IsPaid] = 0 AND [Price] IS NULL)
+         OR ([IsPaid] = 1 AND [Price] IS NOT NULL AND [Price] >= 0)
+        ),
+        CONSTRAINT [CK_Events_CancellationPolicy] CHECK ([CancellationPolicy] IN (
+            N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'NoRefund'))
     );
     PRINT 'Created table [Event].[Events].';
 END
@@ -1648,6 +1661,80 @@ BEGIN
         ADD [InquiryCount] INT NOT NULL
             CONSTRAINT [DF_Events_InquiryCount] DEFAULT 0;
     PRINT 'Added column [Event].[Events].[InquiryCount].';
+END
+GO
+
+-- 2.10c Retrofit: lift ticketing (IsPaid / Price) onto the main event row.
+-- Previously isPaid/price lived only in the Cosmos physical extension, so
+-- online events (which have no Cosmos doc) never carried them. Now they're
+-- SQL columns returned for every event type.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]') AND [name] = N'IsPaid')
+BEGIN
+    ALTER TABLE [Event].[Events]
+        ADD [IsPaid] BIT NOT NULL
+            CONSTRAINT [DF_Events_IsPaid] DEFAULT 0;
+    PRINT 'Added column [Event].[Events].[IsPaid].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]') AND [name] = N'Price')
+BEGIN
+    ALTER TABLE [Event].[Events]
+        ADD [Price] DECIMAL(18, 2) NULL;
+    PRINT 'Added column [Event].[Events].[Price].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Events_Ticketing'
+      AND [parent_object_id] = OBJECT_ID(N'[Event].[Events]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]') AND [name] = N'Price')
+BEGIN
+    -- WITH NOCHECK skips validation of pre-existing rows (which default to
+    -- IsPaid = 0 / Price NULL and already satisfy the rule). Future writes
+    -- are checked normally.
+    ALTER TABLE [Event].[Events] WITH NOCHECK
+        ADD CONSTRAINT [CK_Events_Ticketing] CHECK (
+            ([IsPaid] = 0 AND [Price] IS NULL)
+         OR ([IsPaid] = 1 AND [Price] IS NOT NULL AND [Price] >= 0)
+        );
+    PRINT 'Added CHECK [CK_Events_Ticketing].';
+END
+GO
+
+-- 2.10d Retrofit: add the event cancellation/refund policy column.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]') AND [name] = N'CancellationPolicy')
+BEGIN
+    ALTER TABLE [Event].[Events]
+        ADD [CancellationPolicy] NVARCHAR(32) NOT NULL
+            CONSTRAINT [DF_Events_CancellationPolicy] DEFAULT N'NoRefund';
+    PRINT 'Added column [Event].[Events].[CancellationPolicy].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Events_CancellationPolicy'
+      AND [parent_object_id] = OBJECT_ID(N'[Event].[Events]'))
+AND EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]') AND [name] = N'CancellationPolicy')
+BEGIN
+    -- WITH NOCHECK skips validation of pre-existing rows (which default to
+    -- NoRefund and already satisfy the rule). Future writes are checked.
+    ALTER TABLE [Event].[Events] WITH NOCHECK
+        ADD CONSTRAINT [CK_Events_CancellationPolicy] CHECK ([CancellationPolicy] IN (
+            N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'NoRefund'));
+    PRINT 'Added CHECK [CK_Events_CancellationPolicy].';
 END
 GO
 
@@ -2153,6 +2240,33 @@ END
 ELSE
 BEGIN
     PRINT 'Table [Event].[EventAmenities] already exists.';
+END
+GO
+
+
+-- 2.11a Event.EventPayoutMethods ----------------------------------------------
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'EventPayoutMethods' AND [schema_id] = SCHEMA_ID(N'Event'))
+BEGIN
+    CREATE TABLE [Event].[EventPayoutMethods]
+    (
+        [EventId] UNIQUEIDENTIFIER NOT NULL,
+        [PayoutMethod] NVARCHAR(32) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_EventPayoutMethods_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_EventPayoutMethods] PRIMARY KEY CLUSTERED ([EventId] ASC, [PayoutMethod] ASC),
+        CONSTRAINT [FK_EventPayoutMethods_Events_EventId]
+            FOREIGN KEY ([EventId]) REFERENCES [Event].[Events] ([EventId]) ON DELETE CASCADE,
+        CONSTRAINT [CK_EventPayoutMethods_PayoutMethod]
+            CHECK ([PayoutMethod] IN (N'Cash', N'Digital'))
+    );
+    PRINT 'Created table [Event].[EventPayoutMethods].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Event].[EventPayoutMethods] already exists.';
 END
 GO
 
@@ -3270,6 +3384,50 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Parent].[ListPetParentPets].';
+GO
+
+
+-- 3.1k2 Parent.GetPetParentPet -------------------------------------------------
+CREATE OR ALTER PROCEDURE [Parent].[GetPetParentPet]
+    @PetId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Result set 1: the single pet (zero or one row). The application returns
+    -- 404 PetNotFound when this set is empty.
+    SELECT [PetId],
+           [PetParentId],
+           [PetType],
+           [PetName],
+           [Breed],
+           [Gender],
+           [DateOfBirth],
+           [Weight],
+           [MicrochipId],
+           [Description],
+           [VaccinationStatus],
+           [SterilizationStatus],
+           [MedicalHistory],
+           [Temperament],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[Pets]
+    WHERE [PetId] = @PetId;
+
+    -- Result set 2: the pet's photo gallery, oldest-first so the mobile
+    -- gallery renders in upload order. Nested under the pet in the response.
+    SELECT [PetPhotoId],
+           [PetId],
+           [PhotoUrl],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[PetPhotos]
+    WHERE [PetId] = @PetId
+    ORDER BY [CreatedAtUtc] ASC;
+END;
+GO
+PRINT 'Created/updated [Parent].[GetPetParentPet].';
 GO
 
 
@@ -4823,6 +4981,9 @@ CREATE OR ALTER PROCEDURE [Event].[CreateEvent]
     @EndDate DATE,
     @StartTime TIME(0),
     @EndTime TIME(0),
+    @IsPaid BIT = 0,
+    @Price DECIMAL(18, 2) = NULL,
+    @CancellationPolicy NVARCHAR(32) = N'NoRefund',
     @AmenitiesJson NVARCHAR(MAX) = N'[]'
 AS
 BEGIN
@@ -4845,13 +5006,15 @@ BEGIN
     INSERT INTO [Event].[Events]
     (
         [ProviderId], [EventCategory], [IsChildFriendly], [Title], [Description],
-        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime]
+        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime],
+        [IsPaid], [Price], [CancellationPolicy]
     )
     OUTPUT inserted.[EventId] INTO @InsertedEventId
     VALUES
     (
         @ProviderId, @EventCategory, @IsChildFriendly, @Title, @Description,
-        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime
+        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime,
+        @IsPaid, CASE WHEN @IsPaid = 1 THEN @Price ELSE NULL END, @CancellationPolicy
     );
 
     DECLARE @EventId UNIQUEIDENTIFIER = (SELECT TOP (1) [EventId] FROM @InsertedEventId);
@@ -4861,12 +5024,17 @@ BEGIN
     FROM OPENJSON(@AmenitiesJson)
     WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
 
-    SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
-           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
-           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc],
-           [ViewCount], [ShareCount], [InquiryCount]
-    FROM [Event].[Events]
-    WHERE [EventId] = @EventId;
+    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
+           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
+           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
+           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+           COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
+                    org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl]
+    FROM [Event].[Events] e
+    LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
+    LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
+    WHERE e.[EventId] = @EventId;
 
     SELECT [Amenity]
     FROM [Event].[EventAmenities]
@@ -4895,6 +5063,9 @@ CREATE OR ALTER PROCEDURE [Event].[CreatePetParentEvent]
     @EndDate DATE,
     @StartTime TIME(0),
     @EndTime TIME(0),
+    @IsPaid BIT = 0,
+    @Price DECIMAL(18, 2) = NULL,
+    @CancellationPolicy NVARCHAR(32) = N'NoRefund',
     @AmenitiesJson NVARCHAR(MAX) = N'[]'
 AS
 BEGIN
@@ -4917,13 +5088,15 @@ BEGIN
     INSERT INTO [Event].[Events]
     (
         [PetParentId], [EventCategory], [IsChildFriendly], [Title], [Description],
-        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime]
+        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime],
+        [IsPaid], [Price], [CancellationPolicy]
     )
     OUTPUT inserted.[EventId] INTO @InsertedEventId
     VALUES
     (
         @PetParentId, @EventCategory, @IsChildFriendly, @Title, @Description,
-        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime
+        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime,
+        @IsPaid, CASE WHEN @IsPaid = 1 THEN @Price ELSE NULL END, @CancellationPolicy
     );
 
     DECLARE @EventId UNIQUEIDENTIFIER = (SELECT TOP (1) [EventId] FROM @InsertedEventId);
@@ -4933,12 +5106,17 @@ BEGIN
     FROM OPENJSON(@AmenitiesJson)
     WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
 
-    SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
-           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
-           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc],
-           [ViewCount], [ShareCount], [InquiryCount]
-    FROM [Event].[Events]
-    WHERE [EventId] = @EventId;
+    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
+           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
+           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
+           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+           COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
+                    org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl]
+    FROM [Event].[Events] e
+    LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
+    LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
+    WHERE e.[EventId] = @EventId;
 
     SELECT [Amenity]
     FROM [Event].[EventAmenities]
@@ -4959,12 +5137,17 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
-           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
-           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc],
-           [ViewCount], [ShareCount], [InquiryCount]
-    FROM [Event].[Events]
-    WHERE [EventId] = @EventId;
+    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
+           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
+           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
+           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+           COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
+                    org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl]
+    FROM [Event].[Events] e
+    LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
+    LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
+    WHERE e.[EventId] = @EventId;
 
     SELECT [Amenity]
     FROM [Event].[EventAmenities]
@@ -4983,13 +5166,18 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT [EventId], [ProviderId], [PetParentId], [EventCategory], [IsChildFriendly], [Title],
-           [Description], [BannerImageUrl], [EventType], [StartDate], [EndDate],
-           [StartTime], [EndTime], [CreatedAtUtc], [UpdatedAtUtc],
-           [ViewCount], [ShareCount], [InquiryCount]
-    FROM [Event].[Events]
-    WHERE [ProviderId] = @ProviderId
-    ORDER BY [StartDate] DESC, [StartTime] DESC;
+    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
+           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
+           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
+           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+           COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
+                    org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl]
+    FROM [Event].[Events] e
+    LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
+    LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
+    WHERE e.[ProviderId] = @ProviderId
+    ORDER BY e.[StartDate] DESC, e.[StartTime] DESC;
 
     SELECT a.[EventId], a.[Amenity]
     FROM [Event].[EventAmenities] a
@@ -4999,6 +5187,37 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Event].[ListEventsByProvider].';
+GO
+
+
+-- 3.12a Event.ListEventsByPetParent ------------------------------------------
+CREATE OR ALTER PROCEDURE [Event].[ListEventsByPetParent]
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
+           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
+           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
+           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+           COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
+                    org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl]
+    FROM [Event].[Events] e
+    LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
+    LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
+    WHERE e.[PetParentId] = @PetParentId
+    ORDER BY e.[StartDate] DESC, e.[StartTime] DESC;
+
+    SELECT a.[EventId], a.[Amenity]
+    FROM [Event].[EventAmenities] a
+    INNER JOIN [Event].[Events] e ON e.[EventId] = a.[EventId]
+    WHERE e.[PetParentId] = @PetParentId
+    ORDER BY a.[EventId], a.[Amenity];
+END;
+GO
+PRINT 'Created/updated [Event].[ListEventsByPetParent].';
 GO
 
 
@@ -5050,9 +5269,14 @@ BEGIN
            e.[Title], e.[Description], e.[BannerImageUrl], e.[EventType],
            e.[StartDate], e.[EndDate], e.[StartTime], e.[EndTime],
            e.[CreatedAtUtc], e.[UpdatedAtUtc],
-           e.[ViewCount], e.[ShareCount], e.[InquiryCount]
+           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+           COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
+                    org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl]
     FROM [Event].[Events] e
     INNER JOIN FilteredEvents f ON f.[EventId] = e.[EventId]
+    LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
+    LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
     ORDER BY e.[StartDate] DESC, e.[StartTime] DESC, e.[EventId] ASC;
 
     SELECT a.[EventId], a.[Amenity]
@@ -5370,7 +5594,10 @@ CREATE OR ALTER PROCEDURE [Event].[CreateEventBooking]
     @BookerEmail NVARCHAR(320),
     @BookerMobile NVARCHAR(32) = NULL,
     @PaymentMethod NVARCHAR(32),
-    @MaximumCapacity INT,
+    -- NULL for online events: they have no venue capacity, so the capacity
+    -- check below is skipped and any number of bookings is accepted (each
+    -- online booking is capped to one ticket by the application layer).
+    @MaximumCapacity INT = NULL,
     @TotalAmount DECIMAL(18, 2),
     @AttendeeNames [Event].[EventBookingAttendeeNames] READONLY
 AS
@@ -5396,7 +5623,7 @@ BEGIN
     WHERE [EventId] = @EventId
       AND [Status] = N'Confirmed';
 
-    IF @ReservedTickets + @TicketCount > @MaximumCapacity
+    IF @MaximumCapacity IS NOT NULL AND @ReservedTickets + @TicketCount > @MaximumCapacity
         THROW 51091, 'Event is sold out or does not have enough remaining capacity.', 1;
 
     DECLARE @InsertedBookingId TABLE ([BookingId] UNIQUEIDENTIFIER);
@@ -5558,6 +5785,55 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Event].[IncrementEventCounter].';
+GO
+
+
+-- 3.32a Event.SaveEventPayoutMethods ------------------------------------------
+-- Replaces an event's payout-method set (Cash and/or Digital). Payout methods
+-- only apply to PAID events: a free event throws 51099 (API → 400
+-- FreeEventNoPayout); a missing event throws 51098 (API → 404 EventNotFound).
+CREATE OR ALTER PROCEDURE [Event].[SaveEventPayoutMethods]
+    @EventId UNIQUEIDENTIFIER,
+    @AcceptsCash BIT,
+    @AcceptsDigital BIT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    DECLARE @IsPaid BIT;
+    SELECT @IsPaid = [IsPaid]
+    FROM [Event].[Events]
+    WHERE [EventId] = @EventId;
+
+    IF @IsPaid IS NULL
+        THROW 51098, 'Event was not found.', 1;
+
+    IF @IsPaid = 0
+        THROW 51099, 'Payout methods only apply to paid events; this event is free.', 1;
+
+    DELETE FROM [Event].[EventPayoutMethods]
+    WHERE [EventId] = @EventId;
+
+    IF @AcceptsCash = 1
+        INSERT INTO [Event].[EventPayoutMethods] ([EventId], [PayoutMethod])
+        VALUES (@EventId, N'Cash');
+
+    IF @AcceptsDigital = 1
+        INSERT INTO [Event].[EventPayoutMethods] ([EventId], [PayoutMethod])
+        VALUES (@EventId, N'Digital');
+
+    SELECT [PayoutMethod]
+    FROM [Event].[EventPayoutMethods]
+    WHERE [EventId] = @EventId
+    ORDER BY [PayoutMethod];
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Event].[SaveEventPayoutMethods].';
 GO
 
 

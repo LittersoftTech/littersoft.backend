@@ -2,7 +2,7 @@
   "info": {
     "name": "Pawfront — Pet Parent API",
     "_postman_id": "b3e3a1f4-1111-4222-9333-petparentapi0001",
-    "description": "Postman collection for the Pawfront pet-parent host (Pawfront.PetParentApi). All endpoints are under /api/v1 and require a Firebase ID token from the pet-parent Firebase project (`littersoftpetparent`) — passed as `Authorization: Bearer {{idToken}}`.\n\n**Variables to set on import**\n- `baseUrl` — defaults to `https://localhost:7216` (dev). Set to the deployed URL when promoted.\n- `idToken` — Firebase ID token for the signed-in pet parent.\n- `petParentId` — your PetParentId GUID (returned by POST /parent-onboarding/profile).\n- `petId` — a PetId GUID from /pet-parents/{petParentId}/pets.\n- `eventId` / `eventBookingId` / `providerId` / `serviceId` / `parentMobileOtpId` — populate as needed.\n\nResponse envelope is `{ success: bool, data: T | null, error: { code, message } | null }`.",
+    "description": "Postman collection for the Pawfront pet-parent host (Pawfront.PetParentApi). All endpoints are under /api/v1 and require a Firebase ID token from the pet-parent Firebase project (`littersoftpetparent`) — passed as `Authorization: Bearer {{idToken}}`.\n\n**Setup**\n1. Set `baseUrl` (default `https://localhost:7216`).\n2. Get a pet-parent Firebase ID token (see CLAUDE.md `Get a fresh Firebase ID token`) and set `idToken`.\n3. Run the folders top-to-bottom — they are ordered chronologically (onboarding → profile → pets → discovery → bookings → events). Most requests carry a **test script that auto-captures ids** (`petParentId`, `petId`, `parentMobileOtpId`, `providerId`, `serviceId`, `bookingId`, `eventId`, `eventBookingId`, `petParentPhotoId`) into collection variables, so you rarely need to paste a GUID by hand.\n\n**Notes**\n- Response envelope is `{ success: bool, data: T | null, error: { code, message } | null }`.\n- The `/pet-parents/{petParentId}/*` and `/pets/{petId}/*` routes are ownership-filtered: the caller's PetParentId is derived from the JWT, so the route id must be your own.\n- Provider **discovery / search / booking** only return data if a provider has been registered via the provider host (`Pawfront.Api`). Run that collection first to seed a provider, or paste a known `providerId` / `serviceId`.\n- Image-upload requests use multipart with field name `file` — attach a local file before sending.\n- `serviceId` is the booked service. Searches return `serviceId` per hit; their test scripts capture the first one.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -11,18 +11,22 @@
   },
   "variable": [
     { "key": "baseUrl", "value": "https://localhost:7216" },
-    { "key": "idToken", "value": "" },
-    { "key": "petParentId", "value": "" },
-    { "key": "petId", "value": "" },
-    { "key": "parentMobileOtpId", "value": "" },
-    { "key": "eventId", "value": "" },
-    { "key": "eventBookingId", "value": "" },
-    { "key": "providerId", "value": "" },
-    { "key": "serviceId", "value": "" }
+    { "key": "idToken", "value": "PASTE_PET_PARENT_FIREBASE_ID_TOKEN_HERE" },
+    { "key": "petParentId", "value": "", "description": "Captured by POST /parent-onboarding/profile and GET /parent-onboarding/me." },
+    { "key": "petId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/pets." },
+    { "key": "petParentPhotoId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/photos." },
+    { "key": "parentMobileOtpId", "value": "", "description": "Captured by POST .../mobile-verification/otp." },
+    { "key": "providerId", "value": "", "description": "Captured by the provider searches / discovery. Or paste one from the provider host." },
+    { "key": "serviceId", "value": "", "description": "Captured by the provider searches (first hit's serviceId)." },
+    { "key": "serviceItemCode", "value": "BathAndDry", "description": "PetGroomer menu code (one of the 18 canonical codes)." },
+    { "key": "bookingId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/bookings." },
+    { "key": "eventId", "value": "", "description": "Captured by GET /events (first hit) and POST /pet-parents/{petParentId}/events." },
+    { "key": "eventBookingId", "value": "", "description": "Captured by POST /events/{eventId}/bookings." },
+    { "key": "blobUrl", "value": "", "description": "Set to any URL returned by an upload endpoint to test POST /blob-images." }
   ],
   "item": [
     {
-      "name": "Health",
+      "name": "0. Health",
       "item": [
         {
           "name": "GET /health",
@@ -35,7 +39,7 @@
       ]
     },
     {
-      "name": "Parent Onboarding",
+      "name": "1. Parent Onboarding",
       "item": [
         {
           "name": "POST /parent-onboarding/firebase-auth",
@@ -44,38 +48,109 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"fcmToken\": \"sample-fcm-token\",\n  \"deviceId\": \"sample-device-id\",\n  \"devicePlatform\": \"iOS\"\n}"
+              "raw": "{\n  \"fcmToken\": \"sample-fcm-token-abc123\",\n  \"deviceId\": \"device-uuid-1a2b-3c4d\",\n  \"devicePlatform\": \"iOS\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/parent-onboarding/firebase-auth",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "parent-onboarding", "firebase-auth"]
             },
-            "description": "Upserts Parent.ParentAuthIdentities + (optional) device token from the JWT. Body fields are all optional."
+            "description": "Upserts Parent.ParentAuthIdentities + (optional) device token from the JWT. All body fields optional. Call this FIRST after sign-in."
           }
         },
         {
           "name": "POST /parent-onboarding/profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.petParentId) {",
+                  "  pm.collectionVariables.set('petParentId', json.data.petParentId);",
+                  "}"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"firstName\": \"Jane\",\n  \"lastName\": \"Doe\",\n  \"gender\": \"Female\",\n  \"mobileCountryCode\": \"+41\",\n  \"mobileNumber\": \"791234567\",\n  \"dateOfBirth\": \"1990-05-12\",\n  \"addressLine\": \"Bahnhofstrasse 1\",\n  \"latitude\": 47.3769,\n  \"longitude\": 8.5417,\n  \"zipCode\": \"8001\",\n  \"city\": \"Zurich\",\n  \"description\": \"Loving pet parent\"\n}"
+              "raw": "{\n  \"firstName\": \"Jane\",\n  \"lastName\": \"Doe\",\n  \"gender\": \"Female\",\n  \"mobileCountryCode\": \"+41\",\n  \"mobileNumber\": \"791234567\",\n  \"dateOfBirth\": \"1990-05-12\",\n  \"addressLine\": \"Bahnhofstrasse 1\",\n  \"latitude\": 47.3769,\n  \"longitude\": 8.5417,\n  \"zipCode\": \"8001\",\n  \"city\": \"Zurich\",\n  \"description\": \"Loving pet parent of one happy dog.\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/parent-onboarding/profile",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "parent-onboarding", "profile"]
             },
-            "description": "Creates Parent.PetParents and links to the auth identity (resolved from JWT sub/user_id). 404 ParentAuthIdentityNotFound if `firebase-auth` was never called; 409 MobileNumberAlreadyExists; 400 UnsupportedGender."
+            "description": "Creates Parent.PetParents and links to the auth identity (resolved from JWT sub/user_id — NOT from the body). Captures `petParentId`. 404 ParentAuthIdentityNotFound if `firebase-auth` was never called; 409 MobileNumberAlreadyExists; 400 UnsupportedGender."
+          }
+        },
+        {
+          "name": "GET /parent-onboarding/me",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.petParentId) {",
+                  "  pm.collectionVariables.set('petParentId', json.data.petParentId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/parent-onboarding/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "parent-onboarding", "me"]
+            },
+            "description": "Resolves the caller's Firebase uid → { parentAuthIdentityId, petParentId?, firebaseUserId, email, isEmailVerified, displayName, signUpStatus, hasProfile, mobileVerifiedAtUtc? }. Used by mobile after reinstall to recover the PetParentId. Re-captures `petParentId` if a profile exists."
           }
         }
       ]
     },
     {
-      "name": "Pet Parent Profile",
+      "name": "2. Pet Parent Profile",
       "item": [
+        {
+          "name": "GET /pet-parents/{petParentId}/profile",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/profile",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "profile"]
+            },
+            "description": "Full profile read-back (name, gender, email + isEmailVerified, mobile, DOB, address, lat/lng, zip, city, description, profilePhotoUrl, mobileVerifiedAtUtc, timestamps). 404 PetParentNotFound."
+          }
+        },
+        {
+          "name": "PATCH /pet-parents/{petParentId}/profile",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Jane\",\n  \"lastName\": \"Doe\",\n  \"gender\": \"Female\",\n  \"dateOfBirth\": \"1990-05-12\",\n  \"addressLine\": \"Seefeldstrasse 22\",\n  \"zipCode\": \"8008\",\n  \"city\": \"Zurich\",\n  \"description\": \"Updated about-me text.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/profile",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "profile"]
+            },
+            "description": "Edits the basic-profile subset. NOT editable here: mobile number (re-verify via OTP), latitude/longitude, profile photo (own endpoint). Returns the full read-back shape. 404 PetParentNotFound; 400 UnsupportedGender / InvalidRequest."
+          }
+        },
         {
           "name": "POST /pet-parents/{petParentId}/profile-image",
           "request": {
@@ -83,16 +158,71 @@
             "header": [],
             "body": {
               "mode": "formdata",
-              "formdata": [
-                { "key": "file", "type": "file", "src": [] }
-              ]
+              "formdata": [{ "key": "file", "type": "file", "src": [] }]
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/profile-image",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "profile-image"]
             },
-            "description": "multipart/form-data. file required, ≤1MB, JPEG/PNG/WebP. 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat. 404 PetParentNotFound."
+            "description": "multipart/form-data — attach a `file` (≤3 MB, JPEG/PNG/WebP). 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat; 404 PetParentNotFound."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/photos (gallery)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.petParentPhotoId) {",
+                  "  pm.collectionVariables.set('petParentPhotoId', json.data.petParentPhotoId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": [] }]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/photos",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "photos"]
+            },
+            "description": "General pet-parent photo gallery. One row per upload — call N times for N photos. Captures `petParentPhotoId`. ≤3 MB, JPEG/PNG/WebP. 404 PetParentNotFound."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/photos",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/photos",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "photos"]
+            },
+            "description": "Lists the parent's gallery photos, oldest-first ([] when none)."
+          }
+        },
+        {
+          "name": "DELETE /pet-parents/{petParentId}/photos/{photoId}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/photos/{{petParentPhotoId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "photos", "{{petParentPhotoId}}"]
+            },
+            "description": "Removes one gallery photo (scoped by PetParentId + PhotoId) + best-effort blob delete. 404 PetParentPhotoNotFound."
           }
         },
         {
@@ -112,7 +242,20 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "identity"]
             },
-            "description": "multipart/form-data. file ≤1MB, JPEG/PNG/WebP; identityType ∈ {Passport, DriverLicense, NationalId, ResidencePermit}. Re-upload replaces existing row."
+            "description": "multipart/form-data. file ≤3 MB, JPEG/PNG/WebP; identityType ∈ {Passport, DriverLicense, NationalId, ResidencePermit}. One identity per parent — re-uploading replaces."
+          }
+        },
+        {
+          "name": "DELETE /pet-parents/{petParentId}/identity",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/identity",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "identity"]
+            },
+            "description": "Removes the parent's single identity row + best-effort blob delete. 404 ParentIdentityNotFound."
           }
         },
         {
@@ -127,27 +270,28 @@
             },
             "description": "Returns { basicInfo, profilePhoto, pets, petMedicalInfo, identity, verification, isFullyOnboarded }."
           }
-        },
-        {
-          "name": "GET /pet-parents/{petParentId}/event-bookings",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/event-bookings",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "event-bookings"]
-            },
-            "description": "Lists the caller's event-ticket bookings (slim cards joined with event). Filters by Firebase email claim — 403 EmailClaimMissing if absent."
-          }
         }
       ]
     },
     {
-      "name": "Mobile Verification",
+      "name": "3. Mobile Verification",
       "item": [
         {
-          "name": "POST /pet-parents/{petParentId}/mobile-verification/otp",
+          "name": "POST .../mobile-verification/otp",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.parentMobileOtpId) {",
+                  "  pm.collectionVariables.set('parentMobileOtpId', json.data.parentMobileOtpId);",
+                  "}"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [],
@@ -156,11 +300,11 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "mobile-verification", "otp"]
             },
-            "description": "Generates a 6-digit OTP (10-min expiry). Returns { parentMobileOtpId, mobileCountryCode, mobileNumber, dateSentUtc, expiresAtUtc }."
+            "description": "Generates a 6-digit OTP (10-min expiry, NoOp sender today). Captures `parentMobileOtpId`. Returns { parentMobileOtpId, mobileCountryCode, mobileNumber, dateSentUtc, expiresAtUtc }."
           }
         },
         {
-          "name": "POST /pet-parents/{petParentId}/mobile-verification/otp/{otpId}/verify",
+          "name": "POST .../mobile-verification/otp/{otpId}/verify",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -173,29 +317,43 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "mobile-verification", "otp", "{{parentMobileOtpId}}", "verify"]
             },
-            "description": "Always 200; client branches on { isValidated, validationStatus: Validated|Invalid|Expired|Pending }."
+            "description": "Always 200; client branches on { isValidated, validationStatus: Validated|Invalid|Expired|Pending }. (The dev OTP is not 123456 — read it from the API logs / sender, or replace here.)"
           }
         }
       ]
     },
     {
-      "name": "Pets",
+      "name": "4. Pets",
       "item": [
         {
           "name": "POST /pet-parents/{petParentId}/pets",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.petId) {",
+                  "  pm.collectionVariables.set('petId', json.data.petId);",
+                  "}"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"petType\": \"Dog\",\n  \"petName\": \"Bruno\",\n  \"breed\": \"Labrador\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"2021-03-04\",\n  \"weight\": 28.5,\n  \"microchipId\": \"982000123456789\",\n  \"description\": \"Friendly and energetic\"\n}"
+              "raw": "{\n  \"petType\": \"Dog\",\n  \"petName\": \"Bruno\",\n  \"breed\": \"Labrador\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"2021-03-04\",\n  \"weight\": 28.5,\n  \"microchipId\": \"982000123456789\",\n  \"description\": \"Friendly and energetic.\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/pets",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "pets"]
             },
-            "description": "petType ∈ {Dog, Cat, Hamster, GuineaPig}; gender ∈ {Male, Female}; weight DECIMAL(5,2) > 0; microchipId globally UNIQUE (409 MicrochipIdAlreadyExists)."
+            "description": "Captures `petId`. petType ∈ {Dog, Cat, Hamster, GuineaPig}; gender ∈ {Male, Female}; weight DECIMAL(5,2) > 0; microchipId globally UNIQUE (409 MicrochipIdAlreadyExists — change it if it collides)."
           }
         },
         {
@@ -212,13 +370,26 @@
           }
         },
         {
+          "name": "GET /pets/{petId}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pets/{{petId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pets", "{{petId}}"]
+            },
+            "description": "Single pet profile — full basic-info + medical-info snapshot + embedded photo gallery (oldest-first), same shape as the list endpoint. Ownership-filtered: 404 PetNotFound (unknown pet), 403 Forbidden (someone else's pet)."
+          }
+        },
+        {
           "name": "PATCH /pets/{petId}",
           "request": {
             "method": "PATCH",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"petType\": \"Dog\",\n  \"petName\": \"Bruno\",\n  \"breed\": \"Labrador\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"2021-03-04\",\n  \"weight\": 29.0,\n  \"microchipId\": \"982000123456789\",\n  \"description\": \"Updated description\"\n}"
+              "raw": "{\n  \"petType\": \"Dog\",\n  \"petName\": \"Bruno\",\n  \"breed\": \"Labrador Retriever\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"2021-03-04\",\n  \"weight\": 29.0,\n  \"microchipId\": \"982000123456789\",\n  \"description\": \"Updated description.\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pets/{{petId}}",
@@ -235,7 +406,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"vaccinationStatus\": \"Vaccinated\",\n  \"sterilizationStatus\": \"Sterilized\",\n  \"medicalHistory\": \"Mild seasonal allergies\",\n  \"temperament\": \"Friendly\"\n}"
+              "raw": "{\n  \"vaccinationStatus\": \"Vaccinated\",\n  \"sterilizationStatus\": \"Sterilized\",\n  \"medicalHistory\": \"Mild seasonal allergies.\",\n  \"temperament\": \"Friendly\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pets/{{petId}}/medical-info",
@@ -252,30 +423,352 @@
             "header": [],
             "body": {
               "mode": "formdata",
-              "formdata": [
-                { "key": "file", "type": "file", "src": [] }
-              ]
+              "formdata": [{ "key": "file", "type": "file", "src": [] }]
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pets/{{petId}}/photos",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pets", "{{petId}}", "photos"]
             },
-            "description": "multipart/form-data. file ≤1MB, JPEG/PNG/WebP. One row per upload; call N times for N photos."
+            "description": "multipart/form-data — attach a `file` (≤3 MB, JPEG/PNG/WebP). One row per upload; call N times for N photos."
           }
         }
       ]
     },
     {
-      "name": "Events (Catalog)",
+      "name": "5. Provider Discovery & Search",
+      "description": "Parent-facing browse + per-service booking search. These return data only if a provider has been registered via the provider host. `petId` (optional) is ownership-enforced and its PetType becomes the animal filter. Each search test script captures the first hit's `providerId` + `serviceId` for the booking + slots folders below.",
       "item": [
         {
-          "name": "GET /events",
+          "name": "GET /providers (discovery)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.collectionVariables.set('providerId', json.data[0].providerId);",
+                  "}"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/events?eventCategory=AdoptionAndRescue&eventType=Physical&startDate=2026-06-01&endDate=2026-12-31&isChildFriendly=true&amenities=Restrooms&amenities=FreeParking",
+              "raw": "{{baseUrl}}/api/v1/providers?providerType=PetSitter&skip=0&take=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers"],
+              "query": [
+                { "key": "petId", "value": "{{petId}}", "description": "Optional. Must be your pet; its PetType becomes the animal filter.", "disabled": true },
+                { "key": "providerType", "value": "PetSitter", "description": "PetSitter | PetGroomer | PetTrainer | Vet (PetAdoptionAndSale is not a valid filter value)" },
+                { "key": "date", "value": "2026-07-15", "description": "date + startTime + endTime travel as a trio (full free-slot check).", "disabled": true },
+                { "key": "startTime", "value": "10:00:00", "disabled": true },
+                { "key": "endTime", "value": "12:00:00", "disabled": true },
+                { "key": "city", "value": "Pune", "description": "case-insensitive exact match", "disabled": true },
+                { "key": "serviceLocation", "value": "ProvidersPlace", "description": "ParentsPlace | ProvidersPlace", "disabled": true },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "50", "description": "1..200, default 50" }
+              ]
+            },
+            "description": "Slim summary cards. ALL filters optional + combinable. Captures the first hit's `providerId`. NOTE: the old `?serviceCategory=` / `?animals=` params were REMOVED — use `?providerType=` and `?petId=`."
+          }
+        },
+        {
+          "name": "GET /providers/search/day-care",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.collectionVariables.set('providerId', json.data[0].providerId);",
+                  "  pm.collectionVariables.set('serviceId', json.data[0].serviceId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/search/day-care?skip=0&take=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "search", "day-care"],
+              "query": [
+                { "key": "petId", "value": "{{petId}}", "disabled": true },
+                { "key": "date", "value": "2026-07-15", "description": "date+startTime+endTime trio; FULL window must be bookable.", "disabled": true },
+                { "key": "startTime", "value": "10:00:00", "disabled": true },
+                { "key": "endTime", "value": "14:00:00", "disabled": true },
+                { "key": "city", "value": "Pune", "disabled": true },
+                { "key": "serviceLocation", "value": "ProvidersPlace", "disabled": true },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "50" }
+              ]
+            },
+            "description": "PetSitter/DayCare search. Charges = PricePerHour. Captures first hit's `providerId` + `serviceId`."
+          }
+        },
+        {
+          "name": "GET /providers/search/night-stay",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.collectionVariables.set('providerId', json.data[0].providerId);",
+                  "  pm.collectionVariables.set('serviceId', json.data[0].serviceId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/search/night-stay?skip=0&take=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "search", "night-stay"],
+              "query": [
+                { "key": "petId", "value": "{{petId}}", "disabled": true },
+                { "key": "startDate", "value": "2026-07-15", "description": "startDate+pickupDate pair; pickupDate is checkout (not a stayed night); span ≤ 30 nights.", "disabled": true },
+                { "key": "pickupDate", "value": "2026-07-18", "disabled": true },
+                { "key": "city", "value": "Pune", "disabled": true },
+                { "key": "serviceLocation", "value": "ProvidersPlace", "disabled": true },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "50" }
+              ]
+            },
+            "description": "PetSitter/NightStay search. Every night from startDate..pickupDate-1 must have free capacity. Charges = PricePerHour."
+          }
+        },
+        {
+          "name": "GET /providers/search/groomers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.collectionVariables.set('providerId', json.data[0].providerId);",
+                  "  pm.collectionVariables.set('serviceId', json.data[0].serviceId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/search/groomers?skip=0&take=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "search", "groomers"],
+              "query": [
+                { "key": "petId", "value": "{{petId}}", "disabled": true },
+                { "key": "date", "value": "2026-07-15", "disabled": true },
+                { "key": "serviceItemCode", "value": "{{serviceItemCode}}", "description": "One of the 18 canonical codes; when set, charges = that item's price.", "disabled": true },
+                { "key": "city", "value": "Pune", "disabled": true },
+                { "key": "serviceLocation", "value": "ProvidersPlace", "disabled": true },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "50" }
+              ]
+            },
+            "description": "PetGroomer/GroomingSession search. With serviceItemCode → only providers offering that ACTIVE item; charges = item price (PerService). Without → any groomer with ≥1 active item; charges null."
+          }
+        },
+        {
+          "name": "GET /providers/search/vets",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.collectionVariables.set('providerId', json.data[0].providerId);",
+                  "  pm.collectionVariables.set('serviceId', json.data[0].serviceId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/search/vets?skip=0&take=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "search", "vets"],
+              "query": [
+                { "key": "petId", "value": "{{petId}}", "disabled": true },
+                { "key": "date", "value": "2026-07-15", "disabled": true },
+                { "key": "city", "value": "Pune", "disabled": true },
+                { "key": "serviceLocation", "value": "ProvidersPlace", "disabled": true },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "50" }
+              ]
+            },
+            "description": "Vet/VetAppointment search. date → any free appointment slot that day. Charges = PricePerAppointment (PerAppointment)."
+          }
+        },
+        {
+          "name": "GET /providers/{providerId}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "{{providerId}}"]
+            },
+            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff, minimumHoursBeforeCancellation (null|24|48|72|96), acceptedPaymentMethods ([\"Cash\"|\"Digital\"], [] when unset), and reviews (always [] for now — review feature not built yet). 404 ProviderNotRegistered."
+          }
+        },
+        {
+          "name": "GET .../availability/slots (durationHours)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceId}}&date=2026-07-15&durationHours=2&granularityMinutes=30",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "{{providerId}}", "availability", "slots"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceId}}" },
+                { "key": "date", "value": "2026-07-15" },
+                { "key": "durationHours", "value": "2", "description": "PetSitter / PetTrainer / Vet" },
+                { "key": "granularityMinutes", "value": "30", "description": "default 30" }
+              ]
+            },
+            "description": "Free-slot query for PetSitter / PetTrainer / Vet (use durationHours). Closures, capacity, and overlapping confirmed bookings are subtracted per-service."
+          }
+        },
+        {
+          "name": "GET .../availability/slots (PetGroomer)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceId}}&date=2026-07-15&serviceItemCode={{serviceItemCode}}&granularityMinutes=30",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "{{providerId}}", "availability", "slots"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceId}}" },
+                { "key": "date", "value": "2026-07-15" },
+                { "key": "serviceItemCode", "value": "{{serviceItemCode}}", "description": "One of the 18 canonical PetGroomer codes" },
+                { "key": "granularityMinutes", "value": "30" }
+              ]
+            },
+            "description": "PetGroomer uses serviceItemCode — duration resolved server-side from the menu item. Errors: 400 InvalidServiceId / ServiceItemCodeRequired / ServiceItemNotOffered / InvalidBookingDuration / OfferingNotConfigured; 409 ServiceItemInactive; 404 ServiceNotRegistered."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Service Bookings (parent-initiated)",
+      "description": "Parent 'book now' against a discovered service. Needs `petId` (your pet) + `serviceId` (from a search). bookingDate / startTime / endTime must fall inside the provider's working hours for the booked service — adjust to a free slot returned by the slots endpoint.",
+      "item": [
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.bookingId) {",
+                  "  pm.collectionVariables.set('bookingId', json.data.bookingId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petId\": \"{{petId}}\",\n  \"serviceId\": \"{{serviceId}}\",\n  \"bookingDate\": \"2026-07-15\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"serviceItemCode\": null\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings"]
+            },
+            "description": "Booker = route petParentId (from JWT, not the body). Provider resolved from serviceId. petId must be yours. For PetGroomer set `serviceItemCode` (the duration is derived from it). Captures `bookingId`. Errors: 404 PetNotFound / ServiceNotRegistered; 403 Forbidden; 400 InvalidServiceId / InvalidPetId / InvalidBookingTime; 409 ServiceClosed / CapacityExceeded / ProviderInactive."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/status",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"PARENT_CANCELLED\",\n  \"note\": \"Plans changed.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "status"]
+            },
+            "description": "Parent sets APPROVAL_NEEDED | COMPLETED | PARENT_CANCELLED on their own booking; audited. 403 Forbidden; 400 BookingStatusNotAllowed; 409 BookingStatusTerminal | BookingStatusUnchanged."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/bookings/{bookingId}/status-history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/status-history",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "status-history"]
+            },
+            "description": "Full status audit trail, oldest-first. 404 if not your booking."
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Events (Catalog)",
+      "item": [
+        {
+          "name": "GET /events",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.collectionVariables.set('eventId', json.data[0].eventId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events?skip=0",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events"],
               "query": [
@@ -288,7 +781,7 @@
                 { "key": "amenities", "value": "FreeParking", "disabled": true }
               ]
             },
-            "description": "Catalog listing. All query params optional. Amenities repeats."
+            "description": "Catalog listing. All query params optional; amenities repeats. Captures the first event's `eventId`. Each event returns top-level `isPaid` / `price` (all event types), `pawPrints`, and an `organizer { type, id, name, imageUrl }` block."
           }
         },
         {
@@ -300,7 +793,8 @@
               "raw": "{{baseUrl}}/api/v1/events/{{eventId}}",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events", "{{eventId}}"]
-            }
+            },
+            "description": "Single event detail (SQL + Cosmos for physical). Returns top-level `isPaid` / `price` for every event type (online included), `physical.maximumCapacity` + `physical.location` for physical events, `pawPrints { viewCount, shareCount, inquiryCount }`, and an `organizer { type, id, name, imageUrl }` block."
           }
         },
         {
@@ -343,10 +837,140 @@
       ]
     },
     {
-      "name": "Event Bookings",
+      "name": "8. Parent-organised Events",
+      "description": "A pet parent can create their own events (ProviderId NULL, PetParentId set). Ownership-filtered on petParentId.",
+      "item": [
+        {
+          "name": "POST /pet-parents/{petParentId}/events/banner-image",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.url) {",
+                  "  pm.collectionVariables.set('blobUrl', json.data.url);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": [] }]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events/banner-image",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "events", "banner-image"]
+            },
+            "description": "multipart/form-data → { url }. No 1 MB cap (banners can be larger). Captures the URL into `blobUrl` so you can paste it as bannerImageUrl below."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/events (Physical, Paid)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.eventId) {",
+                  "  pm.collectionVariables.set('eventId', json.data.eventId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventCategory\": \"OutdoorActivities\",\n  \"isChildFriendly\": true,\n  \"title\": \"Community Dog Walk 2026\",\n  \"description\": \"A friendly group walk around the lake for dogs and their humans.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-08-10\",\n  \"endDate\": \"2026-08-10\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"isPaid\": true,\n  \"price\": 50,\n  \"cancellationPolicy\": \"FullRefundUpTo2Hours\",\n  \"physical\": {\n    \"maximumCapacity\": 100,\n    \"location\": {\n      \"houseNumber\": \"12\",\n      \"street\": \"Seefeldstrasse\",\n      \"city\": \"Zurich\",\n      \"zip\": \"8008\",\n      \"country\": \"Switzerland\",\n      \"latitude\": 47.3667,\n      \"longitude\": 8.5500\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "events"]
+            },
+            "description": "Creates a parent-organised event. `isPaid` / `price` are TOP-LEVEL (apply to all event types). `price` is required when `isPaid` is true. For Physical events, `physical.maximumCapacity` AND `physical.location` (houseNumber/street/city/zip/country required, lat/long optional) are required. Captures `eventId`. 404 PetParentNotFound; 400 InvalidRequest."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/events (Online, Free)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventCategory\": \"ParentEducation\",\n  \"isChildFriendly\": true,\n  \"title\": \"Webinar: First-time Puppy Care\",\n  \"description\": \"Live online Q&A for new pet parents.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"None\"],\n  \"eventType\": \"Online\",\n  \"startDate\": \"2026-08-20\",\n  \"endDate\": \"2026-08-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"20:30:00\",\n  \"isPaid\": false,\n  \"price\": null,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"physical\": null\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "events"]
+            },
+            "description": "Online event — no `physical` block (not bookable). `isPaid` / `price` still apply at the top level (here it's free). Online paid events are allowed too (e.g. a paid webinar)."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/events",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "events"]
+            },
+            "description": "Lists the events this parent has organised (mirror of the provider host's GET /providers/{providerId}/events). Ownership-filtered. SQL-only — physical details are hydrated only on GET /events/{eventId}. Each event includes pawPrints { viewCount, shareCount, inquiryCount } and an organizer { type, id, name, imageUrl } block. Ordered most-recent first; returns [] when the parent has organised none."
+          }
+        },
+        {
+          "name": "POST /events/{eventId}/payout-methods",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payoutMethods\": [\"Cash\", \"Digital\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/payout-methods",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events", "{{eventId}}", "payout-methods"]
+            },
+            "description": "Sets how the organiser wants ticket proceeds paid out — one or more of Cash / Digital (replaces the previously saved set). **Only valid for PAID events** — a free event returns 400 FreeEventNoPayout. Uses the `eventId` captured by the Paid event create above. 404 EventNotFound; 400 InvalidRequest (empty list / unknown method)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Event Ticket Bookings",
+      "description": "Buy tickets for an event. Physical events accept any number of tickets (capacity-gated); online events accept exactly ONE ticket per booking (>1 attendee → 400 OnlineEventSingleTicket). One ticket row per attendee.",
       "item": [
         {
           "name": "POST /events/{eventId}/bookings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.bookingId) {",
+                  "  pm.collectionVariables.set('eventBookingId', json.data.bookingId);",
+                  "}"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -359,7 +983,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events", "{{eventId}}", "bookings"]
             },
-            "description": "paymentMethod ∈ {CreditCard, Twint}. One ticket row per attendee. 404 EventNotFound; 400 EventNotBookable (online); 409 EventSoldOut."
+            "description": "paymentMethod ∈ {CreditCard, Twint}. One ticket row per attendee. Physical = any number of tickets; online = exactly one. Captures `eventBookingId`. 404 EventNotFound; 400 OnlineEventSingleTicket (>1 attendee on an online event); 409 EventSoldOut (physical capacity)."
           }
         },
         {
@@ -372,88 +996,42 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "event-bookings", "{{eventBookingId}}"]
             },
-            "description": "Booking + one entry per ticket."
+            "description": "Booking + one entry per ticket (denormalised on the wire)."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/event-bookings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/event-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "event-bookings"]
+            },
+            "description": "Lists the caller's event-ticket bookings (slim cards joined with the event). Filters by the JWT email claim — 403 EmailClaimMissing if absent. Only matches bookings whose bookerEmail equals your Firebase email."
           }
         }
       ]
     },
     {
-      "name": "Provider Discovery",
+      "name": "10. Blob Images (universal fetch)",
       "item": [
         {
-          "name": "GET /providers",
+          "name": "POST /blob-images",
           "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/providers?serviceCategory=PetSitter&animals=Dog&animals=Cat&skip=0&take=50",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "providers"],
-              "query": [
-                { "key": "serviceCategory", "value": "PetSitter", "description": "PetSitter | PetGroomer | PetTrainer | PetAdoptionAndSale | Vet", "disabled": true },
-                { "key": "animals", "value": "Dog", "disabled": true },
-                { "key": "animals", "value": "Cat", "disabled": true },
-                { "key": "skip", "value": "0", "disabled": true },
-                { "key": "take", "value": "50", "description": "1..200, default 50", "disabled": true }
-              ]
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"blobUrl\": \"{{blobUrl}}\"\n}"
             },
-            "description": "Slim summary cards. animals filter excludes PetAdoptionAndSale (no offering)."
-          }
-        },
-        {
-          "name": "GET /providers/{providerId}",
-          "request": {
-            "method": "GET",
-            "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}",
+              "raw": "{{baseUrl}}/api/v1/blob-images",
               "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "providers", "{{providerId}}"]
+              "path": ["api", "v1", "blob-images"]
             },
-            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff. 404 ProviderNotRegistered."
-          }
-        }
-      ]
-    },
-    {
-      "name": "Availability Slots",
-      "item": [
-        {
-          "name": "GET /providers/{providerId}/availability/slots (durationHours)",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceId}}&date=2026-07-15&durationHours=2&granularityMinutes=30",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "providers", "{{providerId}}", "availability", "slots"],
-              "query": [
-                { "key": "serviceId", "value": "{{serviceId}}" },
-                { "key": "date", "value": "2026-07-15" },
-                { "key": "durationHours", "value": "2", "description": "PetSitter / PetTrainer / Vet" },
-                { "key": "granularityMinutes", "value": "30", "description": "default 30" }
-              ]
-            },
-            "description": "Use durationHours for PetSitter, PetTrainer, Vet."
-          }
-        },
-        {
-          "name": "GET /providers/{providerId}/availability/slots (PetGroomer)",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceId}}&date=2026-07-15&serviceItemCode=BathAndDry&granularityMinutes=30",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "providers", "{{providerId}}", "availability", "slots"],
-              "query": [
-                { "key": "serviceId", "value": "{{serviceId}}" },
-                { "key": "date", "value": "2026-07-15" },
-                { "key": "serviceItemCode", "value": "BathAndDry", "description": "One of the 18 canonical PetGroomer codes" },
-                { "key": "granularityMinutes", "value": "30" }
-              ]
-            },
-            "description": "PetGroomer uses serviceItemCode — duration resolved server-side from the menu item.\n\nErrors: 400 InvalidServiceId / ServiceItemCodeRequired / ServiceItemNotOffered / InvalidBookingDuration / OfferingNotConfigured; 409 ServiceItemInactive; 404 ServiceNotRegistered."
+            "description": "Streams the raw image bytes for a private-container blob URL (the response is binary — see Postman's Preview tab). Set `blobUrl` to a URL returned by any upload endpoint. 400 InvalidRequest (bad/foreign URL); 404 BlobNotFound."
           }
         }
       ]

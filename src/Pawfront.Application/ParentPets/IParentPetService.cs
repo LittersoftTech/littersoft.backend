@@ -64,4 +64,15 @@ public interface IParentPetService
     Task<IReadOnlyList<PetParentPetWithPhotosResponse>> GetPetsAsync(
         Guid petParentId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns a single pet's full profile — basic info, medical-info
+    /// snapshot, and embedded photo gallery (oldest-first). Returns
+    /// <c>null</c> when no pet with the given id exists; the endpoint maps
+    /// that to 404 (though the ownership filter normally rejects unknown pets
+    /// before the handler runs).
+    /// </summary>
+    Task<PetParentPetWithPhotosResponse?> GetPetAsync(
+        Guid petId,
+        CancellationToken cancellationToken);
 }

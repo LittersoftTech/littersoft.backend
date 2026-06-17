@@ -33,6 +33,9 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@EndDate", input.EndDate.ToDateTime(TimeOnly.MinValue));
         command.Parameters.AddWithValue("@StartTime", input.StartTime.ToTimeSpan());
         command.Parameters.AddWithValue("@EndTime", input.EndTime.ToTimeSpan());
+        command.Parameters.AddWithValue("@IsPaid", input.IsPaid);
+        command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
+        command.Parameters.AddWithValue("@CancellationPolicy", input.CancellationPolicy);
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
         try
@@ -78,6 +81,9 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@EndDate", input.EndDate.ToDateTime(TimeOnly.MinValue));
         command.Parameters.AddWithValue("@StartTime", input.StartTime.ToTimeSpan());
         command.Parameters.AddWithValue("@EndTime", input.EndTime.ToTimeSpan());
+        command.Parameters.AddWithValue("@IsPaid", input.IsPaid);
+        command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
+        command.Parameters.AddWithValue("@CancellationPolicy", input.CancellationPolicy);
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
         try
@@ -136,6 +142,55 @@ internal sealed class SqlEventStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@ProviderId", providerId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        // Result set 1: event rows.
+        var rows = new List<EventSqlSnapshot>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadEventRow(reader, amenities: Array.Empty<string>()));
+        }
+
+        // Result set 2: (EventId, Amenity) pairs — fold into the rows above.
+        var amenityLookup = new Dictionary<Guid, List<string>>();
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var eventId = reader.GetGuid(0);
+                var amenity = reader.GetString(1);
+                if (!amenityLookup.TryGetValue(eventId, out var list))
+                {
+                    list = new List<string>();
+                    amenityLookup[eventId] = list;
+                }
+                list.Add(amenity);
+            }
+        }
+
+        var hydrated = new List<EventSqlSnapshot>(rows.Count);
+        foreach (var row in rows)
+        {
+            hydrated.Add(amenityLookup.TryGetValue(row.EventId, out var amenities)
+                ? row with { Amenities = amenities }
+                : row);
+        }
+        return hydrated;
+    }
+
+    public async Task<IReadOnlyList<EventSqlSnapshot>> ListByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.ListEventsByPetParent", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
@@ -258,7 +313,18 @@ internal sealed class SqlEventStore(
             Counters: new EventCounters(
                 ViewCount: reader.GetInt32(15),
                 ShareCount: reader.GetInt32(16),
-                InquiryCount: reader.GetInt32(17)));
+                InquiryCount: reader.GetInt32(17)),
+            // Ticketing appended after the counters in every event-returning
+            // sproc's result set 1 (top-level, returned for all event types).
+            IsPaid: reader.GetBoolean(18),
+            Price: reader.IsDBNull(19) ? null : reader.GetDecimal(19),
+            // Cancellation policy appended after ticketing in result set 1.
+            CancellationPolicy: reader.GetString(20),
+            // Organiser display fields appended last in result set 1 — joined
+            // from Provider.Providers / Parent.PetParents. ImageUrl is always
+            // DBNull for provider-organised events (no profile-photo column).
+            OrganizerName: reader.IsDBNull(21) ? null : reader.GetString(21),
+            OrganizerImageUrl: reader.IsDBNull(22) ? null : reader.GetString(22));
     }
 
     private static async Task<List<string>> ReadAmenitiesAsync(
@@ -310,6 +376,43 @@ internal sealed class SqlEventStore(
         catch (SqlException exception) when (exception.Number == 51097)
         {
             throw new ArgumentException(exception.Message, nameof(counterType));
+        }
+    }
+
+    public async Task<IReadOnlyList<string>> SavePayoutMethodsAsync(
+        Guid eventId,
+        bool acceptsCash,
+        bool acceptsDigital,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.SaveEventPayoutMethods", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@EventId", eventId);
+        command.Parameters.AddWithValue("@AcceptsCash", acceptsCash);
+        command.Parameters.AddWithValue("@AcceptsDigital", acceptsDigital);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var saved = new List<string>();
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                saved.Add(reader.GetString(0));
+            }
+            return saved;
+        }
+        catch (SqlException exception) when (exception.Number == 51098)
+        {
+            throw new EventNotFoundException(eventId);
+        }
+        catch (SqlException exception) when (exception.Number == 51099)
+        {
+            throw new EventNotPaidException(eventId);
         }
     }
 

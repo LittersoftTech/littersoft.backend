@@ -21,11 +21,28 @@ public sealed record ProviderPublicProfileResponse(
     decimal Longitude,
     IReadOnlyList<ProviderWorkingHoursDayResponse> WorkingHours,
     IReadOnlyList<ProviderTimeOffEntryResponse> TimeOff,
+    // Booking policy the provider advertises. MinimumHoursBeforeCancellation
+    // is null when the provider has set no cancellation policy.
+    // AcceptedPaymentMethods is the provider's payout-method set (Cash /
+    // Digital); empty when none configured.
+    int? MinimumHoursBeforeCancellation,
+    IReadOnlyCollection<string> AcceptedPaymentMethods,
+    // Parent reviews of the provider. Always empty for now — the review
+    // feature isn't built yet; the field is wired so the mobile client can
+    // bind it ahead of time.
+    IReadOnlyList<ProviderReviewResponse> Reviews,
     PetSitterServiceResponse? PetSitter,
     PetGroomerServiceResponse? PetGroomer,
     PetTrainerServiceResponse? PetTrainer,
     PetAdoptionSaleServiceResponse? PetAdoptionSale,
     VetServiceResponse? Vet);
+
+/// <summary>
+/// Placeholder for a parent's review of a provider. The review feature is not
+/// built yet, so this carries no fields and the <c>Reviews</c> array is always
+/// empty — fields will be added when reviews land.
+/// </summary>
+public sealed record ProviderReviewResponse();
 
 public sealed record ProviderWorkingHoursDayResponse(
     int DayOfWeek,              // 0 = Sunday .. 6 = Saturday

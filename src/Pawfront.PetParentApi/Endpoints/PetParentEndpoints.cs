@@ -19,9 +19,9 @@ namespace Pawfront.PetParentApi.Endpoints;
 internal static class PetParentEndpoints
 {
     // Hard upper bound on uploaded image size. Mirrors the user-specified
-    // "max 1 MB" constraint. Applied to both pet-parent profile photos and
+    // "max 3 MB" constraint. Applied to both pet-parent profile photos and
     // individual pet photos — both endpoints share the same validation.
-    private const long MaxPhotoBytes = 1L * 1024 * 1024;
+    private const long MaxPhotoBytes = 3L * 1024 * 1024;
 
     // Allowlist of MIME types the mobile client can send. JPEG / PNG / WebP
     // covers the standard iOS + Android capture/picker formats. HEIC can be
@@ -65,6 +65,7 @@ internal static class PetParentEndpoints
         // to the caller's resolved PetParentId. Unknown pet → 404; wrong
         // owner → 403.
         var pets = builder.MapGroup("/pets/{petId:guid}").RequireOwnedPet();
+        pets.MapGet("/", GetPet);
         pets.MapPatch("/", UpdatePet);
         pets.MapPatch("/medical-info", UpdatePetMedicalInfo);
         pets.MapPost("/photos", UploadPetPhoto).DisableAntiforgery();
@@ -501,7 +502,7 @@ internal static class PetParentEndpoints
         {
             return ApiResults.BadRequest(
                 "ImageTooLarge",
-                $"Photo must be {MaxPhotoBytes / 1024} KB or smaller.");
+                $"Photo must be {MaxPhotoBytes / (1024 * 1024)} MB or smaller.");
         }
 
         var contentType = file.ContentType;
@@ -513,6 +514,20 @@ internal static class PetParentEndpoints
         }
 
         return null;
+    }
+
+    private static async Task<IResult> GetPet(
+        Guid petId,
+        IParentPetService petService,
+        CancellationToken cancellationToken)
+    {
+        // The group's ownership filter already confirmed the pet exists and
+        // belongs to the caller, so a null here would be an unexpected race
+        // (pet deleted between filter and read). Map it to 404 defensively.
+        var pet = await petService.GetPetAsync(petId, cancellationToken);
+        return pet is null
+            ? ApiResults.NotFound("PetNotFound", $"Pet '{petId}' was not found.")
+            : ApiResults.Ok(pet);
     }
 
     private static async Task<IResult> UpdatePet(

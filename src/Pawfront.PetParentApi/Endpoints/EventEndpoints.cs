@@ -36,6 +36,9 @@ internal static class EventEndpoints
         eventScoped.MapPost("/inquiries", (Guid eventId, IEventService svc, CancellationToken ct)
             => IncrementCounter(eventId, EventCounterType.Inquiry, svc, ct));
 
+        // Organiser sets how they want ticket proceeds paid out (Cash/Digital).
+        eventScoped.MapPost("/payout-methods", SavePayoutMethods);
+
         // Parent-organised event creation. Ownership-filtered: the
         // {petParentId} route segment must match the caller's resolved id.
         var parentScoped = builder
@@ -43,6 +46,7 @@ internal static class EventEndpoints
             .RequireOwnedPetParent();
         parentScoped.MapPost("/banner-image", UploadBanner).DisableAntiforgery();
         parentScoped.MapPost("/", Create);
+        parentScoped.MapGet("/", ListByPetParent);
 
         return builder;
     }
@@ -92,12 +96,14 @@ internal static class EventEndpoints
                     request.EndDate,
                     request.StartTime,
                     request.EndTime,
+                    request.IsPaid,
+                    request.Price,
+                    request.CancellationPolicy,
                     request.Physical is null
                         ? null
                         : new PhysicalEventInput(
                             request.Physical.MaximumCapacity,
-                            request.Physical.IsPaid,
-                            request.Physical.Price)),
+                            ToLocationInput(request.Physical.Location))),
                 cancellationToken);
 
             return ApiResults.Created($"/api/v1/events/{result.EventId}", ToResponse(result));
@@ -110,6 +116,15 @@ internal static class EventEndpoints
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
         }
+    }
+
+    private static async Task<IResult> ListByPetParent(
+        Guid petParentId,
+        IEventService eventService,
+        CancellationToken cancellationToken)
+    {
+        var results = await eventService.ListByPetParentAsync(petParentId, cancellationToken);
+        return ApiResults.Ok(results.Select(ToResponse).ToArray());
     }
 
     private static async Task<IResult> List(
@@ -155,6 +170,32 @@ internal static class EventEndpoints
             : ApiResults.Ok(ToResponse(result));
     }
 
+    private static async Task<IResult> SavePayoutMethods(
+        Guid eventId,
+        SaveEventPayoutMethodsRequest request,
+        IEventService eventService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await eventService.SavePayoutMethodsAsync(
+                eventId, request?.PayoutMethods!, cancellationToken);
+            return ApiResults.Ok(new EventPayoutMethodsResponse(result.EventId, result.PayoutMethods));
+        }
+        catch (EventNotFoundException exception)
+        {
+            return ApiResults.NotFound("EventNotFound", exception.Message);
+        }
+        catch (EventNotPaidException exception)
+        {
+            return ApiResults.BadRequest("FreeEventNoPayout", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
     private static async Task<IResult> IncrementCounter(
         Guid eventId,
         string counterType,
@@ -196,17 +237,52 @@ internal static class EventEndpoints
             result.EndDate,
             result.StartTime,
             result.EndTime,
+            result.IsPaid,
+            result.Price,
+            result.CancellationPolicy,
             result.Physical is null
                 ? null
                 : new PhysicalEventResponse(
                     result.Physical.MaximumCapacity,
-                    result.Physical.IsPaid,
-                    result.Physical.Price),
+                    ToLocationResponse(result.Physical.Location)),
             new PawPrintsResponse(
                 result.Counters.ViewCount,
                 result.Counters.ShareCount,
                 result.Counters.InquiryCount),
+            new EventOrganizerResponse(
+                result.Organizer.Type,
+                result.Organizer.Id,
+                result.Organizer.Name,
+                result.Organizer.ImageUrl),
             result.CreatedAtUtc,
             result.UpdatedAtUtc);
+    }
+
+    private static EventLocationInput? ToLocationInput(EventLocationRequest? location)
+    {
+        return location is null
+            ? null
+            : new EventLocationInput(
+                location.HouseNumber,
+                location.Street,
+                location.City,
+                location.Zip,
+                location.Country,
+                location.Latitude,
+                location.Longitude);
+    }
+
+    private static EventLocationResponse? ToLocationResponse(EventLocationResult? location)
+    {
+        return location is null
+            ? null
+            : new EventLocationResponse(
+                location.HouseNumber,
+                location.Street,
+                location.City,
+                location.Zip,
+                location.Country,
+                location.Latitude,
+                location.Longitude);
     }
 }

@@ -16,7 +16,10 @@ CREATE OR ALTER PROCEDURE [Event].[CreateEventBooking]
     @BookerEmail NVARCHAR(320),
     @BookerMobile NVARCHAR(32) = NULL,
     @PaymentMethod NVARCHAR(32),
-    @MaximumCapacity INT,
+    -- NULL for online events: they have no venue capacity, so the capacity
+    -- check below is skipped and any number of bookings is accepted (each
+    -- online booking is capped to one ticket by the application layer).
+    @MaximumCapacity INT = NULL,
     @TotalAmount DECIMAL(18, 2),
     @AttendeeNames [Event].[EventBookingAttendeeNames] READONLY
 AS
@@ -49,7 +52,7 @@ BEGIN
     WHERE [EventId] = @EventId
       AND [Status] = N'Confirmed';
 
-    IF @ReservedTickets + @TicketCount > @MaximumCapacity
+    IF @MaximumCapacity IS NOT NULL AND @ReservedTickets + @TicketCount > @MaximumCapacity
     BEGIN
         THROW 51091, 'Event is sold out or does not have enough remaining capacity.', 1;
     END

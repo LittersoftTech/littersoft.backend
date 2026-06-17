@@ -40,7 +40,9 @@ public sealed record CreateEventBookingSqlInput(
     string BookerEmail,
     string? BookerMobile,
     string PaymentMethod,
-    int MaximumCapacity,
+    // Null for online events (no venue capacity — unlimited). The sproc skips
+    // its capacity check when this is null.
+    int? MaximumCapacity,
     decimal TotalAmount,
     IReadOnlyList<string> AttendeeNames);
 
@@ -48,7 +50,10 @@ public sealed class EventBookingEventNotFoundException(Guid eventId)
     : Exception($"Event '{eventId}' was not found.");
 
 public sealed class EventBookingNotPhysicalException(Guid eventId)
-    : Exception($"Event '{eventId}' is not a physical event and cannot accept ticket bookings.");
+    : Exception($"Event '{eventId}' cannot accept ticket bookings (no capacity is configured).");
+
+public sealed class EventBookingOnlineSingleTicketException(Guid eventId)
+    : Exception($"Event '{eventId}' is an online event — only one ticket may be booked per booking.");
 
 public sealed class EventBookingCapacityExceededException(Guid eventId, int maximumCapacity)
     : Exception($"Event '{eventId}' is sold out (capacity {maximumCapacity}).")

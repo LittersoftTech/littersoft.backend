@@ -54,6 +54,10 @@ internal static class EventBookingEndpoints
         {
             return ApiResults.BadRequest("EventNotBookable", exception.Message);
         }
+        catch (EventBookingOnlineSingleTicketException exception)
+        {
+            return ApiResults.BadRequest("OnlineEventSingleTicket", exception.Message);
+        }
         catch (EventBookingCapacityExceededException exception)
         {
             return ApiResults.Conflict("EventSoldOut", exception.Message);

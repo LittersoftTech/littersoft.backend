@@ -6,6 +6,7 @@ namespace Pawfront.Infrastructure.Sql.Events;
 internal sealed class InMemoryEventStore : IEventSqlStore
 {
     private readonly ConcurrentDictionary<Guid, EventSqlSnapshot> events = new();
+    private readonly ConcurrentDictionary<Guid, IReadOnlyList<string>> payoutMethods = new();
 
     public Task<EventSqlSnapshot> CreateAsync(CreateEventSqlInput input, CancellationToken cancellationToken)
     {
@@ -25,6 +26,9 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             EndDate: input.EndDate,
             StartTime: input.StartTime,
             EndTime: input.EndTime,
+            IsPaid: input.IsPaid,
+            Price: input.Price,
+            CancellationPolicy: input.CancellationPolicy,
             CreatedAtUtc: now,
             UpdatedAtUtc: now,
             // Counters aren't tracked in the in-memory dev fallback.
@@ -54,6 +58,9 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             EndDate: input.EndDate,
             StartTime: input.StartTime,
             EndTime: input.EndTime,
+            IsPaid: input.IsPaid,
+            Price: input.Price,
+            CancellationPolicy: input.CancellationPolicy,
             CreatedAtUtc: now,
             UpdatedAtUtc: now,
             // Counters aren't tracked in the in-memory dev fallback.
@@ -75,6 +82,18 @@ internal sealed class InMemoryEventStore : IEventSqlStore
     {
         IReadOnlyList<EventSqlSnapshot> list = events.Values
             .Where(e => e.ProviderId == providerId)
+            .OrderByDescending(e => e.StartDate)
+            .ThenByDescending(e => e.StartTime)
+            .ToArray();
+        return Task.FromResult(list);
+    }
+
+    public Task<IReadOnlyList<EventSqlSnapshot>> ListByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<EventSqlSnapshot> list = events.Values
+            .Where(e => e.PetParentId == petParentId)
             .OrderByDescending(e => e.StartDate)
             .ThenByDescending(e => e.StartTime)
             .ToArray();
@@ -142,5 +161,29 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             throw new EventNotFoundException(eventId);
         }
         return Task.FromResult(new EventCounters(0, 0, 0));
+    }
+
+    public Task<IReadOnlyList<string>> SavePayoutMethodsAsync(
+        Guid eventId,
+        bool acceptsCash,
+        bool acceptsDigital,
+        CancellationToken cancellationToken)
+    {
+        if (!events.TryGetValue(eventId, out var snapshot))
+        {
+            throw new EventNotFoundException(eventId);
+        }
+
+        if (!snapshot.IsPaid)
+        {
+            throw new EventNotPaidException(eventId);
+        }
+
+        var saved = new List<string>();
+        if (acceptsCash) saved.Add("Cash");
+        if (acceptsDigital) saved.Add("Digital");
+
+        payoutMethods[eventId] = saved;
+        return Task.FromResult<IReadOnlyList<string>>(saved);
     }
 }

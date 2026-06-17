@@ -29,18 +29,36 @@ internal sealed class EventBookingService(
         var attendeeNames = NormalizeAttendees(command.AttendeeNames);
 
         // Resolve the event (SQL row + Cosmos extension) — we need MaximumCapacity
-        // and pricing to compute the total. IEventService already composes both.
+        // (from the physical block) and ticketing (top-level) to compute the
+        // total. IEventService already composes both.
         var @event = await eventService.GetAsync(command.EventId, cancellationToken)
             ?? throw new EventBookingEventNotFoundException(command.EventId);
 
-        if (!string.Equals(@event.EventType, nameof(EventType.Physical), StringComparison.Ordinal)
-            || @event.Physical is null)
+        int? maximumCapacity;
+        if (string.Equals(@event.EventType, nameof(EventType.Online), StringComparison.Ordinal))
         {
-            throw new EventBookingNotPhysicalException(command.EventId);
+            // Online events have no venue capacity — a ticket is just the
+            // signed-in attendee's seat, so exactly ONE ticket per booking.
+            // Capacity is unlimited (the sproc skips the check when null).
+            if (attendeeNames.Count != 1)
+            {
+                throw new EventBookingOnlineSingleTicketException(command.EventId);
+            }
+            maximumCapacity = null;
+        }
+        else
+        {
+            // Physical events allow ANY number of tickets, gated against the
+            // venue capacity held in the Cosmos extension doc.
+            if (@event.Physical is null)
+            {
+                throw new EventBookingNotPhysicalException(command.EventId);
+            }
+            maximumCapacity = @event.Physical.MaximumCapacity;
         }
 
-        var totalAmount = @event.Physical.IsPaid
-            ? (@event.Physical.Price ?? 0m) * attendeeNames.Count
+        var totalAmount = @event.IsPaid
+            ? (@event.Price ?? 0m) * attendeeNames.Count
             : 0m;
 
         return await sqlStore.CreateAsync(
@@ -50,7 +68,7 @@ internal sealed class EventBookingService(
                 bookerEmail,
                 bookerMobile,
                 paymentMethod,
-                @event.Physical.MaximumCapacity,
+                maximumCapacity,
                 totalAmount,
                 attendeeNames),
             cancellationToken);

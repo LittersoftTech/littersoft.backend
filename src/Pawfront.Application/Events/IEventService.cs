@@ -19,6 +19,16 @@ public interface IEventService
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists the events a pet parent has organised (the parent-host mirror of
+    /// <see cref="ListByProviderAsync"/>). Listing skips Cosmos for cost;
+    /// the detail endpoint hydrates physical details. Empty list when the
+    /// parent has organised none.
+    /// </summary>
+    Task<IReadOnlyCollection<EventResult>> ListByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Catalog-wide listing with optional filters. Every <see cref="EventListFilter"/>
     /// field is optional; omitting all of them returns every event. Validates enum-
     /// shaped filters (category, type, amenities) and the date-window ordering.
@@ -36,5 +46,17 @@ public interface IEventService
     Task<EventCounters> IncrementCounterAsync(
         Guid eventId,
         string counterType,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Saves the event organiser's payout methods (one or more of Cash /
+    /// Digital), replacing any previously stored set. Throws
+    /// <see cref="EventNotFoundException"/> if the event id is unknown and
+    /// <see cref="EventNotPaidException"/> if the event is free (payout
+    /// methods only apply to paid events).
+    /// </summary>
+    Task<EventPayoutMethodsResult> SavePayoutMethodsAsync(
+        Guid eventId,
+        IReadOnlyCollection<string> payoutMethods,
         CancellationToken cancellationToken);
 }

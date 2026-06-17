@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.Azure.Cosmos;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Domain.Services;
+using Pawfront.Domain.Vocabularies;
 using Pawfront.Infrastructure.Cosmos.Documents;
 using Pawfront.Infrastructure.Cosmos.ProviderServices;
 
@@ -12,20 +13,16 @@ internal sealed class CosmosPetGroomerServiceRegistry(
 {
     private static readonly string ServiceCategory = ProviderServiceCategory.PetGroomer.ToString();
 
-    private static readonly IReadOnlySet<string> AllowedAnimals = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "Dogs", "Cats", "GuineaPig", "Hamster"
-    };
+    // Animals + temperaments come from the canonical platform vocabulary
+    // (Pawfront.Domain.Vocabularies) — no per-category copy, so no drift.
+    private static readonly IReadOnlySet<string> AllowedAnimals = VocabularyCatalog.AnimalCodes;
 
     private static readonly IReadOnlySet<string> AllowedAddOns = new HashSet<string>(StringComparer.Ordinal)
     {
         "NailTrim", "EarCleaning", "TeethBrushing", "DeShedding", "FleaTreatment"
     };
 
-    private static readonly IReadOnlySet<string> AllowedTemperaments = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "Friendly", "Anxious", "Aggressive"
-    };
+    private static readonly IReadOnlySet<string> AllowedTemperaments = VocabularyCatalog.BehaviourCodes;
 
     private static readonly IReadOnlySet<string> AllowedServiceLocations = new HashSet<string>(StringComparer.Ordinal)
     {

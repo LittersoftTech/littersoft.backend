@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.Azure.Cosmos;
 using Pawfront.Application.Services.Vet;
 using Pawfront.Domain.Services;
+using Pawfront.Domain.Vocabularies;
 using Pawfront.Infrastructure.Cosmos.Documents;
 using Pawfront.Infrastructure.Cosmos.ProviderServices;
 
@@ -14,10 +15,9 @@ internal sealed class CosmosVetServiceRegistry(
 
     private static readonly string ServiceCategory = ProviderServiceCategory.Vet.ToString();
 
-    private static readonly IReadOnlySet<string> AllowedAnimals = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "Dog", "Cat", "Bird", "Rabbit", "Hamster", "GuineaPig", "Reptile", "Fish", "Other"
-    };
+    // Canonical platform vocabulary (Pawfront.Domain.Vocabularies) — the
+    // Animal enum is the single source of truth for this list.
+    private static readonly IReadOnlySet<string> AllowedAnimals = VocabularyCatalog.AnimalCodes;
 
     private static readonly IReadOnlySet<string> AllowedServiceLocations = new HashSet<string>(StringComparer.Ordinal)
     {

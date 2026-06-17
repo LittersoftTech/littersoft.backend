@@ -4,6 +4,7 @@ using Pawfront.Application.Configuration;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
 using Pawfront.Contracts.ParentPets;
+using Pawfront.Domain.Vocabularies;
 
 namespace Pawfront.Infrastructure.Sql.ParentPets;
 
@@ -224,6 +225,62 @@ internal sealed class SqlParentPetService(
             .ToList();
     }
 
+    public async Task<PetParentPetWithPhotosResponse?> GetPetAsync(
+        Guid petId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.GetPetParentPet");
+        command.Parameters.AddWithValue("@PetId", petId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        // Result set 1: the pet (zero or one row).
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var builder = new PetParentPetWithPhotosResponseBuilder(
+            PetId: reader.GetGuid(0),
+            PetParentId: reader.GetGuid(1),
+            PetType: reader.GetString(2),
+            PetName: reader.GetString(3),
+            Breed: reader.GetString(4),
+            Gender: reader.GetString(5),
+            DateOfBirth: DateOnly.FromDateTime(reader.GetDateTime(6)),
+            Weight: reader.GetDecimal(7),
+            MicrochipId: reader.IsDBNull(8) ? null : reader.GetString(8),
+            Description: reader.IsDBNull(9) ? null : reader.GetString(9),
+            VaccinationStatus: reader.IsDBNull(10) ? null : reader.GetString(10),
+            SterilizationStatus: reader.IsDBNull(11) ? null : reader.GetString(11),
+            MedicalHistory: reader.IsDBNull(12) ? null : reader.GetString(12),
+            Temperament: reader.IsDBNull(13) ? null : reader.GetString(13),
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
+            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero));
+
+        // Result set 2: the pet's photo gallery (oldest-first).
+        var photos = new List<PetPhotoResponse>();
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                photos.Add(new PetPhotoResponse(
+                    PetPhotoId: reader.GetGuid(0),
+                    PetId: reader.GetGuid(1),
+                    PhotoUrl: reader.GetString(2),
+                    CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(3), TimeSpan.Zero),
+                    UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero)));
+            }
+        }
+
+        return builder.Build(photos);
+    }
+
     /// <summary>
     /// Mutable shim for assembling a <see cref="PetParentPetWithPhotosResponse"/>
     /// across two result sets — the photo list isn't known until set 2 lands.
@@ -347,27 +404,30 @@ internal sealed class SqlParentPetService(
         };
     }
 
+    // Behaviour is the canonical pet-temperament vocabulary (shared with the
+    // provider "temperaments handled" lists).
     private static string NormalizeTemperament(string? value)
     {
-        return Required(value, nameof(value)) switch
-        {
-            "Anxious" => "Anxious",
-            "Friendly" => "Friendly",
-            "Aggressive" => "Aggressive",
-            var unsupported => throw new UnsupportedTemperamentException(unsupported)
-        };
+        var raw = Required(value, nameof(value));
+        return Enum.TryParse<Behaviour>(raw, ignoreCase: false, out var behaviour)
+            ? behaviour.ToString()
+            : throw new UnsupportedTemperamentException(raw);
     }
+
+    // Pets draw from the canonical Animal vocabulary but are restricted to the
+    // subset a parent can actually own. The spelling comes from the enum (one
+    // source of truth); the subset is the only per-context rule.
+    private static readonly IReadOnlySet<Animal> SupportedPetTypes = new HashSet<Animal>
+    {
+        Animal.Dog, Animal.Cat, Animal.Hamster, Animal.GuineaPig
+    };
 
     private static string NormalizePetType(string? value)
     {
-        return Required(value, nameof(value)) switch
-        {
-            "Dog" => "Dog",
-            "Cat" => "Cat",
-            "Hamster" => "Hamster",
-            "GuineaPig" => "GuineaPig",
-            var unsupported => throw new UnsupportedPetTypeException(unsupported)
-        };
+        var raw = Required(value, nameof(value));
+        return Enum.TryParse<Animal>(raw, ignoreCase: false, out var animal) && SupportedPetTypes.Contains(animal)
+            ? animal.ToString()
+            : throw new UnsupportedPetTypeException(raw);
     }
 
     private static string NormalizeGender(string? value)
