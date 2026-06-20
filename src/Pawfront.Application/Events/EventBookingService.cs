@@ -1,10 +1,13 @@
+using Microsoft.Extensions.Logging;
 using Pawfront.Domain.Events;
 
 namespace Pawfront.Application.Events;
 
 internal sealed class EventBookingService(
     IEventService eventService,
-    IEventBookingSqlStore sqlStore) : IEventBookingService
+    IEventBookingSqlStore sqlStore,
+    IEventCosmosStore cosmosStore,
+    ILogger<EventBookingService> logger) : IEventBookingService
 {
     private static readonly IReadOnlySet<string> AllowedPaymentMethods = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -99,7 +102,7 @@ internal sealed class EventBookingService(
         CancellationToken cancellationToken)
         => sqlStore.GetMetricsAsync(providerId, eventId, cancellationToken);
 
-    public Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
+    public async Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
         string bookerEmail,
         CancellationToken cancellationToken)
     {
@@ -108,7 +111,50 @@ internal sealed class EventBookingService(
             throw new ArgumentException("Booker email is required.", nameof(bookerEmail));
         }
 
-        return sqlStore.ListByBookerEmailAsync(bookerEmail.Trim(), cancellationToken);
+        var summaries = await sqlStore.ListByBookerEmailAsync(bookerEmail.Trim(), cancellationToken);
+
+        // The venue location lives in the Cosmos extension doc (physical events
+        // only), so hydrate it per booking — one point read each, fanned out in
+        // parallel. Online events have no doc; a failed read for a single
+        // booking is logged and that card is returned without a location.
+        var hydrated = await Task.WhenAll(summaries.Select(async summary =>
+        {
+            if (!string.Equals(summary.EventType, nameof(EventType.Physical), StringComparison.Ordinal))
+            {
+                return summary;
+            }
+
+            try
+            {
+                var physical = await cosmosStore.GetPhysicalAsync(
+                    summary.EventId, summary.EventCategory, cancellationToken);
+                return summary with { EventLocation = physical?.Location };
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "Failed to hydrate the venue location for event booking {BookingId} (event {EventId}); returning the card without a location.",
+                    summary.BookingId,
+                    summary.EventId);
+                return summary;
+            }
+        }));
+
+        return hydrated;
+    }
+
+    public Task<EventBookingResult> CancelByBookerAsync(
+        Guid bookingId,
+        string bookerEmail,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(bookerEmail))
+        {
+            throw new ArgumentException("Booker email is required.", nameof(bookerEmail));
+        }
+
+        return sqlStore.CancelByBookerAsync(bookingId, bookerEmail.Trim(), cancellationToken);
     }
 
     private static List<string> NormalizeAttendees(IReadOnlyList<string>? values)

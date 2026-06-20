@@ -9,5 +9,6 @@ public enum BlobUploadKind
     PetPhoto = 4,
     PetParentIdentity = 5,
     PetParentPhoto = 6,
-    ProviderPhoto = 7
+    ProviderPhoto = 7,
+    PetProfilePhoto = 8
 }

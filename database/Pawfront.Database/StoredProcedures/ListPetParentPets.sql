@@ -22,7 +22,8 @@ BEGIN
            [MedicalHistory],
            [Temperament],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [ProfilePhotoUrl]
     FROM [Parent].[Pets]
     WHERE [PetParentId] = @PetParentId
     ORDER BY [CreatedAtUtc] ASC;

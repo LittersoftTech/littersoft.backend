@@ -17,15 +17,14 @@ BEGIN
     WHERE pp.[PetParentId] = @PetParentId;
 
     -- Result set 2: pets summary. Each row carries a server-computed flag
-    -- for whether the three required medical fields are populated.
-    -- MedicalHistory is intentionally NOT part of the completion check —
-    -- it's a free-text field that the spec marked optional.
+    -- for whether the two required medical fields are populated.
+    -- MedicalHistory and Temperament are intentionally NOT part of the
+    -- completion check — both are optional (Temperament can be left empty).
     SELECT [PetId],
            [PetName],
            CASE
                WHEN [VaccinationStatus]   IS NOT NULL
                 AND [SterilizationStatus] IS NOT NULL
-                AND [Temperament]         IS NOT NULL
                THEN CAST(1 AS BIT)
                ELSE CAST(0 AS BIT)
            END AS [IsMedicalInfoComplete]

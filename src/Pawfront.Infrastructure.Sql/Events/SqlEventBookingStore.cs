@@ -85,9 +85,14 @@ internal sealed class SqlEventBookingStore(
                 EventId: reader.GetGuid(1),
                 EventTitle: reader.GetString(2),
                 EventCategory: reader.GetString(3),
+                // EventType is selected last (ordinal 19, after CancelledAtUtc)
+                // so the existing ordinals are unchanged; venue location is
+                // hydrated from Cosmos by the service, so it's null here.
+                EventType: reader.GetString(19),
                 EventStartDate: DateOnly.FromDateTime(reader.GetDateTime(4)),
                 EventStartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
                 EventBannerImageUrl: reader.IsDBNull(6) ? null : reader.GetString(6),
+                EventLocation: null,
                 BookerName: reader.GetString(7),
                 BookerEmail: reader.GetString(8),
                 BookerMobile: reader.IsDBNull(9) ? null : reader.GetString(9),
@@ -104,6 +109,37 @@ internal sealed class SqlEventBookingStore(
                     : new DateTimeOffset(reader.GetDateTime(18), TimeSpan.Zero)));
         }
         return rows;
+    }
+
+    public async Task<EventBookingResult> CancelByBookerAsync(
+        Guid bookingId,
+        string bookerEmail,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.CancelEventBooking", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@BookingId", bookingId);
+        command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            return await ReadBookingWithTicketsAsync(reader, cancellationToken)
+                ?? throw new InvalidOperationException("Event booking row was not returned after cancel.");
+        }
+        catch (SqlException exception) when (exception.Number == 51218)
+        {
+            throw new EventBookingNotFoundForBookerException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51219)
+        {
+            throw new EventBookingAlreadyCancelledException(bookingId);
+        }
     }
 
     public async Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)

@@ -30,7 +30,12 @@ BEGIN
            e.[CancellationPolicy],
            COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
                     org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
-           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl]
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
+           -- Total tickets booked (non-cancelled) — the "total bookings done".
+           (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
+            FROM [Event].[EventBookings] eb
+            WHERE eb.[EventId] = e.[EventId]
+              AND eb.[Status] = N'Confirmed') AS [TotalBookings]
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
@@ -41,4 +46,20 @@ BEGIN
     FROM [Event].[EventAmenities]
     WHERE [EventId] = @EventId
     ORDER BY [Amenity];
+
+    -- Result set 3: payment options (payout methods Cash / Digital).
+    SELECT [PayoutMethod]
+    FROM [Event].[EventPayoutMethods]
+    WHERE [EventId] = @EventId
+    ORDER BY [PayoutMethod];
+
+    -- Result set 4: attendees — names only (+ ticket number), non-cancelled
+    -- bookings. Booker contact / payment stay on the organiser-only dashboard.
+    SELECT t.[AttendeeName],
+           t.[TicketNumber]
+    FROM [Event].[EventBookingTickets] t
+    INNER JOIN [Event].[EventBookings] b ON b.[BookingId] = t.[BookingId]
+    WHERE t.[EventId] = @EventId
+      AND b.[Status] = N'Confirmed'
+    ORDER BY b.[CreatedAtUtc] ASC, t.[TicketNumber] ASC;
 END;

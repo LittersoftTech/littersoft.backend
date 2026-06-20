@@ -44,9 +44,12 @@ public sealed record EventBookingSummaryResponse(
     Guid EventId,
     string EventTitle,
     string EventCategory,
+    string EventType,
     DateOnly EventStartDate,
     TimeOnly EventStartTime,
     string? EventBannerImageUrl,
+    // Venue address for physical events; null for online events (no venue).
+    EventLocationResponse? EventLocation,
     string BookerName,
     string BookerEmail,
     string? BookerMobile,

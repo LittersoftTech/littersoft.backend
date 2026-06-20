@@ -15,6 +15,7 @@
     { "key": "petParentId", "value": "", "description": "Captured by POST /parent-onboarding/profile and GET /parent-onboarding/me." },
     { "key": "petId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/pets." },
     { "key": "petParentPhotoId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/photos." },
+    { "key": "petPhotoId", "value": "", "description": "Captured by POST /pets/{petId}/photos." },
     { "key": "parentMobileOtpId", "value": "", "description": "Captured by POST .../mobile-verification/otp." },
     { "key": "providerId", "value": "", "description": "Captured by the provider searches / discovery. Or paste one from the provider host." },
     { "key": "serviceId", "value": "", "description": "Captured by the provider searches (first hit's serviceId)." },
@@ -246,6 +247,19 @@
           }
         },
         {
+          "name": "GET /pet-parents/{petParentId}/identity",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/identity",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "identity"]
+            },
+            "description": "Reads the parent's single identity row with full details + the document blob URL: { parentIdentityId, petParentId, identityType, identityPhotoUrl, createdAtUtc, updatedAtUtc }. Fetch the document bytes by POSTing identityPhotoUrl to /blob-images. 404 ParentIdentityNotFound when none on file."
+          }
+        },
+        {
           "name": "DELETE /pet-parents/{petParentId}/identity",
           "request": {
             "method": "DELETE",
@@ -413,11 +427,42 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pets", "{{petId}}", "medical-info"]
             },
-            "description": "vaccinationStatus ∈ {Vaccinated, NotVaccinated}; sterilizationStatus ∈ {Sterilized, Intact}; temperament ∈ {Anxious, Friendly, Aggressive}; medicalHistory optional."
+            "description": "vaccinationStatus ∈ {Vaccinated, NotVaccinated}; sterilizationStatus ∈ {Sterilized, Intact}; temperament ∈ {Anxious, Friendly, Aggressive} but OPTIONAL (omit/empty → null); medicalHistory optional. Only vaccination + sterilization gate onboarding completeness."
+          }
+        },
+        {
+          "name": "POST /pets/{petId}/profile-image",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": [] }]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pets/{{petId}}/profile-image",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pets", "{{petId}}", "profile-image"]
+            },
+            "description": "multipart/form-data — attach a `file` (≤3 MB, JPEG/PNG/WebP). Sets the pet's SINGLE primary/profile photo (distinct from the gallery below) — stored on Parent.Pets.ProfilePhotoUrl and surfaced as `profilePhotoUrl` on every pet read. Returns { petId, profilePhotoUrl, updatedAtUtc }. Ownership-filtered. 404 PetNotFound; 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat."
           }
         },
         {
           "name": "POST /pets/{petId}/photos",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.petPhotoId) {",
+                  "  pm.collectionVariables.set('petPhotoId', json.data.petPhotoId);",
+                  "}"
+                ]
+              }
+            }
+          ],
           "request": {
             "method": "POST",
             "header": [],
@@ -430,14 +475,40 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pets", "{{petId}}", "photos"]
             },
-            "description": "multipart/form-data — attach a `file` (≤3 MB, JPEG/PNG/WebP). One row per upload; call N times for N photos."
+            "description": "multipart/form-data — attach a `file` (≤3 MB, JPEG/PNG/WebP). One row per upload; call N times for N photos. Captures `petPhotoId`."
+          }
+        },
+        {
+          "name": "DELETE /pets/{petId}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pets/{{petId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pets", "{{petId}}"]
+            },
+            "description": "Permanently removes the pet. Photo rows cascade (blobs left for a future sweep); bookings that referenced the pet are detached (their petId set null, snapshots preserved). Ownership-filtered. Returns { petId, petParentId, deletedAtUtc }. 404 PetNotFound for unknown pet; 403 Forbidden for someone else's pet."
+          }
+        },
+        {
+          "name": "DELETE /pets/{petId}/photos/{photoId}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pets/{{petId}}/photos/{{petPhotoId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pets", "{{petId}}", "photos", "{{petPhotoId}}"]
+            },
+            "description": "Removes one photo from a pet's gallery (scoped by petId + photoId) + best-effort blob delete. Ownership-filtered. Returns { petPhotoId, petId, photoUrl, deletedAtUtc }. 404 PetPhotoNotFound; 403 Forbidden / 404 PetNotFound on the pet."
           }
         }
       ]
     },
     {
       "name": "5. Provider Discovery & Search",
-      "description": "Parent-facing browse + per-service booking search. These return data only if a provider has been registered via the provider host. `petId` (optional) is ownership-enforced and its PetType becomes the animal filter. Each search test script captures the first hit's `providerId` + `serviceId` for the booking + slots folders below.",
+      "description": "Parent-facing browse + per-service booking search. These return data only if a provider has been registered via the provider host. `petId` (optional) is ownership-enforced and its PetType becomes the animal filter. Each search test script captures the first hit's `providerId` + `serviceId` for the booking + slots folders below. Each per-service search hit also carries `imageUrl` — the service image the provider uploaded for that offering (null when unset).",
       "item": [
         {
           "name": "GET /providers (discovery)",
@@ -626,6 +697,42 @@
           }
         },
         {
+          "name": "GET /providers/search/trainers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.collectionVariables.set('providerId', json.data[0].providerId);",
+                  "  pm.collectionVariables.set('serviceId', json.data[0].serviceId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/search/trainers?skip=0&take=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "search", "trainers"],
+              "query": [
+                { "key": "petId", "value": "{{petId}}", "description": "Optional. Must be your pet; its PetType becomes the animal filter.", "disabled": true },
+                { "key": "date", "value": "2026-07-15", "description": "Optional. date → any free slot of the session's duration that day.", "disabled": true },
+                { "key": "city", "value": "Pune", "disabled": true },
+                { "key": "serviceLocation", "value": "ProvidersPlace", "description": "ParentsPlace | ProvidersPlace", "disabled": true },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "50" }
+              ]
+            },
+            "description": "PetTrainer/TrainingSession search. A training session is a single fixed-duration booking (like a vet appointment): date → any free slot of the session's duration that day. Charges = PricePerSession (PerSession). Each hit carries imageUrl (the offering's service image)."
+          }
+        },
+        {
           "name": "GET /providers/{providerId}",
           "request": {
             "method": "GET",
@@ -714,6 +821,19 @@
           }
         },
         {
+          "name": "GET /pet-parents/{petParentId}/bookings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings"]
+            },
+            "description": "The parent's own service bookings (\"my bookings\"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered — petParentId comes from the JWT, so you only ever see your own. Returns [] when none (no 404)."
+          }
+        },
+        {
           "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/status",
           "request": {
             "method": "POST",
@@ -778,10 +898,11 @@
                 { "key": "endDate", "value": "2026-12-31", "disabled": true },
                 { "key": "isChildFriendly", "value": "true", "disabled": true },
                 { "key": "amenities", "value": "Restrooms", "disabled": true },
-                { "key": "amenities", "value": "FreeParking", "disabled": true }
+                { "key": "amenities", "value": "FreeParking", "disabled": true },
+                { "key": "title", "value": "dog", "description": "Optional case-insensitive 'contains' search on the event title (LIKE %term%).", "disabled": true }
               ]
             },
-            "description": "Catalog listing. All query params optional; amenities repeats. Captures the first event's `eventId`. Each event returns top-level `isPaid` / `price` (all event types), `pawPrints`, and an `organizer { type, id, name, imageUrl }` block."
+            "description": "Catalog listing. All query params optional; amenities repeats. `title` is an optional case-insensitive 'contains' search on the event title. Captures the first event's `eventId`. Each event returns top-level `isPaid` / `price` (all event types), `pawPrints`, an `organizer { type, id, name, imageUrl }` block, physical details (incl. location), and a `bookings { maxBookings, totalBookings }` block (maxBookings = physical capacity, null for online; totalBookings = non-cancelled tickets booked)."
           }
         },
         {
@@ -794,7 +915,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events", "{{eventId}}"]
             },
-            "description": "Single event detail (SQL + Cosmos for physical). Returns top-level `isPaid` / `price` for every event type (online included), `physical.maximumCapacity` + `physical.location` for physical events, `pawPrints { viewCount, shareCount, inquiryCount }`, and an `organizer { type, id, name, imageUrl }` block."
+            "description": "Single event detail (SQL + Cosmos for physical). Returns top-level `isPaid` / `price` for every event type (online included), `physical.maximumCapacity` + `physical.location` for physical events, `pawPrints { viewCount, shareCount, inquiryCount }`, an `organizer { type, id, name, imageUrl }` block, a `bookings { maxBookings, totalBookings }` block, `paymentOptions [\"Cash\"|\"Digital\"]`, and `attendees [{ attendeeName, ticketNumber }]` (names only — booker contact / payment stay on the organiser dashboard)."
           }
         },
         {
@@ -920,6 +1041,40 @@
           }
         },
         {
+          "name": "PUT /pet-parents/{petParentId}/events/{eventId}",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventCategory\": \"OutdoorActivities\",\n  \"isChildFriendly\": true,\n  \"title\": \"Community Dog Walk 2026 (Updated)\",\n  \"description\": \"Updated route — now starting from the north gate.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-08-11\",\n  \"endDate\": \"2026-08-11\",\n  \"startTime\": \"08:30:00\",\n  \"endTime\": \"11:30:00\",\n  \"isPaid\": true,\n  \"price\": 60,\n  \"cancellationPolicy\": \"FullRefundUpTo4Hours\",\n  \"physical\": {\n    \"maximumCapacity\": 120,\n    \"location\": {\n      \"houseNumber\": \"12\",\n      \"street\": \"Seefeldstrasse\",\n      \"city\": \"Zurich\",\n      \"zip\": \"8008\",\n      \"country\": \"Switzerland\",\n      \"latitude\": 47.3667,\n      \"longitude\": 8.5500\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events/{{eventId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "events", "{{eventId}}"]
+            },
+            "description": "Full-replace edit of a parent-organised event — every field editable (same body shape as create). Ownership-filtered; 404 EventNotFound when not found or not owned by this parent; 400 InvalidRequest on validation. Reconciles the Cosmos physical doc (upsert when physical; deletes the old doc when the event becomes Online or its category changes). Editing a paid event to free drops its payout methods. Returns the full detail (incl. bookings, paymentOptions, attendees)."
+          }
+        },
+        {
+          "name": "PATCH /pet-parents/{petParentId}/events/{eventId}",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Community Dog Walk 2026 (Patched Title)\",\n  \"price\": 75\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events/{{eventId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "events", "{{eventId}}"]
+            },
+            "description": "Partial edit — send ONLY the fields you want to change; everything else stays as-is. Each field is optional; an OMITTED field is left unchanged, while an explicit null CLEARS it (e.g. `\"bannerImageUrl\": null`). The merged event is then validated like a full edit, so cross-field rules still apply (flipping `eventType` to Physical needs a `physical` block; flipping `isPaid` to true needs a `price`). Ownership-filtered. 404 EventNotFound; 400 InvalidRequest. Returns the full detail (incl. bookings, paymentOptions, attendees)."
+          }
+        },
+        {
           "name": "GET /pet-parents/{petParentId}/events",
           "request": {
             "method": "GET",
@@ -929,7 +1084,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "events"]
             },
-            "description": "Lists the events this parent has organised (mirror of the provider host's GET /providers/{providerId}/events). Ownership-filtered. SQL-only — physical details are hydrated only on GET /events/{eventId}. Each event includes pawPrints { viewCount, shareCount, inquiryCount } and an organizer { type, id, name, imageUrl } block. Ordered most-recent first; returns [] when the parent has organised none."
+            "description": "Lists the events this parent has organised (mirror of the provider host's GET /providers/{providerId}/events). Ownership-filtered. Hydrates physical details (incl. location) per event. Each event includes pawPrints { viewCount, shareCount, inquiryCount }, an organizer { type, id, name, imageUrl } block, and a bookings { maxBookings, totalBookings } block (maxBookings = physical capacity, null for online; totalBookings = non-cancelled tickets booked). Ordered most-recent first; returns [] when the parent has organised none."
           }
         },
         {
@@ -1000,6 +1155,19 @@
           }
         },
         {
+          "name": "DELETE /event-bookings/{bookingId}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/event-bookings/{{eventBookingId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "event-bookings", "{{eventBookingId}}"]
+            },
+            "description": "Soft-cancels the caller's own booking. Authorised by your Firebase **email claim** matched against the booking's bookerEmail (so you can only cancel a booking you made). Flips Status → Cancelled and frees the seat capacity automatically; returns the cancelled booking + tickets. 403 EmailClaimMissing (token has no email); 404 EventBookingNotFound (unknown id OR not yours); 409 EventBookingAlreadyCancelled."
+          }
+        },
+        {
           "name": "GET /pet-parents/{petParentId}/event-bookings",
           "request": {
             "method": "GET",
@@ -1009,7 +1177,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "event-bookings"]
             },
-            "description": "Lists the caller's event-ticket bookings (slim cards joined with the event). Filters by the JWT email claim — 403 EmailClaimMissing if absent. Only matches bookings whose bookerEmail equals your Firebase email."
+            "description": "Lists the caller's event-ticket bookings (slim cards joined with the event). Filters by the JWT email claim — 403 EmailClaimMissing if absent. Only matches bookings whose bookerEmail equals your Firebase email. Each card carries the event `eventType` + `eventLocation` (venue address for physical events; null for online), plus title, category, start date/time, and banner."
           }
         }
       ]

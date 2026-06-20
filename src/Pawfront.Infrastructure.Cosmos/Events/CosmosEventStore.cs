@@ -58,6 +58,26 @@ internal sealed class CosmosEventStore(
                 ToLocationResult(document.Physical.Location));
     }
 
+    public async Task DeletePhysicalAsync(
+        Guid eventId,
+        string eventCategory,
+        CancellationToken cancellationToken)
+    {
+        var container = await containerAccessor.GetContainerAsync(cancellationToken);
+
+        try
+        {
+            await container.DeleteItemAsync<EventDocument>(
+                eventId.ToString(),
+                new PartitionKey(eventCategory),
+                cancellationToken: cancellationToken);
+        }
+        catch (CosmosException exception) when (exception.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Already absent (online event, or never had a physical doc) — no-op.
+        }
+    }
+
     private static EventLocationDetails? ToLocationDocument(EventLocationInput? location)
     {
         if (location is null)

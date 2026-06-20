@@ -55,6 +55,18 @@ public interface IParentPetService
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Sets the pet's single primary/profile photo URL (the
+    /// <c>Parent.Pets.ProfilePhotoUrl</c> column — distinct from the photo
+    /// gallery). The blob upload happens at the endpoint layer; this method
+    /// only writes the URL. Throws <see cref="PetNotFoundException"/> when the
+    /// pet row is missing.
+    /// </summary>
+    Task<UpdatePetProfilePhotoResponse> UpdateProfilePhotoAsync(
+        Guid petId,
+        string profilePhotoUrl,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Returns every pet on file for the given parent, each with its full
     /// medical-info snapshot and embedded photo gallery. Returns an empty
     /// list when the parent has no pets (or doesn't exist) — list semantics,
@@ -74,5 +86,29 @@ public interface IParentPetService
     /// </summary>
     Task<PetParentPetWithPhotosResponse?> GetPetAsync(
         Guid petId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Permanently removes a pet. Photo rows (<c>Parent.PetPhotos</c>) cascade
+    /// with the pet; any bookings that referenced it are detached (their
+    /// <c>PetId</c> is set null — booking snapshots stay intact). Photo blobs
+    /// are not removed (left for a future sweep, matching cascade behaviour
+    /// elsewhere). Throws <see cref="PetNotFoundException"/> when the pet row
+    /// is missing.
+    /// </summary>
+    Task<DeletePetResponse> DeletePetAsync(
+        Guid petId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Removes a single photo from a pet's gallery. Scoped by both
+    /// <paramref name="petId"/> and <paramref name="petPhotoId"/> so a photo
+    /// can only be deleted via the pet it belongs to. Returns the removed
+    /// photo's URL so the endpoint can best-effort delete the blob. Throws
+    /// <see cref="PetPhotoNotFoundException"/> when no matching photo exists.
+    /// </summary>
+    Task<DeletePetPhotoResponse> DeletePhotoAsync(
+        Guid petId,
+        Guid petPhotoId,
         CancellationToken cancellationToken);
 }

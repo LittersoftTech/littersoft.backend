@@ -444,6 +444,36 @@ internal sealed class SqlParentOnboardingService(
         }
     }
 
+    public async Task<PetParentIdentityResponse?> GetIdentityAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.GetPetParentIdentity");
+
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        // Zero or one row — the parent has at most one identity on file.
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new PetParentIdentityResponse(
+            reader.GetGuid(0),
+            reader.GetGuid(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero),
+            new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero));
+    }
+
     public async Task<DeletePetParentIdentityResponse> DeleteIdentityAsync(
         Guid petParentId,
         CancellationToken cancellationToken)

@@ -94,4 +94,7 @@ public sealed record ProviderSearchResultResponse(
     int CompletedBookings,
     decimal? Charges,
     string ChargesUnit,
-    string? ServiceItemCode);
+    string? ServiceItemCode,
+    // The service image the provider uploaded for this offering (same image
+    // as the discovery card's). Null when the provider hasn't set one.
+    string? ImageUrl);

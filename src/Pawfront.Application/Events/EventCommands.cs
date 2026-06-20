@@ -45,6 +45,54 @@ public sealed record CreateParentEventCommand(
     string CancellationPolicy,
     PhysicalEventInput? Physical);
 
+/// <summary>
+/// Full-replace edit of a provider-organised event (every field is editable).
+/// Same shape as <see cref="CreateEventCommand"/> plus the target
+/// <see cref="EventId"/>. The owning provider is taken from the authenticated
+/// route, never the body.
+/// </summary>
+public sealed record UpdateEventCommand(
+    Guid EventId,
+    Guid ProviderId,
+    string EventCategory,
+    bool IsChildFriendly,
+    string Title,
+    string Description,
+    string? BannerImageUrl,
+    IReadOnlyCollection<string> Amenities,
+    string EventType,
+    DateOnly StartDate,
+    DateOnly EndDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    bool IsPaid,
+    decimal? Price,
+    string CancellationPolicy,
+    PhysicalEventInput? Physical);
+
+/// <summary>
+/// Full-replace edit of a parent-organised event. Mirror of
+/// <see cref="UpdateEventCommand"/> keyed by <see cref="PetParentId"/>.
+/// </summary>
+public sealed record UpdateParentEventCommand(
+    Guid EventId,
+    Guid PetParentId,
+    string EventCategory,
+    bool IsChildFriendly,
+    string Title,
+    string Description,
+    string? BannerImageUrl,
+    IReadOnlyCollection<string> Amenities,
+    string EventType,
+    DateOnly StartDate,
+    DateOnly EndDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    bool IsPaid,
+    decimal? Price,
+    string CancellationPolicy,
+    PhysicalEventInput? Physical);
+
 public sealed record PhysicalEventInput(
     int MaximumCapacity,
     // Nullable on the raw input — the service validates that physical events
@@ -89,7 +137,24 @@ public sealed record EventResult(
     EventCounters Counters,
     // Who organised the event (provider or pet parent), derived from whichever
     // of ProviderId / PetParentId is set plus the joined name / photo.
-    EventOrganizer Organizer);
+    EventOrganizer Organizer,
+    // Total tickets booked (non-cancelled) so far. The "max number of bookings"
+    // is the physical capacity (Physical.MaximumCapacity); null/unlimited for
+    // online events.
+    int TotalBookings = 0,
+    // Detail-only (populated by GetAsync / UpdateAsync): the event's payment
+    // options (payout methods) and attendee names. Null on list reads.
+    IReadOnlyCollection<string>? PaymentOptions = null,
+    IReadOnlyCollection<EventAttendeeSummary>? Attendees = null);
+
+/// <summary>
+/// A single attendee on an event, as surfaced on the public event-detail read.
+/// Deliberately names-only (plus the ticket number) — booker contact / payment
+/// detail stays on the organiser-only dashboard.
+/// </summary>
+public sealed record EventAttendeeSummary(
+    string AttendeeName,
+    int TicketNumber);
 
 /// <summary>
 /// Display details for the event's organiser. <see cref="Type"/> is
@@ -142,7 +207,14 @@ public sealed record EventSqlSnapshot(
     // Parent.PetParents in every event-returning sproc's result set 1.
     // OrganizerImageUrl is null for provider-organised events.
     string? OrganizerName = null,
-    string? OrganizerImageUrl = null);
+    string? OrganizerImageUrl = null,
+    // Total tickets booked (non-cancelled) — appended after the organiser
+    // fields in every event-returning sproc's result set 1.
+    int TotalBookings = 0,
+    // Detail-only: filled by GetAsync / UpdateAsync from GetEvent/UpdateEvent's
+    // extra result sets (payout methods + attendee names). Null on list reads.
+    IReadOnlyCollection<string>? PaymentOptions = null,
+    IReadOnlyCollection<EventAttendeeSummary>? Attendees = null);
 
 public sealed record CreateEventSqlInput(
     Guid ProviderId,
@@ -184,12 +256,58 @@ public sealed record CreateParentEventSqlInput(
     string CancellationPolicy);
 
 /// <summary>
+/// Wire shape sent from the event service to the SQL store for a provider
+/// event edit. Mirrors <see cref="CreateEventSqlInput"/> plus the target
+/// <see cref="EventId"/> (and ProviderId used for the ownership check).
+/// </summary>
+public sealed record UpdateEventSqlInput(
+    Guid EventId,
+    Guid ProviderId,
+    string EventCategory,
+    bool IsChildFriendly,
+    string Title,
+    string Description,
+    string? BannerImageUrl,
+    IReadOnlyCollection<string> Amenities,
+    string EventType,
+    DateOnly StartDate,
+    DateOnly EndDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    bool IsPaid,
+    decimal? Price,
+    string CancellationPolicy);
+
+/// <summary>
+/// Wire shape for a parent event edit. Mirror of
+/// <see cref="UpdateEventSqlInput"/> keyed by <see cref="PetParentId"/>.
+/// </summary>
+public sealed record UpdateParentEventSqlInput(
+    Guid EventId,
+    Guid PetParentId,
+    string EventCategory,
+    bool IsChildFriendly,
+    string Title,
+    string Description,
+    string? BannerImageUrl,
+    IReadOnlyCollection<string> Amenities,
+    string EventType,
+    DateOnly StartDate,
+    DateOnly EndDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    bool IsPaid,
+    decimal? Price,
+    string CancellationPolicy);
+
+/// <summary>
 /// Catalog-wide event listing filter. Every field is optional; omitting a field
 /// means "no constraint on that dimension". <see cref="StartDate"/> and
 /// <see cref="EndDate"/> form an overlap window — an event is returned when
 /// its <c>[StartDate, EndDate]</c> intersects the requested window.
 /// <see cref="Amenities"/>, when supplied, requires the event to carry EVERY
-/// listed amenity (ALL-match semantics).
+/// listed amenity (ALL-match semantics). <see cref="Title"/>, when supplied,
+/// is a case-insensitive "contains" match on the event title.
 /// </summary>
 public sealed record EventListFilter(
     string? EventCategory,
@@ -197,7 +315,8 @@ public sealed record EventListFilter(
     DateOnly? StartDate,
     DateOnly? EndDate,
     bool? IsChildFriendly,
-    IReadOnlyCollection<string>? Amenities);
+    IReadOnlyCollection<string>? Amenities,
+    string? Title = null);
 
 public sealed class EventProviderNotFoundException(Guid providerId)
     : Exception($"Provider profile '{providerId}' was not found.");

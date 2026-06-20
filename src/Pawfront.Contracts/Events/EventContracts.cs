@@ -1,3 +1,5 @@
+using Pawfront.Contracts.Common;
+
 namespace Pawfront.Contracts.Events;
 
 public sealed record CreateEventRequest(
@@ -21,6 +23,60 @@ public sealed record CreateEventRequest(
     // FullRefundUpTo2Hours, NoRefund. Required for every event type.
     string CancellationPolicy,
     PhysicalEventRequest? Physical);
+
+/// <summary>
+/// Body for the full-replace event edit (<c>PUT /…/events/{eventId}</c>) on
+/// both hosts. Same shape as <see cref="CreateEventRequest"/> — every field is
+/// editable. The organiser (provider / pet parent) and the event id come from
+/// the route, not the body.
+/// </summary>
+public sealed record UpdateEventRequest(
+    string EventCategory,
+    bool IsChildFriendly,
+    string Title,
+    string Description,
+    string? BannerImageUrl,
+    IReadOnlyCollection<string> Amenities,
+    string EventType,
+    DateOnly StartDate,
+    DateOnly EndDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    bool IsPaid,
+    decimal? Price,
+    string CancellationPolicy,
+    PhysicalEventRequest? Physical);
+
+/// <summary>
+/// Body for the partial event edit (<c>PATCH /…/events/{eventId}</c>) on both
+/// hosts. Every field is wrapped in <see cref="Optional{T}"/> so the server can
+/// tell an omitted field (leave unchanged) apart from one explicitly sent as
+/// null (clear it). Only the supplied fields are applied; everything else keeps
+/// its current value. The merged result is then validated exactly like a full
+/// edit, so cross-field rules still hold (e.g. flipping <c>eventType</c> to
+/// Physical requires a <c>physical</c> block; flipping <c>isPaid</c> to true
+/// requires a <c>price</c>).
+/// </summary>
+public sealed record PatchEventRequest(
+    Optional<string> EventCategory,
+    Optional<bool> IsChildFriendly,
+    Optional<string> Title,
+    Optional<string> Description,
+    // Nullable + clearable: send null to remove the banner, omit to keep it.
+    Optional<string?> BannerImageUrl,
+    Optional<IReadOnlyCollection<string>> Amenities,
+    Optional<string> EventType,
+    Optional<DateOnly> StartDate,
+    Optional<DateOnly> EndDate,
+    Optional<TimeOnly> StartTime,
+    Optional<TimeOnly> EndTime,
+    Optional<bool> IsPaid,
+    // Nullable: null is meaningful only when the merged event is free.
+    Optional<decimal?> Price,
+    Optional<string> CancellationPolicy,
+    // Send the whole physical block to change capacity/venue; null to drop it
+    // (only valid when the merged event is online); omit to keep it.
+    Optional<PhysicalEventRequest?> Physical);
 
 public sealed record PhysicalEventRequest(
     int MaximumCapacity,
@@ -71,8 +127,36 @@ public sealed record EventResponse(
     // Who created the event — a provider OR a pet parent. Resolved from
     // whichever of ProviderId / PetParentId is set.
     EventOrganizerResponse Organizer,
+    // Booking summary: max bookings (= physical capacity; null/unlimited for
+    // online events) and total bookings done so far. Returned on list + detail.
+    EventBookingStatsResponse Bookings,
+    // Detail-only (GET /events/{eventId}, PUT edit): the event's payment options
+    // (Cash / Digital). Null on list reads.
+    IReadOnlyCollection<string>? PaymentOptions,
+    // Detail-only: who is attending — names + ticket number only. Null on list
+    // reads.
+    IReadOnlyCollection<EventAttendeeSummaryResponse>? Attendees,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
+
+/// <summary>
+/// Booking summary for an event. <see cref="MaxBookings"/> is the maximum
+/// number of bookings allowed (the physical venue capacity); it is null for
+/// online events, which have no capacity limit. <see cref="TotalBookings"/> is
+/// the number of tickets booked (non-cancelled) so far.
+/// </summary>
+public sealed record EventBookingStatsResponse(
+    int? MaxBookings,
+    int TotalBookings);
+
+/// <summary>
+/// One attendee on an event, as exposed on the public event-detail read —
+/// names only (no booker contact or payment detail; those stay on the
+/// organiser-only dashboard).
+/// </summary>
+public sealed record EventAttendeeSummaryResponse(
+    string AttendeeName,
+    int TicketNumber);
 
 /// <summary>
 /// Identifies the organiser of an event for display in event reads. An event

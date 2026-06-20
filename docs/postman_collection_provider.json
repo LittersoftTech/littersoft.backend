@@ -1077,11 +1077,58 @@
           }
         },
         {
+          "name": "PUT edit event (full replace)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events","{{eventId}}"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventCategory\": \"AdoptionAndRescue\",\n  \"isChildFriendly\": true,\n  \"title\": \"Spring Adoption Drive 2026 (Updated)\",\n  \"description\": \"Updated details. Now featuring 40+ adoptable pets.\",\n  \"bannerImageUrl\": \"https://example.com/images/event-banner.jpg\",\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\", \"FirstAidBooth\", \"FoodAndBeverage\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-06-16\",\n  \"endDate\": \"2026-06-16\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"18:00:00\",\n  \"isPaid\": true,\n  \"price\": 150,\n  \"cancellationPolicy\": \"FullRefundUpTo2Hours\",\n  \"physical\": {\n    \"maximumCapacity\": 250,\n    \"location\": {\n      \"houseNumber\": \"42\",\n      \"street\": \"Park Lane\",\n      \"city\": \"Pune\",\n      \"zip\": \"411001\",\n      \"country\": \"India\",\n      \"latitude\": 18.5204,\n      \"longitude\": 73.8567\n    }\n  }\n}"
+            },
+            "description": "Full-replace edit of a provider-organised event — every field editable (same body shape as create). 404 EventNotFound when the event isn't found or isn't owned by this provider; 400 InvalidRequest on validation. Reconciles the Cosmos physical doc (upsert when physical; deletes the old doc when the event becomes Online or its category changes). Editing a paid event to free drops its payout methods. Returns the full detail (incl. bookings, paymentOptions, attendees). Payout methods themselves are set via the dedicated payout-methods endpoint, not this edit."
+          }
+        },
+        {
+          "name": "PATCH edit event (partial)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events","{{eventId}}"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Spring Adoption Drive 2026 (Patched Title)\",\n  \"price\": 175\n}"
+            },
+            "description": "Partial edit — send ONLY the fields you want to change; everything else stays as-is. Each field is optional; an OMITTED field is left unchanged, while an explicit null CLEARS it (e.g. `\"bannerImageUrl\": null`). The merged event is then validated like a full edit, so cross-field rules still apply (flipping `eventType` to Physical needs a `physical` block; flipping `isPaid` to true needs a `price`). 404 EventNotFound (not found / not owned); 400 InvalidRequest. Returns the full detail (incl. bookings, paymentOptions, attendees)."
+          }
+        },
+        {
+          "name": "GET events (catalog list)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events?skip=0",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","events"],
+              "query": [
+                { "key": "eventCategory", "value": "AdoptionAndRescue", "description": "AdoptionAndRescue | PetTraining | Charity | Volunteering | HealthAndWellness | SocialAndCultural | OutdoorActivities | ParentEducation", "disabled": true },
+                { "key": "eventType", "value": "Physical", "description": "Physical | Online", "disabled": true },
+                { "key": "startDate", "value": "2026-06-01", "disabled": true },
+                { "key": "endDate", "value": "2026-12-31", "disabled": true },
+                { "key": "isChildFriendly", "value": "true", "disabled": true },
+                { "key": "amenities", "value": "Restrooms", "disabled": true },
+                { "key": "title", "value": "adoption", "description": "Optional case-insensitive 'contains' search on the event title (LIKE %term%).", "disabled": true }
+              ]
+            },
+            "description": "Provider-agnostic catalog listing (same shared service as the parent host). All query params optional; amenities repeats. `title` is an optional case-insensitive 'contains' search on the event title. Each event hydrates physical details + carries pawPrints and bookings { maxBookings, totalBookings }."
+          }
+        },
+        {
           "name": "GET events by provider",
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] },
-            "description": "Lists this provider's events. Each event includes pawPrints { viewCount, shareCount, inquiryCount } and an organizer { type, id, name, imageUrl } block."
+            "description": "Lists this provider's events. Each event includes pawPrints { viewCount, shareCount, inquiryCount }, an organizer { type, id, name, imageUrl } block, physical details (incl. location), and a bookings { maxBookings, totalBookings } block (maxBookings = physical capacity, null for online; totalBookings = non-cancelled tickets booked)."
           }
         },
         {
@@ -1089,7 +1136,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}"] },
-            "description": "Single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount } and an organizer { type, id, name, imageUrl } block."
+            "description": "Single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount }, organizer { type, id, name, imageUrl }, bookings { maxBookings, totalBookings }, paymentOptions [\"Cash\"|\"Digital\"], and attendees [{ attendeeName, ticketNumber }] (names only — booker contact / payment stay on the organiser-only dashboard)."
           }
         },
         {
@@ -1156,6 +1203,14 @@
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/event-bookings/{{eventBookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","event-bookings","{{eventBookingId}}"] },
             "description": "Returns the booking envelope + a `tickets` array with one entry per attendee. If 4 tickets were bought, 4 entries come back here."
+          }
+        },
+        {
+          "name": "DELETE event booking (cancel)",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/api/v1/event-bookings/{{eventBookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","event-bookings","{{eventBookingId}}"] },
+            "description": "Soft-cancels the caller's own booking. Authorised by your Firebase **email claim** matched against the booking's bookerEmail — so this only succeeds if you booked with the email on your token (the sample bookings above use other emails, so they would return 404 here). Flips Status → Cancelled and frees the seat capacity automatically; returns the cancelled booking + tickets. 403 EmailClaimMissing; 404 EventBookingNotFound (unknown id OR not yours); 409 EventBookingAlreadyCancelled."
           }
         },
         {

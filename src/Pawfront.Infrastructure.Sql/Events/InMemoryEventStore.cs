@@ -72,8 +72,87 @@ internal sealed class InMemoryEventStore : IEventSqlStore
 
     public Task<EventSqlSnapshot?> GetAsync(Guid eventId, CancellationToken cancellationToken)
     {
-        events.TryGetValue(eventId, out var snapshot);
-        return Task.FromResult(snapshot);
+        if (!events.TryGetValue(eventId, out var snapshot))
+        {
+            return Task.FromResult<EventSqlSnapshot?>(null);
+        }
+
+        // Surface the detail-only fields the SQL GetEvent returns. Attendees
+        // aren't tracked in this dev fallback.
+        var detail = snapshot with
+        {
+            PaymentOptions = payoutMethods.TryGetValue(eventId, out var methods)
+                ? methods
+                : Array.Empty<string>(),
+            Attendees = Array.Empty<EventAttendeeSummary>()
+        };
+        return Task.FromResult<EventSqlSnapshot?>(detail);
+    }
+
+    public Task<EventSqlSnapshot> UpdateAsync(UpdateEventSqlInput input, CancellationToken cancellationToken)
+    {
+        if (!events.TryGetValue(input.EventId, out var existing) || existing.ProviderId != input.ProviderId)
+        {
+            throw new EventNotFoundException(input.EventId);
+        }
+
+        var updated = existing with
+        {
+            EventCategory = input.EventCategory,
+            IsChildFriendly = input.IsChildFriendly,
+            Title = input.Title,
+            Description = input.Description,
+            BannerImageUrl = input.BannerImageUrl,
+            Amenities = input.Amenities.ToArray(),
+            EventType = input.EventType,
+            StartDate = input.StartDate,
+            EndDate = input.EndDate,
+            StartTime = input.StartTime,
+            EndTime = input.EndTime,
+            IsPaid = input.IsPaid,
+            Price = input.IsPaid ? input.Price : null,
+            CancellationPolicy = input.CancellationPolicy,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        events[input.EventId] = updated;
+        if (!input.IsPaid)
+        {
+            payoutMethods.TryRemove(input.EventId, out _);
+        }
+        return Task.FromResult(updated);
+    }
+
+    public Task<EventSqlSnapshot> UpdateByParentAsync(UpdateParentEventSqlInput input, CancellationToken cancellationToken)
+    {
+        if (!events.TryGetValue(input.EventId, out var existing) || existing.PetParentId != input.PetParentId)
+        {
+            throw new EventNotFoundException(input.EventId);
+        }
+
+        var updated = existing with
+        {
+            EventCategory = input.EventCategory,
+            IsChildFriendly = input.IsChildFriendly,
+            Title = input.Title,
+            Description = input.Description,
+            BannerImageUrl = input.BannerImageUrl,
+            Amenities = input.Amenities.ToArray(),
+            EventType = input.EventType,
+            StartDate = input.StartDate,
+            EndDate = input.EndDate,
+            StartTime = input.StartTime,
+            EndTime = input.EndTime,
+            IsPaid = input.IsPaid,
+            Price = input.IsPaid ? input.Price : null,
+            CancellationPolicy = input.CancellationPolicy,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        events[input.EventId] = updated;
+        if (!input.IsPaid)
+        {
+            payoutMethods.TryRemove(input.EventId, out _);
+        }
+        return Task.FromResult(updated);
     }
 
     public Task<IReadOnlyList<EventSqlSnapshot>> ListByProviderAsync(
@@ -138,6 +217,12 @@ internal sealed class InMemoryEventStore : IEventSqlStore
         {
             var required = filter.Amenities.ToHashSet(StringComparer.Ordinal);
             query = query.Where(e => required.All(a => e.Amenities.Contains(a, StringComparer.Ordinal)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(filter.Title))
+        {
+            var term = filter.Title.Trim();
+            query = query.Where(e => e.Title.Contains(term, StringComparison.OrdinalIgnoreCase));
         }
 
         IReadOnlyList<EventSqlSnapshot> list = query

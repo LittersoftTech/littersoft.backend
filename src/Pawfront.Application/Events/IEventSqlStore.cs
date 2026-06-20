@@ -15,6 +15,31 @@ public interface IEventSqlStore
         CreateParentEventSqlInput input,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Full-replace edit of a provider-organised event. Verifies the event
+    /// belongs to the provider (throws <see cref="EventNotFoundException"/> if
+    /// not found or not owned), rewrites the editable columns + amenities, and
+    /// returns the refreshed detail snapshot (amenities + payment options +
+    /// attendee names). Cosmos physical details are reconciled separately by
+    /// the caller.
+    /// </summary>
+    Task<EventSqlSnapshot> UpdateAsync(
+        UpdateEventSqlInput input,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Full-replace edit of a parent-organised event. Mirror of
+    /// <see cref="UpdateAsync"/> keyed by PetParentId.
+    /// </summary>
+    Task<EventSqlSnapshot> UpdateByParentAsync(
+        UpdateParentEventSqlInput input,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Reads a single event with its full detail (amenities, payment options,
+    /// attendee names). The list/create snapshots leave payment options +
+    /// attendees null.
+    /// </summary>
     Task<EventSqlSnapshot?> GetAsync(
         Guid eventId,
         CancellationToken cancellationToken);

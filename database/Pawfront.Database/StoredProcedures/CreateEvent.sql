@@ -99,7 +99,11 @@ BEGIN
            e.[CancellationPolicy],
            COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
                     org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
-           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl]
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
+           (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
+            FROM [Event].[EventBookings] eb
+            WHERE eb.[EventId] = e.[EventId]
+              AND eb.[Status] = N'Confirmed') AS [TotalBookings]
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]

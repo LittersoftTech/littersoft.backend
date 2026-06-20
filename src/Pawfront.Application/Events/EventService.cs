@@ -116,6 +116,118 @@ internal sealed class EventService(
         return ToResult(snapshot, physicalResult);
     }
 
+    public async Task<EventResult> UpdateAsync(UpdateEventCommand command, CancellationToken cancellationToken)
+    {
+        var validated = ValidateForCreate(
+            command.EventCategory, command.EventType, command.Amenities,
+            command.Title, command.Description, command.StartDate, command.EndDate,
+            command.IsPaid, command.Price, command.CancellationPolicy, command.Physical);
+
+        // Capture the pre-edit state so we know whether/where an old Cosmos
+        // physical document needs cleaning up (type or category change).
+        var previous = await sqlStore.GetAsync(command.EventId, cancellationToken);
+
+        var snapshot = await sqlStore.UpdateAsync(
+            new UpdateEventSqlInput(
+                command.EventId,
+                command.ProviderId,
+                validated.Category,
+                command.IsChildFriendly,
+                validated.Title,
+                validated.Description,
+                Trim(command.BannerImageUrl),
+                validated.Amenities,
+                validated.EventType,
+                command.StartDate,
+                command.EndDate,
+                command.StartTime,
+                command.EndTime,
+                validated.IsPaid,
+                validated.Price,
+                validated.CancellationPolicy),
+            cancellationToken);
+
+        var physicalResult = await ReconcilePhysicalAsync(
+            previous, snapshot, validated.PhysicalInput, cancellationToken);
+
+        return ToResult(snapshot, physicalResult);
+    }
+
+    public async Task<EventResult> UpdateByParentAsync(
+        UpdateParentEventCommand command,
+        CancellationToken cancellationToken)
+    {
+        var validated = ValidateForCreate(
+            command.EventCategory, command.EventType, command.Amenities,
+            command.Title, command.Description, command.StartDate, command.EndDate,
+            command.IsPaid, command.Price, command.CancellationPolicy, command.Physical);
+
+        var previous = await sqlStore.GetAsync(command.EventId, cancellationToken);
+
+        var snapshot = await sqlStore.UpdateByParentAsync(
+            new UpdateParentEventSqlInput(
+                command.EventId,
+                command.PetParentId,
+                validated.Category,
+                command.IsChildFriendly,
+                validated.Title,
+                validated.Description,
+                Trim(command.BannerImageUrl),
+                validated.Amenities,
+                validated.EventType,
+                command.StartDate,
+                command.EndDate,
+                command.StartTime,
+                command.EndTime,
+                validated.IsPaid,
+                validated.Price,
+                validated.CancellationPolicy),
+            cancellationToken);
+
+        var physicalResult = await ReconcilePhysicalAsync(
+            previous, snapshot, validated.PhysicalInput, cancellationToken);
+
+        return ToResult(snapshot, physicalResult);
+    }
+
+    /// <summary>
+    /// Reconciles the Cosmos physical extension after an edit. Deletes the
+    /// pre-edit document when the event is no longer physical OR its category
+    /// (the partition key) changed, then upserts the new document when the
+    /// edited event is physical. A Cosmos failure is logged but does not fail
+    /// the edit — the SQL row is the source of truth.
+    /// </summary>
+    private async Task<PhysicalEventResult?> ReconcilePhysicalAsync(
+        EventSqlSnapshot? previous,
+        EventSqlSnapshot updated,
+        PhysicalEventInput? physicalInput,
+        CancellationToken cancellationToken)
+    {
+        var wasPhysical = previous is not null
+            && string.Equals(previous.EventType, nameof(EventType.Physical), StringComparison.Ordinal);
+        var categoryChanged = previous is not null
+            && !string.Equals(previous.EventCategory, updated.EventCategory, StringComparison.Ordinal);
+
+        if (wasPhysical && (physicalInput is null || categoryChanged))
+        {
+            try
+            {
+                await cosmosStore.DeletePhysicalAsync(updated.EventId, previous!.EventCategory, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "Failed to delete the stale Cosmos physical document for event {EventId} (category {Category}) during edit.",
+                    updated.EventId,
+                    previous!.EventCategory);
+            }
+        }
+
+        return await WritePhysicalExtensionAsync(
+            updated.EventId, updated.EventCategory, physicalInput, cancellationToken);
+    }
+
     /// <summary>
     /// Shared validation for both the provider- and parent-create paths.
     /// Normalises enum-shaped fields, checks the date window, validates the
@@ -238,8 +350,10 @@ internal sealed class EventService(
         CancellationToken cancellationToken)
     {
         var snapshots = await sqlStore.ListByProviderAsync(providerId, cancellationToken);
-        // Listing skips Cosmos for cost; detail endpoint hydrates physical details.
-        return snapshots.Select(s => ToResult(s, physical: null)).ToArray();
+        // Hydrate the Cosmos physical extension so each card carries the
+        // venue location + "max bookings" (capacity). Total bookings comes
+        // from SQL (result set 1).
+        return await HydratePhysicalAsync(snapshots, cancellationToken);
     }
 
     public async Task<IReadOnlyCollection<EventResult>> ListByPetParentAsync(
@@ -247,8 +361,10 @@ internal sealed class EventService(
         CancellationToken cancellationToken)
     {
         var snapshots = await sqlStore.ListByPetParentAsync(petParentId, cancellationToken);
-        // Listing skips Cosmos for cost; detail endpoint hydrates physical details.
-        return snapshots.Select(s => ToResult(s, physical: null)).ToArray();
+        // Hydrate the Cosmos physical extension so each card carries the
+        // venue location + "max bookings" (capacity). Total bookings comes
+        // from SQL (result set 1).
+        return await HydratePhysicalAsync(snapshots, cancellationToken);
     }
 
     public async Task<IReadOnlyCollection<EventResult>> ListAsync(
@@ -257,8 +373,49 @@ internal sealed class EventService(
     {
         var normalised = ValidateFilter(filter);
         var snapshots = await sqlStore.ListAsync(normalised, cancellationToken);
-        // Listing skips Cosmos for cost; detail endpoint hydrates physical details.
-        return snapshots.Select(s => ToResult(s, physical: null)).ToArray();
+        // The consumer-facing catalog needs the venue location + "max bookings"
+        // (capacity) for physical events, so hydrate the Cosmos extension here —
+        // one point read per physical event, fanned out in parallel. Online
+        // events have no Cosmos doc and are returned as-is.
+        return await HydratePhysicalAsync(snapshots, cancellationToken);
+    }
+
+    /// <summary>
+    /// Maps SQL snapshots to results, hydrating the Cosmos physical extension
+    /// (capacity + venue location) for physical events via parallel point
+    /// reads. A Cosmos read failure for a single event is logged and that event
+    /// is returned without physical details rather than failing the whole list.
+    /// Result order matches the input order.
+    /// </summary>
+    private async Task<IReadOnlyCollection<EventResult>> HydratePhysicalAsync(
+        IReadOnlyCollection<EventSqlSnapshot> snapshots,
+        CancellationToken cancellationToken)
+    {
+        var tasks = snapshots.Select(async snapshot =>
+        {
+            if (!string.Equals(snapshot.EventType, nameof(EventType.Physical), StringComparison.Ordinal))
+            {
+                return ToResult(snapshot, physical: null);
+            }
+
+            PhysicalEventResult? physical = null;
+            try
+            {
+                physical = await cosmosStore.GetPhysicalAsync(
+                    snapshot.EventId, snapshot.EventCategory, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "Failed to hydrate physical details for event {EventId} during catalog listing; returning it without physical details.",
+                    snapshot.EventId);
+            }
+
+            return ToResult(snapshot, physical);
+        });
+
+        return await Task.WhenAll(tasks);
     }
 
     private static EventListFilter ValidateFilter(EventListFilter filter)
@@ -289,13 +446,18 @@ internal sealed class EventService(
             amenities = NormalizeAmenities(filter.Amenities);
         }
 
+        // Free-text title search: trim and treat blank as "no filter". The
+        // case-insensitive "contains" match is applied in the store.
+        var title = string.IsNullOrWhiteSpace(filter.Title) ? null : filter.Title.Trim();
+
         return new EventListFilter(
             category,
             eventType,
             filter.StartDate,
             filter.EndDate,
             filter.IsChildFriendly,
-            amenities);
+            amenities,
+            title);
     }
 
     public Task<EventCounters> IncrementCounterAsync(
@@ -402,7 +564,10 @@ internal sealed class EventService(
             snapshot.CreatedAtUtc,
             snapshot.UpdatedAtUtc,
             snapshot.Counters,
-            BuildOrganizer(snapshot));
+            BuildOrganizer(snapshot),
+            snapshot.TotalBookings,
+            snapshot.PaymentOptions,
+            snapshot.Attendees);
     }
 
     /// <summary>

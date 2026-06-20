@@ -29,13 +29,18 @@ public sealed record PetParentPetResponse(
     string? MedicalHistory,
     string? Temperament,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    // The pet's single primary/profile photo (distinct from the gallery). Null
+    // until set via POST /pets/{petId}/profile-image.
+    string? ProfilePhotoUrl);
 
 public sealed record UpdatePetMedicalInfoRequest(
     string VaccinationStatus,
     string SterilizationStatus,
     string? MedicalHistory,
-    string Temperament);
+    // Optional — a pet can be added without a known temperament. When omitted
+    // or empty it's stored as null; when present it must be a valid value.
+    string? Temperament);
 
 /// <summary>
 /// Edits the basic-info subset of a pet (everything captured at AddPet time
@@ -63,6 +68,27 @@ public sealed record PetPhotoResponse(
     DateTimeOffset UpdatedAtUtc);
 
 /// <summary>
+/// Returned by <c>DELETE /pets/{petId}</c>. The pet row and its photo rows
+/// (cascade) are gone; any bookings that referenced the pet are detached
+/// (their <c>petId</c> set null, snapshots preserved). Photo blobs are left
+/// for a future cleanup sweep.
+/// </summary>
+public sealed record DeletePetResponse(
+    Guid PetId,
+    Guid PetParentId,
+    DateTimeOffset DeletedAtUtc);
+
+/// <summary>
+/// Returned by <c>DELETE /pets/{petId}/photos/{photoId}</c>. Carries the
+/// removed photo's URL so the caller knows which blob was best-effort deleted.
+/// </summary>
+public sealed record DeletePetPhotoResponse(
+    Guid PetPhotoId,
+    Guid PetId,
+    string PhotoUrl,
+    DateTimeOffset DeletedAtUtc);
+
+/// <summary>
 /// Full pet snapshot returned by <c>GET /api/v1/pet-parents/{petParentId}/pets</c>.
 /// Same fields as <see cref="PetParentPetResponse"/> plus the embedded photo
 /// gallery. Kept as a separate type so AddPet and PATCH medical-info responses
@@ -85,4 +111,16 @@ public sealed record PetParentPetWithPhotosResponse(
     string? Temperament,
     IReadOnlyList<PetPhotoResponse> Photos,
     DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    // The pet's single primary/profile photo (distinct from the gallery above).
+    string? ProfilePhotoUrl);
+
+/// <summary>
+/// Returned by <c>POST /pets/{petId}/profile-image</c>. Slim confirmation —
+/// the pet's new profile-photo URL plus when it changed. Mirror of the parent
+/// host's profile-photo response shape.
+/// </summary>
+public sealed record UpdatePetProfilePhotoResponse(
+    Guid PetId,
+    string ProfilePhotoUrl,
     DateTimeOffset UpdatedAtUtc);

@@ -26,7 +26,11 @@ BEGIN
            b.[Status],
            b.[CreatedAtUtc],
            b.[UpdatedAtUtc],
-           b.[CancelledAtUtc]
+           b.[CancelledAtUtc],
+           -- EventType lets the app decide whether to hydrate the Cosmos venue
+           -- location (physical events only). Appended last so existing ordinals
+           -- don't shift.
+           e.[EventType]        AS [EventType]
     FROM [Event].[EventBookings] AS b
     INNER JOIN [Event].[Events] AS e
         ON e.[EventId] = b.[EventId]

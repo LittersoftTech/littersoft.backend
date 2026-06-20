@@ -69,6 +69,17 @@ public sealed class EventBookingPaymentAlreadyConfirmedException(Guid bookingId)
     : Exception($"Event booking '{bookingId}' payment has already been confirmed.");
 
 /// <summary>
+/// The booking either doesn't exist or wasn't made under the caller's email.
+/// The two cases are deliberately indistinguishable so we don't leak the
+/// existence of another user's booking.
+/// </summary>
+public sealed class EventBookingNotFoundForBookerException(Guid bookingId)
+    : Exception($"Event booking '{bookingId}' was not found for this booker.");
+
+public sealed class EventBookingAlreadyCancelledException(Guid bookingId)
+    : Exception($"Event booking '{bookingId}' is already cancelled.");
+
+/// <summary>
 /// Slim per-booking summary returned by the parent host's "my event
 /// bookings" endpoint. Joined with the event row so the mobile card can
 /// render title / banner / start time without a follow-up fetch. The
@@ -80,9 +91,14 @@ public sealed record EventBookingSummary(
     Guid EventId,
     string EventTitle,
     string EventCategory,
+    string EventType,
     DateOnly EventStartDate,
     TimeOnly EventStartTime,
     string? EventBannerImageUrl,
+    // Venue address for physical events, hydrated from the Cosmos extension
+    // doc by the service. Null for online events (no venue) and for any
+    // physical event whose Cosmos doc couldn't be read.
+    EventLocationResult? EventLocation,
     string BookerName,
     string BookerEmail,
     string? BookerMobile,
