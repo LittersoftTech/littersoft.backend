@@ -225,6 +225,8 @@ erDiagram
         DATE             EndDate
         TIME             StartTime
         TIME             EndTime
+        BIT              IsPaid              "default 0; all event types"
+        DECIMAL          Price               "nullable; required when IsPaid"
         INT              ViewCount           "default 0"
         INT              ShareCount          "default 0"
         INT              InquiryCount        "default 0"
@@ -233,6 +235,11 @@ erDiagram
     EVENT_AMENITIES {
         UNIQUEIDENTIFIER EventId PK "also FK; ON DELETE CASCADE"
         NVARCHAR         Amenity PK "8 values; None cannot coexist"
+    }
+
+    EVENT_PAYOUT_METHODS {
+        UNIQUEIDENTIFIER EventId      PK "also FK; ON DELETE CASCADE"
+        NVARCHAR         PayoutMethod PK "Cash | Digital; paid events only"
     }
 
     EVENT_BOOKINGS {
@@ -525,9 +532,11 @@ one-by-one via `Parent.DeletePetParentPhoto`.
 
 ### `Event.Events`
 Provider-created events (adoption drives, training sessions, charity,
-etc.). Physical-event extension data (capacity + ticketing) lives in
+etc.). Physical-event extension data (**capacity only**) lives in
 **Cosmos** (`Events` container), keyed by the same `EventId`. Online events
-have no Cosmos doc.
+have no Cosmos doc. **Ticketing (`IsPaid`/`Price`) lives on this SQL row,
+not Cosmos**, so it's returned for every event type — online events can be
+paid too.
 
 - `EventId` — PK.
 - `ProviderId` — FK.
@@ -538,6 +547,9 @@ have no Cosmos doc.
 - `Title`, `Description` (NVARCHAR(MAX)), `BannerImageUrl` (nullable).
 - `EventType` — `Physical` or `Online`.
 - `StartDate <= EndDate` (CHECK), `StartTime`, `EndTime`.
+- `IsPaid` (default 0) / `Price` (nullable DECIMAL(18,2)) — ticketing for any
+  event type. `CK_Events_Ticketing` enforces `Price IS NULL` for free events
+  and a non-negative `Price` for paid ones.
 - `ViewCount`, `ShareCount`, `InquiryCount` — engagement counters
   ("PawPrints"). Default 0; atomically incremented by
   `Event.IncrementEventCounter` from the three public increment
@@ -552,6 +564,15 @@ Junction listing the venue amenities for an event.
 - `Amenity` — one of `FreeParking`, `PaidParking`, `Restrooms`,
   `DrinkingWater`, `FoodAndBeverage`, `SeatingAreas`, `FirstAidBooth`,
   `None`. The C# layer rejects `None` together with any other amenity.
+
+### `Event.EventPayoutMethods`
+Junction listing how the event organiser wants ticket proceeds paid out.
+Written by `Event.SaveEventPayoutMethods` (`POST /events/{eventId}/payout-methods`).
+
+- PK `(EventId, PayoutMethod)` with `ON DELETE CASCADE`.
+- `PayoutMethod` — `Cash` or `Digital` (one or more rows per event).
+- **Paid events only** — the sproc throws `51099` for a free event
+  (`IsPaid = 0`) and `51098` when the event id is unknown.
 
 ### `Event.EventBookings`
 Ticket purchases against a physical event. **Booker identity is free text**

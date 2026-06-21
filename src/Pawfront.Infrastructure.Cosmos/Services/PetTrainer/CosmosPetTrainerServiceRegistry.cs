@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.Azure.Cosmos;
 using Pawfront.Application.Services.PetTrainer;
 using Pawfront.Domain.Services;
+using Pawfront.Domain.Vocabularies;
 using Pawfront.Infrastructure.Cosmos.Documents;
 using Pawfront.Infrastructure.Cosmos.ProviderServices;
 
@@ -12,10 +13,11 @@ internal sealed class CosmosPetTrainerServiceRegistry(
 {
     private static readonly string ServiceCategory = ProviderServiceCategory.PetTrainer.ToString();
 
-    private static readonly IReadOnlySet<string> AllowedPets = new HashSet<string>(StringComparer.Ordinal)
-    {
-        "Dog", "Cat"
-    };
+    // Canonical platform vocabulary (Pawfront.Domain.Vocabularies). NOTE: this
+    // broadens the trainer's accepted animals from {Dog, Cat} to the full
+    // Animal list — the master vocabulary no longer varies per category.
+    // (Temperaments below stay trainer-specific — a different, richer axis.)
+    private static readonly IReadOnlySet<string> AllowedPets = VocabularyCatalog.AnimalCodes;
 
     private static readonly IReadOnlySet<string> AllowedAgeGroups = new HashSet<string>(StringComparer.Ordinal)
     {

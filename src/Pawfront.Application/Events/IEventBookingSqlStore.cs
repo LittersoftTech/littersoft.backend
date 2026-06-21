@@ -57,4 +57,16 @@ public interface IEventBookingSqlStore
     Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
         string bookerEmail,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Soft-cancels the booking iff it was made under <paramref name="bookerEmail"/>.
+    /// Returns the cancelled booking with its tickets. Throws
+    /// <see cref="EventBookingNotFoundForBookerException"/> on an unknown id /
+    /// ownership miss, or <see cref="EventBookingAlreadyCancelledException"/>
+    /// when it was already cancelled.
+    /// </summary>
+    Task<EventBookingResult> CancelByBookerAsync(
+        Guid bookingId,
+        string bookerEmail,
+        CancellationToken cancellationToken);
 }

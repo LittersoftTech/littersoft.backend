@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using Pawfront.Application.Events;
 using Pawfront.Contracts.Events;
 
@@ -22,6 +23,7 @@ internal static class EventBookingEndpoints
         eventScoped.MapPost("/", Create);
 
         builder.MapGet("/event-bookings/{bookingId:guid}", GetById);
+        builder.MapDelete("/event-bookings/{bookingId:guid}", Cancel);
 
         return builder;
     }
@@ -54,6 +56,10 @@ internal static class EventBookingEndpoints
         {
             return ApiResults.BadRequest("EventNotBookable", exception.Message);
         }
+        catch (EventBookingOnlineSingleTicketException exception)
+        {
+            return ApiResults.BadRequest("OnlineEventSingleTicket", exception.Message);
+        }
         catch (EventBookingCapacityExceededException exception)
         {
             return ApiResults.Conflict("EventSoldOut", exception.Message);
@@ -73,6 +79,43 @@ internal static class EventBookingEndpoints
         return result is null
             ? ApiResults.NotFound("EventBookingNotFound", $"Event booking '{bookingId}' was not found.")
             : ApiResults.Ok(ToResponse(result));
+    }
+
+    private static async Task<IResult> Cancel(
+        Guid bookingId,
+        HttpContext httpContext,
+        IEventBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        // Booker identity on Event.EventBookings is free text (no FK to any
+        // user table), so we authorise the cancel by matching the caller's
+        // Firebase email claim against the booking's BookerEmail — the booker
+        // can only cancel a booking they made.
+        var email = httpContext.User.FindFirstValue("email");
+        if (string.IsNullOrWhiteSpace(email))
+        {
+            return ApiResults.Forbidden(
+                "EmailClaimMissing",
+                "The Firebase token does not carry an email claim, so the booking cannot be cancelled.");
+        }
+
+        try
+        {
+            var result = await bookingService.CancelByBookerAsync(bookingId, email, cancellationToken);
+            return ApiResults.Ok(ToResponse(result));
+        }
+        catch (EventBookingNotFoundForBookerException exception)
+        {
+            return ApiResults.NotFound("EventBookingNotFound", exception.Message);
+        }
+        catch (EventBookingAlreadyCancelledException exception)
+        {
+            return ApiResults.Conflict("EventBookingAlreadyCancelled", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
     }
 
     private static EventBookingResponse ToResponse(EventBookingResult result)

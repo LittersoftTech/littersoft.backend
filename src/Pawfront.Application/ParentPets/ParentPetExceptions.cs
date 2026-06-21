@@ -12,6 +12,9 @@ public sealed class MicrochipIdAlreadyExistsException(string microchipId)
 public sealed class PetNotFoundException(Guid petId)
     : Exception($"Pet '{petId}' was not found.");
 
+public sealed class PetPhotoNotFoundException(Guid petPhotoId)
+    : Exception($"Pet photo '{petPhotoId}' was not found.");
+
 public sealed class UnsupportedVaccinationStatusException(string vaccinationStatus)
     : Exception($"Vaccination status '{vaccinationStatus}' is not supported.");
 

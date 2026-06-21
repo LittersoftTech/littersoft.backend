@@ -6,6 +6,7 @@ namespace Pawfront.Infrastructure.Sql.Events;
 internal sealed class InMemoryEventStore : IEventSqlStore
 {
     private readonly ConcurrentDictionary<Guid, EventSqlSnapshot> events = new();
+    private readonly ConcurrentDictionary<Guid, IReadOnlyList<string>> payoutMethods = new();
 
     public Task<EventSqlSnapshot> CreateAsync(CreateEventSqlInput input, CancellationToken cancellationToken)
     {
@@ -25,6 +26,9 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             EndDate: input.EndDate,
             StartTime: input.StartTime,
             EndTime: input.EndTime,
+            IsPaid: input.IsPaid,
+            Price: input.Price,
+            CancellationPolicy: input.CancellationPolicy,
             CreatedAtUtc: now,
             UpdatedAtUtc: now,
             // Counters aren't tracked in the in-memory dev fallback.
@@ -54,6 +58,9 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             EndDate: input.EndDate,
             StartTime: input.StartTime,
             EndTime: input.EndTime,
+            IsPaid: input.IsPaid,
+            Price: input.Price,
+            CancellationPolicy: input.CancellationPolicy,
             CreatedAtUtc: now,
             UpdatedAtUtc: now,
             // Counters aren't tracked in the in-memory dev fallback.
@@ -65,8 +72,87 @@ internal sealed class InMemoryEventStore : IEventSqlStore
 
     public Task<EventSqlSnapshot?> GetAsync(Guid eventId, CancellationToken cancellationToken)
     {
-        events.TryGetValue(eventId, out var snapshot);
-        return Task.FromResult(snapshot);
+        if (!events.TryGetValue(eventId, out var snapshot))
+        {
+            return Task.FromResult<EventSqlSnapshot?>(null);
+        }
+
+        // Surface the detail-only fields the SQL GetEvent returns. Attendees
+        // aren't tracked in this dev fallback.
+        var detail = snapshot with
+        {
+            PaymentOptions = payoutMethods.TryGetValue(eventId, out var methods)
+                ? methods
+                : Array.Empty<string>(),
+            Attendees = Array.Empty<EventAttendeeSummary>()
+        };
+        return Task.FromResult<EventSqlSnapshot?>(detail);
+    }
+
+    public Task<EventSqlSnapshot> UpdateAsync(UpdateEventSqlInput input, CancellationToken cancellationToken)
+    {
+        if (!events.TryGetValue(input.EventId, out var existing) || existing.ProviderId != input.ProviderId)
+        {
+            throw new EventNotFoundException(input.EventId);
+        }
+
+        var updated = existing with
+        {
+            EventCategory = input.EventCategory,
+            IsChildFriendly = input.IsChildFriendly,
+            Title = input.Title,
+            Description = input.Description,
+            BannerImageUrl = input.BannerImageUrl,
+            Amenities = input.Amenities.ToArray(),
+            EventType = input.EventType,
+            StartDate = input.StartDate,
+            EndDate = input.EndDate,
+            StartTime = input.StartTime,
+            EndTime = input.EndTime,
+            IsPaid = input.IsPaid,
+            Price = input.IsPaid ? input.Price : null,
+            CancellationPolicy = input.CancellationPolicy,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        events[input.EventId] = updated;
+        if (!input.IsPaid)
+        {
+            payoutMethods.TryRemove(input.EventId, out _);
+        }
+        return Task.FromResult(updated);
+    }
+
+    public Task<EventSqlSnapshot> UpdateByParentAsync(UpdateParentEventSqlInput input, CancellationToken cancellationToken)
+    {
+        if (!events.TryGetValue(input.EventId, out var existing) || existing.PetParentId != input.PetParentId)
+        {
+            throw new EventNotFoundException(input.EventId);
+        }
+
+        var updated = existing with
+        {
+            EventCategory = input.EventCategory,
+            IsChildFriendly = input.IsChildFriendly,
+            Title = input.Title,
+            Description = input.Description,
+            BannerImageUrl = input.BannerImageUrl,
+            Amenities = input.Amenities.ToArray(),
+            EventType = input.EventType,
+            StartDate = input.StartDate,
+            EndDate = input.EndDate,
+            StartTime = input.StartTime,
+            EndTime = input.EndTime,
+            IsPaid = input.IsPaid,
+            Price = input.IsPaid ? input.Price : null,
+            CancellationPolicy = input.CancellationPolicy,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        events[input.EventId] = updated;
+        if (!input.IsPaid)
+        {
+            payoutMethods.TryRemove(input.EventId, out _);
+        }
+        return Task.FromResult(updated);
     }
 
     public Task<IReadOnlyList<EventSqlSnapshot>> ListByProviderAsync(
@@ -75,6 +161,18 @@ internal sealed class InMemoryEventStore : IEventSqlStore
     {
         IReadOnlyList<EventSqlSnapshot> list = events.Values
             .Where(e => e.ProviderId == providerId)
+            .OrderByDescending(e => e.StartDate)
+            .ThenByDescending(e => e.StartTime)
+            .ToArray();
+        return Task.FromResult(list);
+    }
+
+    public Task<IReadOnlyList<EventSqlSnapshot>> ListByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<EventSqlSnapshot> list = events.Values
+            .Where(e => e.PetParentId == petParentId)
             .OrderByDescending(e => e.StartDate)
             .ThenByDescending(e => e.StartTime)
             .ToArray();
@@ -121,6 +219,12 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             query = query.Where(e => required.All(a => e.Amenities.Contains(a, StringComparer.Ordinal)));
         }
 
+        if (!string.IsNullOrWhiteSpace(filter.Title))
+        {
+            var term = filter.Title.Trim();
+            query = query.Where(e => e.Title.Contains(term, StringComparison.OrdinalIgnoreCase));
+        }
+
         IReadOnlyList<EventSqlSnapshot> list = query
             .OrderByDescending(e => e.StartDate)
             .ThenByDescending(e => e.StartTime)
@@ -142,5 +246,29 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             throw new EventNotFoundException(eventId);
         }
         return Task.FromResult(new EventCounters(0, 0, 0));
+    }
+
+    public Task<IReadOnlyList<string>> SavePayoutMethodsAsync(
+        Guid eventId,
+        bool acceptsCash,
+        bool acceptsDigital,
+        CancellationToken cancellationToken)
+    {
+        if (!events.TryGetValue(eventId, out var snapshot))
+        {
+            throw new EventNotFoundException(eventId);
+        }
+
+        if (!snapshot.IsPaid)
+        {
+            throw new EventNotPaidException(eventId);
+        }
+
+        var saved = new List<string>();
+        if (acceptsCash) saved.Add("Cash");
+        if (acceptsDigital) saved.Add("Digital");
+
+        payoutMethods[eventId] = saved;
+        return Task.FromResult<IReadOnlyList<string>>(saved);
     }
 }

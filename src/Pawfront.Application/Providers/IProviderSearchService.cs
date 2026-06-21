@@ -24,4 +24,8 @@ public interface IProviderSearchService
     Task<IReadOnlyList<ProviderSearchResult>> SearchVetAsync(
         VetProviderSearchCriteria criteria,
         CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ProviderSearchResult>> SearchTrainerAsync(
+        TrainerProviderSearchCriteria criteria,
+        CancellationToken cancellationToken);
 }

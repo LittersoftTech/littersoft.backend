@@ -3,7 +3,8 @@ CREATE OR ALTER PROCEDURE [Parent].[UpdatePetMedicalInfo]
     @VaccinationStatus NVARCHAR(32),
     @SterilizationStatus NVARCHAR(32),
     @MedicalHistory NVARCHAR(MAX) = NULL,
-    @Temperament NVARCHAR(32)
+    -- Temperament is optional — null when the parent hasn't set one.
+    @Temperament NVARCHAR(32) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -37,7 +38,8 @@ BEGIN
            [MedicalHistory],
            [Temperament],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [ProfilePhotoUrl]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 END;

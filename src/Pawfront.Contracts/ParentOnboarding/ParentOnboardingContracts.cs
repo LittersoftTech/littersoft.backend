@@ -199,6 +199,20 @@ public sealed record UpsertPetParentIdentityResponse(
     DateTimeOffset UpdatedAtUtc);
 
 /// <summary>
+/// Full identity record returned by
+/// <c>GET /api/v1/pet-parents/{petParentId}/identity</c>. One row per parent;
+/// <c>IdentityPhotoUrl</c> is the blob URL of the uploaded document (fetch the
+/// bytes via <c>POST /api/v1/blob-images</c>).
+/// </summary>
+public sealed record PetParentIdentityResponse(
+    Guid ParentIdentityId,
+    Guid PetParentId,
+    string IdentityType,
+    string IdentityPhotoUrl,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc);
+
+/// <summary>
 /// Result of <c>DELETE /api/v1/pet-parents/{petParentId}/identity</c>. The
 /// onboarding-status identity stage reverts to Remaining (and
 /// isFullyOnboarded to false) until a new document is uploaded.

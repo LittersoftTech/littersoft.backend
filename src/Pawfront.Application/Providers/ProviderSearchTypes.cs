@@ -55,6 +55,20 @@ public sealed record VetProviderSearchCriteria(
     int Take);
 
 /// <summary>
+/// Criteria for the PetTrainer/TrainingSession search. A training session is a
+/// single fixed-duration booking (like a vet appointment): when a date is set,
+/// a provider matches if any free slot of the session's duration exists that
+/// day. Charges = PricePerSession.
+/// </summary>
+public sealed record TrainerProviderSearchCriteria(
+    IReadOnlyCollection<string>? Animals,
+    string? City,
+    string? ServiceLocation,
+    DateOnly? Date,
+    int Skip,
+    int Take);
+
+/// <summary>
 /// Per-provider search hit. ServiceId is included so the mobile client can
 /// go straight to the slots / booking endpoints without a follow-up lookup.
 /// </summary>
@@ -72,6 +86,10 @@ public sealed record VetProviderSearchCriteria(
 /// grooming search without a ServiceItemCode.
 /// </param>
 /// <param name="ChargesUnit">PerHour | PerService | PerAppointment.</param>
+/// <param name="ImageUrl">
+/// The service image the provider uploaded for this offering (the same image
+/// shown on the discovery card). Null when the provider hasn't set one.
+/// </param>
 public sealed record ProviderSearchResult(
     Guid ProviderId,
     Guid ServiceId,
@@ -80,11 +98,13 @@ public sealed record ProviderSearchResult(
     int CompletedBookings,
     decimal? Charges,
     string ChargesUnit,
-    string? ServiceItemCode);
+    string? ServiceItemCode,
+    string? ImageUrl);
 
 public static class ProviderSearchChargesUnits
 {
     public const string PerHour = "PerHour";
     public const string PerService = "PerService";
     public const string PerAppointment = "PerAppointment";
+    public const string PerSession = "PerSession";
 }

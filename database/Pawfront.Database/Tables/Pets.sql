@@ -19,6 +19,9 @@ CREATE TABLE [Parent].[Pets]
     [SterilizationStatus] NVARCHAR(32) NULL,
     [MedicalHistory] NVARCHAR(MAX) NULL,
     [Temperament] NVARCHAR(32) NULL,
+    -- The pet's single primary/profile photo. Distinct from the photo gallery
+    -- in [Parent].[PetPhotos]; set via POST /pets/{petId}/profile-image.
+    [ProfilePhotoUrl] NVARCHAR(1000) NULL,
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_Pets_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
     [UpdatedAtUtc] DATETIME2(7) NOT NULL

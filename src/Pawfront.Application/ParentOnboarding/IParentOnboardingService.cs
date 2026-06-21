@@ -97,6 +97,16 @@ public interface IParentOnboardingService
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Reads the parent's single identity row (one per parent), including the
+    /// document's blob URL. Returns <c>null</c> when no identity is on file —
+    /// the parent's existence is guaranteed by the ownership filter, so a null
+    /// result means "no document uploaded yet" and the endpoint maps it to 404.
+    /// </summary>
+    Task<PetParentIdentityResponse?> GetIdentityAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Deletes the parent's single identity row (one per parent). The blob
     /// itself is deleted by the endpoint layer using the returned
     /// <c>IdentityPhotoUrl</c> (best-effort). Throws

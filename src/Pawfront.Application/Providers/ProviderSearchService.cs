@@ -59,7 +59,8 @@ internal sealed class ProviderSearchService(
 
                 return new ProviderSearchResult(
                     summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
-                    CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerHour, ServiceItemCode: null);
+                    CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerHour,
+                    ServiceItemCode: null, summary.ImageUrl);
             },
             cancellationToken);
 
@@ -93,7 +94,8 @@ internal sealed class ProviderSearchService(
 
                 return new ProviderSearchResult(
                     summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
-                    CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerHour, ServiceItemCode: null);
+                    CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerHour,
+                    ServiceItemCode: null, summary.ImageUrl);
             },
             cancellationToken);
 
@@ -155,7 +157,8 @@ internal sealed class ProviderSearchService(
 
                 return new ProviderSearchResult(
                     summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
-                    CompletedBookings: 0, charges, ProviderSearchChargesUnits.PerService, criteria.ServiceItemCode);
+                    CompletedBookings: 0, charges, ProviderSearchChargesUnits.PerService,
+                    criteria.ServiceItemCode, summary.ImageUrl);
             },
             cancellationToken);
 
@@ -182,7 +185,38 @@ internal sealed class ProviderSearchService(
 
                 return new ProviderSearchResult(
                     summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
-                    CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerAppointment, ServiceItemCode: null);
+                    CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerAppointment,
+                    ServiceItemCode: null, summary.ImageUrl);
+            },
+            cancellationToken);
+
+    public Task<IReadOnlyList<ProviderSearchResult>> SearchTrainerAsync(
+        TrainerProviderSearchCriteria criteria,
+        CancellationToken cancellationToken) =>
+        SearchAsync(
+            nameof(ProviderServiceCategory.PetTrainer),
+            ProviderServiceTypes.TrainingSession,
+            criteria.Animals, criteria.City, criteria.ServiceLocation,
+            criteria.Skip, criteria.Take,
+            async (summary, service, resolved, ct) =>
+            {
+                if (criteria.Date is not null)
+                {
+                    // A training session is fixed-duration — any free slot of
+                    // that length on the date means the provider is bookable.
+                    var slots = await TryGetSlotsAsync(
+                        resolved.ProviderId, service.ServiceId, criteria.Date.Value,
+                        resolved.DurationHours, AnySlotGranularityMinutes, serviceItemCode: null, ct);
+                    if (slots is null || slots.Slots.Count == 0)
+                    {
+                        return null;
+                    }
+                }
+
+                return new ProviderSearchResult(
+                    summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
+                    CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerSession,
+                    ServiceItemCode: null, summary.ImageUrl);
             },
             cancellationToken);
 

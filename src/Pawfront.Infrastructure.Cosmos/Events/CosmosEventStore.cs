@@ -27,11 +27,7 @@ internal sealed class CosmosEventStore(
             Physical = new PhysicalEventDetails
             {
                 MaximumCapacity = details.MaximumCapacity,
-                Ticketing = new EventTicketing
-                {
-                    IsPaid = details.IsPaid,
-                    Price = details.IsPaid ? details.Price : null
-                }
+                Location = ToLocationDocument(details.Location)
             },
             CreatedAtUtc = existing?.CreatedAtUtc ?? now,
             UpdatedAtUtc = now
@@ -44,8 +40,7 @@ internal sealed class CosmosEventStore(
 
         return new PhysicalEventResult(
             document.Physical.MaximumCapacity,
-            document.Physical.Ticketing.IsPaid,
-            document.Physical.Ticketing.Price);
+            ToLocationResult(document.Physical.Location));
     }
 
     public async Task<PhysicalEventResult?> GetPhysicalAsync(
@@ -60,8 +55,63 @@ internal sealed class CosmosEventStore(
             ? null
             : new PhysicalEventResult(
                 document.Physical.MaximumCapacity,
-                document.Physical.Ticketing.IsPaid,
-                document.Physical.Ticketing.Price);
+                ToLocationResult(document.Physical.Location));
+    }
+
+    public async Task DeletePhysicalAsync(
+        Guid eventId,
+        string eventCategory,
+        CancellationToken cancellationToken)
+    {
+        var container = await containerAccessor.GetContainerAsync(cancellationToken);
+
+        try
+        {
+            await container.DeleteItemAsync<EventDocument>(
+                eventId.ToString(),
+                new PartitionKey(eventCategory),
+                cancellationToken: cancellationToken);
+        }
+        catch (CosmosException exception) when (exception.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Already absent (online event, or never had a physical doc) — no-op.
+        }
+    }
+
+    private static EventLocationDetails? ToLocationDocument(EventLocationInput? location)
+    {
+        if (location is null)
+        {
+            return null;
+        }
+
+        return new EventLocationDetails
+        {
+            HouseNumber = location.HouseNumber,
+            Street = location.Street,
+            City = location.City,
+            Zip = location.Zip,
+            Country = location.Country,
+            Latitude = location.Latitude,
+            Longitude = location.Longitude
+        };
+    }
+
+    private static EventLocationResult? ToLocationResult(EventLocationDetails? location)
+    {
+        if (location is null)
+        {
+            return null;
+        }
+
+        return new EventLocationResult(
+            location.HouseNumber,
+            location.Street,
+            location.City,
+            location.Zip,
+            location.Country,
+            location.Latitude,
+            location.Longitude);
     }
 
     private static async Task<EventDocument?> TryReadAsync(

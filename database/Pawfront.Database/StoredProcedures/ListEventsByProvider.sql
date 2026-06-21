@@ -7,27 +7,39 @@ BEGIN
     -- Result set 1: event rows (PetParentId is always NULL on rows
     -- returned here because the filter is on ProviderId — but included
     -- for column-shape consistency with GetEvent / ListEvents readers).
-    SELECT [EventId],
-           [ProviderId],
-           [PetParentId],
-           [EventCategory],
-           [IsChildFriendly],
-           [Title],
-           [Description],
-           [BannerImageUrl],
-           [EventType],
-           [StartDate],
-           [EndDate],
-           [StartTime],
-           [EndTime],
-           [CreatedAtUtc],
-           [UpdatedAtUtc],
-           [ViewCount],
-           [ShareCount],
-           [InquiryCount]
-    FROM [Event].[Events]
-    WHERE [ProviderId] = @ProviderId
-    ORDER BY [StartDate] DESC, [StartTime] DESC;
+    SELECT e.[EventId],
+           e.[ProviderId],
+           e.[PetParentId],
+           e.[EventCategory],
+           e.[IsChildFriendly],
+           e.[Title],
+           e.[Description],
+           e.[BannerImageUrl],
+           e.[EventType],
+           e.[StartDate],
+           e.[EndDate],
+           e.[StartTime],
+           e.[EndTime],
+           e.[CreatedAtUtc],
+           e.[UpdatedAtUtc],
+           e.[ViewCount],
+           e.[ShareCount],
+           e.[InquiryCount],
+           e.[IsPaid],
+           e.[Price],
+           e.[CancellationPolicy],
+           COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
+                    org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
+           org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
+           (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
+            FROM [Event].[EventBookings] eb
+            WHERE eb.[EventId] = e.[EventId]
+              AND eb.[Status] = N'Confirmed') AS [TotalBookings]
+    FROM [Event].[Events] e
+    LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
+    LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
+    WHERE e.[ProviderId] = @ProviderId
+    ORDER BY e.[StartDate] DESC, e.[StartTime] DESC;
 
     -- Result set 2: amenities for this provider's events (EventId + Amenity)
     SELECT a.[EventId], a.[Amenity]

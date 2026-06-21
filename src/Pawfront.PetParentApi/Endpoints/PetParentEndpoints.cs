@@ -19,9 +19,9 @@ namespace Pawfront.PetParentApi.Endpoints;
 internal static class PetParentEndpoints
 {
     // Hard upper bound on uploaded image size. Mirrors the user-specified
-    // "max 1 MB" constraint. Applied to both pet-parent profile photos and
+    // "max 3 MB" constraint. Applied to both pet-parent profile photos and
     // individual pet photos — both endpoints share the same validation.
-    private const long MaxPhotoBytes = 1L * 1024 * 1024;
+    private const long MaxPhotoBytes = 3L * 1024 * 1024;
 
     // Allowlist of MIME types the mobile client can send. JPEG / PNG / WebP
     // covers the standard iOS + Android capture/picker formats. HEIC can be
@@ -47,12 +47,14 @@ internal static class PetParentEndpoints
         group.MapPost("/pets", AddPet);
         group.MapGet("/pets", ListPets);
         group.MapPost("/identity", UploadIdentity).DisableAntiforgery();
+        group.MapGet("/identity", GetIdentity);
         group.MapDelete("/identity", DeleteIdentity);
         group.MapPost("/photos", UploadPhoto).DisableAntiforgery();
         group.MapGet("/photos", ListPhotos);
         group.MapDelete("/photos/{photoId:guid}", DeletePhoto);
         group.MapGet("/event-bookings", ListEventBookings);
         group.MapPost("/bookings", CreateServiceBooking);
+        group.MapGet("/bookings", ListServiceBookings);
         group.MapPost("/bookings/{bookingId:guid}/status", UpdateBookingStatus);
         group.MapGet("/bookings/{bookingId:guid}/status-history", GetBookingStatusHistory);
         group.MapGet("/onboarding-status", GetOnboardingStatus);
@@ -65,9 +67,13 @@ internal static class PetParentEndpoints
         // to the caller's resolved PetParentId. Unknown pet → 404; wrong
         // owner → 403.
         var pets = builder.MapGroup("/pets/{petId:guid}").RequireOwnedPet();
+        pets.MapGet("/", GetPet);
         pets.MapPatch("/", UpdatePet);
         pets.MapPatch("/medical-info", UpdatePetMedicalInfo);
+        pets.MapDelete("/", DeletePet);
+        pets.MapPost("/profile-image", UploadPetProfilePhoto).DisableAntiforgery();
         pets.MapPost("/photos", UploadPetPhoto).DisableAntiforgery();
+        pets.MapDelete("/photos/{photoId:guid}", DeletePetPhoto);
 
         return builder;
     }
@@ -103,9 +109,20 @@ internal static class PetParentEndpoints
             summary.EventId,
             summary.EventTitle,
             summary.EventCategory,
+            summary.EventType,
             summary.EventStartDate,
             summary.EventStartTime,
             summary.EventBannerImageUrl,
+            summary.EventLocation is null
+                ? null
+                : new EventLocationResponse(
+                    summary.EventLocation.HouseNumber,
+                    summary.EventLocation.Street,
+                    summary.EventLocation.City,
+                    summary.EventLocation.Zip,
+                    summary.EventLocation.Country,
+                    summary.EventLocation.Latitude,
+                    summary.EventLocation.Longitude),
             summary.BookerName,
             summary.BookerEmail,
             summary.BookerMobile,
@@ -118,6 +135,21 @@ internal static class PetParentEndpoints
             summary.CreatedAtUtc,
             summary.UpdatedAtUtc,
             summary.CancelledAtUtc);
+
+    /// <summary>
+    /// The parent's own service bookings ("my bookings"), most-recent first,
+    /// including cancelled ones. The petParentId is JWT-verified by the group's
+    /// ownership filter, so a caller only ever sees their own bookings. Empty
+    /// array when the parent has none — list semantics, no 404.
+    /// </summary>
+    private static async Task<IResult> ListServiceBookings(
+        Guid petParentId,
+        IBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        var results = await bookingService.ListByPetParentAsync(petParentId, cancellationToken);
+        return ApiResults.Ok(results.Select(ToBookingResponse).ToArray());
+    }
 
     /// <summary>
     /// Parent-initiated service booking ("book now" from a search result /
@@ -455,6 +487,39 @@ internal static class PetParentEndpoints
             status.IsFullyOnboarded);
     }
 
+    private static async Task<IResult> UploadPetProfilePhoto(
+        Guid petId,
+        IFormFile file,
+        IPawfrontBlobStorage blobStorage,
+        IParentPetService petService,
+        CancellationToken cancellationToken)
+    {
+        var validation = ValidatePhotoFile(file);
+        if (validation is not null)
+        {
+            return validation;
+        }
+
+        await using var stream = file.OpenReadStream();
+        var url = await blobStorage.UploadAsync(
+            BlobUploadKind.PetProfilePhoto,
+            petId,
+            file.FileName,
+            stream,
+            file.ContentType,
+            cancellationToken);
+
+        try
+        {
+            var response = await petService.UpdateProfilePhotoAsync(petId, url, cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (PetNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetNotFound", exception.Message);
+        }
+    }
+
     private static async Task<IResult> UploadPetPhoto(
         Guid petId,
         IFormFile file,
@@ -501,7 +566,7 @@ internal static class PetParentEndpoints
         {
             return ApiResults.BadRequest(
                 "ImageTooLarge",
-                $"Photo must be {MaxPhotoBytes / 1024} KB or smaller.");
+                $"Photo must be {MaxPhotoBytes / (1024 * 1024)} MB or smaller.");
         }
 
         var contentType = file.ContentType;
@@ -513,6 +578,20 @@ internal static class PetParentEndpoints
         }
 
         return null;
+    }
+
+    private static async Task<IResult> GetPet(
+        Guid petId,
+        IParentPetService petService,
+        CancellationToken cancellationToken)
+    {
+        // The group's ownership filter already confirmed the pet exists and
+        // belongs to the caller, so a null here would be an unexpected race
+        // (pet deleted between filter and read). Map it to 404 defensively.
+        var pet = await petService.GetPetAsync(petId, cancellationToken);
+        return pet is null
+            ? ApiResults.NotFound("PetNotFound", $"Pet '{petId}' was not found.")
+            : ApiResults.Ok(pet);
     }
 
     private static async Task<IResult> UpdatePet(
@@ -588,6 +667,60 @@ internal static class PetParentEndpoints
     {
         var pets = await petService.GetPetsAsync(petParentId, cancellationToken);
         return ApiResults.Ok(pets);
+    }
+
+    private static async Task<IResult> DeletePet(
+        Guid petId,
+        IParentPetService petService,
+        CancellationToken cancellationToken)
+    {
+        // Ownership is already enforced by RequireOwnedPet on the group — the
+        // route's petId is confirmed to belong to the caller (unknown → 404,
+        // wrong owner → 403) before this handler runs.
+        try
+        {
+            var response = await petService.DeletePetAsync(petId, cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (PetNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetNotFound", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> DeletePetPhoto(
+        Guid petId,
+        Guid photoId,
+        IPawfrontBlobStorage blobStorage,
+        IParentPetService petService,
+        CancellationToken cancellationToken)
+    {
+        // Ownership: RequireOwnedPet on the group confirmed the pet belongs to
+        // the caller; the sproc additionally scopes the photo by petId so a
+        // photo can only be removed via its own pet.
+        DeletePetPhotoResponse response;
+        try
+        {
+            response = await petService.DeletePhotoAsync(petId, photoId, cancellationToken);
+        }
+        catch (PetPhotoNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetPhotoNotFound", exception.Message);
+        }
+
+        // Best-effort blob cleanup: the SQL row (source of truth) is already
+        // gone, so a storage hiccup must not fail the request — the blob is
+        // merely orphaned for a future sweep.
+        try
+        {
+            await blobStorage.DeleteAsync(response.PhotoUrl, cancellationToken);
+        }
+        catch
+        {
+            // Swallow — see above.
+        }
+
+        return ApiResults.Ok(response);
     }
 
     private static async Task<IResult> AddPet(
@@ -671,6 +804,22 @@ internal static class PetParentEndpoints
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
         }
+    }
+
+    private static async Task<IResult> GetIdentity(
+        Guid petParentId,
+        IParentOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        // Ownership filter on the group already confirmed the parent belongs to
+        // the caller — a null result here means the parent has no identity on
+        // file yet, which maps to 404 (not 403).
+        var response = await onboardingService.GetIdentityAsync(petParentId, cancellationToken);
+        return response is null
+            ? ApiResults.NotFound(
+                "ParentIdentityNotFound",
+                $"Pet parent '{petParentId}' has no identity on file.")
+            : ApiResults.Ok(response);
     }
 
     private static async Task<IResult> DeleteIdentity(

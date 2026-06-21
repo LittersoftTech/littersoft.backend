@@ -38,6 +38,7 @@ app.UseMiddleware<ProviderTelemetryEnrichmentMiddleware>();
 var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.FirebaseUserPolicy);
 
 api.MapHealthEndpoints();
+api.MapMetadataEndpoints();
 api.MapProviderOnboardingEndpoints();
 api.MapProviderEndpoints();
 api.MapProviderServiceCatalogEndpoints();

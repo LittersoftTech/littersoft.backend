@@ -1,5 +1,6 @@
 using Pawfront.Application.Availability;
 using Pawfront.Application.Closures;
+using Pawfront.Application.Policies;
 using Pawfront.Application.Services.PetAdoptionSale;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.PetSitter;
@@ -18,7 +19,8 @@ internal sealed class ProviderPublicProfileService(
     IPetAdoptionSaleServiceRegistry petAdoptionSale,
     IVetServiceRegistry vet,
     IProviderAvailabilityService availabilityService,
-    IProviderClosureService closureService) : IProviderPublicProfileService
+    IProviderClosureService closureService,
+    IProviderPolicyService policyService) : IProviderPublicProfileService
 {
     // 10-year window for "future time off" — closures rarely run beyond this,
     // and the closure list endpoint requires a bounded range. Trimmed in the
@@ -90,6 +92,11 @@ internal sealed class ProviderPublicProfileService(
             to: today.AddDays((int)FutureTimeOffWindow.TotalDays),
             cancellationToken);
 
+        // Advertised booking policy: cancellation window + accepted payment
+        // (payout) methods. GetAsync returns empty/null when nothing is set,
+        // so no provider-not-found handling is needed here.
+        var policy = await policyService.GetAsync(providerId, cancellationToken);
+
         return new ProviderPublicProfile(
             providerId,
             location.ServiceCategory,
@@ -98,6 +105,8 @@ internal sealed class ProviderPublicProfileService(
             location.Longitude,
             workingHours,
             timeOff,
+            policy.MinimumHoursBeforeCancellation,
+            policy.PayoutMethods,
             petSitterResult,
             petGroomerResult,
             petTrainerResult,

@@ -57,4 +57,22 @@ public interface IEventBookingService
     Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
         string bookerEmail,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Soft-cancels the booking on behalf of the booker. Ownership is proven
+    /// by matching <paramref name="bookerEmail"/> (from the caller's Firebase
+    /// JWT) against the booking's free-text booker email — there is no FK to
+    /// any user table, so either host's caller can cancel their own booking.
+    /// Flips Status to Cancelled + stamps CancelledAtUtc, which releases the
+    /// seat capacity automatically (the create-side capacity SUM only counts
+    /// Confirmed rows). Throws
+    /// <see cref="EventBookingNotFoundForBookerException"/> if the booking is
+    /// unknown or not theirs, or
+    /// <see cref="EventBookingAlreadyCancelledException"/> if it was already
+    /// cancelled.
+    /// </summary>
+    Task<EventBookingResult> CancelByBookerAsync(
+        Guid bookingId,
+        string bookerEmail,
+        CancellationToken cancellationToken);
 }

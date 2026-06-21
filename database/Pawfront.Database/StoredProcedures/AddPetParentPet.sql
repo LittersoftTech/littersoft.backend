@@ -69,7 +69,8 @@ BEGIN
            [MedicalHistory],
            [Temperament],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [ProfilePhotoUrl]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 

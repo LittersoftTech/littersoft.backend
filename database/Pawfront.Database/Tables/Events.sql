@@ -18,6 +18,17 @@ CREATE TABLE [Event].[Events]
     [EndDate] DATE NOT NULL,
     [StartTime] TIME(0) NOT NULL,
     [EndTime] TIME(0) NOT NULL,
+    -- Ticketing. Stored on the main event row (not the Cosmos physical
+    -- extension) so it's returned for every event type — online events have
+    -- no Cosmos document but can still be paid. [Price] is NULL for free
+    -- events; the application normalises it to NULL whenever IsPaid = 0.
+    [IsPaid] BIT NOT NULL
+        CONSTRAINT [DF_Events_IsPaid] DEFAULT 0,
+    [Price] DECIMAL(18, 2) NULL,
+    -- Refund policy the creator advertises (every event type). One of
+    -- FullRefundUpTo4Hours / FullRefundUpTo2Hours / NoRefund.
+    [CancellationPolicy] NVARCHAR(32) NOT NULL
+        CONSTRAINT [DF_Events_CancellationPolicy] DEFAULT N'NoRefund',
     -- Organiser-dashboard counters. Bumped by [Event].[IncrementEventCounter]
     -- from the public increment endpoints. Read in [Event].[GetEventMetrics].
     [ViewCount] INT NOT NULL
@@ -44,7 +55,14 @@ CREATE TABLE [Event].[Events]
         N'AdoptionAndRescue', N'PetTraining', N'Charity', N'Volunteering',
         N'HealthAndWellness', N'SocialAndCultural', N'OutdoorActivities', N'ParentEducation')),
     CONSTRAINT [CK_Events_EventType] CHECK ([EventType] IN (N'Physical', N'Online')),
-    CONSTRAINT [CK_Events_DateRange] CHECK ([StartDate] <= [EndDate])
+    CONSTRAINT [CK_Events_DateRange] CHECK ([StartDate] <= [EndDate]),
+    -- A paid event must carry a non-negative price; a free event has none.
+    CONSTRAINT [CK_Events_Ticketing] CHECK (
+        ([IsPaid] = 0 AND [Price] IS NULL)
+     OR ([IsPaid] = 1 AND [Price] IS NOT NULL AND [Price] >= 0)
+    ),
+    CONSTRAINT [CK_Events_CancellationPolicy] CHECK ([CancellationPolicy] IN (
+        N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'NoRefund'))
 );
 
 GO

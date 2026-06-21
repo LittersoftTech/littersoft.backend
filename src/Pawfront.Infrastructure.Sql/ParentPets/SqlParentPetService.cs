@@ -4,6 +4,7 @@ using Pawfront.Application.Configuration;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
 using Pawfront.Contracts.ParentPets;
+using Pawfront.Domain.Vocabularies;
 
 namespace Pawfront.Infrastructure.Sql.ParentPets;
 
@@ -120,7 +121,7 @@ internal sealed class SqlParentPetService(
     {
         var vaccinationStatus = NormalizeVaccinationStatus(request.VaccinationStatus);
         var sterilizationStatus = NormalizeSterilizationStatus(request.SterilizationStatus);
-        var temperament = NormalizeTemperament(request.Temperament);
+        var temperament = NormalizeTemperamentOrNull(request.Temperament);
         var medicalHistory = TrimOrNull(request.MedicalHistory);
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
@@ -134,7 +135,7 @@ internal sealed class SqlParentPetService(
         command.Parameters.AddWithValue("@VaccinationStatus", vaccinationStatus);
         command.Parameters.AddWithValue("@SterilizationStatus", sterilizationStatus);
         command.Parameters.AddWithValue("@MedicalHistory", DbValue(medicalHistory));
-        command.Parameters.AddWithValue("@Temperament", temperament);
+        command.Parameters.AddWithValue("@Temperament", DbValue(temperament));
 
         try
         {
@@ -190,7 +191,8 @@ internal sealed class SqlParentPetService(
                 MedicalHistory: reader.IsDBNull(12) ? null : reader.GetString(12),
                 Temperament: reader.IsDBNull(13) ? null : reader.GetString(13),
                 CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
-                UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero));
+                UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero),
+                ProfilePhotoUrl: reader.IsDBNull(16) ? null : reader.GetString(16));
 
             var photos = new List<PetPhotoResponse>();
             pets.Add((builder, photos));
@@ -224,6 +226,130 @@ internal sealed class SqlParentPetService(
             .ToList();
     }
 
+    public async Task<PetParentPetWithPhotosResponse?> GetPetAsync(
+        Guid petId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.GetPetParentPet");
+        command.Parameters.AddWithValue("@PetId", petId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        // Result set 1: the pet (zero or one row).
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var builder = new PetParentPetWithPhotosResponseBuilder(
+            PetId: reader.GetGuid(0),
+            PetParentId: reader.GetGuid(1),
+            PetType: reader.GetString(2),
+            PetName: reader.GetString(3),
+            Breed: reader.GetString(4),
+            Gender: reader.GetString(5),
+            DateOfBirth: DateOnly.FromDateTime(reader.GetDateTime(6)),
+            Weight: reader.GetDecimal(7),
+            MicrochipId: reader.IsDBNull(8) ? null : reader.GetString(8),
+            Description: reader.IsDBNull(9) ? null : reader.GetString(9),
+            VaccinationStatus: reader.IsDBNull(10) ? null : reader.GetString(10),
+            SterilizationStatus: reader.IsDBNull(11) ? null : reader.GetString(11),
+            MedicalHistory: reader.IsDBNull(12) ? null : reader.GetString(12),
+            Temperament: reader.IsDBNull(13) ? null : reader.GetString(13),
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
+            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero),
+            ProfilePhotoUrl: reader.IsDBNull(16) ? null : reader.GetString(16));
+
+        // Result set 2: the pet's photo gallery (oldest-first).
+        var photos = new List<PetPhotoResponse>();
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                photos.Add(new PetPhotoResponse(
+                    PetPhotoId: reader.GetGuid(0),
+                    PetId: reader.GetGuid(1),
+                    PhotoUrl: reader.GetString(2),
+                    CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(3), TimeSpan.Zero),
+                    UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero)));
+            }
+        }
+
+        return builder.Build(photos);
+    }
+
+    public async Task<DeletePetResponse> DeletePetAsync(
+        Guid petId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.DeletePetParentPet");
+        command.Parameters.AddWithValue("@PetId", petId);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Delete confirmation row was not returned.");
+            }
+
+            return new DeletePetResponse(
+                PetId: reader.GetGuid(0),
+                PetParentId: reader.GetGuid(1),
+                DeletedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero));
+        }
+        catch (SqlException exception) when (exception.Number == 51214)
+        {
+            throw new PetNotFoundException(petId);
+        }
+    }
+
+    public async Task<DeletePetPhotoResponse> DeletePhotoAsync(
+        Guid petId,
+        Guid petPhotoId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.DeletePetPhoto");
+        command.Parameters.AddWithValue("@PetId", petId);
+        command.Parameters.AddWithValue("@PetPhotoId", petPhotoId);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Deleted pet photo row was not returned.");
+            }
+
+            return new DeletePetPhotoResponse(
+                PetPhotoId: reader.GetGuid(0),
+                PetId: reader.GetGuid(1),
+                PhotoUrl: reader.GetString(2),
+                DeletedAtUtc: new DateTimeOffset(reader.GetDateTime(3), TimeSpan.Zero));
+        }
+        catch (SqlException exception) when (exception.Number == 51215)
+        {
+            throw new PetPhotoNotFoundException(petPhotoId);
+        }
+    }
+
     /// <summary>
     /// Mutable shim for assembling a <see cref="PetParentPetWithPhotosResponse"/>
     /// across two result sets — the photo list isn't known until set 2 lands.
@@ -244,7 +370,8 @@ internal sealed class SqlParentPetService(
         string? MedicalHistory,
         string? Temperament,
         DateTimeOffset CreatedAtUtc,
-        DateTimeOffset UpdatedAtUtc)
+        DateTimeOffset UpdatedAtUtc,
+        string? ProfilePhotoUrl)
     {
         public PetParentPetWithPhotosResponse Build(IReadOnlyList<PetPhotoResponse> photos) =>
             new(
@@ -264,7 +391,8 @@ internal sealed class SqlParentPetService(
                 Temperament,
                 photos,
                 CreatedAtUtc,
-                UpdatedAtUtc);
+                UpdatedAtUtc,
+                ProfilePhotoUrl);
     }
 
     public async Task<PetPhotoResponse> AddPhotoAsync(
@@ -306,6 +434,43 @@ internal sealed class SqlParentPetService(
         }
     }
 
+    public async Task<UpdatePetProfilePhotoResponse> UpdateProfilePhotoAsync(
+        Guid petId,
+        string profilePhotoUrl,
+        CancellationToken cancellationToken)
+    {
+        var url = Required(profilePhotoUrl, nameof(profilePhotoUrl));
+
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.UpdatePetProfilePhoto");
+
+        command.Parameters.AddWithValue("@PetId", petId);
+        command.Parameters.AddWithValue("@ProfilePhotoUrl", url);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Pet row was not returned after profile-photo update.");
+            }
+
+            return new UpdatePetProfilePhotoResponse(
+                PetId: reader.GetGuid(0),
+                ProfilePhotoUrl: reader.GetString(1),
+                UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero));
+        }
+        catch (SqlException exception) when (exception.Number == 51220)
+        {
+            throw new PetNotFoundException(petId);
+        }
+    }
+
     private static PetParentPetResponse ReadPet(SqlDataReader reader)
     {
         return new PetParentPetResponse(
@@ -324,7 +489,8 @@ internal sealed class SqlParentPetService(
             reader.IsDBNull(12) ? null : reader.GetString(12),
             reader.IsDBNull(13) ? null : reader.GetString(13),
             new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
-            new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero));
+            new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero),
+            reader.IsDBNull(16) ? null : reader.GetString(16));
     }
 
     private static string NormalizeVaccinationStatus(string? value)
@@ -347,27 +513,36 @@ internal sealed class SqlParentPetService(
         };
     }
 
-    private static string NormalizeTemperament(string? value)
+    // Behaviour is the canonical pet-temperament vocabulary (shared with the
+    // provider "temperaments handled" lists). Temperament is optional — an
+    // omitted/empty value is stored as null; a supplied value must be valid.
+    private static string? NormalizeTemperamentOrNull(string? value)
     {
-        return Required(value, nameof(value)) switch
+        var raw = TrimOrNull(value);
+        if (raw is null)
         {
-            "Anxious" => "Anxious",
-            "Friendly" => "Friendly",
-            "Aggressive" => "Aggressive",
-            var unsupported => throw new UnsupportedTemperamentException(unsupported)
-        };
+            return null;
+        }
+
+        return Enum.TryParse<Behaviour>(raw, ignoreCase: false, out var behaviour)
+            ? behaviour.ToString()
+            : throw new UnsupportedTemperamentException(raw);
     }
+
+    // Pets draw from the canonical Animal vocabulary but are restricted to the
+    // subset a parent can actually own. The spelling comes from the enum (one
+    // source of truth); the subset is the only per-context rule.
+    private static readonly IReadOnlySet<Animal> SupportedPetTypes = new HashSet<Animal>
+    {
+        Animal.Dog, Animal.Cat, Animal.Hamster, Animal.GuineaPig
+    };
 
     private static string NormalizePetType(string? value)
     {
-        return Required(value, nameof(value)) switch
-        {
-            "Dog" => "Dog",
-            "Cat" => "Cat",
-            "Hamster" => "Hamster",
-            "GuineaPig" => "GuineaPig",
-            var unsupported => throw new UnsupportedPetTypeException(unsupported)
-        };
+        var raw = Required(value, nameof(value));
+        return Enum.TryParse<Animal>(raw, ignoreCase: false, out var animal) && SupportedPetTypes.Contains(animal)
+            ? animal.ToString()
+            : throw new UnsupportedPetTypeException(raw);
     }
 
     private static string NormalizeGender(string? value)

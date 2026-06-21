@@ -25,6 +25,7 @@ internal static class ProviderSearchEndpoints
         builder.MapGet("/providers/search/night-stay", SearchNightStay);
         builder.MapGet("/providers/search/groomers", SearchGroomers);
         builder.MapGet("/providers/search/vets", SearchVets);
+        builder.MapGet("/providers/search/trainers", SearchTrainers);
         return builder;
     }
 
@@ -229,6 +230,44 @@ internal static class ProviderSearchEndpoints
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
     }
 
+    private static async Task<IResult> SearchTrainers(
+        Guid? petId,
+        DateOnly? date,
+        string? city,
+        string? serviceLocation,
+        int? skip,
+        int? take,
+        IProviderSearchService searchService,
+        ICurrentPetParentContext currentPetParent,
+        IPetParentOwnershipReader ownershipReader,
+        CancellationToken cancellationToken)
+    {
+        string? normalisedLocation;
+        try
+        {
+            normalisedLocation = NormaliseServiceLocationOrNull(serviceLocation);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("UnsupportedServiceLocation", exception.Message);
+        }
+
+        var (error, animals) = await ResolveAnimalsFromPetAsync(
+            petId, currentPetParent, ownershipReader, cancellationToken);
+        if (error is not null)
+        {
+            return error;
+        }
+
+        var (clampedSkip, clampedTake) = ClampPaging(skip, take);
+        var results = await searchService.SearchTrainerAsync(
+            new TrainerProviderSearchCriteria(
+                animals, city, normalisedLocation, date, clampedSkip, clampedTake),
+            cancellationToken);
+
+        return ApiResults.Ok(results.Select(ToResponse).ToArray());
+    }
+
     /// <summary>
     /// petId → the pet's type as the animal filter. Ownership is enforced
     /// inline (these routes aren't under /pets/{petId}, so the group filter
@@ -297,5 +336,6 @@ internal static class ProviderSearchEndpoints
             result.CompletedBookings,
             result.Charges,
             result.ChargesUnit,
-            result.ServiceItemCode);
+            result.ServiceItemCode,
+            result.ImageUrl);
 }
