@@ -6370,6 +6370,28 @@ PRINT 'Created/updated [Event].[ListEventBookingsByBookerEmail].';
 GO
 
 
+-- 3.35a Event.ListBookedEventIdsByBookerEmail ----------------------------------
+-- Distinct events the caller currently holds tickets for (Status =
+-- N'Confirmed'; cancelled bookings free the seat and are excluded). Powers
+-- the IsBookable flag on event list / detail reads — an event the caller has
+-- already booked is not bookable again. Booker identity is free text, so we
+-- match by BookerEmail, which the endpoint pulls from the caller's JWT.
+CREATE OR ALTER PROCEDURE [Event].[ListBookedEventIdsByBookerEmail]
+    @BookerEmail NVARCHAR(320)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT DISTINCT b.[EventId]
+    FROM [Event].[EventBookings] AS b
+    WHERE b.[BookerEmail] = @BookerEmail
+      AND b.[Status] = N'Confirmed';
+END;
+GO
+PRINT 'Created/updated [Event].[ListBookedEventIdsByBookerEmail].';
+GO
+
+
 -- 3.36 Event.CancelEventBooking ------------------------------------------------
 -- Soft-cancels a booking on behalf of the booker (matched by @BookerEmail).
 -- Flipping Status to N'Cancelled' releases the seat capacity automatically

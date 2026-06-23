@@ -9,6 +9,8 @@ internal sealed class EventBookingService(
     IEventCosmosStore cosmosStore,
     ILogger<EventBookingService> logger) : IEventBookingService
 {
+    private static readonly IReadOnlySet<Guid> EmptyEventIds = new HashSet<Guid>();
+
     private static readonly IReadOnlySet<string> AllowedPaymentMethods = new HashSet<string>(StringComparer.Ordinal)
     {
         "CreditCard",
@@ -36,6 +38,17 @@ internal sealed class EventBookingService(
         // total. IEventService already composes both.
         var @event = await eventService.GetAsync(command.EventId, cancellationToken)
             ?? throw new EventBookingEventNotFoundException(command.EventId);
+
+        // An event's organiser can't buy tickets to their own event. The
+        // caller's organiser id is resolved from their JWT by the host
+        // endpoint (ProviderId on the provider host, PetParentId on the parent
+        // host); GUIDs are globally unique, so a match against either organiser
+        // column is conclusive regardless of which host issued the request.
+        if (command.BookerOrganiserId is Guid organiserId
+            && (organiserId == @event.ProviderId || organiserId == @event.PetParentId))
+        {
+            throw new EventBookingSelfBookingNotAllowedException(command.EventId);
+        }
 
         int? maximumCapacity;
         if (string.Equals(@event.EventType, nameof(EventType.Online), StringComparison.Ordinal))
@@ -142,6 +155,20 @@ internal sealed class EventBookingService(
         }));
 
         return hydrated;
+    }
+
+    public Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
+        string? bookerEmail,
+        CancellationToken cancellationToken)
+    {
+        // No email claim → no bookings we can attribute to the caller, so every
+        // event is bookable. Avoid a round-trip for the empty case.
+        if (string.IsNullOrWhiteSpace(bookerEmail))
+        {
+            return Task.FromResult<IReadOnlySet<Guid>>(EmptyEventIds);
+        }
+
+        return sqlStore.ListBookedEventIdsByBookerEmailAsync(bookerEmail.Trim(), cancellationToken);
     }
 
     public Task<EventBookingResult> CancelByBookerAsync(

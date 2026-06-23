@@ -59,6 +59,16 @@ public interface IEventBookingService
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Returns the distinct set of event ids the caller currently holds
+    /// (non-cancelled) tickets for, matched by <paramref name="bookerEmail"/>.
+    /// Powers the <c>IsBookable</c> flag on event list / detail reads. Returns
+    /// an empty set when the email is null/blank (no known bookings).
+    /// </summary>
+    Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
+        string? bookerEmail,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Soft-cancels the booking on behalf of the booker. Ownership is proven
     /// by matching <paramref name="bookerEmail"/> (from the caller's Firebase
     /// JWT) against the booking's free-text booker email — there is no FK to

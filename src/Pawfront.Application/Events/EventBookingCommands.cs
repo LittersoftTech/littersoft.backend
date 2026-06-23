@@ -6,7 +6,13 @@ public sealed record CreateEventBookingCommand(
     string BookerEmail,
     string? BookerMobile,
     IReadOnlyList<string> AttendeeNames,
-    string PaymentMethod);
+    string PaymentMethod,
+    // The caller's own organiser id, resolved from their Firebase JWT by the
+    // host endpoint — a ProviderId on the provider host, a PetParentId on the
+    // parent host. Null when the caller has no organiser profile (then they
+    // can't be the event's organiser anyway). Used to block an organiser from
+    // booking tickets to their own event.
+    Guid? BookerOrganiserId = null);
 
 public sealed record EventBookingResult(
     Guid BookingId,
@@ -61,6 +67,13 @@ public sealed class EventBookingCapacityExceededException(Guid eventId, int maxi
     public Guid EventId { get; } = eventId;
     public int MaximumCapacity { get; } = maximumCapacity;
 }
+
+/// <summary>
+/// The caller is the event's organiser (provider or pet parent) — an
+/// organiser may not buy tickets to their own event.
+/// </summary>
+public sealed class EventBookingSelfBookingNotAllowedException(Guid eventId)
+    : Exception($"Event '{eventId}' cannot be booked by its own organiser.");
 
 public sealed class EventBookingNotFoundException(Guid bookingId)
     : Exception($"Event booking '{bookingId}' was not found.");

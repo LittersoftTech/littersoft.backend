@@ -130,6 +130,11 @@ public sealed record EventResponse(
     // Booking summary: max bookings (= physical capacity; null/unlimited for
     // online events) and total bookings done so far. Returned on list + detail.
     EventBookingStatsResponse Bookings,
+    // True when the caller may still book tickets for this event; false once
+    // the caller already holds (non-cancelled) tickets for it. Computed per
+    // request from the caller's Firebase email on event list + detail reads;
+    // defaults to true on organiser-context reads (create / edit / my-events).
+    bool IsBookable,
     // Detail-only (GET /events/{eventId}, PUT edit): the event's payment options
     // (Cash / Digital). Null on list reads.
     IReadOnlyCollection<string>? PaymentOptions,

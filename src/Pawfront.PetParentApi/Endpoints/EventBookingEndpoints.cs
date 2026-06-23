@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Pawfront.Application.Events;
 using Pawfront.Contracts.Events;
+using Pawfront.PetParentApi.Auth;
 
 namespace Pawfront.PetParentApi.Endpoints;
 
@@ -31,9 +32,16 @@ internal static class EventBookingEndpoints
     private static async Task<IResult> Create(
         Guid eventId,
         CreateEventBookingRequest request,
+        ICurrentPetParentContext currentParent,
         IEventBookingService bookingService,
         CancellationToken cancellationToken)
     {
+        // Resolve the caller's own PetParentId so the service can block a
+        // parent from booking tickets to an event they organise. Null when
+        // the caller hasn't completed their profile (then they can't be the
+        // organiser of any event).
+        var callerPetParentId = await currentParent.GetPetParentIdAsync(cancellationToken);
+
         try
         {
             var result = await bookingService.CreateAsync(
@@ -43,7 +51,8 @@ internal static class EventBookingEndpoints
                     request.BookerEmail,
                     request.BookerMobile,
                     request.AttendeeNames,
-                    request.PaymentMethod),
+                    request.PaymentMethod,
+                    callerPetParentId),
                 cancellationToken);
 
             return ApiResults.Created($"/api/v1/event-bookings/{result.BookingId}", ToResponse(result));
@@ -51,6 +60,10 @@ internal static class EventBookingEndpoints
         catch (EventBookingEventNotFoundException exception)
         {
             return ApiResults.NotFound("EventNotFound", exception.Message);
+        }
+        catch (EventBookingSelfBookingNotAllowedException exception)
+        {
+            return ApiResults.Forbidden("SelfBookingNotAllowed", exception.Message);
         }
         catch (EventBookingNotPhysicalException exception)
         {
