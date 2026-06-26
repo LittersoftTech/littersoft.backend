@@ -111,6 +111,28 @@ internal sealed class SqlEventBookingStore(
         return rows;
     }
 
+    public async Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
+        string bookerEmail,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.ListBookedEventIdsByBookerEmail", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+
+        var eventIds = new HashSet<Guid>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            eventIds.Add(reader.GetGuid(0));
+        }
+        return eventIds;
+    }
+
     public async Task<EventBookingResult> CancelByBookerAsync(
         Guid bookingId,
         string bookerEmail,

@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using Pawfront.Application.Events;
 using Pawfront.Application.Storage;
 using Pawfront.Contracts.Common;
@@ -261,7 +262,8 @@ internal static class EventEndpoints
         CancellationToken cancellationToken)
     {
         var results = await eventService.ListByProviderAsync(providerId, cancellationToken);
-        return ApiResults.Ok(results.Select(ToResponse).ToArray());
+        // Organiser's own events — IsBookable defaults true (not a booking surface).
+        return ApiResults.Ok(results.Select(e => ToResponse(e)).ToArray());
     }
 
     private static async Task<IResult> List(
@@ -275,7 +277,9 @@ internal static class EventEndpoints
         string[]? amenities,
         // Optional free-text title search (case-insensitive "contains").
         string? title,
+        HttpContext httpContext,
         IEventService eventService,
+        IEventBookingService bookingService,
         CancellationToken cancellationToken)
     {
         try
@@ -291,7 +295,14 @@ internal static class EventEndpoints
                     title),
                 cancellationToken);
 
-            return ApiResults.Ok(results.Select(ToResponse).ToArray());
+            // An event the caller already holds tickets for is no longer
+            // bookable. Booker identity is the caller's Firebase email claim.
+            var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
+                httpContext.User.FindFirstValue("email"), cancellationToken);
+
+            return ApiResults.Ok(results
+                .Select(r => ToResponse(r, !bookedEventIds.Contains(r.EventId)))
+                .ToArray());
         }
         catch (ArgumentException exception)
         {
@@ -301,16 +312,23 @@ internal static class EventEndpoints
 
     private static async Task<IResult> GetById(
         Guid eventId,
+        HttpContext httpContext,
         IEventService eventService,
+        IEventBookingService bookingService,
         CancellationToken cancellationToken)
     {
         var result = await eventService.GetAsync(eventId, cancellationToken);
-        return result is null
-            ? ApiResults.NotFound("EventNotFound", $"Event '{eventId}' was not found.")
-            : ApiResults.Ok(ToResponse(result));
+        if (result is null)
+        {
+            return ApiResults.NotFound("EventNotFound", $"Event '{eventId}' was not found.");
+        }
+
+        var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
+            httpContext.User.FindFirstValue("email"), cancellationToken);
+        return ApiResults.Ok(ToResponse(result, !bookedEventIds.Contains(result.EventId)));
     }
 
-    private static EventResponse ToResponse(EventResult result)
+    private static EventResponse ToResponse(EventResult result, bool isBookable = true)
     {
         return new EventResponse(
             result.EventId,
@@ -349,6 +367,7 @@ internal static class EventEndpoints
                 // for online events.
                 result.Physical?.MaximumCapacity,
                 result.TotalBookings),
+            isBookable,
             result.PaymentOptions,
             result.Attendees?
                 .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber))

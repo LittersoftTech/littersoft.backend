@@ -59,6 +59,16 @@ public interface IEventBookingSqlStore
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Returns the distinct set of event ids the caller currently holds
+    /// (non-cancelled) tickets for, matched by <paramref name="bookerEmail"/>.
+    /// Powers the <c>IsBookable</c> flag on event list / detail reads — an
+    /// event the caller has already booked is no longer bookable.
+    /// </summary>
+    Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
+        string bookerEmail,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Soft-cancels the booking iff it was made under <paramref name="bookerEmail"/>.
     /// Returns the cancelled booking with its tickets. Throws
     /// <see cref="EventBookingNotFoundForBookerException"/> on an unknown id /

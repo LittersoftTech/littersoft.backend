@@ -641,6 +641,19 @@ all reference a specific **ServiceId**, not the whole provider.
   `totalBookings` = tickets booked so far (non-cancelled, `Status='Confirmed'`)
   — a `TotalBookings` correlated-SUM column appended to result set 1 of all six
   event-returning sprocs (so `EventSqlSnapshot` carries it uniformly).
+- **`isBookable` flag on the event catalog list + detail** (`GET /events` and
+  `GET /events/{eventId}`, both hosts): `true` when the caller may still book
+  tickets, `false` once the caller **already holds non-cancelled tickets** for
+  that event (a cancelled booking frees the seat → bookable again). The caller
+  is matched by their Firebase **email claim** (booker identity is free text —
+  same model as the cancel/"my bookings" flows); the `List`/`GetById` handlers
+  fetch the caller's booked-event-id set once via
+  `IEventBookingService.ListBookedEventIdsByBookerEmailAsync` (sproc
+  `Event.ListBookedEventIdsByBookerEmail` — `DISTINCT EventId WHERE
+  Status='Confirmed'`) and membership-test each event. No email claim → empty
+  set → everything bookable. `EventResponse.IsBookable` **defaults to `true`**
+  on organiser-context reads (create / edit / `GET .../events` own-events
+  lists), which aren't booking surfaces.
 - **Event detail extras** (`GET /events/{eventId}` + the edit response, both
   hosts; null on list reads): `paymentOptions: ["Cash"|"Digital", ...]` (the
   event's payout methods) and `attendees: [{ attendeeName, ticketNumber }]`
@@ -683,6 +696,17 @@ validated against any user table. Bookings are **per ticket**: 4 attendees
   `{ bookerName, bookerEmail, bookerMobile?, attendeeNames: [...], paymentMethod }`.
   `paymentMethod` is `CreditCard` or `Twint`. Returns the booking + ticket
   rows; booking is created in `PaymentStatus = Pending`.
+- **An event's organiser cannot book their own event.** Both hosts resolve the
+  caller's own organiser id from the JWT (provider host → ProviderId via
+  `IProviderOnboardingService.ResolveProviderByFirebaseUidAsync`; parent host →
+  PetParentId via `ICurrentPetParentContext`) and pass it on
+  `CreateEventBookingCommand.BookerOrganiserId`. The shared
+  `EventBookingService.CreateAsync` rejects when that id matches the event's
+  `ProviderId` **or** `PetParentId` (GUIDs are globally unique, so the check is
+  host-agnostic) → **403 SelfBookingNotAllowed**
+  (`EventBookingSelfBookingNotAllowedException`). The id is taken from the JWT,
+  never the body; a caller with no organiser profile resolves to null and is
+  never blocked.
 - `GET /event-bookings/{bookingId}` — booking + one entry per ticket
   (denormalised on the wire — if 4 tickets were bought, 4 entries appear in
   the `tickets` array).
@@ -877,8 +901,8 @@ GET    /pet-parents/{petParentId}/onboarding-status                             
 POST   /pet-parents/{petParentId}/mobile-verification/otp                        generates a 6-digit OTP, stores SHA-256 hash + last-2-digits hint with 10-minute expiry in Parent.ParentMobileOtps via Parent.CreateMobileVerificationOtp, dispatches the raw code via IPetParentMobileOtpSender (NoOp today — real SMS provider TBD). Returns { parentMobileOtpId, petParentId, mobileCountryCode, mobileNumber, dateSentUtc, expiresAtUtc }. 404 PetParentNotFound (sproc 51210).
 POST   /pet-parents/{petParentId}/mobile-verification/otp/{otpId}/verify         body { otpCode }. ALWAYS returns 200 — client branches on { isValidated, validationStatus: Validated|Invalid|Expired|Pending }. On the first successful verification, Parent.PetParents.MobileVerifiedAtUtc is set (COALESCE, so re-verification doesn't bump it). 404 ParentMobileOtpNotFound (sproc 51211); 400 InvalidRequest for empty otpCode.
 
-GET    /events                                                                   [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=... &title=] — same provider-agnostic catalog listing as the provider host; duplicated on the parent host because the two hosts authenticate against different Firebase projects. Backed by the shared IEventService — no new business logic. `title` is an optional case-insensitive "contains" search on the event title (LIKE %term%, LIKE-metacharacters escaped). Each event hydrates Cosmos physical details + carries pawPrints and bookings { maxBookings, totalBookings }.
-GET    /events/{eventId}                                                         single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount }, bookings { maxBookings, totalBookings }, paymentOptions [Cash|Digital], attendees [{ attendeeName, ticketNumber }] (names only).
+GET    /events                                                                   [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=... &title=] — same provider-agnostic catalog listing as the provider host; duplicated on the parent host because the two hosts authenticate against different Firebase projects. Backed by the shared IEventService — no new business logic. `title` is an optional case-insensitive "contains" search on the event title (LIKE %term%, LIKE-metacharacters escaped). Each event hydrates Cosmos physical details + carries pawPrints, bookings { maxBookings, totalBookings }, and isBookable (false once the caller already holds non-cancelled tickets, matched by JWT email).
+GET    /events/{eventId}                                                         single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount }, bookings { maxBookings, totalBookings }, isBookable (false once the caller already holds non-cancelled tickets), paymentOptions [Cash|Digital], attendees [{ attendeeName, ticketNumber }] (names only).
 POST   /events/{eventId}/views                                                   public engagement counter (parent host copy).
 POST   /events/{eventId}/shares                                                  public engagement counter (parent host copy).
 POST   /events/{eventId}/inquiries                                               public engagement counter (parent host copy).
@@ -1001,10 +1025,11 @@ POST   /providers/{providerId}/events
 PUT    /providers/{providerId}/events/{eventId}                        full-replace edit (every field). 404 EventNotFound (not found/not owned), 400 InvalidRequest. Reconciles Cosmos physical doc; returns full detail.
 PATCH  /providers/{providerId}/events/{eventId}                        partial edit — body fields are all Optional<T>; only supplied fields change (explicit null clears, e.g. bannerImageUrl). Reads current event, merges, reuses the full-replace update path (full re-validation). 404 EventNotFound; 400 InvalidRequest.
 GET    /providers/{providerId}/events                                  each event includes pawPrints + bookings { maxBookings, totalBookings }
-GET    /events                                                         [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=... &title=] provider-agnostic catalog listing. title = optional case-insensitive "contains" search on the event title (LIKE %term%, metacharacters escaped).
-GET    /events/{eventId}                                               includes pawPrints, bookings { maxBookings, totalBookings }, paymentOptions [Cash|Digital], attendees [{ attendeeName, ticketNumber }]
+GET    /events                                                         [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=... &title=] provider-agnostic catalog listing. title = optional case-insensitive "contains" search on the event title (LIKE %term%, metacharacters escaped). Each event carries pawPrints, bookings { maxBookings, totalBookings }, and isBookable (false once the caller already holds non-cancelled tickets, matched by JWT email).
+GET    /events/{eventId}                                               includes pawPrints, bookings { maxBookings, totalBookings }, isBookable (false once the caller already holds non-cancelled tickets), paymentOptions [Cash|Digital], attendees [{ attendeeName, ticketNumber }]
 
 POST   /events/{eventId}/bookings                                      body: { bookerName, bookerEmail, bookerMobile?, attendeeNames[], paymentMethod }
+GET    /event-bookings                                                 the caller's own event-ticket bookings ("my booked events") — slim summary cards with the joined event (title, category, eventType, start date/time, banner URL, venue eventLocation for physical / null for online). Booker matched by the JWT email claim; most-recent first, cancelled included. Mirror of the parent host's GET /pet-parents/{petParentId}/event-bookings. 403 EmailClaimMissing.
 GET    /event-bookings/{bookingId}                                     returns booking + one entry per ticket
 DELETE /event-bookings/{bookingId}                                     soft-cancels the caller's own booking (booker matched by JWT email claim) → flips Status to Cancelled + frees the seat. 403 EmailClaimMissing; 404 EventBookingNotFound; 409 EventBookingAlreadyCancelled
 POST   /event-bookings/{bookingId}/payment-confirmation                gateway callback → flips PaymentStatus to Paid|Failed
