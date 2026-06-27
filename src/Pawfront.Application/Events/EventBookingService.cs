@@ -14,7 +14,9 @@ internal sealed class EventBookingService(
     private static readonly IReadOnlySet<string> AllowedPaymentMethods = new HashSet<string>(StringComparer.Ordinal)
     {
         "CreditCard",
-        "Twint"
+        "Twint",
+        "Cash",
+        "Free"
     };
 
     private static readonly IReadOnlySet<string> AllowedPaymentStatuses = new HashSet<string>(StringComparer.Ordinal)

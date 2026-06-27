@@ -52,7 +52,7 @@ internal sealed class EventService(
         var validated = ValidateForCreate(
             command.EventCategory, command.EventType, command.Amenities,
             command.Title, command.Description, command.StartDate, command.EndDate,
-            command.IsPaid, command.Price, command.CancellationPolicy, command.Physical);
+            command.IsPaid, command.Price, command.CancellationPolicy, command.EventLink, command.Physical);
 
         // Write SQL first (source of truth + EventId generation). Ticketing
         // (IsPaid / Price) lives in SQL so it's returned for every event type,
@@ -73,7 +73,8 @@ internal sealed class EventService(
                 command.EndTime,
                 validated.IsPaid,
                 validated.Price,
-                validated.CancellationPolicy),
+                validated.CancellationPolicy,
+                validated.EventLink),
             cancellationToken);
 
         var physicalResult = await WritePhysicalExtensionAsync(
@@ -89,7 +90,7 @@ internal sealed class EventService(
         var validated = ValidateForCreate(
             command.EventCategory, command.EventType, command.Amenities,
             command.Title, command.Description, command.StartDate, command.EndDate,
-            command.IsPaid, command.Price, command.CancellationPolicy, command.Physical);
+            command.IsPaid, command.Price, command.CancellationPolicy, command.EventLink, command.Physical);
 
         var snapshot = await sqlStore.CreateByParentAsync(
             new CreateParentEventSqlInput(
@@ -107,7 +108,8 @@ internal sealed class EventService(
                 command.EndTime,
                 validated.IsPaid,
                 validated.Price,
-                validated.CancellationPolicy),
+                validated.CancellationPolicy,
+                validated.EventLink),
             cancellationToken);
 
         var physicalResult = await WritePhysicalExtensionAsync(
@@ -121,7 +123,7 @@ internal sealed class EventService(
         var validated = ValidateForCreate(
             command.EventCategory, command.EventType, command.Amenities,
             command.Title, command.Description, command.StartDate, command.EndDate,
-            command.IsPaid, command.Price, command.CancellationPolicy, command.Physical);
+            command.IsPaid, command.Price, command.CancellationPolicy, command.EventLink, command.Physical);
 
         // Capture the pre-edit state so we know whether/where an old Cosmos
         // physical document needs cleaning up (type or category change).
@@ -144,7 +146,8 @@ internal sealed class EventService(
                 command.EndTime,
                 validated.IsPaid,
                 validated.Price,
-                validated.CancellationPolicy),
+                validated.CancellationPolicy,
+                validated.EventLink),
             cancellationToken);
 
         var physicalResult = await ReconcilePhysicalAsync(
@@ -160,7 +163,7 @@ internal sealed class EventService(
         var validated = ValidateForCreate(
             command.EventCategory, command.EventType, command.Amenities,
             command.Title, command.Description, command.StartDate, command.EndDate,
-            command.IsPaid, command.Price, command.CancellationPolicy, command.Physical);
+            command.IsPaid, command.Price, command.CancellationPolicy, command.EventLink, command.Physical);
 
         var previous = await sqlStore.GetAsync(command.EventId, cancellationToken);
 
@@ -181,7 +184,8 @@ internal sealed class EventService(
                 command.EndTime,
                 validated.IsPaid,
                 validated.Price,
-                validated.CancellationPolicy),
+                validated.CancellationPolicy,
+                validated.EventLink),
             cancellationToken);
 
         var physicalResult = await ReconcilePhysicalAsync(
@@ -245,6 +249,7 @@ internal sealed class EventService(
         bool isPaid,
         decimal? price,
         string cancellationPolicy,
+        string? eventLink,
         PhysicalEventInput? physical)
     {
         var category = NormalizeOne(eventCategory, AllowedCategories, nameof(eventCategory));
@@ -263,6 +268,12 @@ internal sealed class EventService(
         // Ticketing is validated for every event type — online events can be
         // paid too. A free event ignores any submitted price (normalised null).
         var (validatedIsPaid, validatedPrice) = ValidateTicketing(isPaid, price);
+
+        // The joining link applies only to ONLINE events. Physical events have a
+        // venue location instead, so any submitted link is dropped (stored null).
+        // The link is optional even for online events (capture-and-return, not
+        // enforced) — to require it, throw here when online + blank.
+        var normalisedLink = normalisedType == nameof(EventType.Online) ? Trim(eventLink) : null;
 
         PhysicalEventInput? physicalInput = null;
         if (normalisedType == nameof(EventType.Physical))
@@ -289,7 +300,8 @@ internal sealed class EventService(
         return new ValidatedEventCreate(
             category, normalisedType, normalisedAmenities,
             normalisedTitle, normalisedDescription,
-            validatedIsPaid, validatedPrice, normalisedCancellationPolicy, physicalInput);
+            validatedIsPaid, validatedPrice, normalisedCancellationPolicy,
+            normalisedLink, physicalInput);
     }
 
     private async Task<PhysicalEventResult?> WritePhysicalExtensionAsync(
@@ -326,6 +338,7 @@ internal sealed class EventService(
         bool IsPaid,
         decimal? Price,
         string CancellationPolicy,
+        string? EventLink,
         PhysicalEventInput? PhysicalInput);
 
     public async Task<EventResult?> GetAsync(Guid eventId, CancellationToken cancellationToken)
@@ -377,6 +390,17 @@ internal sealed class EventService(
         // (capacity) for physical events, so hydrate the Cosmos extension here —
         // one point read per physical event, fanned out in parallel. Online
         // events have no Cosmos doc and are returned as-is.
+        return await HydratePhysicalAsync(snapshots, cancellationToken);
+    }
+
+    public async Task<IReadOnlyCollection<EventResult>> ListTrendingAsync(
+        int take,
+        CancellationToken cancellationToken)
+    {
+        var snapshots = await sqlStore.ListTrendingAsync(take, cancellationToken);
+        // Same as the catalog list: hydrate the Cosmos physical extension (venue
+        // location + "max bookings") for physical events; online events are
+        // returned as-is. The trending order from SQL is preserved.
         return await HydratePhysicalAsync(snapshots, cancellationToken);
     }
 
@@ -560,6 +584,7 @@ internal sealed class EventService(
             snapshot.IsPaid,
             snapshot.Price,
             snapshot.CancellationPolicy,
+            snapshot.EventLink,
             physical,
             snapshot.CreatedAtUtc,
             snapshot.UpdatedAtUtc,

@@ -33,6 +33,14 @@ internal sealed class BookingService(
             _ => throw new InvalidOperationException("Unknown offering resolution.")
         };
 
+        // 1a. NightStay is a multi-night boarding service keyed by a check-in /
+        // check-out date range, not a single-day time window — it can't be booked
+        // through this path. Send the caller to the dedicated night-stay endpoint.
+        if (offering.ServiceType == ProviderServiceTypes.NightStay)
+        {
+            throw new BookingNightStayUseDedicatedEndpointException();
+        }
+
         // 1b. PetGroomer: resolve the requested menu-item code and replace the
         // offering's duration with the item's per-groomer duration. Other
         // categories ignore ServiceItemCode entirely — duration comes from the
@@ -135,6 +143,13 @@ internal sealed class BookingService(
             OfferingResolution.Resolved r => r,
             _ => throw new InvalidOperationException("Unknown offering resolution.")
         };
+
+        // NightStay is a multi-night boarding service — it has no single-day
+        // representation, so it can't be recorded as a custom walk-in here either.
+        if (offering.ServiceType == ProviderServiceTypes.NightStay)
+        {
+            throw new BookingNightStayUseDedicatedEndpointException();
+        }
 
         // 2. Scheduling: working hours, break, closure. Same gates as the app
         // booking path so the provider's calendar stays consistent.

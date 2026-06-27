@@ -35,7 +35,8 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings]
+              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
+           e.[EventLink]
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]

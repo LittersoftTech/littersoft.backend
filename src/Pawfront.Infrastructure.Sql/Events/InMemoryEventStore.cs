@@ -29,6 +29,7 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             IsPaid: input.IsPaid,
             Price: input.Price,
             CancellationPolicy: input.CancellationPolicy,
+            EventLink: input.EventLink,
             CreatedAtUtc: now,
             UpdatedAtUtc: now,
             // Counters aren't tracked in the in-memory dev fallback.
@@ -61,6 +62,7 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             IsPaid: input.IsPaid,
             Price: input.Price,
             CancellationPolicy: input.CancellationPolicy,
+            EventLink: input.EventLink,
             CreatedAtUtc: now,
             UpdatedAtUtc: now,
             // Counters aren't tracked in the in-memory dev fallback.
@@ -112,6 +114,7 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             IsPaid = input.IsPaid,
             Price = input.IsPaid ? input.Price : null,
             CancellationPolicy = input.CancellationPolicy,
+            EventLink = input.EventLink,
             UpdatedAtUtc = DateTimeOffset.UtcNow
         };
         events[input.EventId] = updated;
@@ -145,6 +148,7 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             IsPaid = input.IsPaid,
             Price = input.IsPaid ? input.Price : null,
             CancellationPolicy = input.CancellationPolicy,
+            EventLink = input.EventLink,
             UpdatedAtUtc = DateTimeOffset.UtcNow
         };
         events[input.EventId] = updated;
@@ -229,6 +233,24 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             .OrderByDescending(e => e.StartDate)
             .ThenByDescending(e => e.StartTime)
             .ThenBy(e => e.EventId)
+            .ToArray();
+        return Task.FromResult(list);
+    }
+
+    public Task<IReadOnlyList<EventSqlSnapshot>> ListTrendingAsync(
+        int take,
+        CancellationToken cancellationToken)
+    {
+        if (take < 1) take = 20;
+        if (take > 100) take = 100;
+
+        // Trending score = views + shares + non-cancelled ticket bookings
+        // (TotalBookings already counts Confirmed tickets in the snapshot).
+        IReadOnlyList<EventSqlSnapshot> list = events.Values
+            .OrderByDescending(e => e.Counters.ViewCount + e.Counters.ShareCount + e.TotalBookings)
+            .ThenByDescending(e => e.StartDate)
+            .ThenBy(e => e.EventId)
+            .Take(take)
             .ToArray();
         return Task.FromResult(list);
     }

@@ -1060,7 +1060,7 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"eventCategory\": \"AdoptionAndRescue\",\n  \"isChildFriendly\": true,\n  \"title\": \"Spring Adoption Drive 2026\",\n  \"description\": \"Meet 30+ adoptable rescue dogs and cats. Free vet check-ups on-site.\",\n  \"bannerImageUrl\": \"https://example.com/images/event-banner.jpg\",\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\", \"FirstAidBooth\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-06-15\",\n  \"endDate\": \"2026-06-15\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"isPaid\": true,\n  \"price\": 100,\n  \"cancellationPolicy\": \"FullRefundUpTo4Hours\",\n  \"physical\": {\n    \"maximumCapacity\": 200,\n    \"location\": {\n      \"houseNumber\": \"42\",\n      \"street\": \"Park Lane\",\n      \"city\": \"Pune\",\n      \"zip\": \"411001\",\n      \"country\": \"India\",\n      \"latitude\": 18.5204,\n      \"longitude\": 73.8567\n    }\n  }\n}"
+              "raw": "{\n  \"eventCategory\": \"AdoptionAndRescue\",\n  \"isChildFriendly\": true,\n  \"title\": \"Spring Adoption Drive 2026\",\n  \"description\": \"Meet 30+ adoptable rescue dogs and cats. Free vet check-ups on-site.\",\n  \"bannerImageUrl\": \"https://example.com/images/event-banner.jpg\",\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\", \"FirstAidBooth\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-06-15\",\n  \"endDate\": \"2026-06-15\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"isPaid\": true,\n  \"price\": 100,\n  \"cancellationPolicy\": \"FullRefundUpTo4Hours\",\n  \"eventLink\": null,\n  \"physical\": {\n    \"maximumCapacity\": 200,\n    \"location\": {\n      \"houseNumber\": \"42\",\n      \"street\": \"Park Lane\",\n      \"city\": \"Pune\",\n      \"zip\": \"411001\",\n      \"country\": \"India\",\n      \"latitude\": 18.5204,\n      \"longitude\": 73.8567\n    }\n  }\n}"
             }
           }
         },
@@ -1072,7 +1072,7 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"eventCategory\": \"ParentEducation\",\n  \"isChildFriendly\": true,\n  \"title\": \"Webinar: Bringing Home a Puppy\",\n  \"description\": \"Live online session for new pet parents.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"None\"],\n  \"eventType\": \"Online\",\n  \"startDate\": \"2026-06-20\",\n  \"endDate\": \"2026-06-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"20:30:00\",\n  \"isPaid\": false,\n  \"price\": null,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"physical\": null\n}"
+              "raw": "{\n  \"eventCategory\": \"ParentEducation\",\n  \"isChildFriendly\": true,\n  \"title\": \"Webinar: Bringing Home a Puppy\",\n  \"description\": \"Live online session for new pet parents.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"None\"],\n  \"eventType\": \"Online\",\n  \"startDate\": \"2026-06-20\",\n  \"endDate\": \"2026-06-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"20:30:00\",\n  \"isPaid\": false,\n  \"price\": null,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"https://meet.example.com/puppy-webinar\",\n  \"physical\": null\n}"
             }
           }
         },
@@ -1084,7 +1084,7 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","events","{{eventId}}"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"eventCategory\": \"AdoptionAndRescue\",\n  \"isChildFriendly\": true,\n  \"title\": \"Spring Adoption Drive 2026 (Updated)\",\n  \"description\": \"Updated details. Now featuring 40+ adoptable pets.\",\n  \"bannerImageUrl\": \"https://example.com/images/event-banner.jpg\",\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\", \"FirstAidBooth\", \"FoodAndBeverage\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-06-16\",\n  \"endDate\": \"2026-06-16\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"18:00:00\",\n  \"isPaid\": true,\n  \"price\": 150,\n  \"cancellationPolicy\": \"FullRefundUpTo2Hours\",\n  \"physical\": {\n    \"maximumCapacity\": 250,\n    \"location\": {\n      \"houseNumber\": \"42\",\n      \"street\": \"Park Lane\",\n      \"city\": \"Pune\",\n      \"zip\": \"411001\",\n      \"country\": \"India\",\n      \"latitude\": 18.5204,\n      \"longitude\": 73.8567\n    }\n  }\n}"
+              "raw": "{\n  \"eventCategory\": \"AdoptionAndRescue\",\n  \"isChildFriendly\": true,\n  \"title\": \"Spring Adoption Drive 2026 (Updated)\",\n  \"description\": \"Updated details. Now featuring 40+ adoptable pets.\",\n  \"bannerImageUrl\": \"https://example.com/images/event-banner.jpg\",\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\", \"FirstAidBooth\", \"FoodAndBeverage\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-06-16\",\n  \"endDate\": \"2026-06-16\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"18:00:00\",\n  \"isPaid\": true,\n  \"price\": 150,\n  \"cancellationPolicy\": \"FullRefundUpTo2Hours\",\n  \"eventLink\": null,\n  \"physical\": {\n    \"maximumCapacity\": 250,\n    \"location\": {\n      \"houseNumber\": \"42\",\n      \"street\": \"Park Lane\",\n      \"city\": \"Pune\",\n      \"zip\": \"411001\",\n      \"country\": \"India\",\n      \"latitude\": 18.5204,\n      \"longitude\": 73.8567\n    }\n  }\n}"
             },
             "description": "Full-replace edit of a provider-organised event — every field editable (same body shape as create). 404 EventNotFound when the event isn't found or isn't owned by this provider; 400 InvalidRequest on validation. Reconciles the Cosmos physical doc (upsert when physical; deletes the old doc when the event becomes Online or its category changes). Editing a paid event to free drops its payout methods. Returns the full detail (incl. bookings, paymentOptions, attendees). Payout methods themselves are set via the dedicated payout-methods endpoint, not this edit."
           }
@@ -1120,7 +1120,22 @@
                 { "key": "title", "value": "adoption", "description": "Optional case-insensitive 'contains' search on the event title (LIKE %term%).", "disabled": true }
               ]
             },
-            "description": "Provider-agnostic catalog listing (same shared service as the parent host). All query params optional; amenities repeats. `title` is an optional case-insensitive 'contains' search on the event title. Each event hydrates physical details + carries pawPrints and bookings { maxBookings, totalBookings }."
+            "description": "Provider-agnostic catalog listing (same shared service as the parent host). All query params optional; amenities repeats. `title` is an optional case-insensitive 'contains' search on the event title. Each event hydrates physical details + carries pawPrints, bookings { maxBookings, totalBookings }, eventLink (online joining URL; null for physical), and isBookable."
+          }
+        },
+        {
+          "name": "GET events/trending",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/trending?take=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","events","trending"],
+              "query": [
+                { "key": "take", "value": "20", "description": "Top-N (default 20, clamped 1..100).", "disabled": true }
+              ]
+            },
+            "description": "Top-N trending events, most engaging first. Trending score = ViewCount + ShareCount + non-cancelled (Confirmed) ticket bookings. Same provider-agnostic shape + Cosmos hydration + isBookable (matched by JWT email) as GET /events; no filters. Mirrored on the parent host."
           }
         },
         {
@@ -1136,7 +1151,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}"] },
-            "description": "Single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount }, organizer { type, id, name, imageUrl }, bookings { maxBookings, totalBookings }, paymentOptions [\"Cash\"|\"Digital\"], and attendees [{ attendeeName, ticketNumber }] (names only — booker contact / payment stay on the organiser-only dashboard)."
+            "description": "Single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount }, organizer { type, id, name, imageUrl }, bookings { maxBookings, totalBookings }, eventLink (online joining URL; null for physical), paymentOptions [\"Cash\"|\"Digital\"], and attendees [{ attendeeName, ticketNumber }] (names only — booker contact / payment stay on the organiser-only dashboard)."
           }
         },
         {
@@ -1156,7 +1171,7 @@
     },
     {
       "name": "7b. Event Ticket Bookings",
-      "description": "Ticket purchases for an event. **Anyone** signed in can buy tickets for any names — attendee names are free text and not validated against the database. The booking is created with `PaymentStatus = Pending`; flip it to `Paid` (or `Failed`) via the gateway callback request.\n\n**Physical** events accept any number of tickets per booking and are capacity-gated (concurrent buyers serialise inside `Event.CreateEventBooking`; the (N+1)-th seat returns 409 EventSoldOut). **Online** events accept exactly ONE ticket per booking — more than one attendee name returns 400 OnlineEventSingleTicket, and there is no capacity limit.",
+      "description": "Ticket purchases for an event. **Anyone** signed in can buy tickets for any names — attendee names are free text and not validated against the database. The booking is created with `PaymentStatus = Pending`; flip it to `Paid` (or `Failed`) via the gateway callback request.\n\n`paymentMethod` ∈ {CreditCard, Twint, Cash, Free} — Cash is collected in person, Free is for no-charge bookings (validated in EventBookingService + the CK_EventBookings_PaymentMethod CHECK; same set on both hosts).\n\n**Physical** events accept any number of tickets per booking and are capacity-gated (concurrent buyers serialise inside `Event.CreateEventBooking`; the (N+1)-th seat returns 409 EventSoldOut). **Online** events accept exactly ONE ticket per booking — more than one attendee name returns 400 OnlineEventSingleTicket, and there is no capacity limit.",
       "item": [
         {
           "name": "POST create event booking (Credit Card, 4 tickets)",

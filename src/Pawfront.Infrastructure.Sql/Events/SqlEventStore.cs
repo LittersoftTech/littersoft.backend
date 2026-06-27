@@ -36,6 +36,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@IsPaid", input.IsPaid);
         command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
         command.Parameters.AddWithValue("@CancellationPolicy", input.CancellationPolicy);
+        command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
         try
@@ -84,6 +85,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@IsPaid", input.IsPaid);
         command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
         command.Parameters.AddWithValue("@CancellationPolicy", input.CancellationPolicy);
+        command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
         try
@@ -422,6 +424,56 @@ internal sealed class SqlEventStore(
         return hydrated;
     }
 
+    public async Task<IReadOnlyList<EventSqlSnapshot>> ListTrendingAsync(
+        int take,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.ListTrendingEvents", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@Take", take);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        // Result set 1: event rows, already ordered by trending score.
+        var rows = new List<EventSqlSnapshot>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadEventRow(reader, amenities: Array.Empty<string>()));
+        }
+
+        // Result set 2: (EventId, Amenity) pairs.
+        var amenityLookup = new Dictionary<Guid, List<string>>();
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var eventId = reader.GetGuid(0);
+                var amenity = reader.GetString(1);
+                if (!amenityLookup.TryGetValue(eventId, out var list))
+                {
+                    list = new List<string>();
+                    amenityLookup[eventId] = list;
+                }
+                list.Add(amenity);
+            }
+        }
+
+        // Preserve the SQL trending order (rows list) while attaching amenities.
+        var hydrated = new List<EventSqlSnapshot>(rows.Count);
+        foreach (var row in rows)
+        {
+            hydrated.Add(amenityLookup.TryGetValue(row.EventId, out var amenities)
+                ? row with { Amenities = amenities }
+                : row);
+        }
+        return hydrated;
+    }
+
     private static EventSqlSnapshot ReadEventRow(SqlDataReader reader, IReadOnlyCollection<string> amenities)
     {
         return new EventSqlSnapshot(
@@ -453,6 +505,9 @@ internal sealed class SqlEventStore(
             Price: reader.IsDBNull(19) ? null : reader.GetDecimal(19),
             // Cancellation policy appended after ticketing in result set 1.
             CancellationPolicy: reader.GetString(20),
+            // Joining link (online events) — appended as the last column of
+            // result set 1 in every event-returning sproc (index 24).
+            EventLink: reader.IsDBNull(24) ? null : reader.GetString(24),
             // Organiser display fields appended last in result set 1 — joined
             // from Provider.Providers / Parent.PetParents. ImageUrl is always
             // DBNull for provider-organised events (no profile-photo column).

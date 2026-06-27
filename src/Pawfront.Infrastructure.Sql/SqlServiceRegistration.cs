@@ -54,6 +54,7 @@ public static class SqlServiceRegistration
             services.AddSingleton<IEventSqlStore, InMemoryEventStore>();
             services.AddSingleton<IProviderAvailabilityService, InMemoryProviderAvailabilityService>();
             services.AddSingleton<IBookingSqlStore, InMemoryBookingStore>();
+            services.AddSingleton<INightStayBookingSqlStore, InMemoryNightStayBookingStore>();
             services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
             services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
         }
@@ -97,6 +98,11 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IBookingSqlStore>(provider =>
                 new SqlBookingStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<INightStayBookingSqlStore>(provider =>
+                new SqlNightStayBookingStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 

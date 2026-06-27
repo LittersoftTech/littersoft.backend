@@ -29,6 +29,9 @@ CREATE TABLE [Event].[Events]
     -- FullRefundUpTo4Hours / FullRefundUpTo2Hours / NoRefund.
     [CancellationPolicy] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_Events_CancellationPolicy] DEFAULT N'NoRefund',
+    -- Joining link for ONLINE events (e.g. the meeting URL). NULL for physical
+    -- events, which carry a venue location in the Cosmos extension doc instead.
+    [EventLink] NVARCHAR(1000) NULL,
     -- Organiser-dashboard counters. Bumped by [Event].[IncrementEventCounter]
     -- from the public increment endpoints. Read in [Event].[GetEventMetrics].
     [ViewCount] INT NOT NULL

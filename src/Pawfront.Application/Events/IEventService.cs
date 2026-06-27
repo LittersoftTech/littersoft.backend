@@ -55,6 +55,18 @@ public interface IEventService
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists trending events — ranked by engagement (views + shares +
+    /// non-cancelled ticket bookings), most engaging first — capped at
+    /// <paramref name="take"/> (the endpoint applies the default; the sproc
+    /// clamps to 1..100). Hydrates the Cosmos physical extension like
+    /// <see cref="ListAsync"/>. Provider-agnostic: returns events organised by
+    /// either providers or pet parents.
+    /// </summary>
+    Task<IReadOnlyCollection<EventResult>> ListTrendingAsync(
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Bumps the requested counter (View | Share | Inquiry) on the event.
     /// Open to any signed-in caller — these are public engagement signals,
     /// not provider-scoped. Throws <see cref="EventNotFoundException"/> if

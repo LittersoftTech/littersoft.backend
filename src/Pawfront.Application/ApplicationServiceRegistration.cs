@@ -30,6 +30,11 @@ public static class ApplicationServiceRegistration
         services.TryAddScoped<IBookingService>(sp => sp.GetRequiredService<BookingService>());
         services.TryAddScoped<IDailyBookingReader>(sp => sp.GetRequiredService<BookingService>());
 
+        // Multi-night boarding (PetSitter NightStay) — separate from the
+        // single-day BookingService because a stay is a check-in/check-out date
+        // range, not a single-day time window.
+        services.TryAddScoped<INightStayBookingService, NightStayBookingService>();
+
         // ProviderClosureService also implements two interfaces (service + narrow reader).
         services.TryAddScoped<ProviderClosureService>();
         services.TryAddScoped<IProviderClosureService>(sp => sp.GetRequiredService<ProviderClosureService>());

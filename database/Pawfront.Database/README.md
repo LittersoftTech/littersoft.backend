@@ -249,7 +249,7 @@ erDiagram
         NVARCHAR         BookerEmail
         NVARCHAR         BookerMobile          "nullable"
         INT              TicketCount           ">= 1"
-        NVARCHAR         PaymentMethod         "CreditCard|Twint"
+        NVARCHAR         PaymentMethod         "CreditCard|Twint|Cash|Free"
         NVARCHAR         PaymentStatus         "Pending|Paid|Failed"
         NVARCHAR         PaymentReference      "nullable; gateway ref"
         DECIMAL          TotalAmount           ">= 0; price*count snapshot"
@@ -587,8 +587,9 @@ the event under `UPDLOCK + HOLDLOCK`.
   the buyer of the tickets.
 - `TicketCount` — denormalised count of child ticket rows; feeds the
   race-safe capacity check.
-- `PaymentMethod` — `CreditCard` or `Twint` (CHECK). The actual transaction
-  happens on an external gateway.
+- `PaymentMethod` — `CreditCard`, `Twint`, `Cash`, or `Free` (CHECK).
+  `CreditCard`/`Twint` settle on an external gateway; `Cash` is collected
+  in person and `Free` carries no charge.
 - `PaymentStatus` — `Pending`, `Paid`, or `Failed`. Created as `Pending`;
   flipped by the gateway callback (`Event.ConfirmEventBookingPayment`).
 - `PaymentReference` — external gateway reference, populated on callback.

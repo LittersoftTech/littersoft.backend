@@ -92,6 +92,10 @@ internal static class BookingEndpoints
         {
             return ApiResults.BadRequest("InvalidBookingTime", exception.Message);
         }
+        catch (BookingNightStayUseDedicatedEndpointException exception)
+        {
+            return ApiResults.BadRequest("UseNightStayEndpoint", exception.Message);
+        }
         catch (ArgumentException exception)
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
@@ -158,6 +162,10 @@ internal static class BookingEndpoints
         catch (InvalidBookingTimeException exception)
         {
             return ApiResults.BadRequest("InvalidBookingTime", exception.Message);
+        }
+        catch (BookingNightStayUseDedicatedEndpointException exception)
+        {
+            return ApiResults.BadRequest("UseNightStayEndpoint", exception.Message);
         }
         catch (ArgumentException exception)
         {

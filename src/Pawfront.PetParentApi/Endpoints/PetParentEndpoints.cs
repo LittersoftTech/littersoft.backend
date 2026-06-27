@@ -253,6 +253,10 @@ internal static class PetParentEndpoints
         {
             return ApiResults.BadRequest("InvalidBookingTime", exception.Message);
         }
+        catch (BookingNightStayUseDedicatedEndpointException exception)
+        {
+            return ApiResults.BadRequest("UseNightStayEndpoint", exception.Message);
+        }
         catch (ArgumentException exception)
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
