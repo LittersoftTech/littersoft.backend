@@ -67,6 +67,16 @@ public interface IEventSqlStore
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Lists the most engaging events first (trending score =
+    /// ViewCount + ShareCount + non-cancelled ticket bookings), capped at
+    /// <paramref name="take"/> (clamped 1..100 by the sproc). Same two result
+    /// sets as <see cref="ListAsync"/>; skips Cosmos.
+    /// </summary>
+    Task<IReadOnlyList<EventSqlSnapshot>> ListTrendingAsync(
+        int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Atomic single-column increment. <paramref name="counterType"/> must be
     /// one of <c>View</c>, <c>Share</c>, <c>Inquiry</c>. Throws
     /// <see cref="EventNotFoundException"/> if the event id is unknown.

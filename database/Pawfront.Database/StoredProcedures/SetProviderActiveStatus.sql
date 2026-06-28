@@ -49,7 +49,7 @@ BEGIN
                b.[BookingDate], b.[StartTime], b.[EndTime]
         FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
         WHERE b.[ProviderId] = @ProviderId
-          AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+          AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
           AND (
               b.[BookingDate] > @Today
               OR (b.[BookingDate] = @Today AND b.[EndTime] > @NowTime)

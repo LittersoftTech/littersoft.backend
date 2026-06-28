@@ -81,7 +81,7 @@ BEGIN
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
       AND [StartTime] < @EndTime
       AND [EndTime] > @StartTime;
 

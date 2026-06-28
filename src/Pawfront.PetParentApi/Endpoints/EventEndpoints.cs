@@ -26,6 +26,9 @@ internal static class EventEndpoints
         // Catalog-wide listing with optional filters. Anchored before the
         // {eventId:guid} route so the literal /events GET resolves to List.
         builder.MapGet("/events", List);
+        // Trending events (top-N by engagement). The literal "trending" segment
+        // can't match the {eventId:guid} route below, but keep it ahead for clarity.
+        builder.MapGet("/events/trending", Trending);
         builder.MapGet("/events/{eventId:guid}", GetById);
 
         // Public engagement counters — any signed-in pet parent can call
@@ -103,6 +106,7 @@ internal static class EventEndpoints
                     request.IsPaid,
                     request.Price,
                     request.CancellationPolicy,
+                    request.EventLink,
                     request.Physical is null
                         ? null
                         : new PhysicalEventInput(
@@ -149,6 +153,7 @@ internal static class EventEndpoints
                     request.IsPaid,
                     request.Price,
                     request.CancellationPolicy,
+                    request.EventLink,
                     request.Physical is null
                         ? null
                         : new PhysicalEventInput(
@@ -207,6 +212,7 @@ internal static class EventEndpoints
                     request.IsPaid.Or(current.IsPaid),
                     request.Price.Or(current.Price),
                     request.CancellationPolicy.Or(current.CancellationPolicy),
+                    request.EventLink.Or(current.EventLink),
                     MergePhysical(request.Physical, current.Physical)),
                 cancellationToken);
 
@@ -294,6 +300,26 @@ internal static class EventEndpoints
         return ApiResults.Ok(ToResponse(result, !bookedEventIds.Contains(result.EventId)));
     }
 
+    private static async Task<IResult> Trending(
+        int? take,
+        HttpContext httpContext,
+        IEventService eventService,
+        IEventBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        // Default to 20; the sproc clamps to 1..100.
+        var results = await eventService.ListTrendingAsync(take ?? 20, cancellationToken);
+
+        // An event the caller already holds tickets for is no longer bookable.
+        // Booker identity is the caller's Firebase email claim.
+        var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
+            httpContext.User.FindFirstValue("email"), cancellationToken);
+
+        return ApiResults.Ok(results
+            .Select(r => ToResponse(r, !bookedEventIds.Contains(r.EventId)))
+            .ToArray());
+    }
+
     private static async Task<IResult> SavePayoutMethods(
         Guid eventId,
         SaveEventPayoutMethodsRequest request,
@@ -364,6 +390,7 @@ internal static class EventEndpoints
             result.IsPaid,
             result.Price,
             result.CancellationPolicy,
+            result.EventLink,
             result.Physical is null
                 ? null
                 : new PhysicalEventResponse(

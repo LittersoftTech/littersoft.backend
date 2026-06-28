@@ -21,6 +21,7 @@
     { "key": "serviceId", "value": "", "description": "Captured by the provider searches (first hit's serviceId)." },
     { "key": "serviceItemCode", "value": "BathAndDry", "description": "PetGroomer menu code (one of the 18 canonical codes)." },
     { "key": "bookingId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/bookings." },
+    { "key": "nightStayBookingId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/night-stay-bookings." },
     { "key": "eventId", "value": "", "description": "Captured by GET /events (first hit) and POST /pet-parents/{petParentId}/events." },
     { "key": "eventBookingId", "value": "", "description": "Captured by POST /events/{eventId}/bookings." },
     { "key": "blobUrl", "value": "", "description": "Set to any URL returned by an upload endpoint to test POST /blob-images." }
@@ -862,6 +863,248 @@
             },
             "description": "Full status audit trail, oldest-first. 404 if not your booking."
           }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/bookings/{bookingId} (detail + start-OTP)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}"]
+            },
+            "description": "Single booking read. Returns { booking, startOtp, pendingModification }. When the booking is in a startable (confirmed-equivalent) state, startOtp carries the plaintext code + expiry for the parent to read out to the provider (who enters it on the provider host's /start). When a provider has staged a modification, pendingModification carries the proposed date/time so the parent can accept/decline. 404 if not your booking."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/cancel",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "cancel"]
+            },
+            "description": "Parent cancels their booking → PARENT_CANCELLED."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/modifications",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"bookingDate\": \"2025-07-02\",\n  \"startTime\": \"11:00:00\",\n  \"endTime\": \"13:00:00\",\n  \"note\": \"Can we move it?\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/modifications",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "modifications"]
+            },
+            "description": "Parent proposes a new date/time (editing is limited to the schedule). Stages the proposal → MODIFICATION_REQUEST_BY_PARENT; the provider sees it and accepts/declines. 409 ModificationAlreadyPending if one is already open."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/modifications/accept",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Works for me.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/modifications/accept",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "modifications", "accept"]
+            },
+            "description": "Parent accepts the provider's staged modification → PARENT_ACCEPTED_MODIFICATION; the proposed date/time is applied and the staging row removed. 409 CapacityExceeded / NoPendingModification."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/modifications/decline",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"That time doesn't work.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/modifications/decline",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "modifications", "decline"]
+            },
+            "description": "Parent declines the provider's staged modification → PARENT_DECLINED_MODIFICATION; booking keeps its original details, staging row removed."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/bookings/{bookingId}/evidence",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/evidence",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "evidence"]
+            },
+            "description": "Read-only: the provider-uploaded job-completion photos, oldest-first (parents view the proof; the provider uploads them)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6b. Night-Stay Bookings (multi-night boarding)",
+      "description": "Multi-night boarding (PetSitter NightStay service) is a separate entity from single-day bookings — a stay is a check-in/check-out date RANGE, not a single-day time window. The stay spans [checkInDate, checkOutDate): checkOutDate is the pickup day and is NOT a stayed night. Capacity is enforced per night. Parent-host only (the parent is who books). Provider/serviceId must come from a NightStay search (GET /providers/search/night-stay). The single-day POST /bookings rejects a NightStay serviceId with 400 UseNightStayEndpoint.",
+      "item": [
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.nightStayBookingId) {",
+                  "  pm.collectionVariables.set('nightStayBookingId', json.data.nightStayBookingId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"petId\": \"{{petId}}\",\n  \"serviceId\": \"{{serviceId}}\",\n  \"checkInDate\": \"2026-07-10\",\n  \"checkOutDate\": \"2026-07-13\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings"]
+            },
+            "description": "Books a multi-night stay. serviceId must be an active NightStay service; petId must be one of your pets; provider is resolved server-side. checkOutDate must be after checkInDate; max 30 nights; checkOutDate is the pickup day (not a stayed night). DropOff/PickUp times are snapshotted from the offering. Captures nightStayBookingId. Errors: 404 PetNotFound / 403 Forbidden (pet), 400 InvalidServiceId / NotNightStayService / OfferingNotConfigured / InvalidPetId / InvalidNightStayDates, 404 ProviderNotFound / PetParentNotFound, 409 ProviderInactive / CapacityExceeded / ServiceClosed."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/night-stay-bookings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings"]
+            },
+            "description": "Your own night-stay bookings, most-recent first (CheckInDate DESC), cancelled included. Ownership-filtered. [] when none."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/night-stay-bookings/{bookingId}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}"]
+            },
+            "description": "Single night-stay booking — returns the detail wrapper { booking, startOtp (when startable), pendingModification (staged date-range proposal, when one awaits a response) }. 404 NightStayBookingNotFound if unknown or not yours."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/status",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"PARENT_CANCELLED\",\n  \"note\": \"Plans changed\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/status",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "status"]
+            },
+            "description": "Parent moves the booking to a new status — one of APPROVAL_NEEDED | COMPLETED | PARENT_CANCELLED (cancel is done here, mirroring single-day; PARENT_CANCELLED frees the per-night capacity). Actor=Parent. 404 NightStayBookingNotFound, 403 Forbidden, 400 BookingStatusNotAllowed, 409 BookingStatusTerminal | BookingStatusUnchanged."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/status-history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/status-history",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "status-history"]
+            },
+            "description": "Full status audit trail, oldest-first. 404 if not your booking."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/cancel",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "cancel"]
+            },
+            "description": "Parent cancels the stay → PARENT_CANCELLED (frees per-night capacity)."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/modifications",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"checkInDate\": \"2025-08-01\",\n  \"checkOutDate\": \"2025-08-04\",\n  \"note\": \"Can we shift the dates?\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/modifications",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "modifications"]
+            },
+            "description": "Parent proposes a new check-in/check-out range (checkOutDate = pickup day, NOT a stayed night) → MODIFICATION_REQUEST_BY_PARENT. 409 ModificationAlreadyPending if one is already open."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/modifications/accept",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Works for me.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/modifications/accept",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "modifications", "accept"]
+            },
+            "description": "Parent accepts the provider's staged date-range proposal → PARENT_ACCEPTED_MODIFICATION; the range is applied (per-night capacity re-checked) and the staging row removed. 409 CapacityExceeded / NoPendingModification."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/modifications/decline",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Those dates don't work.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/modifications/decline",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "modifications", "decline"]
+            },
+            "description": "Parent declines the provider's staged proposal → PARENT_DECLINED_MODIFICATION; the stay keeps its original dates, staging row removed."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/evidence",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/evidence",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "evidence"]
+            },
+            "description": "Read-only: the provider-uploaded job-completion photos for the stay, oldest-first."
+          }
         }
       ]
     },
@@ -902,7 +1145,23 @@
                 { "key": "title", "value": "dog", "description": "Optional case-insensitive 'contains' search on the event title (LIKE %term%).", "disabled": true }
               ]
             },
-            "description": "Catalog listing. All query params optional; amenities repeats. `title` is an optional case-insensitive 'contains' search on the event title. Captures the first event's `eventId`. Each event returns top-level `isPaid` / `price` (all event types), `pawPrints`, an `organizer { type, id, name, imageUrl }` block, physical details (incl. location), and a `bookings { maxBookings, totalBookings }` block (maxBookings = physical capacity, null for online; totalBookings = non-cancelled tickets booked)."
+            "description": "Catalog listing. All query params optional; amenities repeats. `title` is an optional case-insensitive 'contains' search on the event title. Captures the first event's `eventId`. Each event returns top-level `isPaid` / `price` (all event types), `pawPrints`, an `organizer { type, id, name, imageUrl }` block, physical details (incl. location), `eventLink` (online joining URL; null for physical), and a `bookings { maxBookings, totalBookings }` block (maxBookings = physical capacity, null for online; totalBookings = non-cancelled tickets booked)."
+          }
+        },
+        {
+          "name": "GET /events/trending",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/trending?take=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events", "trending"],
+              "query": [
+                { "key": "take", "value": "20", "description": "Top-N (default 20, clamped 1..100).", "disabled": true }
+              ]
+            },
+            "description": "Top-N trending events, most engaging first. Trending score = ViewCount + ShareCount + non-cancelled (Confirmed) ticket bookings. Same provider-agnostic shape + Cosmos hydration + isBookable (matched by JWT email) as GET /events; no filters. Mirror of the provider host."
           }
         },
         {
@@ -915,7 +1174,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events", "{{eventId}}"]
             },
-            "description": "Single event detail (SQL + Cosmos for physical). Returns top-level `isPaid` / `price` for every event type (online included), `physical.maximumCapacity` + `physical.location` for physical events, `pawPrints { viewCount, shareCount, inquiryCount }`, an `organizer { type, id, name, imageUrl }` block, a `bookings { maxBookings, totalBookings }` block, `paymentOptions [\"Cash\"|\"Digital\"]`, and `attendees [{ attendeeName, ticketNumber }]` (names only — booker contact / payment stay on the organiser dashboard)."
+            "description": "Single event detail (SQL + Cosmos for physical). Returns top-level `isPaid` / `price` for every event type (online included), `physical.maximumCapacity` + `physical.location` for physical events, `eventLink` (online joining URL; null for physical), `pawPrints { viewCount, shareCount, inquiryCount }`, an `organizer { type, id, name, imageUrl }` block, a `bookings { maxBookings, totalBookings }` block, `paymentOptions [\"Cash\"|\"Digital\"]`, and `attendees [{ attendeeName, ticketNumber }]` (names only — booker contact / payment stay on the organiser dashboard)."
           }
         },
         {
@@ -1013,7 +1272,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"eventCategory\": \"OutdoorActivities\",\n  \"isChildFriendly\": true,\n  \"title\": \"Community Dog Walk 2026\",\n  \"description\": \"A friendly group walk around the lake for dogs and their humans.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-08-10\",\n  \"endDate\": \"2026-08-10\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"isPaid\": true,\n  \"price\": 50,\n  \"cancellationPolicy\": \"FullRefundUpTo2Hours\",\n  \"physical\": {\n    \"maximumCapacity\": 100,\n    \"location\": {\n      \"houseNumber\": \"12\",\n      \"street\": \"Seefeldstrasse\",\n      \"city\": \"Zurich\",\n      \"zip\": \"8008\",\n      \"country\": \"Switzerland\",\n      \"latitude\": 47.3667,\n      \"longitude\": 8.5500\n    }\n  }\n}"
+              "raw": "{\n  \"eventCategory\": \"OutdoorActivities\",\n  \"isChildFriendly\": true,\n  \"title\": \"Community Dog Walk 2026\",\n  \"description\": \"A friendly group walk around the lake for dogs and their humans.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-08-10\",\n  \"endDate\": \"2026-08-10\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"isPaid\": true,\n  \"price\": 50,\n  \"cancellationPolicy\": \"FullRefundUpTo2Hours\",\n  \"eventLink\": null,\n  \"physical\": {\n    \"maximumCapacity\": 100,\n    \"location\": {\n      \"houseNumber\": \"12\",\n      \"street\": \"Seefeldstrasse\",\n      \"city\": \"Zurich\",\n      \"zip\": \"8008\",\n      \"country\": \"Switzerland\",\n      \"latitude\": 47.3667,\n      \"longitude\": 8.5500\n    }\n  }\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events",
@@ -1030,14 +1289,14 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"eventCategory\": \"ParentEducation\",\n  \"isChildFriendly\": true,\n  \"title\": \"Webinar: First-time Puppy Care\",\n  \"description\": \"Live online Q&A for new pet parents.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"None\"],\n  \"eventType\": \"Online\",\n  \"startDate\": \"2026-08-20\",\n  \"endDate\": \"2026-08-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"20:30:00\",\n  \"isPaid\": false,\n  \"price\": null,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"physical\": null\n}"
+              "raw": "{\n  \"eventCategory\": \"ParentEducation\",\n  \"isChildFriendly\": true,\n  \"title\": \"Webinar: First-time Puppy Care\",\n  \"description\": \"Live online Q&A for new pet parents.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"None\"],\n  \"eventType\": \"Online\",\n  \"startDate\": \"2026-08-20\",\n  \"endDate\": \"2026-08-20\",\n  \"startTime\": \"19:00:00\",\n  \"endTime\": \"20:30:00\",\n  \"isPaid\": false,\n  \"price\": null,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"https://meet.example.com/puppy-care-webinar\",\n  \"physical\": null\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "events"]
             },
-            "description": "Online event — no `physical` block (not bookable). `isPaid` / `price` still apply at the top level (here it's free). Online paid events are allowed too (e.g. a paid webinar)."
+            "description": "Online event — no `physical` block (not bookable). `isPaid` / `price` still apply at the top level (here it's free). Online paid events are allowed too (e.g. a paid webinar). `eventLink` is the joining URL — optional, returned only for online events (dropped/null for physical)."
           }
         },
         {
@@ -1047,7 +1306,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"eventCategory\": \"OutdoorActivities\",\n  \"isChildFriendly\": true,\n  \"title\": \"Community Dog Walk 2026 (Updated)\",\n  \"description\": \"Updated route — now starting from the north gate.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-08-11\",\n  \"endDate\": \"2026-08-11\",\n  \"startTime\": \"08:30:00\",\n  \"endTime\": \"11:30:00\",\n  \"isPaid\": true,\n  \"price\": 60,\n  \"cancellationPolicy\": \"FullRefundUpTo4Hours\",\n  \"physical\": {\n    \"maximumCapacity\": 120,\n    \"location\": {\n      \"houseNumber\": \"12\",\n      \"street\": \"Seefeldstrasse\",\n      \"city\": \"Zurich\",\n      \"zip\": \"8008\",\n      \"country\": \"Switzerland\",\n      \"latitude\": 47.3667,\n      \"longitude\": 8.5500\n    }\n  }\n}"
+              "raw": "{\n  \"eventCategory\": \"OutdoorActivities\",\n  \"isChildFriendly\": true,\n  \"title\": \"Community Dog Walk 2026 (Updated)\",\n  \"description\": \"Updated route — now starting from the north gate.\",\n  \"bannerImageUrl\": null,\n  \"amenities\": [\"FreeParking\", \"DrinkingWater\", \"Restrooms\"],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-08-11\",\n  \"endDate\": \"2026-08-11\",\n  \"startTime\": \"08:30:00\",\n  \"endTime\": \"11:30:00\",\n  \"isPaid\": true,\n  \"price\": 60,\n  \"cancellationPolicy\": \"FullRefundUpTo4Hours\",\n  \"eventLink\": null,\n  \"physical\": {\n    \"maximumCapacity\": 120,\n    \"location\": {\n      \"houseNumber\": \"12\",\n      \"street\": \"Seefeldstrasse\",\n      \"city\": \"Zurich\",\n      \"zip\": \"8008\",\n      \"country\": \"Switzerland\",\n      \"latitude\": 47.3667,\n      \"longitude\": 8.5500\n    }\n  }\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/events/{{eventId}}",
@@ -1131,14 +1390,14 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"bookerName\": \"Jane Doe\",\n  \"bookerEmail\": \"jane.doe@example.com\",\n  \"bookerMobile\": \"+41791234567\",\n  \"attendeeNames\": [\"Jane Doe\", \"John Doe\"],\n  \"paymentMethod\": \"CreditCard\"\n}"
+              "raw": "{\n  \"bookerName\": \"Jane Doe\",\n  \"bookerEmail\": \"jane.doe@example.com\",\n  \"bookerMobile\": \"+41791234567\",\n  \"attendeeNames\": [\"Jane Doe\", \"John Doe\"],\n  \"paymentMethod\": \"Cash\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/events/{{eventId}}/bookings",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events", "{{eventId}}", "bookings"]
             },
-            "description": "paymentMethod ∈ {CreditCard, Twint}. One ticket row per attendee. Physical = any number of tickets; online = exactly one. Captures `eventBookingId`. 404 EventNotFound; 400 OnlineEventSingleTicket (>1 attendee on an online event); 409 EventSoldOut (physical capacity)."
+            "description": "paymentMethod ∈ {CreditCard, Twint, Cash, Free}. One ticket row per attendee. Physical = any number of tickets; online = exactly one. Captures `eventBookingId`. 404 EventNotFound; 400 OnlineEventSingleTicket (>1 attendee on an online event); 409 EventSoldOut (physical capacity)."
           }
         },
         {

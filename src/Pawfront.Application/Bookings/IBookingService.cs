@@ -16,6 +16,14 @@ public interface IBookingService
 
     Task<BookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Enriched booking-detail read for the detail endpoints: the booking joined
+    /// with its pet-parent + pet records, plus the friendly Job ID and live-computed
+    /// payment figures (unit price, total = rate × time, and the Pawfront fee at the
+    /// configured percentage). Null when the booking doesn't exist.
+    /// </summary>
+    Task<BookingDetailResult?> GetDetailAsync(Guid bookingId, CancellationToken cancellationToken);
+
     Task<BookingResult> CancelAsync(
         Guid bookingId,
         Guid petParentId,
@@ -56,6 +64,45 @@ public interface IBookingService
     /// history (or doesn't exist) — list semantics, no exception.
     /// </summary>
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken);
+
+    // --- Job lifecycle: start-OTP, evidence, modifications ------------------
+
+    /// <summary>
+    /// Issues (or reuses) the parent-facing start-OTP for a booking. Called when
+    /// the parent opens a confirmed booking's details; the returned plaintext code
+    /// is read to the provider, who posts it to <see cref="StartWithOtpAsync"/>.
+    /// </summary>
+    Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken);
+
+    /// <summary>Provider starts the job after entering the parent's start-OTP.</summary>
+    Task<BookingResult> StartWithOtpAsync(StartBookingCommand command, CancellationToken cancellationToken);
+
+    /// <summary>Either party proposes a date/time change (validated, then staged).</summary>
+    Task<BookingResult> RequestModificationAsync(
+        RequestBookingModificationCommand command,
+        CancellationToken cancellationToken);
+
+    /// <summary>The counterparty accepts (apply) or declines (discard) the proposal.</summary>
+    Task<BookingResult> RespondModificationAsync(
+        RespondBookingModificationCommand command,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads the staged (pending) modification proposal, or null when none.</summary>
+    Task<BookingModificationResult?> GetPendingModificationAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Records one job-completion evidence photo (provider-owned booking).</summary>
+    Task<BookingEvidenceResult> AddEvidenceAsync(
+        Guid bookingId,
+        Guid providerId,
+        string photoUrl,
+        CancellationToken cancellationToken);
+
+    /// <summary>Lists a booking's evidence photos, oldest-first.</summary>
+    Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
         Guid bookingId,
         CancellationToken cancellationToken);
 }

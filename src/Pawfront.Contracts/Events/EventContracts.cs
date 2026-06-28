@@ -22,6 +22,10 @@ public sealed record CreateEventRequest(
     // Refund policy the creator advertises. One of: FullRefundUpTo4Hours,
     // FullRefundUpTo2Hours, NoRefund. Required for every event type.
     string CancellationPolicy,
+    // Joining link for ONLINE events (e.g. the meeting URL). Captured + returned
+    // only for online events; ignored (stored null) for physical events, which
+    // carry a venue location instead.
+    string? EventLink,
     PhysicalEventRequest? Physical);
 
 /// <summary>
@@ -45,6 +49,8 @@ public sealed record UpdateEventRequest(
     bool IsPaid,
     decimal? Price,
     string CancellationPolicy,
+    // Joining link for online events (see CreateEventRequest.EventLink).
+    string? EventLink,
     PhysicalEventRequest? Physical);
 
 /// <summary>
@@ -74,6 +80,9 @@ public sealed record PatchEventRequest(
     // Nullable: null is meaningful only when the merged event is free.
     Optional<decimal?> Price,
     Optional<string> CancellationPolicy,
+    // Joining link for online events. Nullable + clearable: send null to clear,
+    // omit to keep. Only meaningful when the merged event is online.
+    Optional<string?> EventLink,
     // Send the whole physical block to change capacity/venue; null to drop it
     // (only valid when the merged event is online); omit to keep it.
     Optional<PhysicalEventRequest?> Physical);
@@ -121,6 +130,9 @@ public sealed record EventResponse(
     decimal? Price,
     // Refund policy (FullRefundUpTo4Hours | FullRefundUpTo2Hours | NoRefund).
     string CancellationPolicy,
+    // Joining link for online events (e.g. the meeting URL); null for physical
+    // events (which carry a venue location in the `physical` block instead).
+    string? EventLink,
     PhysicalEventResponse? Physical,
     // Engagement counters (views / shares / inquiries) for this event.
     PawPrintsResponse PawPrints,

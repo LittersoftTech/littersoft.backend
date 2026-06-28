@@ -19,6 +19,8 @@ public sealed record CreateEventCommand(
     decimal? Price,
     // Refund policy the creator advertises (every event type).
     string CancellationPolicy,
+    // Joining link for ONLINE events (online-only; null for physical events).
+    string? EventLink,
     PhysicalEventInput? Physical);
 
 /// <summary>
@@ -43,6 +45,8 @@ public sealed record CreateParentEventCommand(
     bool IsPaid,
     decimal? Price,
     string CancellationPolicy,
+    // Joining link for ONLINE events (online-only; null for physical events).
+    string? EventLink,
     PhysicalEventInput? Physical);
 
 /// <summary>
@@ -68,6 +72,8 @@ public sealed record UpdateEventCommand(
     bool IsPaid,
     decimal? Price,
     string CancellationPolicy,
+    // Joining link for ONLINE events (online-only; null for physical events).
+    string? EventLink,
     PhysicalEventInput? Physical);
 
 /// <summary>
@@ -91,6 +97,8 @@ public sealed record UpdateParentEventCommand(
     bool IsPaid,
     decimal? Price,
     string CancellationPolicy,
+    // Joining link for ONLINE events (online-only; null for physical events).
+    string? EventLink,
     PhysicalEventInput? Physical);
 
 public sealed record PhysicalEventInput(
@@ -130,6 +138,8 @@ public sealed record EventResult(
     bool IsPaid,
     decimal? Price,
     string CancellationPolicy,
+    // Joining link for online events (null for physical events).
+    string? EventLink,
     PhysicalEventResult? Physical,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
@@ -200,6 +210,9 @@ public sealed record EventSqlSnapshot(
     bool IsPaid,
     decimal? Price,
     string CancellationPolicy,
+    // Joining link for online events (null for physical events). Read from the
+    // last column of result set 1 in every event-returning sproc.
+    string? EventLink,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     EventCounters Counters,
@@ -231,7 +244,8 @@ public sealed record CreateEventSqlInput(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy);
+    string CancellationPolicy,
+    string? EventLink);
 
 /// <summary>
 /// Wire shape sent from the parent-side event service to the SQL store.
@@ -253,7 +267,8 @@ public sealed record CreateParentEventSqlInput(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy);
+    string CancellationPolicy,
+    string? EventLink);
 
 /// <summary>
 /// Wire shape sent from the event service to the SQL store for a provider
@@ -276,7 +291,8 @@ public sealed record UpdateEventSqlInput(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy);
+    string CancellationPolicy,
+    string? EventLink);
 
 /// <summary>
 /// Wire shape for a parent event edit. Mirror of
@@ -298,7 +314,8 @@ public sealed record UpdateParentEventSqlInput(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy);
+    string CancellationPolicy,
+    string? EventLink);
 
 /// <summary>
 /// Catalog-wide event listing filter. Every field is optional; omitting a field

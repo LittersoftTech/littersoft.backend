@@ -3,6 +3,7 @@ using Pawfront.Api.Auth;
 using Pawfront.Api.Endpoints;
 using Pawfront.Api.Telemetry;
 using Pawfront.Application;
+using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
 using Pawfront.Infrastructure.Cosmos;
 using Pawfront.Infrastructure.Sql;
@@ -20,6 +21,10 @@ builder.Services
     .AddPawfrontSqlInfrastructure(builder.Configuration)
     .AddPawfrontCosmosInfrastructure(builder.Configuration)
     .AddPawfrontAuthentication(builder.Configuration);
+
+// Platform fee (% of booking total) surfaced on the booking-detail payment block.
+builder.Services.Configure<PawfrontFeeOptions>(
+    builder.Configuration.GetSection(PawfrontFeeOptions.SectionName));
 
 var app = builder.Build();
 
@@ -53,6 +58,7 @@ api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapEventDashboardEndpoints();
 api.MapBookingEndpoints();
+api.MapProviderNightStayBookingEndpoints();
 api.MapBlobImageEndpoints();
 api.MapProviderClosureEndpoints();
 api.MapProviderActiveStatusEndpoints();

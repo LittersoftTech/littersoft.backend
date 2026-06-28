@@ -58,6 +58,13 @@ public interface IBookingSqlStore
 
     Task<BookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Enriched single-booking read (<c>Booking.GetBookingDetail</c>) for the
+    /// booking-detail endpoints — the base row plus JobNumber, payout fields, and
+    /// the joined pet-parent / pet records. Null when the booking doesn't exist.
+    /// </summary>
+    Task<BookingDetailRow?> GetDetailAsync(Guid bookingId, CancellationToken cancellationToken);
+
     Task<BookingResult> CancelAsync(
         Guid bookingId,
         Guid petParentId,
@@ -91,6 +98,60 @@ public interface IBookingSqlStore
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken);
+
+    // --- Job lifecycle: start-OTP, evidence, modifications ------------------
+
+    /// <summary>Issues (or reuses) the active start-OTP for a booking.</summary>
+    Task<StartOtpResult> IssueStartOtpAsync(
+        Guid bookingId,
+        string newCode,
+        int ttlMinutes,
+        CancellationToken cancellationToken);
+
+    /// <summary>Validates the start-OTP and moves the booking to JOB_STARTED.</summary>
+    Task<BookingResult> StartWithOtpAsync(
+        Guid bookingId,
+        Guid providerId,
+        string otpCode,
+        CancellationToken cancellationToken);
+
+    /// <summary>Stages a date/time-change proposal and flips the booking status.</summary>
+    Task<BookingResult> RequestModificationAsync(
+        Guid bookingId,
+        BookingStatusActor actor,
+        Guid actorId,
+        DateOnly bookingDate,
+        TimeOnly startTime,
+        TimeOnly endTime,
+        string? note,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads the staged (pending) proposal, or null when none.</summary>
+    Task<BookingModificationResult?> GetPendingModificationAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Accepts (apply, capacity re-checked) or declines (keep) the open proposal.
+    /// </summary>
+    Task<BookingResult> RespondModificationAsync(
+        Guid bookingId,
+        BookingStatusActor actor,
+        Guid actorId,
+        bool accept,
+        int capacity,
+        string? note,
+        CancellationToken cancellationToken);
+
+    Task<BookingEvidenceResult> AddEvidenceAsync(
+        Guid bookingId,
+        Guid providerId,
+        string photoUrl,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
         Guid bookingId,
         CancellationToken cancellationToken);
 }

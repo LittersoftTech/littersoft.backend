@@ -42,7 +42,7 @@ CREATE TABLE [Event].[EventBookings]
     CONSTRAINT [CK_EventBookings_TicketCount] CHECK ([TicketCount] >= 1),
     CONSTRAINT [CK_EventBookings_TotalAmount] CHECK ([TotalAmount] >= 0),
     CONSTRAINT [CK_EventBookings_PaymentMethod]
-        CHECK ([PaymentMethod] IN (N'CreditCard', N'Twint')),
+        CHECK ([PaymentMethod] IN (N'CreditCard', N'Twint', N'Cash', N'Free')),
     CONSTRAINT [CK_EventBookings_PaymentStatus]
         CHECK ([PaymentStatus] IN (N'Pending', N'Paid', N'Failed')),
     CONSTRAINT [CK_EventBookings_Status]
