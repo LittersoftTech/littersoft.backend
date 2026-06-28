@@ -15,6 +15,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
     private readonly ConcurrentDictionary<Guid, BookingRow> bookings = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> serviceLocks = new();
     private readonly ConcurrentDictionary<Guid, List<BookingStatusHistoryEntry>> history = new();
+    private int jobSequence;
 
     // A booking holds its slot unless it has been cancelled by either party.
     private static bool IsActive(BookingRow row) => !BookingStatuses.Cancelled.Contains(row.Status);
@@ -77,6 +78,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             var row = new BookingRow
             {
                 BookingId = Guid.NewGuid(),
+                JobNumber = Interlocked.Increment(ref jobSequence),
                 ProviderId = providerId,
                 PetParentId = petParentId,
                 PetId = petId,
@@ -144,6 +146,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             var row = new BookingRow
             {
                 BookingId = Guid.NewGuid(),
+                JobNumber = Interlocked.Increment(ref jobSequence),
                 ProviderId = providerId,
                 PetParentId = null,
                 ServiceId = serviceId,
@@ -184,6 +187,57 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
     {
         bookings.TryGetValue(bookingId, out var row);
         return Task.FromResult(row is null ? null : (BookingResult?)ToResult(row));
+    }
+
+    public Task<BookingDetailRow?> GetDetailAsync(Guid bookingId, CancellationToken cancellationToken)
+    {
+        // Dev fallback: no parent/pet join data is available in-memory, so those
+        // fields stay null (App-booking customer/pet details aren't populated here).
+        if (!bookings.TryGetValue(bookingId, out var row))
+        {
+            return Task.FromResult<BookingDetailRow?>(null);
+        }
+
+        var detail = new BookingDetailRow(
+            BookingId: row.BookingId,
+            JobNumber: row.JobNumber,
+            ProviderId: row.ProviderId,
+            PetParentId: row.PetParentId,
+            ServiceId: row.ServiceId,
+            ServiceCategory: row.ServiceCategory,
+            SubCategory: row.SubCategory,
+            BookingDate: row.BookingDate,
+            StartTime: row.StartTime,
+            EndTime: row.EndTime,
+            Status: row.Status,
+            CreatedAtUtc: row.CreatedAtUtc,
+            UpdatedAtUtc: row.UpdatedAtUtc,
+            CancelledAtUtc: row.CancelledAtUtc,
+            ServiceItemCode: row.ServiceItemCode,
+            Source: row.Source,
+            CustomerName: row.CustomerName,
+            CustomerMobileCountryCode: row.CustomerMobileCountryCode,
+            CustomerMobile: row.CustomerMobile,
+            AnimalType: row.AnimalType,
+            PetName: row.PetName,
+            ServiceLocation: row.ServiceLocation,
+            CustomerLocation: row.CustomerLocation,
+            PricePerHour: row.PricePerHour,
+            JobNotes: row.JobNotes,
+            PetId: row.PetId,
+            PayoutStatus: "Pending",
+            PayoutId: null,
+            ParentFirstName: null,
+            ParentLastName: null,
+            ParentGender: null,
+            ParentMobileCountryCode: null,
+            ParentMobileNumber: null,
+            ParentPhotoUrl: null,
+            PetProfileName: null,
+            PetType: null,
+            PetGender: null,
+            PetPhotoUrl: null);
+        return Task.FromResult<BookingDetailRow?>(detail);
     }
 
     public Task<BookingResult> CancelAsync(
@@ -331,6 +385,34 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         return Task.FromResult(list);
     }
 
+    // The job lifecycle (start-OTP, evidence, modifications) is not implemented in
+    // the in-memory dev fallback — it requires the SQL-backed path.
+    private static NotSupportedException NotInMemory()
+        => new("The booking job lifecycle requires the SQL-backed store.");
+
+    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<BookingResult> StartWithOtpAsync(Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<BookingResult> RequestModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
+        DateOnly bookingDate, TimeOnly startTime, TimeOnly endTime, string? note, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<BookingResult> RespondModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
+        bool accept, int capacity, string? note, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<BookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
+        => Task.FromResult<BookingModificationResult?>(null);
+
+    public Task<BookingEvidenceResult> AddEvidenceAsync(Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(Guid bookingId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<BookingEvidenceResult>>(Array.Empty<BookingEvidenceResult>());
+
     private static BookingResult ToResult(BookingRow row) =>
         new(row.BookingId,
             row.ProviderId,
@@ -361,6 +443,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
     private sealed class BookingRow
     {
         public Guid BookingId { get; init; }
+        public int JobNumber { get; init; }
         public Guid ProviderId { get; init; }
         public Guid? PetParentId { get; init; }
         public Guid? PetId { get; init; }

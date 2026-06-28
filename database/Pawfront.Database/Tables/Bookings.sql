@@ -2,6 +2,9 @@ CREATE TABLE [Booking].[Bookings]
 (
     [BookingId] UNIQUEIDENTIFIER NOT NULL
         CONSTRAINT [DF_Bookings_BookingId] DEFAULT NEWSEQUENTIALID(),
+    -- Short, human-friendly sequential job number. Surfaced on the booking-detail
+    -- read as a "PF-000123" Job ID; the GUID stays the API/route identity.
+    [JobNumber] INT NOT NULL IDENTITY(1, 1),
     [ProviderId] UNIQUEIDENTIFIER NOT NULL,
     -- Nullable so private (off-app) custom bookings created by the provider can
     -- live alongside regular pet-parent bookings. Discriminator is [Source]:
@@ -41,12 +44,27 @@ CREATE TABLE [Booking].[Bookings]
     [PricePerHour] DECIMAL(10, 2) NULL,
     [JobNotes] NVARCHAR(2000) NULL,
     -- -----------------------------------------------------------------------
-    -- Lifecycle: CREATED (parent booked) -> CONFIRMED (provider accepted) ->
-    -- COMPLETED (both agree it's done). APPROVAL_NEEDED is a transient state when
-    -- either party needs a schedule change. PROVIDER_CANCELLED / PARENT_CANCELLED
-    -- are the two terminal cancellation states. Every status except the two
-    -- cancelled ones still holds the booking's capacity slot.
-    [Status] NVARCHAR(32) NOT NULL
+    -- Payout (capture-only for now — the actual provider-payout execution leg is
+    -- not built yet). [PayoutStatus] tracks where the provider's money is in the
+    -- payout pipeline; [PayoutId] is the external payout reference once issued.
+    [PayoutStatus] NVARCHAR(32) NOT NULL
+        CONSTRAINT [DF_Bookings_PayoutStatus] DEFAULT N'Pending',
+    [PayoutId] NVARCHAR(64) NULL,
+    -- -----------------------------------------------------------------------
+    -- Lifecycle (the "job" flow): CREATED (parent booked) -> CONFIRMED (provider
+    -- accepted) | PROVIDER_DECLINED (provider rejected) -> JOB_STARTED (provider
+    -- started, gated by the parent's start-OTP) -> COMPLETED (provider uploaded
+    -- evidence). Either party can propose a schedule change
+    -- (MODIFICATION_REQUEST_BY_PARENT / _BY_PROVIDER); the counterparty resolves
+    -- it (PROVIDER/PARENT_ACCEPTED_MODIFICATION applies the new details to this
+    -- same row, PROVIDER/PARENT_DECLINED_MODIFICATION keeps the old ones — both
+    -- are "live" resting states the job can still be started from).
+    -- PROVIDER_CANCELLED / PARENT_CANCELLED are the cancellation states.
+    -- APPROVAL_NEEDED is deprecated (superseded by the modification flow) but
+    -- kept allowed so legacy rows stay valid. Capacity-freeing statuses are the
+    -- two cancelled ones PLUS PROVIDER_DECLINED; every other status still holds
+    -- the booking's capacity slot.
+    [Status] NVARCHAR(48) NOT NULL
         CONSTRAINT [DF_Bookings_Status] DEFAULT N'CREATED',
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_Bookings_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
@@ -65,7 +83,11 @@ CREATE TABLE [Booking].[Bookings]
         FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]),
     CONSTRAINT [CK_Bookings_TimeOrder] CHECK ([StartTime] < [EndTime]),
     CONSTRAINT [CK_Bookings_Status]
-        CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED',
+        CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED', N'JOB_STARTED',
+                            N'COMPLETED', N'APPROVAL_NEEDED',
+                            N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER',
+                            N'PROVIDER_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
+                            N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                             N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')),
     CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
@@ -81,6 +103,8 @@ CREATE TABLE [Booking].[Bookings]
             OR [ServiceLocation] IN (N'MyLocation', N'CustomerLocation')),
     CONSTRAINT [CK_Bookings_PricePerHour_NonNegative]
         CHECK ([PricePerHour] IS NULL OR [PricePerHour] >= 0),
+    CONSTRAINT [CK_Bookings_PayoutStatus]
+        CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed')),
     -- Discriminator shape: App rows carry PetParentId only; Custom rows carry
     -- the full custom payload and no PetParentId.
     CONSTRAINT [CK_Bookings_SourceShape] CHECK
@@ -132,3 +156,8 @@ GO
 CREATE INDEX [IX_Bookings_PetParent_Status]
     ON [Booking].[Bookings] ([PetParentId], [Status])
     INCLUDE ([ServiceId], [BookingDate], [StartTime], [EndTime], [ProviderId]);
+
+GO
+
+CREATE UNIQUE INDEX [UX_Bookings_JobNumber]
+    ON [Booking].[Bookings] ([JobNumber]);

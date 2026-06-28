@@ -616,6 +616,9 @@ is race-safe inside `Booking.CreateBooking` (UPDLOCK + HOLDLOCK on the
 overlap-count query).
 
 - `BookingId` — PK.
+- `JobNumber` — `INT IDENTITY`, UNIQUE. Short sequential number rendered as the
+  human-friendly Job ID (`PF-000123`) on the booking-detail read. The GUID
+  `BookingId` stays the API/route identity.
 - `ProviderId` — FK.
 - `PetParentId` — FK.
 - `ServiceId` — FK → `ProviderServices`. **All capacity and closure logic
@@ -632,6 +635,15 @@ overlap-count query).
   walk-ins start `CONFIRMED`. **A booking holds its capacity slot in every
   status except the two cancelled ones** — that's the predicate every
   capacity / closure-conflict / active-status / slot query uses.
+- `PayoutStatus` — `Pending` / `Processing` / `Paid` / `Failed` (CHECK),
+  default `Pending`. Capture-only for now — the actual provider-payout
+  execution leg is not built yet.
+- `PayoutId` — external payout reference; NULL until a payout is issued.
+- Customer/pet detail for **App** bookings is NOT stored here (those columns
+  are Custom-walk-in only) — the booking-detail read
+  (`Booking.GetBookingDetail`) LEFT JOINs `Parent.PetParents` + `Parent.Pets`
+  to surface customer + pet info, and price is computed live from the
+  provider's offering.
 
 ### `Booking.BookingStatusHistory`
 Append-only audit trail of every status change on a booking. One row per
@@ -647,6 +659,33 @@ atomically with the status update by `Booking.UpdateBookingStatus`,
 - `ChangedByActorId` — the ProviderId / PetParentId; NULL for System rows.
 - `Note` — optional free-text reason.
 - `ChangedAtUtc` — when the change happened.
+
+### Job-lifecycle tables (single-day + night-stay twins)
+The expanded "job" lifecycle adds three child tables per booking entity
+(`Booking.Bookings` and `Booking.NightStayBookings`), each `ON DELETE CASCADE`
+from its parent. The night-stay twin names are prefixed `NightStay…`.
+
+- **`Booking.BookingStartOtps`** — telemetry of every start-job OTP issued for a
+  booking. `{ OtpCode NVARCHAR(6) (plaintext low-secrecy share code),
+  Status (Pending|Consumed|Expired), FailedAttemptCount, IssuedAtUtc,
+  ExpiresAtUtc, ConsumedAtUtc }`. Issued/reused by `IssueBookingStartOtp`,
+  consumed by `StartBookingWithOtp`.
+- **`Booking.BookingEvidence`** — one row per job-completion photo
+  (`PhotoUrl`, `CreatedAtUtc`); ≥1 gates `COMPLETED`. Same shape as
+  `Provider.ProviderPhotos`.
+- **`Booking.BookingModifications`** — **staging area** for the single open
+  date/time-change proposal (UNIQUE per booking; **date/time only**).
+  `{ RequestedByActor, RequestedByActorId, ProposedBookingDate/StartTime/EndTime
+  (single-day) | ProposedCheckInDate/CheckOutDate (night-stay), RequestNote,
+  CreatedAtUtc }`. The row is **DELETED** when the proposal is resolved — accept
+  copies the staged values onto the booking row first ("staging → main"), decline
+  just discards. Driven by `RequestBookingModification` /
+  `RespondBookingModification`; read via `GetPendingBookingModification`.
+
+`Booking.Bookings.Status`, `NightStayBookings.Status`, and the two history
+tables' `From/ToStatus` columns are `NVARCHAR(48)` and accept the expanded status
+set (decline, `JOB_STARTED`, six modification states; `APPROVAL_NEEDED` retained
+for legacy rows).
 
 ## User-defined types
 
@@ -692,7 +731,8 @@ so the deploy script always reflects the latest version.
 | `Provider.DeleteClosure`            | Reopen a single closure row. Throws `51071` if missing. |
 | `Provider.GetActiveClosuresForDate` | Per-service lookup used by the slot service and booking validator. |
 | `Booking.CreateBooking`             | Validates ServiceId belongs to provider + active; race-safe capacity check per service; insert. |
-| `Booking.GetBooking`                | Point-read by `BookingId`. |
+| `Booking.GetBooking`                | Point-read by `BookingId` (flat row; backs the internal callers). |
+| `Booking.GetBookingDetail`          | Enriched point-read for the booking-detail endpoints — base row + `JobNumber` + payout fields, LEFT JOINed with `Parent.PetParents` + `Parent.Pets`. |
 | `Booking.CancelBooking`             | Booker-only cancellation; throws `51063/51064/51065`. |
 | `Booking.ListBookingsByProvider`    | Optional `@ServiceId` + `@BookingDate` filters. |
 | `Booking.ListBookingsByPetParent`   | Full history for a pet parent. |

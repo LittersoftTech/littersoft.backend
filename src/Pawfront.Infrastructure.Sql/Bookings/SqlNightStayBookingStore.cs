@@ -258,6 +258,241 @@ internal sealed class SqlNightStayBookingStore(
         return entries;
     }
 
+    public async Task<StartOtpResult> IssueStartOtpAsync(
+        Guid bookingId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.IssueNightStayBookingStartOtp", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
+        command.Parameters.AddWithValue("@NewCode", newCode);
+        command.Parameters.AddWithValue("@TtlMinutes", ttlMinutes);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Start OTP row was not returned.");
+            }
+            return SqlBookingStore.ReadStartOtp(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51250)
+        {
+            throw new NightStayBookingNotFoundException(bookingId);
+        }
+    }
+
+    public async Task<NightStayBookingResult> StartWithOtpAsync(
+        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.StartNightStayBookingWithOtp", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@OtpCode", otpCode);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Night stay booking row was not returned after start.");
+            }
+            return ReadRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51251)
+        {
+            throw new NightStayBookingNotFoundException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51252)
+        {
+            throw new BookingStatusForbiddenException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51253)
+        {
+            throw new BookingNotStartableException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51254)
+        {
+            throw new InvalidStartOtpException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51255)
+        {
+            throw new StartOtpExpiredException(bookingId);
+        }
+    }
+
+    public async Task<NightStayBookingResult> RequestModificationAsync(
+        Guid bookingId, BookingStatusActor actor, Guid actorId,
+        DateOnly checkInDate, DateOnly checkOutDate, string? note, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.RequestNightStayBookingModification", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
+        command.Parameters.AddWithValue("@Actor", actor.ToString());
+        command.Parameters.AddWithValue("@ActorId", actorId);
+        command.Parameters.AddWithValue("@ProposedCheckInDate", checkInDate.ToDateTime(TimeOnly.MinValue));
+        command.Parameters.AddWithValue("@ProposedCheckOutDate", checkOutDate.ToDateTime(TimeOnly.MinValue));
+        command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Night stay booking row was not returned after modification request.");
+            }
+            return ReadRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51260)
+        {
+            throw new NightStayBookingNotFoundException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51261)
+        {
+            throw new BookingStatusForbiddenException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51262)
+        {
+            throw new BookingNotModifiableException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51263)
+        {
+            throw new BookingModificationConflictException(bookingId);
+        }
+    }
+
+    public async Task<NightStayBookingModificationResult?> GetPendingModificationAsync(
+        Guid bookingId, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.GetPendingNightStayBookingModification", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+        return new NightStayBookingModificationResult(
+            NightStayBookingModificationId: reader.GetGuid(0),
+            NightStayBookingId: reader.GetGuid(1),
+            RequestedByActor: reader.GetString(2),
+            RequestedByActorId: reader.GetGuid(3),
+            ProposedCheckInDate: DateOnly.FromDateTime(reader.GetDateTime(4)),
+            ProposedCheckOutDate: DateOnly.FromDateTime(reader.GetDateTime(5)),
+            Note: reader.IsDBNull(6) ? null : reader.GetString(6),
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(7), TimeSpan.Zero));
+    }
+
+    public async Task<NightStayBookingResult> RespondModificationAsync(
+        Guid bookingId, BookingStatusActor actor, Guid actorId,
+        bool accept, int capacity, string? note, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.RespondNightStayBookingModification", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
+        command.Parameters.AddWithValue("@Actor", actor.ToString());
+        command.Parameters.AddWithValue("@ActorId", actorId);
+        command.Parameters.AddWithValue("@Accept", accept);
+        command.Parameters.AddWithValue("@Capacity", capacity);
+        command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Night stay booking row was not returned after modification response.");
+            }
+            return ReadRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51265)
+        {
+            throw new NightStayBookingNotFoundException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51266)
+        {
+            throw new BookingStatusForbiddenException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51267)
+        {
+            throw new NoPendingModificationException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51268)
+        {
+            throw new BookingModificationCapacityException(bookingId);
+        }
+    }
+
+    public async Task<BookingEvidenceResult> AddEvidenceAsync(
+        Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.AddNightStayBookingEvidence", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@PhotoUrl", photoUrl);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Evidence row was not returned after insert.");
+            }
+            return SqlBookingStore.ReadEvidence(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51270)
+        {
+            throw new NightStayBookingNotFoundException(bookingId);
+        }
+    }
+
+    public async Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
+        Guid bookingId, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.ListNightStayBookingEvidence", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
+
+        var rows = new List<BookingEvidenceResult>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(SqlBookingStore.ReadEvidence(reader));
+        }
+        return rows;
+    }
+
     private static async Task<IReadOnlyList<NightStayBookingResult>> ReadAllAsync(
         SqlCommand command,
         CancellationToken cancellationToken)

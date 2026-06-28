@@ -126,4 +126,79 @@ internal sealed class NightStayBookingService(
         Guid bookingId,
         CancellationToken cancellationToken)
         => sqlStore.ListStatusHistoryAsync(bookingId, cancellationToken);
+
+    // --- Job lifecycle: start-OTP, evidence, modifications ------------------
+
+    private const int StartOtpTtlMinutes = 10;
+
+    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken)
+        => sqlStore.IssueStartOtpAsync(bookingId, BookingService.GenerateOtpCode(), StartOtpTtlMinutes, cancellationToken);
+
+    public Task<NightStayBookingResult> StartWithOtpAsync(StartBookingCommand command, CancellationToken cancellationToken)
+        => sqlStore.StartWithOtpAsync(command.BookingId, command.ProviderId, (command.OtpCode ?? string.Empty).Trim(), cancellationToken);
+
+    public async Task<NightStayBookingResult> RequestModificationAsync(
+        RequestNightStayBookingModificationCommand command,
+        CancellationToken cancellationToken)
+    {
+        if (command.CheckOutDate <= command.CheckInDate)
+        {
+            throw new InvalidNightStayDatesException("CheckOutDate must be later than CheckInDate.");
+        }
+
+        var nights = command.CheckOutDate.DayNumber - command.CheckInDate.DayNumber;
+        if (nights > MaxStayNights)
+        {
+            throw new InvalidNightStayDatesException($"A night stay cannot exceed {MaxStayNights} nights.");
+        }
+
+        var booking = await sqlStore.GetAsync(command.NightStayBookingId, cancellationToken)
+            ?? throw new NightStayBookingNotFoundException(command.NightStayBookingId);
+
+        // Per-night full-day closure check on the proposed range (same as create).
+        for (var night = command.CheckInDate; night < command.CheckOutDate; night = night.AddDays(1))
+        {
+            var closures = await closureReader.GetActiveClosuresForDateAsync(
+                booking.ServiceId, night, cancellationToken);
+            var fullDay = closures.FirstOrDefault(c => c.IsFullDay);
+            if (fullDay is not null)
+            {
+                throw new ProviderClosedOnDateException(booking.ServiceId, night, fullDay.Reason);
+            }
+        }
+
+        return await sqlStore.RequestModificationAsync(
+            command.NightStayBookingId, command.Actor, command.ActorId,
+            command.CheckInDate, command.CheckOutDate, command.Note, cancellationToken);
+    }
+
+    public async Task<NightStayBookingResult> RespondModificationAsync(
+        RespondBookingModificationCommand command,
+        CancellationToken cancellationToken)
+    {
+        var capacity = 0;
+        if (command.Accept)
+        {
+            var booking = await sqlStore.GetAsync(command.BookingId, cancellationToken)
+                ?? throw new NightStayBookingNotFoundException(command.BookingId);
+            var doc = await petSitterRegistry.GetAsync(booking.ProviderId, cancellationToken);
+            var offering = doc?.PetHotel?.Offering ?? doc?.Freelance?.Offering;
+            capacity = offering?.MaxPetsAtOneTime
+                ?? throw new BookingOfferingNotConfiguredException(booking.ProviderId, booking.ServiceCategory);
+        }
+
+        return await sqlStore.RespondModificationAsync(
+            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken);
+    }
+
+    public Task<NightStayBookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
+        => sqlStore.GetPendingModificationAsync(bookingId, cancellationToken);
+
+    public Task<BookingEvidenceResult> AddEvidenceAsync(
+        Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
+        => sqlStore.AddEvidenceAsync(bookingId, providerId, photoUrl, cancellationToken);
+
+    public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
+        Guid bookingId, CancellationToken cancellationToken)
+        => sqlStore.ListEvidenceAsync(bookingId, cancellationToken);
 }

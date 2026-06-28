@@ -863,6 +863,87 @@
             },
             "description": "Full status audit trail, oldest-first. 404 if not your booking."
           }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/bookings/{bookingId} (detail + start-OTP)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}"]
+            },
+            "description": "Single booking read. Returns { booking, startOtp, pendingModification }. When the booking is in a startable (confirmed-equivalent) state, startOtp carries the plaintext code + expiry for the parent to read out to the provider (who enters it on the provider host's /start). When a provider has staged a modification, pendingModification carries the proposed date/time so the parent can accept/decline. 404 if not your booking."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/cancel",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "cancel"]
+            },
+            "description": "Parent cancels their booking → PARENT_CANCELLED."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/modifications",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"bookingDate\": \"2025-07-02\",\n  \"startTime\": \"11:00:00\",\n  \"endTime\": \"13:00:00\",\n  \"note\": \"Can we move it?\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/modifications",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "modifications"]
+            },
+            "description": "Parent proposes a new date/time (editing is limited to the schedule). Stages the proposal → MODIFICATION_REQUEST_BY_PARENT; the provider sees it and accepts/declines. 409 ModificationAlreadyPending if one is already open."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/modifications/accept",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Works for me.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/modifications/accept",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "modifications", "accept"]
+            },
+            "description": "Parent accepts the provider's staged modification → PARENT_ACCEPTED_MODIFICATION; the proposed date/time is applied and the staging row removed. 409 CapacityExceeded / NoPendingModification."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/modifications/decline",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"That time doesn't work.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/modifications/decline",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "modifications", "decline"]
+            },
+            "description": "Parent declines the provider's staged modification → PARENT_DECLINED_MODIFICATION; booking keeps its original details, staging row removed."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/bookings/{bookingId}/evidence",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/evidence",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "evidence"]
+            },
+            "description": "Read-only: the provider-uploaded job-completion photos, oldest-first (parents view the proof; the provider uploads them)."
+          }
         }
       ]
     },
@@ -924,7 +1005,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}"]
             },
-            "description": "Single night-stay booking. 404 NightStayBookingNotFound if unknown or not yours."
+            "description": "Single night-stay booking — returns the detail wrapper { booking, startOtp (when startable), pendingModification (staged date-range proposal, when one awaits a response) }. 404 NightStayBookingNotFound if unknown or not yours."
           }
         },
         {
@@ -955,6 +1036,74 @@
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "status-history"]
             },
             "description": "Full status audit trail, oldest-first. 404 if not your booking."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/cancel",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "cancel"]
+            },
+            "description": "Parent cancels the stay → PARENT_CANCELLED (frees per-night capacity)."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/modifications",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"checkInDate\": \"2025-08-01\",\n  \"checkOutDate\": \"2025-08-04\",\n  \"note\": \"Can we shift the dates?\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/modifications",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "modifications"]
+            },
+            "description": "Parent proposes a new check-in/check-out range (checkOutDate = pickup day, NOT a stayed night) → MODIFICATION_REQUEST_BY_PARENT. 409 ModificationAlreadyPending if one is already open."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/modifications/accept",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Works for me.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/modifications/accept",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "modifications", "accept"]
+            },
+            "description": "Parent accepts the provider's staged date-range proposal → PARENT_ACCEPTED_MODIFICATION; the range is applied (per-night capacity re-checked) and the staging row removed. 409 CapacityExceeded / NoPendingModification."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/modifications/decline",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Those dates don't work.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/modifications/decline",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "modifications", "decline"]
+            },
+            "description": "Parent declines the provider's staged proposal → PARENT_DECLINED_MODIFICATION; the stay keeps its original dates, staging row removed."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/evidence",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/evidence",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "evidence"]
+            },
+            "description": "Read-only: the provider-uploaded job-completion photos for the stay, oldest-first."
           }
         }
       ]

@@ -47,6 +47,35 @@ public sealed record UpdateNightStayBookingStatusCommand(
     Guid ActorId,
     string? Note);
 
+/// <summary>
+/// Either party proposes a new check-in / check-out range for a night-stay
+/// booking. The start (<see cref="StartBookingCommand"/>) and respond
+/// (<see cref="RespondBookingModificationCommand"/>) commands are shared with the
+/// single-day flow — only the proposed fields differ, so the request has its own
+/// command.
+/// </summary>
+public sealed record RequestNightStayBookingModificationCommand(
+    Guid NightStayBookingId,
+    BookingStatusActor Actor,
+    Guid ActorId,
+    DateOnly CheckInDate,
+    DateOnly CheckOutDate,
+    string? Note);
+
+/// <summary>
+/// The staged (pending) check-in/check-out change proposal for a night-stay
+/// booking. Removed from staging once accepted or declined.
+/// </summary>
+public sealed record NightStayBookingModificationResult(
+    Guid NightStayBookingModificationId,
+    Guid NightStayBookingId,
+    string RequestedByActor,
+    Guid RequestedByActorId,
+    DateOnly ProposedCheckInDate,
+    DateOnly ProposedCheckOutDate,
+    string? Note,
+    DateTimeOffset CreatedAtUtc);
+
 /// <summary>The requested service id is not a NightStay service of this provider.</summary>
 public sealed class BookingNotNightStayServiceException(Guid serviceId, Guid providerId)
     : Exception($"Service '{serviceId}' is not a NightStay service for provider '{providerId}'.");

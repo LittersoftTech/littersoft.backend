@@ -10,8 +10,8 @@ CREATE TABLE [Booking].[NightStayBookingStatusHistory]
         CONSTRAINT [DF_NightStayBookingStatusHistory_Id] DEFAULT NEWSEQUENTIALID(),
     [NightStayBookingId] UNIQUEIDENTIFIER NOT NULL,
     -- NULL only for the initial creation entry (no prior status).
-    [FromStatus] NVARCHAR(32) NULL,
-    [ToStatus] NVARCHAR(32) NOT NULL,
+    [FromStatus] NVARCHAR(48) NULL,
+    [ToStatus] NVARCHAR(48) NOT NULL,
     -- Who drove the change: 'Provider', 'Parent', or 'System' (the creation seed).
     [ChangedByActor] NVARCHAR(16) NOT NULL,
     -- The ProviderId / PetParentId behind the change; NULL for System entries.

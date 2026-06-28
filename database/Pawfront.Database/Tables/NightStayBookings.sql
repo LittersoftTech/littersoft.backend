@@ -24,9 +24,12 @@ CREATE TABLE [Booking].[NightStayBookings]
     -- Snapshot of the offering's drop-off / pick-up times at booking time.
     [DropOffTime] TIME(0) NOT NULL,
     [PickUpTime] TIME(0) NOT NULL,
-    -- Same 6-state lifecycle as [Booking].[Bookings]. Every status except the
-    -- two cancelled ones still holds the stay's per-night capacity.
-    [Status] NVARCHAR(32) NOT NULL
+    -- Same expanded "job" lifecycle as [Booking].[Bookings] (accept/decline,
+    -- start-with-OTP, evidence-gated complete, parent/provider modification
+    -- proposals). Capacity-freeing statuses are the two cancelled ones PLUS
+    -- PROVIDER_DECLINED; every other status still holds the stay's per-night
+    -- capacity. APPROVAL_NEEDED is deprecated but kept allowed for legacy rows.
+    [Status] NVARCHAR(48) NOT NULL
         CONSTRAINT [DF_NightStayBookings_Status] DEFAULT N'CREATED',
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_NightStayBookings_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
@@ -45,7 +48,11 @@ CREATE TABLE [Booking].[NightStayBookings]
         FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]),
     CONSTRAINT [CK_NightStayBookings_DateOrder] CHECK ([CheckOutDate] > [CheckInDate]),
     CONSTRAINT [CK_NightStayBookings_Status]
-        CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED',
+        CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED', N'JOB_STARTED',
+                            N'COMPLETED', N'APPROVAL_NEEDED',
+                            N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER',
+                            N'PROVIDER_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
+                            N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                             N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')),
     CONSTRAINT [CK_NightStayBookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)

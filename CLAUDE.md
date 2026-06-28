@@ -144,6 +144,10 @@ Key config sections:
   `Folders.{ProfilePhotos,ServicePhotos,EventBanners,PetParentProfilePhotos,PetPhotos,PetProfilePhotos,PetParentIdentities}`.
 - `ApplicationInsights:ConnectionString` — empty by default; when set,
   enables Azure Monitor exporter. Otherwise dev gets console exporter.
+- `Payments:PawfrontFeePercentage` — platform commission as a percentage of a
+  booking's total amount (dev default `10`). Bound to `PawfrontFeeOptions`
+  (both hosts) and used by `BookingService.GetDetailAsync` to compute the
+  `pawfrontFee` on the booking-detail payment block. Missing section ⇒ 0%.
 
 ## SQL — deployment
 
@@ -235,6 +239,28 @@ Custom `THROW` codes used for typed errors:
   **409 BookingStatusUnchanged**
 - `51125` invalid actor or status value (status update) → defensive; API
   validates first
+- `51126` transition not allowed from the current status (status update) → API
+  maps to **409 BookingNotStartable / 400** (engine from-state guard)
+- `51127` evidence required before COMPLETED (status update) → surfaced as
+  the complete endpoint's error
+- **Job-lifecycle sprocs (single-day `Booking.Bookings`):**
+  - `51130` booking not found (issue start-OTP)
+  - `51131/51132/51133` start-with-OTP: not found / not the provider (→ **403**) /
+    not in a startable state (→ **409 BookingNotStartable**)
+  - `51134` start OTP missing/incorrect (→ **400 InvalidStartOtp**); `51135` OTP
+    expired (→ **409 StartOtpExpired**)
+  - `51140/51141/51142/51143` request modification: not found / not a party
+    (→ **403**) / not modifiable (→ **409 BookingNotModifiable**) / a proposal is
+    already pending (→ **409 ModificationAlreadyPending**)
+  - `51145/51146/51147/51148` respond modification: not found / not a party
+    (→ **403**) / no proposal awaiting your response (→ **409 NoPendingModification**) /
+    no capacity for the proposed window (→ **409 CapacityExceeded**)
+  - `51150` booking not found / not owned by provider (add evidence)
+- **Job-lifecycle sprocs (night-stay):** `51246/51247` (transition / evidence
+  gate, mirror of 51126/51127); `51250` (issue OTP not found);
+  `51251-51255` (start-with-OTP, mirror of 51131-51135); `51260-51263` (request
+  modification, mirror of 51140-51143); `51265-51268` (respond modification,
+  mirror of 51145-51148); `51270` (add evidence not found).
 - `51200` parent auth identity not found (pet-parent profile completion)
 - `51201` pet parent not found (profile-photo update)
 - `51202` pet parent not found (pet add)
@@ -311,12 +337,14 @@ pet-parent and pet images now). Folders:
 - `pet-photos/<petId>/<guid>.<ext>` (gallery)
 - `pet-profile-photos/<petId>/<guid>.<ext>` (single primary photo)
 - `pet-parent-identities/<petParentId>/<guid>.<ext>`
+- `booking-evidence/<bookingId>/<guid>.<ext>` (job-completion evidence)
 
 `BlobUploadKind` enum: `ProfilePhoto`, `ServicePhoto`, `EventBanner`,
 `PetParentProfilePhoto`, `PetPhoto`, `PetParentIdentity`, `PetParentPhoto`,
-`ProviderPhoto`, `PetProfilePhoto`. The `IPawfrontBlobStorage.UploadAsync`
-parameter is `ownerId` (generic) — it's a ProviderId for provider kinds,
-a PetParentId for pet-parent kinds, a PetId for pet kinds.
+`ProviderPhoto`, `PetProfilePhoto`, `BookingEvidence`. The
+`IPawfrontBlobStorage.UploadAsync` parameter is `ownerId` (generic) — it's a
+ProviderId for provider kinds, a PetParentId for pet-parent kinds, a PetId for
+pet kinds, a BookingId for `BookingEvidence`.
 
 **Universal fetch endpoint:** the container is private, so the mobile client
 can't `GET` the blob URL directly. Instead it POSTs to
@@ -516,36 +544,99 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
     `Booking.ListBookingsByProvider` via a nullable `@BookingDate` param.
 - `GET /providers/{id}/policy` — returns both.
 
-### Booking status lifecycle + audit
-`Booking.Bookings.Status` is a 6-state lifecycle (stored as literal
-uppercase): `CREATED` (parent booked) → `CONFIRMED` (provider accepted) →
-`COMPLETED` (both agree it's done); `APPROVAL_NEEDED` is the transient state
-when either party needs a schedule change; `PROVIDER_CANCELLED` /
-`PARENT_CANCELLED` are the two terminal cancellation states. **A booking
-holds its capacity slot in every status except the two cancelled ones** — the
-"active booking" predicate `Status NOT IN ('PROVIDER_CANCELLED',
-'PARENT_CANCELLED')` is what every capacity/closure-conflict/active-status/slot
-query keys off (replacing the old `Status = 'Confirmed'`). New parent/provider
-app bookings default to `CREATED`; provider-added custom walk-ins start
-`CONFIRMED`.
-- **Status-change API (both hosts, role-guarded):**
-  `POST /providers/{providerId}/bookings/{bookingId}/status` (actor = Provider,
-  may set CONFIRMED/COMPLETED/APPROVAL_NEEDED/PROVIDER_CANCELLED) and
-  `POST /pet-parents/{petParentId}/bookings/{bookingId}/status` (actor = Parent,
-  may set APPROVAL_NEEDED/COMPLETED/PARENT_CANCELLED). Body
-  `{ status, note? }`. The actor + their id come from the authenticated route,
-  never the body. Backed by `Booking.UpdateBookingStatus` (UPDLOCK+HOLDLOCK):
-  enforces the actor is a party to the booking, the status is settable by that
-  actor, the booking isn't already terminal, and the status actually changes.
-- **Audit table `Booking.BookingStatusHistory`** (append-only,
-  `ON DELETE CASCADE`): one row per transition — `FromStatus` (null for the
-  seeded creation entry), `ToStatus`, `ChangedByActor`
-  (`Provider`/`Parent`/`System`), `ChangedByActorId`, `Note`, `ChangedAtUtc`.
-  Seeded on create (`System`/'Booking created'), and written by both the
-  status-change API and the legacy `Booking.CancelBooking` (now sets
-  `PARENT_CANCELLED`). Read via
-  `GET /{providers/{providerId}|pet-parents/{petParentId}}/bookings/{bookingId}/status-history`
-  (oldest-first; the endpoint verifies the caller is a party → 404 otherwise).
+### Booking ("job") status lifecycle + audit
+`Booking.Bookings.Status` (`NVARCHAR(48)`, literal uppercase) is the expanded
+**job** lifecycle:
+- `CREATED` (parent booked) → `CONFIRMED` (provider accepted) **or**
+  `PROVIDER_DECLINED` (provider rejected).
+- `CONFIRMED`-equivalent → `JOB_STARTED` (provider started — gated by the
+  parent's **start-OTP**) → `COMPLETED` (provider uploaded **evidence**).
+- Either party may propose a schedule change:
+  `MODIFICATION_REQUEST_BY_PARENT` / `MODIFICATION_REQUEST_BY_PROVIDER`; the
+  counterparty resolves it → `PROVIDER/PARENT_ACCEPTED_MODIFICATION` (new
+  details applied to the **same booking id**) or
+  `PROVIDER/PARENT_DECLINED_MODIFICATION` (old details kept). All four are
+  **"live" resting states** — the job can still be started/modified/cancelled
+  from them (`BookingStatuses.ConfirmedEquivalent`).
+- `PROVIDER_CANCELLED` / `PARENT_CANCELLED` are cancellation states.
+- `APPROVAL_NEEDED` is **deprecated** (superseded by modifications) — still in
+  the CHECK list so legacy rows stay valid, no longer settable.
+
+**Capacity-freeing ("inactive booking") predicate is now
+`Status NOT IN ('PROVIDER_CANCELLED','PARENT_CANCELLED','PROVIDER_DECLINED')`**
+— a declined job releases its slot. This predicate is keyed off by every
+capacity / closure-conflict / active-status / slot query (and `GetBookingsForDate`).
+New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
+
+- **Enriched booking-detail read (single-day only).** `GET /bookings/{bookingId}`
+  (provider) and `GET /pet-parents/{petParentId}/bookings/{bookingId}` (parent)
+  return `BookingDetailResponse` grouped into **four sections** — `bookingDetails`
+  (incl. a friendly `jobId` `PF-000123` from the new `Booking.Bookings.JobNumber`
+  IDENTITY column), `parentDetails`, `petDetails`, `paymentDetails` — plus the
+  top-level `startOtp` (parent reads, when startable) + `pendingModification`.
+  Backed by the new `Booking.GetBookingDetail` sproc (base row + `JobNumber` +
+  payout columns, LEFT JOIN `Parent.PetParents` + `Parent.Pets`) and
+  `IBookingService.GetDetailAsync`. **App** bookings fill parent/pet (name,
+  mobile, gender, photo) from the joined records; **Custom** walk-ins from the
+  booking's own free-text fields (gender/photo null). `paymentDetails` is
+  computed **live**: `pricePerHour` = the offering's unit rate (Custom = stored
+  `PricePerHour`); `totalAmount` = rate × time (flat fee for fixed Vet/Trainer/
+  grooming-item); `pawfrontFee` = `totalAmount × Payments:PawfrontFeePercentage`;
+  `payoutStatus`/`payoutId` from the capture-only columns (`Pending` default).
+  Pricing is null when the offering can't be resolved (deactivated service). The
+  flat `BookingResponse` (create/list/status) is unchanged. Night-stay detail is
+  **not** enriched yet (separate entity/endpoint — follow-up).
+- **One dedicated endpoint per transition** (no shared generic setter — though
+  the legacy `POST .../bookings/{id}/status` stays as a back-compat shim). Each
+  is a thin handler that pins the target status + actor (from the host/route);
+  the actor's id is never taken from the body. Provider host:
+  `POST /providers/{providerId}/bookings/{bookingId}/{accept|decline|start|complete|cancel}`
+  + `/modifications`, `/modifications/{accept|decline}`, `POST/GET /evidence`.
+  Parent host: `POST /pet-parents/{petParentId}/bookings/{bookingId}/{cancel}` +
+  `/modifications`, `/modifications/{accept|decline}`, `GET /evidence`, and
+  `GET /pet-parents/{petParentId}/bookings/{bookingId}` (single read that
+  **issues the start-OTP** when the booking is confirmed-equivalent). `/accept`,
+  `/decline`, `/complete`, `/cancel` flow through `Booking.UpdateBookingStatus`
+  (UPDLOCK+HOLDLOCK), which enforces party + per-actor settable set + from-state +
+  the **`COMPLETED` evidence gate** (≥1 row in `Booking.BookingEvidence`, else
+  THROW 51127). `COMPLETED` is now **provider-only, from `JOB_STARTED`** (was
+  settable by both parties — behaviour change).
+- **Start-OTP** (`Booking.BookingStartOtps`, telemetry-tracked): when the parent
+  opens a confirmed booking, `IssueBookingStartOtp` issues/reuses a 6-digit
+  plaintext share-code (10-min TTL, reuse-while-valid) returned in the booking
+  details. The provider posts it to `/start` → `StartBookingWithOtp` validates
+  (consume on success, bump `FailedAttemptCount` on mismatch) → `JOB_STARTED`.
+- **Evidence** (`Booking.BookingEvidence`): provider uploads photo(s) via
+  `POST .../evidence` (blob `BlobUploadKind.BookingEvidence`, `booking-evidence/`
+  folder, 3 MB, JPEG/PNG/WebP); ≥1 gates `COMPLETED`.
+- **Modifications** (`Booking.BookingModifications` is the **staging area** —
+  holds ONLY the open proposal, UNIQUE per booking; **editing is limited to date
+  + time**, no service-item change): `RequestBookingModification` stages the
+  proposed schedule (validated for working hours / closures / duration in the
+  Application layer first — groomer duration is checked against the booking's
+  *existing* item); `RespondBookingModification` on **accept** re-checks capacity
+  race-safely, copies the staged date/time onto the booking ("staging → main"),
+  on **decline** leaves the booking untouched — and **either way DELETES the
+  staging row** (the proposal lives in staging only while pending). The staged
+  proposal is surfaced on every single-booking read (both hosts, single-day +
+  night-stay) as `pendingModification` (via `GetPendingBookingModification`),
+  null unless a `MODIFICATION_REQUEST_BY_*` is open — so the counterparty can see
+  what's proposed before accepting/declining.
+- **Night-stay parity:** all of the above is mirrored for
+  `Booking.NightStayBookings` (the multi-night entity) — its own twin tables
+  (`NightStayBookingStartOtps` / `NightStayBookingEvidence` /
+  `NightStayBookingModifications`) and sprocs, modifications proposing a
+  `CheckInDate`/`CheckOutDate` range. The provider host now has a night-stay
+  management surface (`/providers/{id}/night-stay-bookings/...`, new file
+  `Pawfront.Api/Endpoints/NightStayBookingEndpoints.cs`); the parent host adds
+  the parent-side transitions + OTP injection on its existing GET-one.
+- **Audit tables** `Booking.BookingStatusHistory` /
+  `NightStayBookingStatusHistory` (append-only, `ON DELETE CASCADE`,
+  `From/ToStatus NVARCHAR(48)`): one row per transition — seeded on create, and
+  written by every transition path (status engine, start, modification
+  request/respond, legacy cancel). Read via
+  `GET .../bookings/{bookingId}/status-history` (oldest-first; caller-is-a-party
+  → 404 otherwise).
 
 ### Night-stay (multi-night boarding) bookings — separate from single-day
 Multi-night boarding (PetSitter **NightStay** service) is its own booking entity

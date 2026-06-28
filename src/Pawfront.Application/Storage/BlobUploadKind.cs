@@ -10,5 +10,6 @@ public enum BlobUploadKind
     PetParentIdentity = 5,
     PetParentPhoto = 6,
     ProviderPhoto = 7,
-    PetProfilePhoto = 8
+    PetProfilePhoto = 8,
+    BookingEvidence = 9
 }

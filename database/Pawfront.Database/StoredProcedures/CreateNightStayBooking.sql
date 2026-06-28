@@ -96,7 +96,7 @@ BEGIN
     FROM [Nights] n
     LEFT JOIN [Booking].[NightStayBookings] b WITH (UPDLOCK, HOLDLOCK)
         ON b.[ServiceId] = @ServiceId
-       AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+       AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
        AND b.[CheckInDate] <= n.[Night]
        AND b.[CheckOutDate] > n.[Night]
     GROUP BY n.[Night]

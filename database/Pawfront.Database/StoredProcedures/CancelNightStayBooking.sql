@@ -31,7 +31,7 @@ BEGIN
         THROW 51237, 'Only the original booker can cancel this booking.', 1;
     END
 
-    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
     BEGIN
         THROW 51238, 'Night stay booking is already cancelled.', 1;
     END

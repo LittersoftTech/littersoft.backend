@@ -1,4 +1,5 @@
 using Pawfront.Application;
+using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
 using Pawfront.Infrastructure.Cosmos;
 using Pawfront.Infrastructure.Sql;
@@ -21,6 +22,10 @@ builder.Services
     .AddPawfrontSqlInfrastructure(builder.Configuration)
     .AddPawfrontCosmosInfrastructure(builder.Configuration)
     .AddPetParentAuthentication(builder.Configuration);
+
+// Platform fee (% of booking total) surfaced on the booking-detail payment block.
+builder.Services.Configure<PawfrontFeeOptions>(
+    builder.Configuration.GetSection(PawfrontFeeOptions.SectionName));
 
 // Per-request resolver that caches the caller's PetParentId after the first
 // lookup. Required by the ownership filters applied to /pet-parents/* and

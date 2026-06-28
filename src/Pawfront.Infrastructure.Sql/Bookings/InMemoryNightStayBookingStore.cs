@@ -230,6 +230,34 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         }
     }
 
+    // The job lifecycle (start-OTP, evidence, modifications) is not implemented in
+    // the in-memory dev fallback — it requires the SQL-backed path.
+    private static NotSupportedException NotInMemory()
+        => new("The night-stay job lifecycle requires the SQL-backed store.");
+
+    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<NightStayBookingResult> StartWithOtpAsync(Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<NightStayBookingResult> RequestModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
+        DateOnly checkInDate, DateOnly checkOutDate, string? note, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<NightStayBookingResult> RespondModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
+        bool accept, int capacity, string? note, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<NightStayBookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
+        => Task.FromResult<NightStayBookingModificationResult?>(null);
+
+    public Task<BookingEvidenceResult> AddEvidenceAsync(Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(Guid bookingId, CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<BookingEvidenceResult>>(Array.Empty<BookingEvidenceResult>());
+
     private static NightStayBookingResult ToResult(Row row) =>
         new(row.NightStayBookingId,
             row.ProviderId,

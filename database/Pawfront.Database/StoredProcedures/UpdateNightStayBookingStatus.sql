@@ -1,20 +1,24 @@
 -- Moves a night-stay booking to a new lifecycle status and writes an audit row,
--- atomically. Mirror of [Booking].[UpdateBookingStatus]. The acting party
--- (@Actor = 'Provider' | 'Parent') and @ActorId come from the authenticated
--- route, never the client body. Enforces:
+-- atomically. Mirror of [Booking].[UpdateBookingStatus] — the engine behind the
+-- simple "flip" transitions only (the start-with-OTP and modification flows have
+-- their own sprocs). The acting party (@Actor = 'Provider' | 'Parent') and
+-- @ActorId come from the authenticated route, never the client body. Enforces:
 --   * the actor is a party to the booking            (THROW 51241)
 --   * the status is one the actor may set            (THROW 51242)
 --   * the booking is not already terminal            (THROW 51243)
 --   * the status actually changes                    (THROW 51244)
+--   * the transition is allowed from the current state (THROW 51246)
+--   * COMPLETED requires >= 1 evidence photo         (THROW 51247)
 -- Other THROWs: 51240 booking not found, 51245 invalid actor/status value.
 --
--- Settable per actor:
---   Provider -> CONFIRMED, COMPLETED, APPROVAL_NEEDED, PROVIDER_CANCELLED
---   Parent   -> APPROVAL_NEEDED, COMPLETED, PARENT_CANCELLED
--- Terminal states (no further change): COMPLETED, PROVIDER_CANCELLED, PARENT_CANCELLED.
+-- Engine-settable per actor (other statuses are reached via dedicated sprocs):
+--   Provider -> CONFIRMED (from CREATED), PROVIDER_DECLINED (from CREATED),
+--               COMPLETED (from JOB_STARTED, evidence-gated), PROVIDER_CANCELLED
+--   Parent   -> PARENT_CANCELLED
+-- Terminal states: COMPLETED, PROVIDER_DECLINED, PROVIDER_CANCELLED, PARENT_CANCELLED.
 CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
     @NightStayBookingId UNIQUEIDENTIFIER,
-    @NewStatus NVARCHAR(32),
+    @NewStatus NVARCHAR(48),
     @Actor NVARCHAR(16),
     @ActorId UNIQUEIDENTIFIER,
     @Note NVARCHAR(500) = NULL
@@ -28,14 +32,14 @@ BEGIN
         THROW 51245, 'Actor must be Provider or Parent.', 1;
     END
 
-    IF @NewStatus NOT IN (N'CREATED', N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED',
+    IF @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED',
                           N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
     BEGIN
-        THROW 51245, 'Unknown booking status.', 1;
+        THROW 51245, 'Unknown or non-engine booking status.', 1;
     END
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
-    DECLARE @CurrentStatus NVARCHAR(32);
+    DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
 
@@ -59,14 +63,14 @@ BEGIN
     END
 
     IF (@Actor = N'Provider'
-            AND @NewStatus NOT IN (N'CONFIRMED', N'COMPLETED', N'APPROVAL_NEEDED', N'PROVIDER_CANCELLED'))
+            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PROVIDER_CANCELLED'))
        OR (@Actor = N'Parent'
-            AND @NewStatus NOT IN (N'APPROVAL_NEEDED', N'COMPLETED', N'PARENT_CANCELLED'))
+            AND @NewStatus NOT IN (N'PARENT_CANCELLED'))
     BEGIN
         THROW 51242, 'This status is not permitted for this actor.', 1;
     END
 
-    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
     BEGIN
         THROW 51243, 'Booking is in a terminal state and cannot change.', 1;
     END
@@ -74,6 +78,19 @@ BEGIN
     IF @CurrentStatus = @NewStatus
     BEGIN
         THROW 51244, 'Booking is already in the requested status.', 1;
+    END
+
+    IF (@NewStatus = N'CONFIRMED'           AND @CurrentStatus <> N'CREATED')
+       OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
+       OR (@NewStatus = N'COMPLETED'        AND @CurrentStatus <> N'JOB_STARTED')
+    BEGIN
+        THROW 51246, 'This transition is not allowed from the current status.', 1;
+    END
+
+    IF @NewStatus = N'COMPLETED'
+       AND NOT EXISTS (SELECT 1 FROM [Booking].[NightStayBookingEvidence] WHERE [NightStayBookingId] = @NightStayBookingId)
+    BEGIN
+        THROW 51247, 'Upload at least one evidence photo before completing the job.', 1;
     END
 
     UPDATE [Booking].[NightStayBookings]

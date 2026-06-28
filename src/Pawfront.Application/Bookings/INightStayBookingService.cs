@@ -35,4 +35,32 @@ public interface INightStayBookingService
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
         Guid bookingId,
         CancellationToken cancellationToken);
+
+    // --- Job lifecycle: start-OTP, evidence, modifications ------------------
+
+    Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken);
+
+    Task<NightStayBookingResult> StartWithOtpAsync(StartBookingCommand command, CancellationToken cancellationToken);
+
+    Task<NightStayBookingResult> RequestModificationAsync(
+        RequestNightStayBookingModificationCommand command,
+        CancellationToken cancellationToken);
+
+    Task<NightStayBookingResult> RespondModificationAsync(
+        RespondBookingModificationCommand command,
+        CancellationToken cancellationToken);
+
+    Task<NightStayBookingModificationResult?> GetPendingModificationAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken);
+
+    Task<BookingEvidenceResult> AddEvidenceAsync(
+        Guid bookingId,
+        Guid providerId,
+        string photoUrl,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken);
 }

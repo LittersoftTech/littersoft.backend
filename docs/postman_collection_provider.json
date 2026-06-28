@@ -19,6 +19,7 @@
     { "key": "eventId", "value": "" },
     { "key": "eventBookingId", "value": "", "description": "Populated by POST /events/{eventId}/bookings." },
     { "key": "bookingId", "value": "" },
+    { "key": "nightStayBookingId", "value": "", "description": "A multi-night booking id (created on the parent host) for the provider-side night-stay management endpoints." },
     { "key": "providerPhotoId", "value": "", "description": "Populated by POST /providers/{id}/photos." },
     { "key": "petParentId", "value": "11111111-1111-1111-1111-111111111111" },
     { "key": "closureId", "value": "" },
@@ -982,7 +983,8 @@
           "name": "GET booking by id",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{baseUrl}}/api/v1/bookings/{{bookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","bookings","{{bookingId}}"] }
+            "url": { "raw": "{{baseUrl}}/api/v1/bookings/{{bookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","bookings","{{bookingId}}"] },
+            "description": "Returns the detail wrapper { booking, startOtp (always null on the provider host — the OTP is parent-only), pendingModification (the staged date/time proposal, populated only while a MODIFICATION_REQUEST_BY_* is open so the provider can see a parent's proposal) }."
           }
         },
         {
@@ -1007,7 +1009,96 @@
           }
         },
         {
-          "name": "POST cancel booking",
+          "name": "POST accept booking → CONFIRMED",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/accept", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","accept"] },
+            "description": "Provider accepts a CREATED booking → CONFIRMED."
+          }
+        },
+        {
+          "name": "POST decline booking → PROVIDER_DECLINED",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/decline", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","decline"] },
+            "description": "Provider declines a CREATED booking → PROVIDER_DECLINED (terminal; frees the capacity slot)."
+          }
+        },
+        {
+          "name": "POST start booking (with parent OTP) → JOB_STARTED",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/start", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","start"] },
+            "body": { "mode": "raw", "raw": "{\n  \"otpCode\": \"123456\"\n}" },
+            "description": "Provider starts the job by entering the OTP the parent read out to them (the parent gets it from GET .../bookings/{id} on the parent host). 400 InvalidStartOtp; 409 StartOtpExpired | BookingNotStartable."
+          }
+        },
+        {
+          "name": "POST evidence (multipart) — upload completion photo",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/evidence", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","evidence"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
+            "description": "Provider uploads a job-completion evidence photo (≤3 MB, JPEG/PNG/WebP). ≥1 photo is required before /complete."
+          }
+        },
+        {
+          "name": "GET evidence",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/evidence", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","evidence"] },
+            "description": "Lists the booking's evidence photos, oldest-first."
+          }
+        },
+        {
+          "name": "POST complete booking → COMPLETED",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/complete", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","complete"] },
+            "description": "Provider completes a JOB_STARTED booking → COMPLETED. Blocked (error) until ≥1 evidence photo has been uploaded."
+          }
+        },
+        {
+          "name": "POST cancel booking (provider) → PROVIDER_CANCELLED",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/cancel", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","cancel"] },
+            "description": "Provider cancels the booking → PROVIDER_CANCELLED."
+          }
+        },
+        {
+          "name": "POST request modification (provider) — stage date/time change",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/modifications", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","modifications"] },
+            "body": { "mode": "raw", "raw": "{\n  \"bookingDate\": \"2025-07-02\",\n  \"startTime\": \"11:00:00\",\n  \"endTime\": \"13:00:00\",\n  \"note\": \"Proposing a new slot.\"\n}" },
+            "description": "Provider proposes a new date/time (editing is limited to the schedule). Stages the proposal and flips the booking to MODIFICATION_REQUEST_BY_PROVIDER; the parent sees it on their booking read and accepts/declines. 409 ModificationAlreadyPending if one is already open."
+          }
+        },
+        {
+          "name": "POST accept modification (provider) — respond to a parent's proposal",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/modifications/accept", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","modifications","accept"] },
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Works for me.\"\n}" },
+            "description": "Provider accepts the parent's staged modification → PROVIDER_ACCEPTED_MODIFICATION; the proposed date/time is applied to the booking and the staging row is removed. 409 CapacityExceeded if the new window is full; 409 NoPendingModification if nothing is staged for the provider to answer."
+          }
+        },
+        {
+          "name": "POST decline modification (provider)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/modifications/decline", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","modifications","decline"] },
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Sorry, can't do that time.\"\n}" },
+            "description": "Provider declines the parent's staged modification → PROVIDER_DECLINED_MODIFICATION; the booking keeps its original details and the staging row is removed."
+          }
+        },
+        {
+          "name": "POST cancel booking (legacy parent-cancel shim)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
@@ -1023,6 +1114,116 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","pet-parents","{{petParentId}}","bookings"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6b. Night-Stay Bookings (provider management)",
+      "description": "Provider-side management of multi-night boarding bookings. The booking itself is created on the parent host; set {{nightStayBookingId}} to one of the provider's stays. Same job lifecycle as single-day bookings (accept/decline/start-with-OTP/evidence+complete/cancel/modifications) but modifications propose a check-in/check-out date range.",
+      "item": [
+        {
+          "name": "GET night-stay bookings by provider",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings"] },
+            "description": "All of the provider's night-stay bookings (optional ?date=YYYY-MM-DD)."
+          }
+        },
+        {
+          "name": "GET night-stay booking by id",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}"] },
+            "description": "Detail wrapper { booking, startOtp (null on provider), pendingModification (staged check-in/check-out proposal, populated only while a MODIFICATION_REQUEST_BY_* is open) }."
+          }
+        },
+        {
+          "name": "GET night-stay status-history",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/status-history", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","status-history"] }
+          }
+        },
+        {
+          "name": "POST accept → CONFIRMED",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/accept", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","accept"] }
+          }
+        },
+        {
+          "name": "POST decline → PROVIDER_DECLINED",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/decline", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","decline"] }
+          }
+        },
+        {
+          "name": "POST start (with parent OTP) → JOB_STARTED",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/start", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","start"] },
+            "body": { "mode": "raw", "raw": "{\n  \"otpCode\": \"123456\"\n}" }
+          }
+        },
+        {
+          "name": "POST evidence (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/evidence", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","evidence"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] }
+          }
+        },
+        {
+          "name": "GET evidence",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/evidence", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","evidence"] }
+          }
+        },
+        {
+          "name": "POST complete → COMPLETED",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/complete", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","complete"] },
+            "description": "Requires ≥1 evidence photo first."
+          }
+        },
+        {
+          "name": "POST cancel → PROVIDER_CANCELLED",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/cancel", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","cancel"] }
+          }
+        },
+        {
+          "name": "POST request modification (provider) — propose new date range",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/modifications", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","modifications"] },
+            "body": { "mode": "raw", "raw": "{\n  \"checkInDate\": \"2025-08-01\",\n  \"checkOutDate\": \"2025-08-04\",\n  \"note\": \"Proposing new dates.\"\n}" },
+            "description": "checkOutDate is the pickup day, NOT a stayed night. → MODIFICATION_REQUEST_BY_PROVIDER."
+          }
+        },
+        {
+          "name": "POST accept modification (provider)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/modifications/accept", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","modifications","accept"] },
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Works for me.\"\n}" }
+          }
+        },
+        {
+          "name": "POST decline modification (provider)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/modifications/decline", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","modifications","decline"] },
+            "body": { "mode": "raw", "raw": "{\n  \"note\": \"Those dates don't work.\"\n}" }
           }
         }
       ]

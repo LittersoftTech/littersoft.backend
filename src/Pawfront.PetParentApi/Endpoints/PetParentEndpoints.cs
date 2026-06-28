@@ -55,8 +55,18 @@ internal static class PetParentEndpoints
         group.MapGet("/event-bookings", ListEventBookings);
         group.MapPost("/bookings", CreateServiceBooking);
         group.MapGet("/bookings", ListServiceBookings);
+        // Single booking read — issues the start-OTP into the response when the
+        // booking is in a startable (confirmed-equivalent) state.
+        group.MapGet("/bookings/{bookingId:guid}", GetServiceBookingDetail);
+        // Legacy generic status setter — kept as a back-compat shim.
         group.MapPost("/bookings/{bookingId:guid}/status", UpdateBookingStatus);
         group.MapGet("/bookings/{bookingId:guid}/status-history", GetBookingStatusHistory);
+        // Per-transition endpoints (parent actor).
+        group.MapPost("/bookings/{bookingId:guid}/cancel", ParentCancelServiceBooking);
+        group.MapPost("/bookings/{bookingId:guid}/modifications", RequestServiceBookingModification);
+        group.MapPost("/bookings/{bookingId:guid}/modifications/accept", AcceptServiceBookingModification);
+        group.MapPost("/bookings/{bookingId:guid}/modifications/decline", DeclineServiceBookingModification);
+        group.MapGet("/bookings/{bookingId:guid}/evidence", ListServiceBookingEvidence);
         group.MapGet("/onboarding-status", GetOnboardingStatus);
 
         var mobileVerification = group.MapGroup("/mobile-verification");
@@ -332,6 +342,162 @@ internal static class PetParentEndpoints
         return ApiResults.Ok(history.Select(ToBookingStatusHistoryResponse).ToArray());
     }
 
+    /// <summary>
+    /// Single booking read. Confirms the booking belongs to the caller (404
+    /// otherwise) and, when the booking is in a startable (confirmed-equivalent)
+    /// state, issues/returns the start-OTP for the parent to read to the provider.
+    /// </summary>
+    private static async Task<IResult> GetServiceBookingDetail(
+        Guid petParentId, Guid bookingId, IBookingService bookingService, CancellationToken cancellationToken)
+    {
+        var detail = await bookingService.GetDetailAsync(bookingId, cancellationToken);
+        if (detail is null || detail.Row.PetParentId != petParentId)
+        {
+            return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
+        }
+
+        StartOtpResponse? startOtp = null;
+        if (BookingStatuses.ConfirmedEquivalent.Contains(detail.Row.Status))
+        {
+            var otp = await bookingService.IssueStartOtpAsync(bookingId, cancellationToken);
+            startOtp = new StartOtpResponse(otp.OtpCode, otp.ExpiresAtUtc);
+        }
+
+        BookingModificationResponse? pending = null;
+        if (BookingStatuses.ModificationRequested.Contains(detail.Row.Status))
+        {
+            var mod = await bookingService.GetPendingModificationAsync(bookingId, cancellationToken);
+            pending = mod is null
+                ? null
+                : new BookingModificationResponse(
+                    mod.BookingModificationId, mod.BookingId, mod.RequestedByActor, mod.RequestedByActorId,
+                    mod.ProposedBookingDate, mod.ProposedStartTime, mod.ProposedEndTime, mod.Note, mod.CreatedAtUtc);
+        }
+
+        return ApiResults.Ok(ToBookingDetailResponse(detail, startOtp, pending));
+    }
+
+    private static Task<IResult> ParentCancelServiceBooking(
+        Guid petParentId, Guid bookingId, IBookingService s, CancellationToken ct)
+        => SetParentBookingStatusAsync(petParentId, bookingId, BookingStatuses.ParentCancelled, s, ct);
+
+    private static async Task<IResult> SetParentBookingStatusAsync(
+        Guid petParentId, Guid bookingId, string status, IBookingService bookingService, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await bookingService.UpdateStatusAsync(
+                new UpdateBookingStatusCommand(bookingId, status, BookingStatusActor.Parent, petParentId, null),
+                cancellationToken);
+            return ApiResults.Ok(ToBookingResponse(result));
+        }
+        catch (Exception ex) when (IsBookingError(ex))
+        {
+            return MapBookingError(ex);
+        }
+    }
+
+    private static async Task<IResult> RequestServiceBookingModification(
+        Guid petParentId, Guid bookingId, RequestBookingModificationRequest request,
+        IBookingService bookingService, CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            return ApiResults.BadRequest("InvalidRequest", "Request body is required.");
+        }
+
+        try
+        {
+            var result = await bookingService.RequestModificationAsync(
+                new RequestBookingModificationCommand(
+                    bookingId, BookingStatusActor.Parent, petParentId,
+                    request.BookingDate, request.StartTime, request.EndTime, request.Note),
+                cancellationToken);
+            return ApiResults.Ok(ToBookingResponse(result));
+        }
+        catch (Exception ex) when (IsBookingError(ex))
+        {
+            return MapBookingError(ex);
+        }
+    }
+
+    private static Task<IResult> AcceptServiceBookingModification(
+        Guid petParentId, Guid bookingId, RespondBookingModificationRequest? request, IBookingService s, CancellationToken ct)
+        => RespondParentBookingModificationAsync(petParentId, bookingId, accept: true, request?.Note, s, ct);
+
+    private static Task<IResult> DeclineServiceBookingModification(
+        Guid petParentId, Guid bookingId, RespondBookingModificationRequest? request, IBookingService s, CancellationToken ct)
+        => RespondParentBookingModificationAsync(petParentId, bookingId, accept: false, request?.Note, s, ct);
+
+    private static async Task<IResult> RespondParentBookingModificationAsync(
+        Guid petParentId, Guid bookingId, bool accept, string? note, IBookingService bookingService, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await bookingService.RespondModificationAsync(
+                new RespondBookingModificationCommand(bookingId, BookingStatusActor.Parent, petParentId, accept, note),
+                cancellationToken);
+            return ApiResults.Ok(ToBookingResponse(result));
+        }
+        catch (Exception ex) when (IsBookingError(ex))
+        {
+            return MapBookingError(ex);
+        }
+    }
+
+    private static async Task<IResult> ListServiceBookingEvidence(
+        Guid petParentId, Guid bookingId, IBookingService bookingService, CancellationToken cancellationToken)
+    {
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.PetParentId != petParentId)
+        {
+            return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
+        }
+
+        var evidence = await bookingService.ListEvidenceAsync(bookingId, cancellationToken);
+        return ApiResults.Ok(evidence
+            .Select(e => new BookingEvidenceResponse(e.BookingEvidenceId, e.BookingId, e.PhotoUrl, e.CreatedAtUtc))
+            .ToArray());
+    }
+
+    private static bool IsBookingError(Exception ex) => ex is
+        BookingNotFoundException or BookingStatusForbiddenException or BookingNotStartableException
+        or InvalidStartOtpException or StartOtpExpiredException or BookingNotModifiableException
+        or BookingModificationConflictException or NoPendingModificationException
+        or BookingModificationCapacityException or BookingServiceInvalidException
+        or BookingOfferingNotConfiguredException or BookingGroomingItemCodeRequiredException
+        or BookingGroomingItemNotOfferedException or BookingGroomingItemInactiveException
+        or ProviderClosedOnDateException or InvalidBookingTimeException
+        or BookingNightStayUseDedicatedEndpointException or BookingStatusNotAllowedException
+        or BookingStatusTerminalException or BookingStatusUnchangedException
+        or UnsupportedBookingStatusException or ArgumentException;
+
+    private static IResult MapBookingError(Exception ex) => ex switch
+    {
+        BookingNotFoundException e => ApiResults.NotFound("BookingNotFound", e.Message),
+        BookingStatusForbiddenException e => ApiResults.Forbidden("Forbidden", e.Message),
+        BookingNotStartableException e => ApiResults.Conflict("BookingNotStartable", e.Message),
+        InvalidStartOtpException e => ApiResults.BadRequest("InvalidStartOtp", e.Message),
+        StartOtpExpiredException e => ApiResults.Conflict("StartOtpExpired", e.Message),
+        BookingNotModifiableException e => ApiResults.Conflict("BookingNotModifiable", e.Message),
+        BookingModificationConflictException e => ApiResults.Conflict("ModificationAlreadyPending", e.Message),
+        NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
+        BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
+        BookingServiceInvalidException e => ApiResults.BadRequest("InvalidServiceId", e.Message),
+        BookingOfferingNotConfiguredException e => ApiResults.BadRequest("OfferingNotConfigured", e.Message),
+        BookingGroomingItemCodeRequiredException e => ApiResults.BadRequest("ServiceItemCodeRequired", e.Message),
+        BookingGroomingItemNotOfferedException e => ApiResults.BadRequest("ServiceItemNotOffered", e.Message),
+        BookingGroomingItemInactiveException e => ApiResults.Conflict("ServiceItemInactive", e.Message),
+        ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
+        InvalidBookingTimeException e => ApiResults.BadRequest("InvalidBookingTime", e.Message),
+        BookingNightStayUseDedicatedEndpointException e => ApiResults.BadRequest("UseNightStayEndpoint", e.Message),
+        BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),
+        BookingStatusTerminalException e => ApiResults.Conflict("BookingStatusTerminal", e.Message),
+        BookingStatusUnchangedException e => ApiResults.Conflict("BookingStatusUnchanged", e.Message),
+        UnsupportedBookingStatusException e => ApiResults.BadRequest("UnsupportedBookingStatus", e.Message),
+        _ => ApiResults.BadRequest("InvalidRequest", ex.Message)
+    };
+
     private static BookingStatusHistoryEntryResponse ToBookingStatusHistoryResponse(BookingStatusHistoryEntry entry) =>
         new(entry.BookingStatusHistoryId,
             entry.BookingId,
@@ -368,6 +534,69 @@ internal static class PetParentEndpoints
             result.PricePerHour,
             result.JobNotes,
             result.PetId);
+
+    /// <summary>
+    /// Maps the enriched booking-detail result into the four-section response.
+    /// App bookings draw Parent/Pet details from the joined records; Custom
+    /// walk-ins from the booking's own free-text fields.
+    /// </summary>
+    private static BookingDetailResponse ToBookingDetailResponse(
+        BookingDetailResult detail,
+        StartOtpResponse? startOtp,
+        BookingModificationResponse? pendingModification)
+    {
+        var row = detail.Row;
+        var isCustom = string.Equals(row.Source, "Custom", StringComparison.Ordinal);
+
+        return new BookingDetailResponse(
+            new BookingDetailsSection(
+                row.BookingId,
+                detail.JobId,
+                row.ProviderId,
+                row.ServiceId,
+                row.ServiceCategory,
+                row.SubCategory,
+                row.ServiceItemCode,
+                row.BookingDate,
+                row.StartTime,
+                row.EndTime,
+                row.Status,
+                row.Source,
+                row.ServiceLocation,
+                row.CustomerLocation,
+                row.JobNotes,
+                row.CreatedAtUtc,
+                row.UpdatedAtUtc,
+                row.CancelledAtUtc),
+            new ParentDetailsSection(
+                row.PetParentId,
+                isCustom ? row.CustomerName : CombineName(row.ParentFirstName, row.ParentLastName),
+                row.CustomerMobileCountryCode ?? row.ParentMobileCountryCode,
+                row.CustomerMobile ?? row.ParentMobileNumber,
+                row.ParentGender,
+                row.ParentPhotoUrl),
+            new PetDetailsSection(
+                row.PetId,
+                row.PetProfileName ?? row.PetName,
+                row.PetType ?? row.AnimalType,
+                row.PetGender,
+                row.PetPhotoUrl),
+            new PaymentDetailsSection(
+                detail.PricePerHour,
+                detail.TotalAmount,
+                detail.PawfrontFee,
+                detail.FeePercentage,
+                row.PayoutStatus,
+                row.PayoutId),
+            startOtp,
+            pendingModification);
+    }
+
+    private static string? CombineName(string? first, string? last)
+    {
+        var name = $"{first} {last}".Trim();
+        return string.IsNullOrEmpty(name) ? null : name;
+    }
 
     private static async Task<IResult> GetProfile(
         Guid petParentId,
