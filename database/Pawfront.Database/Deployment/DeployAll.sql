@@ -6572,14 +6572,14 @@ BEGIN
     (
         [PetParentId], [EventCategory], [IsChildFriendly], [Title], [Description],
         [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime],
-        [IsPaid], [Price], [CancellationPolicy]
+        [IsPaid], [Price], [CancellationPolicy], [EventLink]
     )
     OUTPUT inserted.[EventId] INTO @InsertedEventId
     VALUES
     (
         @PetParentId, @EventCategory, @IsChildFriendly, @Title, @Description,
         @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime,
-        @IsPaid, CASE WHEN @IsPaid = 1 THEN @Price ELSE NULL END, @CancellationPolicy
+        @IsPaid, CASE WHEN @IsPaid = 1 THEN @Price ELSE NULL END, @CancellationPolicy, @EventLink
     );
 
     DECLARE @EventId UNIQUEIDENTIFIER = (SELECT TOP (1) [EventId] FROM @InsertedEventId);
