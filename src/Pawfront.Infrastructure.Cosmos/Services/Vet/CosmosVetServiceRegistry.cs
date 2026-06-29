@@ -50,7 +50,8 @@ internal sealed class CosmosVetServiceRegistry(
                 TelephoneCountryCode = Required(command.TelephoneCountryCode, nameof(command.TelephoneCountryCode)),
                 TelephoneNumber = Required(command.TelephoneNumber, nameof(command.TelephoneNumber)),
                 Email = Required(command.Email, nameof(command.Email)),
-                Description = Required(command.Description, nameof(command.Description)),
+                // Optional — the "about the provider" blurb may be omitted at registration.
+                Description = Trim(command.Description) ?? string.Empty,
                 ImageUrl = Trim(command.ClinicImageUrl),
                 Certificate = existingClinic?.Certificate,
                 Offering = existingClinic?.Offering
@@ -91,7 +92,8 @@ internal sealed class CosmosVetServiceRegistry(
             VetClinic = null,
             Freelance = new FreelanceVeterinarianDetails
             {
-                AboutYou = Required(command.AboutYou, nameof(command.AboutYou)),
+                // Optional — the "about you" blurb may be omitted at registration.
+                AboutYou = Trim(command.AboutYou) ?? string.Empty,
                 ImageUrl = Trim(command.ProfileImageUrl),
                 Certificate = existingFreelance?.Certificate,
                 Offering = existingFreelance?.Offering

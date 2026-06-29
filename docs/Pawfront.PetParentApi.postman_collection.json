@@ -88,7 +88,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "parent-onboarding", "profile"]
             },
-            "description": "Creates Parent.PetParents and links to the auth identity (resolved from JWT sub/user_id — NOT from the body). Captures `petParentId`. 404 ParentAuthIdentityNotFound if `firebase-auth` was never called; 409 MobileNumberAlreadyExists; 400 UnsupportedGender."
+            "description": "Creates Parent.PetParents and links to the auth identity (resolved from JWT sub/user_id — NOT from the body). `description` (\"About Me\") is OPTIONAL — omit or send blank to store none. Captures `petParentId`. 404 ParentAuthIdentityNotFound if `firebase-auth` was never called; 409 MobileNumberAlreadyExists; 400 UnsupportedGender."
           }
         },
         {
@@ -743,7 +743,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "providers", "{{providerId}}"]
             },
-            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff, minimumHoursBeforeCancellation (null|24|48|72|96), acceptedPaymentMethods ([\"Cash\"|\"Digital\"], [] when unset), and reviews (always [] for now — review feature not built yet). 404 ProviderNotRegistered."
+            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff, minimumHoursBeforeCancellation (null|24|48|72|96), acceptedPaymentMethods ([\"Cash\"|\"Digital\"], [] when unset), `profilePhotoUrl` (the provider's profile/business image; null when none), `galleryImages` ([] the provider's gallery photos), and reviews (always [] for now — review feature not built yet). 404 ProviderNotRegistered."
           }
         },
         {
@@ -811,14 +811,14 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"petId\": \"{{petId}}\",\n  \"serviceId\": \"{{serviceId}}\",\n  \"bookingDate\": \"2026-07-15\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"serviceItemCode\": null\n}"
+              "raw": "{\n  \"petId\": \"{{petId}}\",\n  \"serviceId\": \"{{serviceId}}\",\n  \"bookingDate\": \"2026-07-15\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"serviceItemCode\": null,\n  \"jobNotes\": \"Gate code is 1234; Bruno is shy around strangers.\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings"]
             },
-            "description": "Booker = route petParentId (from JWT, not the body). Provider resolved from serviceId. petId must be yours. For PetGroomer set `serviceItemCode` (the duration is derived from it). Captures `bookingId`. Errors: 404 PetNotFound / ServiceNotRegistered; 403 Forbidden; 400 InvalidServiceId / InvalidPetId / InvalidBookingTime; 409 ServiceClosed / CapacityExceeded / ProviderInactive."
+            "description": "Booker = route petParentId (from JWT, not the body). Provider resolved from serviceId. petId must be yours. For PetGroomer set `serviceItemCode` (the duration is derived from it). `jobNotes` is optional free-text (access instructions, the pet's quirks) — captured here and returned on the booking detail. Captures `bookingId`. Errors: 404 PetNotFound / ServiceNotRegistered; 403 Forbidden; 400 InvalidServiceId / InvalidPetId / InvalidBookingTime; 409 ServiceClosed / CapacityExceeded / ProviderInactive."
           }
         },
         {
@@ -831,7 +831,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings"]
             },
-            "description": "The parent's own service bookings (\"my bookings\"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered — petParentId comes from the JWT, so you only ever see your own. Returns [] when none (no 404)."
+            "description": "The parent's own service bookings (\"my bookings\"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered — petParentId comes from the JWT, so you only ever see your own. Returns [] when none (no 404).\n\nEach card is sectioned: `booking` (the flat booking), `providerDetails` (businessName, imageUrl, city, serviceCategory, subCategory) and `serviceDetails` (serviceId, serviceType, serviceItemCode, `pricePerHour` — the offering's unit rate; null if the offering can't be resolved)."
           }
         },
         {
@@ -874,7 +874,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}"]
             },
-            "description": "Single booking read. Returns { booking, startOtp, pendingModification }. When the booking is in a startable (confirmed-equivalent) state, startOtp carries the plaintext code + expiry for the parent to read out to the provider (who enters it on the provider host's /start). When a provider has staged a modification, pendingModification carries the proposed date/time so the parent can accept/decline. 404 if not your booking."
+            "description": "Single booking read, sectioned: { bookingDetails, parentDetails, petDetails, paymentDetails, cancellationPolicy, startOtp, pendingModification }. `bookingDetails.serviceLocation` is now populated for App bookings too (the provider offering's service-location, e.g. PetHotel / CustomerPlace / Both) and `bookingDetails.jobNotes` carries the notes captured at booking time. `cancellationPolicy` is a dedicated section { minimumHoursBeforeCancellation }. When startable, startOtp carries the plaintext code + expiry for the parent to read to the provider (who enters it on the provider host's /start). pendingModification carries a staged proposed date/time. 404 if not your booking."
           }
         },
         {
@@ -992,7 +992,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings"]
             },
-            "description": "Your own night-stay bookings, most-recent first (CheckInDate DESC), cancelled included. Ownership-filtered. [] when none."
+            "description": "Your own night-stay bookings, most-recent first (CheckInDate DESC), cancelled included. Ownership-filtered. [] when none.\n\nEach card is sectioned: `booking`, `providerDetails` (businessName, imageUrl, city, serviceCategory, subCategory) and `serviceDetails` (serviceId, serviceType, `pricePerNight` — the NightStay offering's per-night rate; null if unresolved)."
           }
         },
         {
@@ -1005,7 +1005,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}"]
             },
-            "description": "Single night-stay booking — returns the detail wrapper { booking, startOtp (when startable), pendingModification (staged date-range proposal, when one awaits a response) }. 404 NightStayBookingNotFound if unknown or not yours."
+            "description": "Single night-stay booking — now sectioned to match the single-day booking detail: { bookingDetails (incl. jobId, checkIn/out, nights, dropOff/pickUp, serviceLocation), parentDetails, petDetails, paymentDetails (pricePerNight, totalAmount, pawfrontFee), cancellationPolicy, startOtp (when startable), pendingModification (staged date-range proposal) }. 404 NightStayBookingNotFound if unknown or not yours."
           }
         },
         {
@@ -1174,7 +1174,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events", "{{eventId}}"]
             },
-            "description": "Single event detail (SQL + Cosmos for physical). Returns top-level `isPaid` / `price` for every event type (online included), `physical.maximumCapacity` + `physical.location` for physical events, `eventLink` (online joining URL; null for physical), `pawPrints { viewCount, shareCount, inquiryCount }`, an `organizer { type, id, name, imageUrl }` block, a `bookings { maxBookings, totalBookings }` block, `paymentOptions [\"Cash\"|\"Digital\"]`, and `attendees [{ attendeeName, ticketNumber }]` (names only — booker contact / payment stay on the organiser dashboard)."
+            "description": "Single event detail (SQL + Cosmos for physical). Returns top-level `isPaid` / `price` for every event type (online included), `physical.maximumCapacity` + `physical.location` for physical events, `eventLink` (online joining URL; null for physical), `pawPrints { viewCount, shareCount, inquiryCount }`, an `organizer { type, id, name, imageUrl, totalEventsOrganized }` block (totalEventsOrganized = how many events this organiser has created; populated on detail, null on list), a `bookings { maxBookings, totalBookings }` block, `paymentOptions [\"Cash\"|\"Digital\"]`, and `attendees [{ attendeeName, ticketNumber }]` (names only — booker contact / payment stay on the organiser dashboard)."
           }
         },
         {

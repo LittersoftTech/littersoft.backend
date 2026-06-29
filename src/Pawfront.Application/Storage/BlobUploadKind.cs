@@ -11,5 +11,7 @@ public enum BlobUploadKind
     PetParentPhoto = 6,
     ProviderPhoto = 7,
     PetProfilePhoto = 8,
-    BookingEvidence = 9
+    BookingEvidence = 9,
+    // A provider's per-service banner image (owner = ServiceId).
+    ServiceBanner = 10
 }

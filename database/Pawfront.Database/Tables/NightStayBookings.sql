@@ -9,6 +9,10 @@ CREATE TABLE [Booking].[NightStayBookings]
 (
     [NightStayBookingId] UNIQUEIDENTIFIER NOT NULL
         CONSTRAINT [DF_NightStayBookings_Id] DEFAULT NEWSEQUENTIALID(),
+    -- Short, human-friendly sequential job number (separate sequence from the
+    -- single-day [Booking].[Bookings].[JobNumber]). Surfaced on the night-stay
+    -- detail read as a "PF-000123" Job ID; the GUID stays the API/route identity.
+    [JobNumber] INT NOT NULL IDENTITY(1, 1),
     [ProviderId] UNIQUEIDENTIFIER NOT NULL,
     [PetParentId] UNIQUEIDENTIFIER NOT NULL,
     -- Capacity + closures are scoped by ServiceId, exactly as for day bookings.
@@ -24,6 +28,12 @@ CREATE TABLE [Booking].[NightStayBookings]
     -- Snapshot of the offering's drop-off / pick-up times at booking time.
     [DropOffTime] TIME(0) NOT NULL,
     [PickUpTime] TIME(0) NOT NULL,
+    -- Payout (capture-only for now — mirrors [Booking].[Bookings]). [PayoutStatus]
+    -- tracks where the provider's money is in the payout pipeline; [PayoutId] is
+    -- the external payout reference once issued.
+    [PayoutStatus] NVARCHAR(32) NOT NULL
+        CONSTRAINT [DF_NightStayBookings_PayoutStatus] DEFAULT N'Pending',
+    [PayoutId] NVARCHAR(64) NULL,
     -- Same expanded "job" lifecycle as [Booking].[Bookings] (accept/decline,
     -- start-with-OTP, evidence-gated complete, parent/provider modification
     -- proposals). Capacity-freeing statuses are the two cancelled ones PLUS
@@ -57,8 +67,15 @@ CREATE TABLE [Booking].[NightStayBookings]
     CONSTRAINT [CK_NightStayBookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
-    )
+    ),
+    CONSTRAINT [CK_NightStayBookings_PayoutStatus]
+        CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed'))
 );
+
+GO
+
+CREATE UNIQUE INDEX [UX_NightStayBookings_JobNumber]
+    ON [Booking].[NightStayBookings] ([JobNumber]);
 
 GO
 

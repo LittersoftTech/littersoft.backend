@@ -3,6 +3,7 @@ using Pawfront.Application.Closures;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Contracts.Bookings;
+using Pawfront.Domain.Services;
 using Pawfront.PetParentApi.Auth;
 
 namespace Pawfront.PetParentApi.Endpoints;
@@ -144,10 +145,35 @@ internal static class NightStayBookingEndpoints
     private static async Task<IResult> ListByPetParent(
         Guid petParentId,
         INightStayBookingService bookingService,
+        IParentBookingEnrichmentService enrichment,
         CancellationToken cancellationToken)
     {
         var results = await bookingService.ListByPetParentAsync(petParentId, cancellationToken);
-        return ApiResults.Ok(results.Select(ToResponse).ToArray());
+        var enriched = await enrichment.EnrichNightStayAsync(results, cancellationToken);
+        return ApiResults.Ok(enriched.Select(ToNightStayBookingCard).ToArray());
+    }
+
+    /// <summary>
+    /// Maps an enriched night-stay booking into the sectioned "my bookings" card —
+    /// the booking, the booked provider's details, and the service details + the
+    /// per-night price.
+    /// </summary>
+    private static ParentNightStayBookingCardResponse ToNightStayBookingCard(EnrichedNightStayBookingCard card)
+    {
+        var b = card.Booking;
+        return new ParentNightStayBookingCardResponse(
+            ToResponse(b),
+            new BookingProviderDetailsSection(
+                b.ProviderId,
+                card.Provider?.DisplayName,
+                card.Provider?.ImageUrl,
+                card.Provider?.City,
+                b.ServiceCategory,
+                b.SubCategory),
+            new NightStayServiceDetailsSection(
+                b.ServiceId,
+                ProviderServiceTypes.NightStay,
+                card.PricePerNight));
     }
 
     private static async Task<IResult> GetBooking(
@@ -158,8 +184,8 @@ internal static class NightStayBookingEndpoints
     {
         // The group is ownership-filtered on petParentId, but bookingId is not —
         // confirm the booking belongs to this parent (404 rather than leaking).
-        var result = await bookingService.GetAsync(bookingId, cancellationToken);
-        if (result is null || result.PetParentId != petParentId)
+        var detail = await bookingService.GetDetailAsync(bookingId, cancellationToken);
+        if (detail is null || detail.Row.PetParentId != petParentId)
         {
             return ApiResults.NotFound("NightStayBookingNotFound", $"Night stay booking '{bookingId}' was not found.");
         }
@@ -167,15 +193,75 @@ internal static class NightStayBookingEndpoints
         // Issue/return the start-OTP when the stay is in a startable state, so the
         // parent can read it to the provider (same model as single-day bookings).
         StartOtpResponse? startOtp = null;
-        if (BookingStatuses.ConfirmedEquivalent.Contains(result.Status))
+        if (BookingStatuses.ConfirmedEquivalent.Contains(detail.Row.Status))
         {
             var otp = await bookingService.IssueStartOtpAsync(bookingId, cancellationToken);
             startOtp = new StartOtpResponse(otp.OtpCode, otp.ExpiresAtUtc);
         }
 
-        var pending = await ToPendingAsync(bookingService, bookingId, result.Status, cancellationToken);
+        var pending = await ToPendingAsync(bookingService, bookingId, detail.Row.Status, cancellationToken);
 
-        return ApiResults.Ok(new NightStayBookingDetailResponse(ToResponse(result), startOtp, pending));
+        return ApiResults.Ok(ToDetailResponse(detail, startOtp, pending));
+    }
+
+    /// <summary>
+    /// Maps the enriched night-stay detail into the sectioned response — the
+    /// night-stay analog of the single-day booking-detail mapping. Parent/Pet come
+    /// from the joined records (night-stay is App-only).
+    /// </summary>
+    private static NightStayBookingDetailResponse ToDetailResponse(
+        NightStayBookingDetailResult detail,
+        StartOtpResponse? startOtp,
+        NightStayBookingModificationResponse? pendingModification)
+    {
+        var row = detail.Row;
+        return new NightStayBookingDetailResponse(
+            new NightStayBookingDetailsSection(
+                row.NightStayBookingId,
+                detail.JobId,
+                row.ProviderId,
+                row.ServiceId,
+                row.ServiceCategory,
+                row.SubCategory,
+                row.CheckInDate,
+                row.CheckOutDate,
+                row.DropOffTime,
+                row.PickUpTime,
+                detail.Nights,
+                row.Status,
+                detail.ServiceLocation,
+                row.CreatedAtUtc,
+                row.UpdatedAtUtc,
+                row.CancelledAtUtc),
+            new ParentDetailsSection(
+                row.PetParentId,
+                CombineName(row.ParentFirstName, row.ParentLastName),
+                row.ParentMobileCountryCode,
+                row.ParentMobileNumber,
+                row.ParentGender,
+                row.ParentPhotoUrl),
+            new PetDetailsSection(
+                row.PetId,
+                row.PetProfileName,
+                row.PetType,
+                row.PetGender,
+                row.PetPhotoUrl),
+            new NightStayPaymentDetailsSection(
+                detail.PricePerNight,
+                detail.TotalAmount,
+                detail.PawfrontFee,
+                detail.FeePercentage,
+                row.PayoutStatus,
+                row.PayoutId),
+            new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
+            startOtp,
+            pendingModification);
+    }
+
+    private static string? CombineName(string? first, string? last)
+    {
+        var name = $"{first} {last}".Trim();
+        return string.IsNullOrEmpty(name) ? null : name;
     }
 
     private static async Task<NightStayBookingModificationResponse?> ToPendingAsync(

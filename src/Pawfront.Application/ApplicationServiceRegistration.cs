@@ -35,6 +35,9 @@ public static class ApplicationServiceRegistration
         // range, not a single-day time window.
         services.TryAddScoped<INightStayBookingService, NightStayBookingService>();
 
+        // Enriches a parent's "my bookings" cards with provider + service details.
+        services.TryAddScoped<IParentBookingEnrichmentService, ParentBookingEnrichmentService>();
+
         // ProviderClosureService also implements two interfaces (service + narrow reader).
         services.TryAddScoped<ProviderClosureService>();
         services.TryAddScoped<IProviderClosureService>(sp => sp.GetRequiredService<ProviderClosureService>());

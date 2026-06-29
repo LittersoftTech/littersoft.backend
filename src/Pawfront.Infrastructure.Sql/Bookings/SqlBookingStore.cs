@@ -20,6 +20,7 @@ internal sealed class SqlBookingStore(
         DateOnly bookingDate,
         TimeOnly startTime,
         TimeOnly endTime,
+        string? jobNotes,
         int capacity,
         CancellationToken cancellationToken)
     {
@@ -42,6 +43,8 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@BookingDate", bookingDate.ToDateTime(TimeOnly.MinValue));
         command.Parameters.AddWithValue("@StartTime", startTime.ToTimeSpan());
         command.Parameters.AddWithValue("@EndTime", endTime.ToTimeSpan());
+        command.Parameters.AddWithValue("@JobNotes",
+            jobNotes is null ? DBNull.Value : (object)jobNotes);
         command.Parameters.AddWithValue("@Capacity", capacity);
 
         try

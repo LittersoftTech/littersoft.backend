@@ -8,6 +8,10 @@ public sealed record CreateBookingCommand(
     TimeOnly StartTime,
     TimeOnly EndTime,
     string? ServiceItemCode,
+    // Free-text notes the parent attaches to the job (access instructions, the
+    // pet's quirks, etc.). Optional; captured at create time and surfaced on the
+    // booking-detail read.
+    string? JobNotes = null,
     // Which of the parent's pets the booking is for. Optional — the provider
     // host's booking flow doesn't capture it; the parent host's does. Ownership
     // (pet belongs to PetParentId) is validated by the caller AND the sproc.
@@ -137,7 +141,14 @@ public sealed record BookingDetailResult(
     decimal? PricePerHour,
     decimal? TotalAmount,
     decimal? PawfrontFee,
-    decimal FeePercentage);
+    decimal FeePercentage,
+    // Effective service location ("where the provider delivers the service"): the
+    // Custom row's own value, or — for App bookings — the provider offering's
+    // service-location setting. Null when the offering can't be resolved.
+    string? ServiceLocation,
+    // The provider's advertised cancellation policy (minimum hours before a
+    // cancellation is allowed): null | 24 | 48 | 72 | 96. Null when none is set.
+    int? MinimumHoursBeforeCancellation);
 
 /// <summary>Which party is driving a booking status change.</summary>
 public enum BookingStatusActor

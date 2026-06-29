@@ -54,10 +54,52 @@ public sealed record NightStayBookingModificationResponse(
     DateTimeOffset CreatedAtUtc);
 
 /// <summary>
-/// Night-stay single booking read: the booking, the start-OTP (when startable),
-/// and the staged pending modification (when one awaits a response).
+/// Night-stay single booking read, grouped into the same sections as the single-day
+/// <see cref="BookingDetailResponse"/> — Booking, Parent, Pet, Payment, and the
+/// provider's Cancellation Policy — plus the start-OTP (when startable) and the
+/// staged pending modification (when one awaits a response). Night-stay is App-only,
+/// so Parent/Pet always come from the joined records.
 /// </summary>
 public sealed record NightStayBookingDetailResponse(
-    NightStayBookingResponse Booking,
+    NightStayBookingDetailsSection BookingDetails,
+    ParentDetailsSection ParentDetails,
+    PetDetailsSection PetDetails,
+    NightStayPaymentDetailsSection PaymentDetails,
+    CancellationPolicyDetailsSection CancellationPolicy,
     StartOtpResponse? StartOtp,
     NightStayBookingModificationResponse? PendingModification);
+
+/// <summary>The stay/job facts: identity, the check-in/check-out range + nights,
+/// drop-off/pick-up times, status, and where the provider delivers the service.</summary>
+public sealed record NightStayBookingDetailsSection(
+    Guid NightStayBookingId,
+    // Short, human-friendly sequential Job ID, e.g. "PF-000123".
+    string JobId,
+    Guid ProviderId,
+    Guid ServiceId,
+    string ServiceCategory,
+    string SubCategory,
+    DateOnly CheckInDate,
+    DateOnly CheckOutDate,
+    TimeOnly DropOffTime,
+    TimeOnly PickUpTime,
+    // Stayed nights = CheckOutDate - CheckInDate (the checkout day isn't a night).
+    int Nights,
+    string Status,
+    // The provider offering's service-location setting; null when unresolved.
+    string? ServiceLocation,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    DateTimeOffset? CancelledAtUtc);
+
+/// <summary>The money facts for a night stay. <c>PricePerNight</c> is the offering's
+/// per-night rate; <c>TotalAmount</c> is rate × nights; <c>PawfrontFee</c> is
+/// <c>FeePercentage</c> percent of the total. Pricing is null when the offering can't
+/// be resolved. Payout fields are capture-only for now.</summary>
+public sealed record NightStayPaymentDetailsSection(
+    decimal? PricePerNight,
+    decimal? TotalAmount,
+    decimal? PawfrontFee,
+    decimal FeePercentage,
+    string PayoutStatus,
+    string? PayoutId);

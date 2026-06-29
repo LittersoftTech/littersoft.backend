@@ -97,6 +97,25 @@ internal sealed class SqlNightStayBookingStore(
         return ReadRow(reader);
     }
 
+    public async Task<NightStayBookingDetailRow?> GetDetailAsync(Guid bookingId, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Booking.GetNightStayBookingDetail", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+        return ReadDetailRow(reader);
+    }
+
     public async Task<NightStayBookingResult> CancelAsync(
         Guid bookingId,
         Guid petParentId,
@@ -524,6 +543,38 @@ internal sealed class SqlNightStayBookingStore(
                 ? null
                 : new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero),
             PetId: reader.IsDBNull(14) ? null : reader.GetGuid(14));
+
+    private static NightStayBookingDetailRow ReadDetailRow(SqlDataReader reader) =>
+        new(NightStayBookingId: reader.GetGuid(0),
+            JobNumber: reader.GetInt32(1),
+            ProviderId: reader.GetGuid(2),
+            PetParentId: reader.GetGuid(3),
+            ServiceId: reader.GetGuid(4),
+            ServiceCategory: reader.GetString(5),
+            SubCategory: reader.GetString(6),
+            CheckInDate: DateOnly.FromDateTime(reader.GetDateTime(7)),
+            CheckOutDate: DateOnly.FromDateTime(reader.GetDateTime(8)),
+            DropOffTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(9)),
+            PickUpTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(10)),
+            Status: reader.GetString(11),
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero),
+            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero),
+            CancelledAtUtc: reader.IsDBNull(14)
+                ? null
+                : new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
+            PetId: reader.IsDBNull(15) ? null : reader.GetGuid(15),
+            PayoutStatus: reader.GetString(16),
+            PayoutId: reader.IsDBNull(17) ? null : reader.GetString(17),
+            ParentFirstName: reader.IsDBNull(18) ? null : reader.GetString(18),
+            ParentLastName: reader.IsDBNull(19) ? null : reader.GetString(19),
+            ParentGender: reader.IsDBNull(20) ? null : reader.GetString(20),
+            ParentMobileCountryCode: reader.IsDBNull(21) ? null : reader.GetString(21),
+            ParentMobileNumber: reader.IsDBNull(22) ? null : reader.GetString(22),
+            ParentPhotoUrl: reader.IsDBNull(23) ? null : reader.GetString(23),
+            PetProfileName: reader.IsDBNull(24) ? null : reader.GetString(24),
+            PetType: reader.IsDBNull(25) ? null : reader.GetString(25),
+            PetGender: reader.IsDBNull(26) ? null : reader.GetString(26),
+            PetPhotoUrl: reader.IsDBNull(27) ? null : reader.GetString(27));
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)
     {

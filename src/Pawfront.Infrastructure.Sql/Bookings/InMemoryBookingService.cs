@@ -54,6 +54,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         DateOnly bookingDate,
         TimeOnly startTime,
         TimeOnly endTime,
+        string? jobNotes,
         int capacity,
         CancellationToken cancellationToken)
     {
@@ -89,6 +90,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 BookingDate = bookingDate,
                 StartTime = startTime,
                 EndTime = endTime,
+                JobNotes = jobNotes,
                 Status = BookingStatuses.Created,
                 CreatedAtUtc = now,
                 UpdatedAtUtc = now,

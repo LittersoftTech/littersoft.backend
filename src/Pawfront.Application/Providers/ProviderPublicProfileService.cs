@@ -1,6 +1,7 @@
 using Pawfront.Application.Availability;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Policies;
+using Pawfront.Application.ProviderPhotos;
 using Pawfront.Application.Services.PetAdoptionSale;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.PetSitter;
@@ -20,7 +21,8 @@ internal sealed class ProviderPublicProfileService(
     IVetServiceRegistry vet,
     IProviderAvailabilityService availabilityService,
     IProviderClosureService closureService,
-    IProviderPolicyService policyService) : IProviderPublicProfileService
+    IProviderPolicyService policyService,
+    IProviderPhotoService photoService) : IProviderPublicProfileService
 {
     // 10-year window for "future time off" — closures rarely run beyond this,
     // and the closure list endpoint requires a bounded range. Trimmed in the
@@ -97,6 +99,13 @@ internal sealed class ProviderPublicProfileService(
         // so no provider-not-found handling is needed here.
         var policy = await policyService.GetAsync(providerId, cancellationToken);
 
+        // Provider images: the profile/business photo (the offering's image) +
+        // the gallery (Provider.ProviderPhotos, oldest-first).
+        var profilePhotoUrl = ResolveProfilePhoto(
+            petSitterResult, petGroomerResult, petTrainerResult, petAdoptionSaleResult, vetResult);
+        var gallery = await photoService.ListAsync(providerId, cancellationToken);
+        var galleryImages = gallery.Select(p => p.PhotoUrl).ToList();
+
         return new ProviderPublicProfile(
             providerId,
             location.ServiceCategory,
@@ -107,11 +116,50 @@ internal sealed class ProviderPublicProfileService(
             timeOff,
             policy.MinimumHoursBeforeCancellation,
             policy.PayoutMethods,
+            profilePhotoUrl,
+            galleryImages,
             petSitterResult,
             petGroomerResult,
             petTrainerResult,
             petAdoptionSaleResult,
             vetResult,
             groomingCatalog);
+    }
+
+    /// <summary>
+    /// Resolves the provider's profile/business photo from whichever category
+    /// offering is populated — the image the provider uploaded at registration
+    /// (shop/clinic/school image, else the freelance profile image). Null when none.
+    /// </summary>
+    private static string? ResolveProfilePhoto(
+        PetSitterServiceResult? petSitter,
+        PetGroomerServiceResult? petGroomer,
+        PetTrainerServiceResult? petTrainer,
+        PetAdoptionSaleServiceResult? petAdoptionSale,
+        VetServiceResult? vet)
+    {
+        if (petSitter is not null)
+        {
+            return petSitter.PetHotel?.ImageUrl ?? petSitter.Freelance?.ImageUrl;
+        }
+        if (petGroomer is not null)
+        {
+            return petGroomer.GroomerShop?.ImageUrl ?? petGroomer.Freelance?.ImageUrl;
+        }
+        if (petTrainer is not null)
+        {
+            return petTrainer.TrainingSchool?.ImageUrl ?? petTrainer.Freelance?.ImageUrl;
+        }
+        if (petAdoptionSale is not null)
+        {
+            return petAdoptionSale.PetShelter?.ImageUrl
+                ?? petAdoptionSale.PetShop?.ImageUrl
+                ?? petAdoptionSale.Freelance?.ImageUrl;
+        }
+        if (vet is not null)
+        {
+            return vet.VetClinic?.ImageUrl ?? vet.Freelance?.ImageUrl;
+        }
+        return null;
     }
 }

@@ -86,6 +86,26 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         return Task.FromResult(row is null ? null : (NightStayBookingResult?)ToResult(row));
     }
 
+    public Task<NightStayBookingDetailRow?> GetDetailAsync(Guid bookingId, CancellationToken cancellationToken)
+    {
+        bookings.TryGetValue(bookingId, out var row);
+        if (row is null)
+        {
+            return Task.FromResult<NightStayBookingDetailRow?>(null);
+        }
+
+        // Dev fallback: no JobNumber / payout / pet-parent data in memory — leave
+        // them at defaults / null (same posture as the in-memory event store).
+        return Task.FromResult<NightStayBookingDetailRow?>(new NightStayBookingDetailRow(
+            row.NightStayBookingId, JobNumber: 0, row.ProviderId, row.PetParentId, row.ServiceId,
+            row.ServiceCategory, row.SubCategory, row.CheckInDate, row.CheckOutDate,
+            row.DropOffTime, row.PickUpTime, row.Status, row.CreatedAtUtc, row.UpdatedAtUtc,
+            row.CancelledAtUtc, row.PetId, PayoutStatus: "Pending", PayoutId: null,
+            ParentFirstName: null, ParentLastName: null, ParentGender: null,
+            ParentMobileCountryCode: null, ParentMobileNumber: null, ParentPhotoUrl: null,
+            PetProfileName: null, PetType: null, PetGender: null, PetPhotoUrl: null));
+    }
+
     public Task<NightStayBookingResult> CancelAsync(
         Guid bookingId,
         Guid petParentId,

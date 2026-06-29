@@ -253,6 +253,8 @@ internal static class ProviderDetailsEndpoints
                 .ToArray(),
             profile.MinimumHoursBeforeCancellation,
             profile.AcceptedPaymentMethods,
+            profile.ProfilePhotoUrl,
+            profile.GalleryImages,
             // Reviews not built yet — always an empty array for now.
             Array.Empty<ProviderReviewResponse>(),
             profile.PetSitter is null ? null : ToPetSitterResponse(profile.PetSitter),

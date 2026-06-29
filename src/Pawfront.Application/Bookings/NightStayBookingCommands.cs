@@ -36,6 +36,64 @@ public sealed record NightStayBookingResult(
     Guid? PetId);
 
 /// <summary>
+/// Raw enriched night-stay booking row backing the detail read
+/// (<c>Booking.GetNightStayBookingDetail</c>). Mirrors <see cref="BookingDetailRow"/>
+/// for the multi-night model: base columns plus the sequential <see cref="JobNumber"/>,
+/// the capture-only payout fields, and the LEFT-JOINed pet-parent / pet records.
+/// Night-stay is App-only, so the parent/pet details always come from the joins.
+/// </summary>
+public sealed record NightStayBookingDetailRow(
+    Guid NightStayBookingId,
+    int JobNumber,
+    Guid ProviderId,
+    Guid PetParentId,
+    Guid ServiceId,
+    string ServiceCategory,
+    string SubCategory,
+    DateOnly CheckInDate,
+    DateOnly CheckOutDate,
+    TimeOnly DropOffTime,
+    TimeOnly PickUpTime,
+    string Status,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset UpdatedAtUtc,
+    DateTimeOffset? CancelledAtUtc,
+    Guid? PetId,
+    string PayoutStatus,
+    string? PayoutId,
+    // Pet-parent join.
+    string? ParentFirstName,
+    string? ParentLastName,
+    string? ParentGender,
+    string? ParentMobileCountryCode,
+    string? ParentMobileNumber,
+    string? ParentPhotoUrl,
+    // Pet join.
+    string? PetProfileName,
+    string? PetType,
+    string? PetGender,
+    string? PetPhotoUrl);
+
+/// <summary>
+/// Fully resolved night-stay booking-detail view: the raw <see cref="Row"/> plus the
+/// friendly Job ID and live-computed payment figures. <see cref="PricePerNight"/> is
+/// the NightStay offering's per-night rate; <see cref="TotalAmount"/> is
+/// rate × <see cref="Nights"/>; <see cref="PawfrontFee"/> is <see cref="FeePercentage"/>
+/// percent of the total. Pricing/location fields are null when the offering can't be
+/// resolved. Mapped to the sectioned response in the endpoint layer.
+/// </summary>
+public sealed record NightStayBookingDetailResult(
+    NightStayBookingDetailRow Row,
+    string JobId,
+    int Nights,
+    decimal? PricePerNight,
+    decimal? TotalAmount,
+    decimal? PawfrontFee,
+    decimal FeePercentage,
+    string? ServiceLocation,
+    int? MinimumHoursBeforeCancellation);
+
+/// <summary>
 /// Request to move a night-stay booking to a new lifecycle status. Same shape
 /// and actor rules as <see cref="UpdateBookingStatusCommand"/>; <see cref="ActorId"/>
 /// is the caller's ProviderId / PetParentId derived from the authenticated route.

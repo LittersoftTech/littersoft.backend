@@ -9,6 +9,10 @@ CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
     @BookingDate DATE,
     @StartTime TIME(0),
     @EndTime TIME(0),
+    -- Free-text notes the parent attaches to the job at booking time (e.g.
+    -- access instructions, the pet's quirks). Optional; surfaced on the
+    -- booking-detail read. Stored on App rows too (not a Custom-only column).
+    @JobNotes NVARCHAR(2000) = NULL,
     @Capacity INT
 AS
 BEGIN
@@ -103,7 +107,8 @@ BEGIN
         [ServiceItemCode],
         [BookingDate],
         [StartTime],
-        [EndTime]
+        [EndTime],
+        [JobNotes]
     )
     OUTPUT inserted.[BookingId] INTO @InsertedBookingId
     VALUES
@@ -117,7 +122,8 @@ BEGIN
         @ServiceItemCode,
         @BookingDate,
         @StartTime,
-        @EndTime
+        @EndTime,
+        @JobNotes
     );
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);

@@ -59,7 +59,8 @@ internal sealed class ProviderOfferingResolver(
             Capacity: offering.MaxPetsAtOneTime,
             DurationHours: branch.MinimumBookingHours,
             IsDurationFixed: false,
-            Price: branch.PricePerHour);
+            Price: branch.PricePerHour,
+            ServiceLocation: offering.ServiceLocation);
     }
 
     private async Task<OfferingResolution> ResolvePetGroomerAsync(
@@ -84,7 +85,8 @@ internal sealed class ProviderOfferingResolver(
             Capacity: offering.MaxPetsAtOneTime,
             DurationHours: 0m,
             IsDurationFixed: true,
-            Price: null);
+            Price: null,
+            ServiceLocation: offering.ServiceLocation);
     }
 
     public async Task<GroomingItemResolution> ResolveGroomingItemAsync(
@@ -132,7 +134,12 @@ internal sealed class ProviderOfferingResolver(
             Capacity: offering.MaxConcurrentSessions,
             DurationHours: offering.Session.SessionDurationHours,
             IsDurationFixed: true,
-            Price: offering.Session.PricePerSession);
+            Price: offering.Session.PricePerSession,
+            // PetTrainer stores a set of service locations; join for the single
+            // booking-detail field.
+            ServiceLocation: offering.ServiceLocations is { Count: > 0 }
+                ? string.Join(", ", offering.ServiceLocations)
+                : null);
     }
 
     private async Task<OfferingResolution> ResolveVetAsync(
@@ -153,6 +160,7 @@ internal sealed class ProviderOfferingResolver(
             Capacity: offering.MaxConcurrentConsultations,
             DurationHours: offering.Appointment.AppointmentDurationHours,
             IsDurationFixed: true,
-            Price: offering.Appointment.PricePerAppointment);
+            Price: offering.Appointment.PricePerAppointment,
+            ServiceLocation: offering.ServiceLocation);
     }
 }

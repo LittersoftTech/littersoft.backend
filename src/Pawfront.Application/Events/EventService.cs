@@ -248,7 +248,7 @@ internal sealed class EventService(
         DateOnly endDate,
         bool isPaid,
         decimal? price,
-        string cancellationPolicy,
+        string? cancellationPolicy,
         string? eventLink,
         PhysicalEventInput? physical)
     {
@@ -257,7 +257,9 @@ internal sealed class EventService(
         var normalisedAmenities = NormalizeAmenities(amenities);
         var normalisedTitle = Required(title, nameof(title));
         var normalisedDescription = Required(description, nameof(description));
-        var normalisedCancellationPolicy = NormalizeOne(
+        // Optional: a blank/omitted policy stores null (it doesn't apply to free
+        // events). When supplied it must be one of the allowed values.
+        var normalisedCancellationPolicy = NormalizeOptional(
             cancellationPolicy, AllowedCancellationPolicies, nameof(cancellationPolicy));
 
         if (endDate < startDate)
@@ -337,7 +339,7 @@ internal sealed class EventService(
         string Description,
         bool IsPaid,
         decimal? Price,
-        string CancellationPolicy,
+        string? CancellationPolicy,
         string? EventLink,
         PhysicalEventInput? PhysicalInput);
 
@@ -355,7 +357,12 @@ internal sealed class EventService(
             physical = await cosmosStore.GetPhysicalAsync(eventId, snapshot.EventCategory, cancellationToken);
         }
 
-        return ToResult(snapshot, physical);
+        // Detail-only: surface how many events this organiser has created so the
+        // event page can show e.g. "Organised by X · 12 events".
+        var organizerTotalEvents = await sqlStore.CountEventsByOrganizerAsync(
+            snapshot.ProviderId, snapshot.PetParentId, cancellationToken);
+
+        return ToResult(snapshot, physical, organizerTotalEvents);
     }
 
     public async Task<IReadOnlyCollection<EventResult>> ListByProviderAsync(
@@ -564,7 +571,10 @@ internal sealed class EventService(
             nameof(counterType));
     }
 
-    private static EventResult ToResult(EventSqlSnapshot snapshot, PhysicalEventResult? physical)
+    private static EventResult ToResult(
+        EventSqlSnapshot snapshot,
+        PhysicalEventResult? physical,
+        int? organizerTotalEvents = null)
     {
         return new EventResult(
             snapshot.EventId,
@@ -589,7 +599,7 @@ internal sealed class EventService(
             snapshot.CreatedAtUtc,
             snapshot.UpdatedAtUtc,
             snapshot.Counters,
-            BuildOrganizer(snapshot),
+            BuildOrganizer(snapshot, organizerTotalEvents),
             snapshot.TotalBookings,
             snapshot.PaymentOptions,
             snapshot.Attendees);
@@ -601,15 +611,17 @@ internal sealed class EventService(
     /// the type discriminator when present. Name / image are joined in the
     /// sproc — image is always null for provider organisers.
     /// </summary>
-    private static EventOrganizer BuildOrganizer(EventSqlSnapshot snapshot)
+    private static EventOrganizer BuildOrganizer(EventSqlSnapshot snapshot, int? totalEventsOrganized = null)
     {
         return snapshot.ProviderId is Guid providerId
-            ? new EventOrganizer("Provider", providerId, snapshot.OrganizerName, snapshot.OrganizerImageUrl)
+            ? new EventOrganizer(
+                "Provider", providerId, snapshot.OrganizerName, snapshot.OrganizerImageUrl, totalEventsOrganized)
             : new EventOrganizer(
                 "PetParent",
                 snapshot.PetParentId ?? Guid.Empty,
                 snapshot.OrganizerName,
-                snapshot.OrganizerImageUrl);
+                snapshot.OrganizerImageUrl,
+                totalEventsOrganized);
     }
 
     private static (bool IsPaid, decimal? Price) ValidateTicketing(bool isPaid, decimal? price)
@@ -709,6 +721,27 @@ internal sealed class EventService(
         if (string.IsNullOrEmpty(trimmed))
         {
             throw new ArgumentException($"{fieldName} is required.", fieldName);
+        }
+
+        if (!allowed.Contains(trimmed))
+        {
+            throw new ArgumentException($"{fieldName} value '{trimmed}' is not supported.", fieldName);
+        }
+
+        return trimmed;
+    }
+
+    /// <summary>
+    /// Like <see cref="NormalizeOne"/> but optional: a blank/omitted value yields
+    /// null (the field is left unset) instead of throwing. A non-blank value
+    /// still has to be one of the allowed values.
+    /// </summary>
+    private static string? NormalizeOptional(string? value, IReadOnlySet<string> allowed, string fieldName)
+    {
+        var trimmed = value?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return null;
         }
 
         if (!allowed.Contains(trimmed))

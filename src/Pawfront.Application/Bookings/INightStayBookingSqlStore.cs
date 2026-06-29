@@ -28,6 +28,13 @@ public interface INightStayBookingSqlStore
 
     Task<NightStayBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Enriched single-booking read (<c>Booking.GetNightStayBookingDetail</c>) for
+    /// the night-stay booking-detail endpoint — the base row plus JobNumber, payout
+    /// fields, and the joined pet-parent / pet records. Null when not found.
+    /// </summary>
+    Task<NightStayBookingDetailRow?> GetDetailAsync(Guid bookingId, CancellationToken cancellationToken);
+
     Task<NightStayBookingResult> CancelAsync(
         Guid bookingId,
         Guid petParentId,

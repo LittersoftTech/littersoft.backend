@@ -54,7 +54,8 @@ internal static class BookingEndpoints
                     request.BookingDate,
                     request.StartTime,
                     request.EndTime,
-                    request.ServiceItemCode),
+                    request.ServiceItemCode,
+                    request.JobNotes),
                 cancellationToken);
 
             return ApiResults.Created($"/api/v1/bookings/{result.BookingId}", ToResponse(result));
@@ -572,7 +573,7 @@ internal static class BookingEndpoints
                 row.EndTime,
                 row.Status,
                 row.Source,
-                row.ServiceLocation,
+                detail.ServiceLocation,
                 row.CustomerLocation,
                 row.JobNotes,
                 row.CreatedAtUtc,
@@ -598,6 +599,7 @@ internal static class BookingEndpoints
                 detail.FeePercentage,
                 row.PayoutStatus,
                 row.PayoutId),
+            new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
             startOtp,
             pendingModification);
     }

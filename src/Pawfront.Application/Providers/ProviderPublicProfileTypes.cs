@@ -32,6 +32,12 @@ public sealed record ProviderPublicProfile(
     // AcceptedPaymentMethods is the Cash/Digital payout set (empty when none).
     int? MinimumHoursBeforeCancellation,
     IReadOnlyCollection<string> AcceptedPaymentMethods,
+    // The provider's profile/business photo — the image they uploaded for their
+    // offering. Null when none set.
+    string? ProfilePhotoUrl,
+    // The provider's gallery photos (Provider.ProviderPhotos), oldest-first.
+    // Empty when none.
+    IReadOnlyList<string> GalleryImages,
     PetSitterServiceResult? PetSitter,
     PetGroomerServiceResult? PetGroomer,
     PetTrainerServiceResult? PetTrainer,

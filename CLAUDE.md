@@ -731,11 +731,13 @@ all reference a specific **ServiceId**, not the whole provider.
   `longitude` optional) is **required for physical events** (→ `400
   InvalidRequest` if missing) and is null/absent for online events.
 - Both create-event bodies also carry a top-level **`cancellationPolicy`**
-  (refund policy) — **required for every event type**, one of
-  `FullRefundUpTo4Hours` / `FullRefundUpTo2Hours` / `NoRefund` (→ `400
-  InvalidRequest` otherwise). Stored on the SQL `Event.Events` row and
-  returned on every event read. (The refund *execution* flow isn't built
-  yet — this just captures the advertised policy.)
+  (refund policy) — **optional for every event type** (it doesn't apply to free
+  events, so it's never required; `null`/omitted stores NULL). When supplied it
+  must be one of `FullRefundUpTo4Hours` / `FullRefundUpTo2Hours` / `NoRefund`
+  (→ `400 InvalidRequest` otherwise). Stored as `Event.Events.CancellationPolicy
+  NVARCHAR(32) NULL` and returned (nullable) on every event read. (The refund
+  *execution* flow isn't built yet — this just captures the advertised policy.)
+  Validated via `NormalizeOptional` in `EventService.ValidateForCreate`.
 - Both create/edit bodies also carry a top-level **`eventLink`** (the joining
   URL for **online** events). It's **optional** (capture-and-return, not
   enforced) and applies **only to online events** — for physical events any

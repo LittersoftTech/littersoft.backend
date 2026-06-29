@@ -592,6 +592,23 @@
             },
             "description": "Includes services that were deactivated (the provider removed the matching sub-offering on a later save). Historical closures / bookings can still reference these ServiceIds, so the row is kept."
           }
+        },
+        {
+          "name": "POST service banner-image (multipart)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/{{serviceId}}/banner-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","{{serviceId}}","banner-image"] },
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
+            "description": "Uploads/replaces the wide banner image for one bookable service (ServiceId). Distinct from the offering's discovery/profile image. <=5 MB, JPEG/PNG/WebP. The ServiceId must belong to the provider and be active (else 400 InvalidServiceId). Returns { serviceId, providerId, bannerImageUrl, createdAtUtc, updatedAtUtc }. Run after `GET /services` so `{{serviceId}}` is populated."
+          }
+        },
+        {
+          "name": "GET service banner-image",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/{{serviceId}}/banner-image", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","{{serviceId}}","banner-image"] },
+            "description": "Reads the banner for a service. 404 ServiceBannerNotFound when none is set (or the service isn't this provider's)."
+          }
         }
       ]
     },
@@ -924,9 +941,9 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"petParentId\": \"{{petParentId}}\",\n  \"serviceId\": \"{{serviceIdDayCare}}\",\n  \"bookingDate\": \"2026-05-20\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\"\n}"
+              "raw": "{\n  \"petParentId\": \"{{petParentId}}\",\n  \"serviceId\": \"{{serviceIdDayCare}}\",\n  \"bookingDate\": \"2026-05-20\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"jobNotes\": \"Gate code is 1234; Bruno is shy around strangers.\"\n}"
             },
-            "description": "`serviceId` is REQUIRED. The server validates that this ServiceId belongs to the provider and is active (else 400 InvalidServiceId). Capacity is checked per-service — DayCare bookings count separately from NightStay bookings, and closures only block if they target the same ServiceId.\n\nFor PetSitter NightStay use `{{serviceIdNightStay}}`. For single-offering categories (PetGroomer / PetTrainer / Vet) use `{{serviceId}}`."
+            "description": "`serviceId` is REQUIRED. The server validates that this ServiceId belongs to the provider and is active (else 400 InvalidServiceId). Capacity is checked per-service — DayCare bookings count separately from NightStay bookings, and closures only block if they target the same ServiceId.\n\n`jobNotes` is optional free-text (access instructions, the pet's quirks) — captured here and returned on the booking detail. For PetSitter NightStay use `{{serviceIdNightStay}}`. For single-offering categories (PetGroomer / PetTrainer / Vet) use `{{serviceId}}`."
           }
         },
         {
@@ -984,7 +1001,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/bookings/{{bookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","bookings","{{bookingId}}"] },
-            "description": "Returns the detail wrapper { booking, startOtp (always null on the provider host — the OTP is parent-only), pendingModification (the staged date/time proposal, populated only while a MODIFICATION_REQUEST_BY_* is open so the provider can see a parent's proposal) }."
+            "description": "Sectioned detail: { bookingDetails, parentDetails, petDetails, paymentDetails, cancellationPolicy, startOtp (always null on the provider host — the OTP is parent-only), pendingModification (staged date/time proposal, populated only while a MODIFICATION_REQUEST_BY_* is open) }. `bookingDetails.serviceLocation` is now populated for App bookings (the offering's service-location) and `jobNotes` carries the booking notes; `cancellationPolicy` is a dedicated section { minimumHoursBeforeCancellation }."
           }
         },
         {
@@ -1135,7 +1152,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}"] },
-            "description": "Detail wrapper { booking, startOtp (null on provider), pendingModification (staged check-in/check-out proposal, populated only while a MODIFICATION_REQUEST_BY_* is open) }."
+            "description": "Sectioned detail (now mirrors the single-day booking detail): { bookingDetails (incl. jobId, checkIn/out, nights, dropOff/pickUp, serviceLocation), parentDetails, petDetails, paymentDetails (pricePerNight, totalAmount, pawfrontFee), cancellationPolicy, startOtp (null on provider), pendingModification (staged check-in/check-out proposal) }."
           }
         },
         {
@@ -1352,7 +1369,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","events","{{eventId}}"] },
-            "description": "Single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount }, organizer { type, id, name, imageUrl }, bookings { maxBookings, totalBookings }, eventLink (online joining URL; null for physical), paymentOptions [\"Cash\"|\"Digital\"], and attendees [{ attendeeName, ticketNumber }] (names only — booker contact / payment stay on the organiser-only dashboard)."
+            "description": "Single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount }, organizer { type, id, name, imageUrl, totalEventsOrganized } (totalEventsOrganized = how many events this organiser has created; populated on detail, null on list), bookings { maxBookings, totalBookings }, eventLink (online joining URL; null for physical), paymentOptions [\"Cash\"|\"Digital\"], and attendees [{ attendeeName, ticketNumber }] (names only — booker contact / payment stay on the organiser-only dashboard)."
           }
         },
         {

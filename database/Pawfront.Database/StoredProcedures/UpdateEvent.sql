@@ -22,7 +22,7 @@ CREATE OR ALTER PROCEDURE [Event].[UpdateEvent]
     @EndTime TIME(0),
     @IsPaid BIT = 0,
     @Price DECIMAL(18, 2) = NULL,
-    @CancellationPolicy NVARCHAR(32) = N'NoRefund',
+    @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
     @AmenitiesJson NVARCHAR(MAX) = N'[]'
 AS

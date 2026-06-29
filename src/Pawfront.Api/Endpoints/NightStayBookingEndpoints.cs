@@ -45,8 +45,8 @@ internal static class NightStayBookingEndpoints
     private static async Task<IResult> GetBooking(
         Guid providerId, Guid bookingId, INightStayBookingService bookingService, CancellationToken cancellationToken)
     {
-        var result = await bookingService.GetAsync(bookingId, cancellationToken);
-        if (result is null || result.ProviderId != providerId)
+        var detail = await bookingService.GetDetailAsync(bookingId, cancellationToken);
+        if (detail is null || detail.Row.ProviderId != providerId)
         {
             return ApiResults.NotFound("NightStayBookingNotFound", $"Night stay booking '{bookingId}' was not found.");
         }
@@ -54,7 +54,7 @@ internal static class NightStayBookingEndpoints
         // Surface the staged proposal so the provider can see a parent's proposed
         // change before accepting/declining (start-OTP is parent-only → null here).
         NightStayBookingModificationResponse? pending = null;
-        if (BookingStatuses.ModificationRequested.Contains(result.Status))
+        if (BookingStatuses.ModificationRequested.Contains(detail.Row.Status))
         {
             var mod = await bookingService.GetPendingModificationAsync(bookingId, cancellationToken);
             pending = mod is null
@@ -64,7 +64,66 @@ internal static class NightStayBookingEndpoints
                     mod.ProposedCheckInDate, mod.ProposedCheckOutDate, mod.Note, mod.CreatedAtUtc);
         }
 
-        return ApiResults.Ok(new NightStayBookingDetailResponse(ToResponse(result), null, pending));
+        return ApiResults.Ok(ToDetailResponse(detail, startOtp: null, pending));
+    }
+
+    /// <summary>
+    /// Maps the enriched night-stay detail into the sectioned response (the
+    /// night-stay analog of the single-day booking-detail mapping).
+    /// </summary>
+    private static NightStayBookingDetailResponse ToDetailResponse(
+        NightStayBookingDetailResult detail,
+        StartOtpResponse? startOtp,
+        NightStayBookingModificationResponse? pendingModification)
+    {
+        var row = detail.Row;
+        return new NightStayBookingDetailResponse(
+            new NightStayBookingDetailsSection(
+                row.NightStayBookingId,
+                detail.JobId,
+                row.ProviderId,
+                row.ServiceId,
+                row.ServiceCategory,
+                row.SubCategory,
+                row.CheckInDate,
+                row.CheckOutDate,
+                row.DropOffTime,
+                row.PickUpTime,
+                detail.Nights,
+                row.Status,
+                detail.ServiceLocation,
+                row.CreatedAtUtc,
+                row.UpdatedAtUtc,
+                row.CancelledAtUtc),
+            new ParentDetailsSection(
+                row.PetParentId,
+                CombineName(row.ParentFirstName, row.ParentLastName),
+                row.ParentMobileCountryCode,
+                row.ParentMobileNumber,
+                row.ParentGender,
+                row.ParentPhotoUrl),
+            new PetDetailsSection(
+                row.PetId,
+                row.PetProfileName,
+                row.PetType,
+                row.PetGender,
+                row.PetPhotoUrl),
+            new NightStayPaymentDetailsSection(
+                detail.PricePerNight,
+                detail.TotalAmount,
+                detail.PawfrontFee,
+                detail.FeePercentage,
+                row.PayoutStatus,
+                row.PayoutId),
+            new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
+            startOtp,
+            pendingModification);
+    }
+
+    private static string? CombineName(string? first, string? last)
+    {
+        var name = $"{first} {last}".Trim();
+        return string.IsNullOrEmpty(name) ? null : name;
     }
 
     private static async Task<IResult> GetStatusHistory(

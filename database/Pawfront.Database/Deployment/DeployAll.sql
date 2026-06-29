@@ -456,6 +456,41 @@ IF NOT EXISTS (
 GO
 
 
+-- 2.4b Provider.ProviderServiceBanners ----------------------------------------
+-- One banner image per bookable service (ProviderServices row). Distinct from the
+-- Cosmos offering image (the discovery/profile photo) — a wide banner shown on the
+-- service's own screen. Upserted (one row per ServiceId). FKs ProviderServices, so
+-- it is created after that table above.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ProviderServiceBanners' AND [schema_id] = SCHEMA_ID(N'Provider'))
+BEGIN
+    CREATE TABLE [Provider].[ProviderServiceBanners]
+    (
+        [ServiceId] UNIQUEIDENTIFIER NOT NULL,
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [BannerImageUrl] NVARCHAR(1000) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ProviderServiceBanners_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ProviderServiceBanners_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_ProviderServiceBanners] PRIMARY KEY CLUSTERED ([ServiceId] ASC),
+        CONSTRAINT [FK_ProviderServiceBanners_ProviderServices_ServiceId]
+            FOREIGN KEY ([ServiceId]) REFERENCES [Provider].[ProviderServices] ([ServiceId])
+            ON DELETE CASCADE,
+        CONSTRAINT [FK_ProviderServiceBanners_Providers_ProviderId]
+            FOREIGN KEY ([ProviderId]) REFERENCES [Provider].[Providers] ([ProviderId])
+    );
+    PRINT 'Created table [Provider].[ProviderServiceBanners].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Provider].[ProviderServiceBanners] already exists.';
+END
+GO
+
+
 -- 2.4c Provider.ServiceIdList table type --------------------------------------
 -- Used by sprocs that accept an array of ServiceIds (e.g. closure batches).
 -- Sent over from .NET as a SqlParameter with TypeName 'Provider.ServiceIdList'.
@@ -1511,8 +1546,9 @@ BEGIN
         [IsPaid] BIT NOT NULL
             CONSTRAINT [DF_Events_IsPaid] DEFAULT 0,
         [Price] DECIMAL(18, 2) NULL,
-        [CancellationPolicy] NVARCHAR(32) NOT NULL
-            CONSTRAINT [DF_Events_CancellationPolicy] DEFAULT N'NoRefund',
+        -- Optional refund policy (NULL when unset) — doesn't apply to free
+        -- events. When set it's one of the CK_Events_CancellationPolicy values.
+        [CancellationPolicy] NVARCHAR(32) NULL,
         -- Joining link for ONLINE events; NULL for physical events.
         [EventLink] NVARCHAR(1000) NULL,
         [ViewCount] INT NOT NULL
@@ -1710,15 +1746,38 @@ BEGIN
 END
 GO
 
--- 2.10d Retrofit: add the event cancellation/refund policy column.
+-- 2.10d Retrofit: add the event cancellation/refund policy column (optional —
+-- NULL when unset, since it doesn't apply to free events).
 IF NOT EXISTS (
     SELECT 1 FROM sys.columns
     WHERE [object_id] = OBJECT_ID(N'[Event].[Events]') AND [name] = N'CancellationPolicy')
 BEGIN
-    ALTER TABLE [Event].[Events]
-        ADD [CancellationPolicy] NVARCHAR(32) NOT NULL
-            CONSTRAINT [DF_Events_CancellationPolicy] DEFAULT N'NoRefund';
+    ALTER TABLE [Event].[Events] ADD [CancellationPolicy] NVARCHAR(32) NULL;
     PRINT 'Added column [Event].[Events].[CancellationPolicy].';
+END
+GO
+
+-- 2.10d.1 Retrofit: relax the cancellation/refund policy to optional on
+-- databases where it was previously created NOT NULL with a default of
+-- 'NoRefund'. Drop the default constraint, then make the column nullable.
+IF EXISTS (
+    SELECT 1 FROM sys.default_constraints
+    WHERE [name] = N'DF_Events_CancellationPolicy'
+      AND [parent_object_id] = OBJECT_ID(N'[Event].[Events]'))
+BEGIN
+    ALTER TABLE [Event].[Events] DROP CONSTRAINT [DF_Events_CancellationPolicy];
+    PRINT 'Dropped default [DF_Events_CancellationPolicy].';
+END
+GO
+
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [object_id] = OBJECT_ID(N'[Event].[Events]')
+      AND [name] = N'CancellationPolicy'
+      AND [is_nullable] = 0)
+BEGIN
+    ALTER TABLE [Event].[Events] ALTER COLUMN [CancellationPolicy] NVARCHAR(32) NULL;
+    PRINT 'Made [Event].[Events].[CancellationPolicy] nullable.';
 END
 GO
 
@@ -2297,6 +2356,9 @@ BEGIN
     (
         [NightStayBookingId] UNIQUEIDENTIFIER NOT NULL
             CONSTRAINT [DF_NightStayBookings_Id] DEFAULT NEWSEQUENTIALID(),
+        -- Short, human-friendly sequential job number (separate sequence from the
+        -- single-day [Booking].[Bookings].[JobNumber]). Surfaced as "PF-000123".
+        [JobNumber] INT NOT NULL IDENTITY(1, 1),
         [ProviderId] UNIQUEIDENTIFIER NOT NULL,
         [PetParentId] UNIQUEIDENTIFIER NOT NULL,
         [ServiceId] UNIQUEIDENTIFIER NOT NULL,
@@ -2309,6 +2371,10 @@ BEGIN
         -- Snapshot of the offering's drop-off / pick-up times at booking time.
         [DropOffTime] TIME(0) NOT NULL,
         [PickUpTime] TIME(0) NOT NULL,
+        -- Payout (capture-only for now — mirrors [Booking].[Bookings]).
+        [PayoutStatus] NVARCHAR(32) NOT NULL
+            CONSTRAINT [DF_NightStayBookings_PayoutStatus] DEFAULT N'Pending',
+        [PayoutId] NVARCHAR(64) NULL,
         [Status] NVARCHAR(48) NOT NULL
             CONSTRAINT [DF_NightStayBookings_Status] DEFAULT N'CREATED',
         [CreatedAtUtc] DATETIME2(7) NOT NULL
@@ -2337,7 +2403,9 @@ BEGIN
         CONSTRAINT [CK_NightStayBookings_CancelledRequiresTimestamp] CHECK (
             ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
             OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
-        )
+        ),
+        CONSTRAINT [CK_NightStayBookings_PayoutStatus]
+            CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed'))
     );
     PRINT 'Created table [Booking].[NightStayBookings].';
 END
@@ -2372,6 +2440,36 @@ IF NOT EXISTS (
     CREATE INDEX [IX_NightStayBookings_PetParent_Status]
         ON [Booking].[NightStayBookings] ([PetParentId], [Status])
         INCLUDE ([ServiceId], [CheckInDate], [CheckOutDate], [NightStayBookingId], [ProviderId]);
+GO
+
+-- 2.10b1 Retrofit: add JobNumber + payout columns to NightStayBookings so the
+-- night-stay detail read matches the single-day one (Job ID + payout block).
+-- Fires once on DBs created before these columns existed (COL_LENGTH IS NULL).
+IF COL_LENGTH(N'[Booking].[NightStayBookings]', N'JobNumber') IS NULL
+BEGIN
+    PRINT 'Adding [JobNumber] to [Booking].[NightStayBookings].';
+    ALTER TABLE [Booking].[NightStayBookings] ADD [JobNumber] INT NOT NULL IDENTITY(1, 1);
+END
+GO
+
+IF COL_LENGTH(N'[Booking].[NightStayBookings]', N'PayoutStatus') IS NULL
+BEGIN
+    PRINT 'Adding payout columns to [Booking].[NightStayBookings].';
+    ALTER TABLE [Booking].[NightStayBookings] ADD [PayoutStatus] NVARCHAR(32) NOT NULL
+        CONSTRAINT [DF_NightStayBookings_PayoutStatus] DEFAULT N'Pending';
+    ALTER TABLE [Booking].[NightStayBookings] ADD [PayoutId] NVARCHAR(64) NULL;
+    ALTER TABLE [Booking].[NightStayBookings]
+        ADD CONSTRAINT [CK_NightStayBookings_PayoutStatus]
+            CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed'));
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'UX_NightStayBookings_JobNumber'
+      AND [object_id] = OBJECT_ID(N'[Booking].[NightStayBookings]'))
+    CREATE UNIQUE INDEX [UX_NightStayBookings_JobNumber]
+        ON [Booking].[NightStayBookings] ([JobNumber]);
 GO
 
 
@@ -4419,6 +4517,65 @@ PRINT 'Created/updated [Provider].[DeleteProviderPhoto].';
 GO
 
 
+-- 3.1b Provider.ProviderServiceBanners sprocs ---------------------------------
+-- Per-service banner image: upsert (validates the service belongs to the
+-- provider + is active, THROW 51081 otherwise) + read.
+CREATE OR ALTER PROCEDURE [Provider].[SaveProviderServiceBanner]
+    @ServiceId UNIQUEIDENTIFIER,
+    @ProviderId UNIQUEIDENTIFIER,
+    @BannerImageUrl NVARCHAR(1000)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Provider].[ProviderServices] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [ServiceId] = @ServiceId
+          AND [ProviderId] = @ProviderId
+          AND [IsActive] = 1
+    )
+        THROW 51081, 'Service is not valid or active for this provider.', 1;
+
+    UPDATE [Provider].[ProviderServiceBanners]
+    SET [BannerImageUrl] = @BannerImageUrl,
+        [ProviderId] = @ProviderId,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    WHERE [ServiceId] = @ServiceId;
+
+    IF @@ROWCOUNT = 0
+        INSERT INTO [Provider].[ProviderServiceBanners]
+            ([ServiceId], [ProviderId], [BannerImageUrl])
+        VALUES (@ServiceId, @ProviderId, @BannerImageUrl);
+
+    SELECT [ServiceId], [ProviderId], [BannerImageUrl], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Provider].[ProviderServiceBanners]
+    WHERE [ServiceId] = @ServiceId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Provider].[SaveProviderServiceBanner].';
+GO
+
+CREATE OR ALTER PROCEDURE [Provider].[GetProviderServiceBanner]
+    @ServiceId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [ServiceId], [ProviderId], [BannerImageUrl], [CreatedAtUtc], [UpdatedAtUtc]
+    FROM [Provider].[ProviderServiceBanners]
+    WHERE [ServiceId] = @ServiceId;
+END;
+GO
+PRINT 'Created/updated [Provider].[GetProviderServiceBanner].';
+GO
+
+
 -- 3.2 CompleteProviderProfile -------------------------------------------------
 CREATE OR ALTER PROCEDURE [Provider].[CompleteProviderProfile]
     @ProviderAuthIdentityId UNIQUEIDENTIFIER,
@@ -5115,6 +5272,9 @@ CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
     @BookingDate DATE,
     @StartTime TIME(0),
     @EndTime TIME(0),
+    -- Optional free-text notes the parent attaches to the job. Stored on App
+    -- rows too (not a Custom-only column); surfaced on the booking-detail read.
+    @JobNotes NVARCHAR(2000) = NULL,
     @Capacity INT
 AS
 BEGIN
@@ -5172,10 +5332,10 @@ BEGIN
 
     INSERT INTO [Booking].[Bookings]
     ([ProviderId], [PetParentId], [PetId], [ServiceId], [ServiceCategory], [SubCategory],
-     [ServiceItemCode], [BookingDate], [StartTime], [EndTime])
+     [ServiceItemCode], [BookingDate], [StartTime], [EndTime], [JobNotes])
     OUTPUT inserted.[BookingId] INTO @InsertedBookingId
     VALUES (@ProviderId, @PetParentId, @PetId, @ServiceId, @ServiceCategory, @SubCategory,
-            @ServiceItemCode, @BookingDate, @StartTime, @EndTime);
+            @ServiceItemCode, @BookingDate, @StartTime, @EndTime, @JobNotes);
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);
 
@@ -5779,6 +5939,55 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Booking].[GetNightStayBooking].';
+GO
+
+-- Enriched night-stay read backing the night-stay booking-detail endpoint.
+-- Mirrors [Booking].[GetBookingDetail]: base columns PLUS JobNumber, payout
+-- fields, and the joined pet-parent / pet records. Night-stay is App-only, so
+-- the customer + pet details always come from the joins.
+CREATE OR ALTER PROCEDURE [Booking].[GetNightStayBookingDetail]
+    @NightStayBookingId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT b.[NightStayBookingId],
+           b.[JobNumber],
+           b.[ProviderId],
+           b.[PetParentId],
+           b.[ServiceId],
+           b.[ServiceCategory],
+           b.[SubCategory],
+           b.[CheckInDate],
+           b.[CheckOutDate],
+           b.[DropOffTime],
+           b.[PickUpTime],
+           b.[Status],
+           b.[CreatedAtUtc],
+           b.[UpdatedAtUtc],
+           b.[CancelledAtUtc],
+           b.[PetId],
+           b.[PayoutStatus],
+           b.[PayoutId],
+           pp.[FirstName]         AS [ParentFirstName],
+           pp.[LastName]          AS [ParentLastName],
+           pp.[Gender]            AS [ParentGender],
+           pp.[MobileCountryCode] AS [ParentMobileCountryCode],
+           pp.[MobileNumber]      AS [ParentMobileNumber],
+           pp.[ProfilePhotoUrl]   AS [ParentPhotoUrl],
+           pet.[PetName]          AS [PetProfileName],
+           pet.[PetType]          AS [PetType],
+           pet.[Gender]           AS [PetGender],
+           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl]
+    FROM [Booking].[NightStayBookings] AS b
+    LEFT JOIN [Parent].[PetParents] AS pp
+        ON pp.[PetParentId] = b.[PetParentId]
+    LEFT JOIN [Parent].[Pets] AS pet
+        ON pet.[PetId] = b.[PetId]
+    WHERE b.[NightStayBookingId] = @NightStayBookingId;
+END;
+GO
+PRINT 'Created/updated [Booking].[GetNightStayBookingDetail].';
 GO
 
 -- Parent-initiated cancel. Sets PARENT_CANCELLED + frees the per-night capacity.
@@ -6459,7 +6668,7 @@ CREATE OR ALTER PROCEDURE [Event].[CreateEvent]
     @EndTime TIME(0),
     @IsPaid BIT = 0,
     @Price DECIMAL(18, 2) = NULL,
-    @CancellationPolicy NVARCHAR(32) = N'NoRefund',
+    @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
     @AmenitiesJson NVARCHAR(MAX) = N'[]'
 AS
@@ -6547,7 +6756,7 @@ CREATE OR ALTER PROCEDURE [Event].[CreatePetParentEvent]
     @EndTime TIME(0),
     @IsPaid BIT = 0,
     @Price DECIMAL(18, 2) = NULL,
-    @CancellationPolicy NVARCHAR(32) = N'NoRefund',
+    @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
     @AmenitiesJson NVARCHAR(MAX) = N'[]'
 AS
@@ -6687,7 +6896,7 @@ CREATE OR ALTER PROCEDURE [Event].[UpdateEvent]
     @EndTime TIME(0),
     @IsPaid BIT = 0,
     @Price DECIMAL(18, 2) = NULL,
-    @CancellationPolicy NVARCHAR(32) = N'NoRefund',
+    @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
     @AmenitiesJson NVARCHAR(MAX) = N'[]'
 AS
@@ -6793,7 +7002,7 @@ CREATE OR ALTER PROCEDURE [Event].[UpdatePetParentEvent]
     @EndTime TIME(0),
     @IsPaid BIT = 0,
     @Price DECIMAL(18, 2) = NULL,
-    @CancellationPolicy NVARCHAR(32) = N'NoRefund',
+    @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
     @AmenitiesJson NVARCHAR(MAX) = N'[]'
 AS
@@ -7663,6 +7872,25 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Event].[SaveEventPayoutMethods].';
+GO
+
+-- 3.32a Event.CountEventsByOrganizer ------------------------------------------
+-- Total events created by a single organiser (provider OR pet parent). Surfaced
+-- on the event-detail read as the organiser's event count.
+CREATE OR ALTER PROCEDURE [Event].[CountEventsByOrganizer]
+    @ProviderId UNIQUEIDENTIFIER = NULL,
+    @PetParentId UNIQUEIDENTIFIER = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT COUNT(*)
+    FROM [Event].[Events]
+    WHERE (@ProviderId IS NOT NULL AND [ProviderId] = @ProviderId)
+       OR (@PetParentId IS NOT NULL AND [PetParentId] = @PetParentId);
+END;
+GO
+PRINT 'Created/updated [Event].[CountEventsByOrganizer].';
 GO
 
 

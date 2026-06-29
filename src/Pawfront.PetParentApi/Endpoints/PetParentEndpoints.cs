@@ -155,10 +155,35 @@ internal static class PetParentEndpoints
     private static async Task<IResult> ListServiceBookings(
         Guid petParentId,
         IBookingService bookingService,
+        IParentBookingEnrichmentService enrichment,
         CancellationToken cancellationToken)
     {
         var results = await bookingService.ListByPetParentAsync(petParentId, cancellationToken);
-        return ApiResults.Ok(results.Select(ToBookingResponse).ToArray());
+        var enriched = await enrichment.EnrichAsync(results, cancellationToken);
+        return ApiResults.Ok(enriched.Select(ToServiceBookingCard).ToArray());
+    }
+
+    /// <summary>
+    /// Maps an enriched single-day booking into the sectioned "my bookings" card —
+    /// the booking, the booked provider's details, and the service details + price.
+    /// </summary>
+    private static ParentServiceBookingCardResponse ToServiceBookingCard(EnrichedBookingCard card)
+    {
+        var b = card.Booking;
+        return new ParentServiceBookingCardResponse(
+            ToBookingResponse(b),
+            new BookingProviderDetailsSection(
+                b.ProviderId,
+                card.Provider?.DisplayName,
+                card.Provider?.ImageUrl,
+                card.Provider?.City,
+                b.ServiceCategory,
+                b.SubCategory),
+            new BookingServiceDetailsSection(
+                b.ServiceId,
+                card.ServiceType,
+                b.ServiceItemCode,
+                card.PricePerHour));
     }
 
     /// <summary>
@@ -207,6 +232,7 @@ internal static class PetParentEndpoints
                     request.StartTime,
                     request.EndTime,
                     request.ServiceItemCode,
+                    request.JobNotes,
                     request.PetId),
                 cancellationToken);
             return ApiResults.Ok(ToBookingResponse(result));
@@ -562,7 +588,7 @@ internal static class PetParentEndpoints
                 row.EndTime,
                 row.Status,
                 row.Source,
-                row.ServiceLocation,
+                detail.ServiceLocation,
                 row.CustomerLocation,
                 row.JobNotes,
                 row.CreatedAtUtc,
@@ -588,6 +614,7 @@ internal static class PetParentEndpoints
                 detail.FeePercentage,
                 row.PayoutStatus,
                 row.PayoutId),
+            new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
             startOtp,
             pendingModification);
     }

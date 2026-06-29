@@ -55,7 +55,8 @@ internal sealed class CosmosPetGroomerServiceRegistry(
                 TelephoneCountryCode = Required(command.TelephoneCountryCode, nameof(command.TelephoneCountryCode)),
                 TelephoneNumber = Required(command.TelephoneNumber, nameof(command.TelephoneNumber)),
                 Email = Required(command.Email, nameof(command.Email)),
-                Description = Required(command.Description, nameof(command.Description)),
+                // Optional — the "about the provider" blurb may be omitted at registration.
+                Description = Trim(command.Description) ?? string.Empty,
                 ImageUrl = Trim(command.ShopImageUrl),
                 License = existingShop?.License,
                 Offering = existingShop?.Offering
@@ -96,7 +97,8 @@ internal sealed class CosmosPetGroomerServiceRegistry(
             GroomerShop = null,
             Freelance = new FreelanceGroomerDetails
             {
-                AboutYou = Required(command.AboutYou, nameof(command.AboutYou)),
+                // Optional — the "about you" blurb may be omitted at registration.
+                AboutYou = Trim(command.AboutYou) ?? string.Empty,
                 ImageUrl = Trim(command.ProfileImageUrl),
                 License = existingFreelance?.License,
                 Offering = existingFreelance?.Offering

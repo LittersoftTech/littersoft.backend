@@ -36,7 +36,8 @@ internal sealed class CosmosPetAdoptionSaleServiceRegistry(
                 TelephoneCountryCode = Required(command.TelephoneCountryCode, nameof(command.TelephoneCountryCode)),
                 TelephoneNumber = Required(command.TelephoneNumber, nameof(command.TelephoneNumber)),
                 Email = Required(command.Email, nameof(command.Email)),
-                Description = Required(command.Description, nameof(command.Description)),
+                // Optional — the "about the provider" blurb may be omitted at registration.
+                Description = Trim(command.Description) ?? string.Empty,
                 ImageUrl = Trim(command.ShelterImageUrl)
             },
             PetShop = null,
@@ -78,7 +79,8 @@ internal sealed class CosmosPetAdoptionSaleServiceRegistry(
                 TelephoneCountryCode = Required(command.TelephoneCountryCode, nameof(command.TelephoneCountryCode)),
                 TelephoneNumber = Required(command.TelephoneNumber, nameof(command.TelephoneNumber)),
                 Email = Required(command.Email, nameof(command.Email)),
-                Description = Required(command.Description, nameof(command.Description)),
+                // Optional — the "about the provider" blurb may be omitted at registration.
+                Description = Trim(command.Description) ?? string.Empty,
                 ImageUrl = Trim(command.ShopImageUrl)
             },
             Freelance = null,
@@ -116,7 +118,8 @@ internal sealed class CosmosPetAdoptionSaleServiceRegistry(
             PetShop = null,
             Freelance = new FreelancePetAdoptionSaleDetails
             {
-                AboutYou = Required(command.AboutYou, nameof(command.AboutYou)),
+                // Optional — the "about you" blurb may be omitted at registration.
+                AboutYou = Trim(command.AboutYou) ?? string.Empty,
                 ImageUrl = Trim(command.ProfileImageUrl)
             },
             CreatedAtUtc = existing?.CreatedAtUtc ?? now,

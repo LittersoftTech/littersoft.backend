@@ -27,6 +27,12 @@ public sealed record ProviderPublicProfileResponse(
     // Digital); empty when none configured.
     int? MinimumHoursBeforeCancellation,
     IReadOnlyCollection<string> AcceptedPaymentMethods,
+    // The provider's profile/business photo (the image they uploaded for their
+    // offering); null when none set.
+    string? ProfilePhotoUrl,
+    // The provider's gallery photos (Provider.ProviderPhotos), oldest-first;
+    // empty when none.
+    IReadOnlyList<string> GalleryImages,
     // Parent reviews of the provider. Always empty for now — the review
     // feature isn't built yet; the field is wired so the mobile client can
     // bind it ahead of time.

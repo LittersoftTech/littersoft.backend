@@ -6,7 +6,10 @@ public sealed record CreateBookingRequest(
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime,
-    string? ServiceItemCode);
+    string? ServiceItemCode,
+    // Optional free-text notes for the job (access instructions, the pet's
+    // quirks, etc.). Captured at create time and surfaced on the booking detail.
+    string? JobNotes);
 
 /// <summary>
 /// Body for <c>POST /pet-parents/{petParentId}/bookings</c> on the pet-parent
@@ -20,7 +23,10 @@ public sealed record CreateParentBookingRequest(
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime,
-    string? ServiceItemCode);
+    string? ServiceItemCode,
+    // Optional free-text notes for the job (access instructions, the pet's
+    // quirks, etc.). Captured at create time and surfaced on the booking detail.
+    string? JobNotes);
 
 /// <summary>
 /// Provider-initiated private/custom booking for an unregistered walk-in.
@@ -118,8 +124,20 @@ public sealed record BookingDetailResponse(
     ParentDetailsSection ParentDetails,
     PetDetailsSection PetDetails,
     PaymentDetailsSection PaymentDetails,
+    // The provider's advertised cancellation policy for this booking's service,
+    // surfaced as its own section.
+    CancellationPolicyDetailsSection CancellationPolicy,
     StartOtpResponse? StartOtp,
     BookingModificationResponse? PendingModification);
+
+/// <summary>
+/// The provider's advertised cancellation policy for the booked service.
+/// <see cref="MinimumHoursBeforeCancellation"/> is null | 24 | 48 | 72 | 96 — the
+/// minimum notice (in hours) the provider requires before a cancellation; null
+/// when the provider hasn't set one.
+/// </summary>
+public sealed record CancellationPolicyDetailsSection(
+    int? MinimumHoursBeforeCancellation);
 
 /// <summary>The booking/job facts: identity, schedule, status, and (Custom-only)
 /// service-location + notes.</summary>
@@ -138,8 +156,12 @@ public sealed record BookingDetailsSection(
     string Status,
     // 'App' (registered pet parent) or 'Custom' (provider walk-in).
     string Source,
-    // Custom walk-ins only; null for App bookings.
+    // Where the provider delivers the service. For Custom walk-ins this is the
+    // booking's own MyLocation/CustomerLocation; for App bookings it's the
+    // provider offering's service-location setting (resolved live). Null when the
+    // offering can't be resolved.
     string? ServiceLocation,
+    // Free-text street address — Custom 'CustomerLocation' walk-ins only.
     string? CustomerLocation,
     string? JobNotes,
     DateTimeOffset CreatedAtUtc,
