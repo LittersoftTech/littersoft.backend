@@ -49,6 +49,7 @@ erDiagram
     PROVIDER_SERVICES        ||--o{ BOOKINGS                     : "targets"
     PET_PARENTS              ||--o{ PETS                         : "has"
     PETS                     ||--o{ PET_PHOTOS                   : "has (ON DELETE CASCADE)"
+    PETS                     ||--o{ PET_NEXT_CONSULTATIONS       : "has (ON DELETE CASCADE)"
 
     PROVIDER_AUTH_IDENTITIES {
         UNIQUEIDENTIFIER ProviderAuthIdentityId PK
@@ -204,12 +205,22 @@ erDiagram
         NVARCHAR         SterilizationStatus "nullable; Sterilized|Intact"
         NVARCHAR         MedicalHistory      "nullable; free text"
         NVARCHAR         Temperament         "nullable; Anxious|Friendly|Aggressive"
+        NVARCHAR         VaccinationType     "nullable; free text"
+        NVARCHAR         VaccinationDose     "nullable; free text"
+        NVARCHAR         Prescription        "nullable; free text"
     }
 
     PET_PHOTOS {
         UNIQUEIDENTIFIER PetPhotoId PK
         UNIQUEIDENTIFIER PetId      FK    "ON DELETE CASCADE"
         NVARCHAR         PhotoUrl
+    }
+
+    PET_NEXT_CONSULTATIONS {
+        UNIQUEIDENTIFIER PetNextConsultationId PK
+        UNIQUEIDENTIFIER PetId                 FK "ON DELETE CASCADE; UNIQUE with type"
+        NVARCHAR         ConsultationType         "Groomer|Vet|Trainer"
+        DATE             NextConsultationDate
     }
 
     EVENTS {
@@ -501,6 +512,11 @@ by `POST /api/v1/pet-parents/{petParentId}/pets` (sproc
   the mobile client renders it as "Neutered/Spayed".
 - `MedicalHistory` — nullable NVARCHAR(MAX). Free text.
 - `Temperament` — nullable, `Anxious | Friendly | Aggressive` (CHECK).
+- `VaccinationType` / `VaccinationDose` / `Prescription` — nullable free text
+  (NVARCHAR(100) / NVARCHAR(64) / NVARCHAR(MAX)). Same PATCH endpoint; also
+  joined into the booking-detail `petDetails` section (with `Breed` and
+  `VaccinationStatus`) by `Booking.GetBookingDetail` /
+  `Booking.GetNightStayBookingDetail`.
 
 ### `Parent.PetPhotos`
 Pet photos (gallery). One row per uploaded image — a pet can have many
@@ -513,6 +529,17 @@ sproc `Parent.AddPetPhoto`.
 - `PhotoUrl` — NVARCHAR(1000), the blob URL in the `pet-photos`
   folder of the shared `provider-images` container.
 - Timestamps.
+
+### `Parent.PetNextConsultations`
+A pet's next-consultation dates, one row per provider type (`Groomer | Vet |
+Trainer`) — UNIQUE(`PetId`, `ConsultationType`); a newer date from the same
+type replaces the old one. Written by the provider's booking-complete flow
+(`POST /providers/{providerId}/bookings/{bookingId}/complete` with the
+optional `nextConsultationDate` body field) via sproc
+`Parent.UpsertPetNextConsultation` (THROW 51221 pet not found). Read back on
+the pet endpoints (result set 3 of `Parent.GetPetParentPet` /
+`Parent.ListPetParentPets`) as `nextConsultations: [{ type, nextConsultation }]`.
+`ON DELETE CASCADE` with the pet.
 
 ### `Parent.PetParentPhotos`
 General pet-parent photo gallery (not tied to a pet). One row per uploaded
@@ -671,8 +698,8 @@ from its parent. The night-stay twin names are prefixed `NightStay…`.
   ExpiresAtUtc, ConsumedAtUtc }`. Issued/reused by `IssueBookingStartOtp`,
   consumed by `StartBookingWithOtp`.
 - **`Booking.BookingEvidence`** — one row per job-completion photo
-  (`PhotoUrl`, `CreatedAtUtc`); ≥1 gates `COMPLETED`. Same shape as
-  `Provider.ProviderPhotos`.
+  (`PhotoUrl`, `CreatedAtUtc`); optional — `COMPLETED` no longer requires
+  evidence. Same shape as `Provider.ProviderPhotos`.
 - **`Booking.BookingModifications`** — **staging area** for the single open
   date/time-change proposal (UNIQUE per booking; **date/time only**).
   `{ RequestedByActor, RequestedByActorId, ProposedBookingDate/StartTime/EndTime

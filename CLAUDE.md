@@ -241,8 +241,8 @@ Custom `THROW` codes used for typed errors:
   validates first
 - `51126` transition not allowed from the current status (status update) → API
   maps to **409 BookingNotStartable / 400** (engine from-state guard)
-- `51127` evidence required before COMPLETED (status update) → surfaced as
-  the complete endpoint's error
+- `51127` **retired** — evidence is no longer required before COMPLETED
+  (the gate was removed; evidence photos are optional)
 - **Job-lifecycle sprocs (single-day `Booking.Bookings`):**
   - `51130` booking not found (issue start-OTP)
   - `51131/51132/51133` start-with-OTP: not found / not the provider (→ **403**) /
@@ -256,8 +256,8 @@ Custom `THROW` codes used for typed errors:
     (→ **403**) / no proposal awaiting your response (→ **409 NoPendingModification**) /
     no capacity for the proposed window (→ **409 CapacityExceeded**)
   - `51150` booking not found / not owned by provider (add evidence)
-- **Job-lifecycle sprocs (night-stay):** `51246/51247` (transition / evidence
-  gate, mirror of 51126/51127); `51250` (issue OTP not found);
+- **Job-lifecycle sprocs (night-stay):** `51246` (transition guard, mirror of
+  51126; `51247` retired with the evidence gate); `51250` (issue OTP not found);
   `51251-51255` (start-with-OTP, mirror of 51131-51135); `51260-51263` (request
   modification, mirror of 51140-51143); `51265-51268` (respond modification,
   mirror of 51145-51148); `51270` (add evidence not found).
@@ -286,6 +286,8 @@ Custom `THROW` codes used for typed errors:
 - `51219` event booking already cancelled (event-booking cancel) → API maps to
   **409 EventBookingAlreadyCancelled**
 - `51220` pet not found (pet profile-photo update) → API maps to **404 PetNotFound**
+- `51221` pet not found (next-consultation upsert on booking complete) → API maps
+  to **404 PetNotFound**
 - **Night-stay booking sprocs** (multi-night boarding — `Booking.NightStayBookings`):
   - `51230` provider not found (night-stay create) → **404 ProviderNotFound**
   - `51231` provider inactive (night-stay create) → **409 ProviderInactive**
@@ -550,7 +552,8 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
 - `CREATED` (parent booked) → `CONFIRMED` (provider accepted) **or**
   `PROVIDER_DECLINED` (provider rejected).
 - `CONFIRMED`-equivalent → `JOB_STARTED` (provider started — gated by the
-  parent's **start-OTP**) → `COMPLETED` (provider uploaded **evidence**).
+  parent's **start-OTP**) → `COMPLETED` (provider ended the job; evidence
+  photos are **optional**).
 - Either party may propose a schedule change:
   `MODIFICATION_REQUEST_BY_PARENT` / `MODIFICATION_REQUEST_BY_PROVIDER`; the
   counterparty resolves it → `PROVIDER/PARENT_ACCEPTED_MODIFICATION` (new
@@ -570,9 +573,12 @@ New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
 
 - **Enriched booking-detail read (single-day only).** `GET /bookings/{bookingId}`
   (provider) and `GET /pet-parents/{petParentId}/bookings/{bookingId}` (parent)
-  return `BookingDetailResponse` grouped into **four sections** — `bookingDetails`
+  return `BookingDetailResponse` grouped into **five sections** — `bookingDetails`
   (incl. a friendly `jobId` `PF-000123` from the new `Booking.Bookings.JobNumber`
-  IDENTITY column), `parentDetails`, `petDetails`, `paymentDetails` — plus the
+  IDENTITY column), `parentDetails`, `petDetails`, `providerDetails` (provider
+  name/mobile/gender joined from `Provider.Providers`; `providerPhotoUrl` null for
+  now — the business photo lives in Cosmos, same posture as the event organizer
+  block), `paymentDetails` — plus the
   top-level `startOtp` (parent reads, when startable) + `pendingModification`.
   Backed by the new `Booking.GetBookingDetail` sproc (base row + `JobNumber` +
   payout columns, LEFT JOIN `Parent.PetParents` + `Parent.Pets`) and
@@ -597,10 +603,20 @@ New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
   `GET /pet-parents/{petParentId}/bookings/{bookingId}` (single read that
   **issues the start-OTP** when the booking is confirmed-equivalent). `/accept`,
   `/decline`, `/complete`, `/cancel` flow through `Booking.UpdateBookingStatus`
-  (UPDLOCK+HOLDLOCK), which enforces party + per-actor settable set + from-state +
-  the **`COMPLETED` evidence gate** (≥1 row in `Booking.BookingEvidence`, else
-  THROW 51127). `COMPLETED` is now **provider-only, from `JOB_STARTED`** (was
-  settable by both parties — behaviour change).
+  (UPDLOCK+HOLDLOCK), which enforces party + per-actor settable set + from-state.
+  The former **`COMPLETED` evidence gate** (THROW 51127/51247) was **removed** —
+  evidence photos are optional. `COMPLETED` is **provider-only, from
+  `JOB_STARTED`** (was settable by both parties — behaviour change).
+  `/complete` takes an **optional body** `{ nextConsultationDate?: "yyyy-MM-dd" }`
+  — the provider can propose the pet's next visit while ending the job. Stored in
+  `Parent.PetNextConsultations` (one row per pet + provider type, upserted; type
+  derived server-side from the booking's category: PetGroomer → `Groomer`, Vet →
+  `Vet`, PetTrainer → `Trainer`) and surfaced on pet reads as
+  `nextConsultations: [{ type, nextConsultation }]`. Validated BEFORE the
+  transition: 400 `NextConsultationNotSupported` (PetSitter/AdoptionSale booking),
+  400 `NextConsultationRequiresPet` (Custom walk-in / no linked pet), 400
+  `InvalidNextConsultationDate` (past date). Sproc
+  `Parent.UpsertPetNextConsultation` (THROW 51221).
 - **Start-OTP** (`Booking.BookingStartOtps`, telemetry-tracked): when the parent
   opens a confirmed booking, `IssueBookingStartOtp` issues/reuses a 6-digit
   plaintext share-code (10-min TTL, reuse-while-valid) returned in the booking
@@ -608,7 +624,7 @@ New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
   (consume on success, bump `FailedAttemptCount` on mismatch) → `JOB_STARTED`.
 - **Evidence** (`Booking.BookingEvidence`): provider uploads photo(s) via
   `POST .../evidence` (blob `BlobUploadKind.BookingEvidence`, `booking-evidence/`
-  folder, 3 MB, JPEG/PNG/WebP); ≥1 gates `COMPLETED`.
+  folder, 3 MB, JPEG/PNG/WebP); **optional** — no longer gates `COMPLETED`.
 - **Modifications** (`Booking.BookingModifications` is the **staging area** —
   holds ONLY the open proposal, UNIQUE per booking; **editing is limited to date
   + time**, no service-item change): `RequestBookingModification` stages the
@@ -1028,7 +1044,7 @@ GET    /pet-parents/{petParentId}/profile                                       
 PATCH  /pet-parents/{petParentId}/profile                                        body { firstName, lastName, gender, dateOfBirth, addressLine, zipCode, city, description } — edits the basic-profile subset via Parent.UpdatePetParentProfile (THROW 51208). Deliberately NOT editable here: mobile number (must re-verify via OTP), latitude/longitude (no coordinates accompany an address edit — they go stale until a future geocoding pass), profile photo (own endpoint). Returns the same full read-back shape as the GET. 404 PetParentNotFound; 400 UnsupportedGender / InvalidRequest. Ownership-filtered.
 POST   /pet-parents/{petParentId}/profile-image                                  multipart form-data { file }. Validations: file required, <=3 MB, content type ∈ { image/jpeg, image/png, image/webp }. Uploads to the shared blob container under the [PetParentProfilePhotos] folder and saves the resulting URL on Parent.PetParents.ProfilePhotoUrl via Parent.UpdatePetParentProfilePhoto. 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetParentNotFound (sproc 51201).
 POST   /pet-parents/{petParentId}/pets                                           body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? }. Inserts into Parent.Pets via Parent.AddPetParentPet. PetType ∈ {Dog, Cat, Hamster, GuineaPig}; Gender ∈ {Male, Female}; Weight DECIMAL(5,2) > 0. MicrochipId is globally UNIQUE (filtered) — collision returns 409 MicrochipIdAlreadyExists. 404 PetParentNotFound (sproc 51202); 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest. Response carries medical-info fields too — all null until PATCH below runs.
-GET    /pet-parents/{petParentId}/pets                                           returns every pet on file for the parent with the full medical-info snapshot and embedded photo gallery. Backed by Parent.ListPetParentPets (two result sets: pets + their photos, joined in C# by PetId). Photos within each pet are ordered oldest-first. Empty array when the parent has no pets (or doesn't exist) — list semantics, no 404. Distinct response type PetParentPetWithPhotosResponse so AddPet / PATCH medical-info responses stay unchanged.
+GET    /pet-parents/{petParentId}/pets                                           returns every pet on file for the parent with the full medical-info snapshot, embedded photo gallery, and nextConsultations [{ type: Groomer|Vet|Trainer, nextConsultation }] (written by the provider booking-complete flow). Backed by Parent.ListPetParentPets (three result sets: pets + photos + next-consultations, joined in C# by PetId). Photos within each pet are ordered oldest-first. Empty array when the parent has no pets (or doesn't exist) — list semantics, no 404. Distinct response type PetParentPetWithPhotosResponse so AddPet / PATCH medical-info responses stay unchanged.
 GET    /pet-parents/{petParentId}/event-bookings                                 returns the caller's event-ticket bookings — slim summary cards with the joined event (title, category, eventType, start date/time, banner URL, and venue `eventLocation` for physical events — null for online) so the mobile "My Bookings" screen can render without a follow-up fetch. Backed by Event.ListEventBookingsByBookerEmail (SQL) + a per-booking Cosmos point read that hydrates the venue location (physical events only, fanned out in parallel; a failed read returns that card with a null location). **Booker identity on Event.EventBookings is free text (no FK to PetParents), so the filter matches on the caller's Firebase email claim** — the route's petParentId is verified by the ownership filter, then the JWT email is used as the SQL filter. Ordered most-recent first; cancelled bookings included. Mobile drills into GET /event-bookings/{bookingId} for the full shape with attendee names. 403 EmailClaimMissing when the JWT carries no email claim (rare).
 GET    /pet-parents/{petParentId}/bookings                                       the parent's own SERVICE bookings ("my bookings"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered (petParentId from JWT), so a caller only sees their own. [] when none — no 404. Backed by IBookingService.ListByPetParentAsync (sproc Booking.ListBookingsByPetParent). Same BookingResponse shape as the create/status endpoints. (Mirror of the provider host's GET /pet-parents/{petParentId}/bookings, which is unscoped on that host.)
 POST   /pet-parents/{petParentId}/bookings                                       body { petId, serviceId, bookingDate, startTime, endTime, serviceItemCode? } — parent-initiated SERVICE booking ("book now" from a search result/slot). Booker = route petParentId (ownership-filtered; never from body). Provider resolved server-side from serviceId. petId must be one of the caller's pets (404 PetNotFound / 403 Forbidden inline; sproc re-checks via THROW 51068 → 400 InvalidPetId). Same shared IBookingService.CreateAsync + race-safe Booking.CreateBooking sproc as the provider host — full validation chain (working hours, closures → 409 ServiceClosed, duration rules, groomer serviceItemCode, capacity → 409 CapacityExceeded, 409 ProviderInactive). Booking.Bookings now carries nullable PetId (FK → Parent.Pets), surfaced as petId on every booking read.
@@ -1041,7 +1057,7 @@ POST   /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/status        
 GET    /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/status-history full status audit trail, oldest-first (404 if not the parent's booking).
 GET    /pets/{petId}                                                             single pet profile — full basic-info + medical-info snapshot + embedded photo gallery (oldest-first), the same PetParentPetWithPhotosResponse shape as the list endpoint. Backed by Parent.GetPetParentPet (two result sets: pet + photos). Ownership-filtered (RequireOwnedPet → 404 PetNotFound for unknown pet, 403 Forbidden for someone else's). The handler also maps an empty result set to 404 defensively.
 PATCH  /pets/{petId}                                                             body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? } — same shape as AddPet. Updates the basic-info subset via Parent.UpdatePetParentPet; medical-info columns are deliberately untouched (use PATCH /medical-info). Same validations and error map as AddPet: 404 PetNotFound (sproc 51205); 409 MicrochipIdAlreadyExists; 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest.
-PATCH  /pets/{petId}/medical-info                                                body { vaccinationStatus, sterilizationStatus, medicalHistory?, temperament? }. Fills in medical fields on an existing pet via Parent.UpdatePetMedicalInfo. VaccinationStatus ∈ {Vaccinated, NotVaccinated}; SterilizationStatus ∈ {Sterilized, Intact}; Temperament ∈ {Anxious, Friendly, Aggressive} but OPTIONAL — omit/empty to store null (a pet can be added without a known temperament); MedicalHistory is free text and nullable. 404 PetNotFound (sproc 51203); 400 UnsupportedVaccinationStatus / UnsupportedSterilizationStatus / UnsupportedTemperament (only when a non-empty invalid value is sent) / InvalidRequest.
+PATCH  /pets/{petId}/medical-info                                                body { vaccinationStatus, sterilizationStatus, medicalHistory?, temperament?, vaccinationType?, vaccinationDose?, prescription? }. Fills in medical fields on an existing pet via Parent.UpdatePetMedicalInfo. VaccinationStatus ∈ {Vaccinated, NotVaccinated}; SterilizationStatus ∈ {Sterilized, Intact}; Temperament ∈ {Anxious, Friendly, Aggressive} but OPTIONAL — omit/empty to store null (a pet can be added without a known temperament); MedicalHistory, VaccinationType, VaccinationDose, and Prescription are free text and nullable (surfaced on every pet read AND on the booking-detail petDetails section). 404 PetNotFound (sproc 51203); 400 UnsupportedVaccinationStatus / UnsupportedSterilizationStatus / UnsupportedTemperament (only when a non-empty invalid value is sent) / InvalidRequest.
 DELETE /pets/{petId}                                                             permanently removes the pet via Parent.DeletePetParentPet (THROW 51214 → 404 PetNotFound). Photo rows (Parent.PetPhotos) cascade with the pet; photo blobs are left for a future sweep. Bookings that referenced the pet are detached (Booking.Bookings.PetId set null — the booking rows keep their denormalised snapshots) so the FK doesn't block deletion. Returns { petId, petParentId, deletedAtUtc }. Ownership-filtered (RequireOwnedPet → 404 PetNotFound for unknown pet, 403 Forbidden for someone else's).
 POST   /pets/{petId}/profile-image                                               multipart form-data { file }. The pet's SINGLE primary/profile photo (distinct from the gallery below). Same validations as the gallery upload (file required, <=3 MB, image/jpeg|png|webp). Uploads to the [PetProfilePhotos] folder ("pet-profile-photos/<petId>/<guid>.<ext>") and stores the URL on Parent.Pets.ProfilePhotoUrl via Parent.UpdatePetProfilePhoto. Returns { petId, profilePhotoUrl, updatedAtUtc }. Mirror of the parent-profile-photo endpoint. 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetNotFound (sproc 51220). Surfaced as profilePhotoUrl on every pet read (GET/list, add, patch). Ownership-filtered.
 POST   /pets/{petId}/photos                                                      multipart form-data { file }. Same per-file validations as the profile-photo endpoint: file required, <=3 MB, content type ∈ { image/jpeg, image/png, image/webp }. Uploads to the shared blob container under the [PetPhotos] folder ("pet-photos/<petId>/<guid>.<ext>") and inserts a row into Parent.PetPhotos via Parent.AddPetPhoto. One row per upload — a pet can have many photos (client makes N calls for N photos). 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 PetNotFound (sproc 51204). Parent.PetPhotos.PetId has ON DELETE CASCADE so deleting a pet removes its photo rows (blobs not cleaned up — future job).

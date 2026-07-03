@@ -55,7 +55,7 @@ public sealed record NightStayBookingModificationResponse(
 
 /// <summary>
 /// Night-stay single booking read, grouped into the same sections as the single-day
-/// <see cref="BookingDetailResponse"/> — Booking, Parent, Pet, Payment, and the
+/// <see cref="BookingDetailResponse"/> — Booking, Parent, Pet, Provider, Payment, and the
 /// provider's Cancellation Policy — plus the start-OTP (when startable) and the
 /// staged pending modification (when one awaits a response). Night-stay is App-only,
 /// so Parent/Pet always come from the joined records.
@@ -64,6 +64,7 @@ public sealed record NightStayBookingDetailResponse(
     NightStayBookingDetailsSection BookingDetails,
     ParentDetailsSection ParentDetails,
     PetDetailsSection PetDetails,
+    ProviderDetailsSection ProviderDetails,
     NightStayPaymentDetailsSection PaymentDetails,
     CancellationPolicyDetailsSection CancellationPolicy,
     StartOtpResponse? StartOtp,

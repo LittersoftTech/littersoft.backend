@@ -59,6 +59,7 @@ public static class SqlServiceRegistration
             services.AddSingleton<INightStayBookingSqlStore, InMemoryNightStayBookingStore>();
             services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
             services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
+            services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
         }
         else
         {
@@ -126,6 +127,11 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IParentPetService>(provider =>
                 new SqlParentPetService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IPetNextConsultationStore>(provider =>
+                new SqlPetNextConsultationStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 

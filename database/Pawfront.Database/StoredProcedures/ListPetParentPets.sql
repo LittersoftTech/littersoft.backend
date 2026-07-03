@@ -23,7 +23,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetParentId] = @PetParentId
     ORDER BY [CreatedAtUtc] ASC;
@@ -41,4 +44,15 @@ BEGIN
         ON p.[PetId] = ph.[PetId]
     WHERE p.[PetParentId] = @PetParentId
     ORDER BY ph.[CreatedAtUtc] ASC;
+
+    -- Result set 3: next-consultation dates for those pets, one row per
+    -- (pet, provider type). Grouped by PetId in the C# layer.
+    SELECT c.[PetId],
+           c.[ConsultationType],
+           c.[NextConsultationDate]
+    FROM [Parent].[PetNextConsultations] AS c
+    INNER JOIN [Parent].[Pets] AS p
+        ON p.[PetId] = c.[PetId]
+    WHERE p.[PetParentId] = @PetParentId
+    ORDER BY c.[ConsultationType] ASC;
 END;

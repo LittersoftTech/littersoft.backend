@@ -7,7 +7,7 @@ BEGIN
     -- Enriched single-booking read backing the night-stay booking-detail endpoint.
     -- Mirrors [Booking].[GetBookingDetail] for the multi-night model: the base
     -- columns PLUS the sequential JobNumber, payout fields, and the joined
-    -- pet-parent / pet records. Night-stay bookings are App-only (PetParentId is
+    -- pet-parent / pet / provider records. Night-stay bookings are App-only (PetParentId is
     -- always set; PetId is set for parent-app bookings), so there is no Custom
     -- shape — the customer + pet details always come from the joined records.
     SELECT b.[NightStayBookingId],
@@ -39,11 +39,25 @@ BEGIN
            pet.[PetName]          AS [PetProfileName],
            pet.[PetType]          AS [PetType],
            pet.[Gender]           AS [PetGender],
-           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl]
+           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl],
+           -- Provider join -----------------------------------------------------
+           prov.[FirstName]         AS [ProviderFirstName],
+           prov.[LastName]          AS [ProviderLastName],
+           prov.[Gender]            AS [ProviderGender],
+           prov.[MobileCountryCode] AS [ProviderMobileCountryCode],
+           prov.[MobileNumber]      AS [ProviderMobileNumber],
+           -- Pet medical extras ------------------------------------------------
+           pet.[Breed]              AS [PetBreed],
+           pet.[VaccinationStatus]  AS [PetVaccinationStatus],
+           pet.[VaccinationType]    AS [PetVaccinationType],
+           pet.[VaccinationDose]    AS [PetVaccinationDose],
+           pet.[Prescription]       AS [PetPrescription]
     FROM [Booking].[NightStayBookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
     LEFT JOIN [Parent].[Pets] AS pet
         ON pet.[PetId] = b.[PetId]
+    LEFT JOIN [Provider].[Providers] AS prov
+        ON prov.[ProviderId] = b.[ProviderId]
     WHERE b.[NightStayBookingId] = @NightStayBookingId;
 END;

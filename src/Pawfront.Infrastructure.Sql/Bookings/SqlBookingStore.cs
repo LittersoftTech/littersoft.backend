@@ -721,7 +721,17 @@ internal sealed class SqlBookingStore(
             PetProfileName: reader.IsDBNull(34) ? null : reader.GetString(34),
             PetType: reader.IsDBNull(35) ? null : reader.GetString(35),
             PetGender: reader.IsDBNull(36) ? null : reader.GetString(36),
-            PetPhotoUrl: reader.IsDBNull(37) ? null : reader.GetString(37));
+            PetPhotoUrl: reader.IsDBNull(37) ? null : reader.GetString(37),
+            ProviderFirstName: reader.IsDBNull(38) ? null : reader.GetString(38),
+            ProviderLastName: reader.IsDBNull(39) ? null : reader.GetString(39),
+            ProviderGender: reader.IsDBNull(40) ? null : reader.GetString(40),
+            ProviderMobileCountryCode: reader.IsDBNull(41) ? null : reader.GetString(41),
+            ProviderMobileNumber: reader.IsDBNull(42) ? null : reader.GetString(42),
+            PetBreed: reader.IsDBNull(43) ? null : reader.GetString(43),
+            PetVaccinationStatus: reader.IsDBNull(44) ? null : reader.GetString(44),
+            PetVaccinationType: reader.IsDBNull(45) ? null : reader.GetString(45),
+            PetVaccinationDose: reader.IsDBNull(46) ? null : reader.GetString(46),
+            PetPrescription: reader.IsDBNull(47) ? null : reader.GetString(47));
     }
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)

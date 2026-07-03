@@ -103,7 +103,11 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             row.CancelledAtUtc, row.PetId, PayoutStatus: "Pending", PayoutId: null,
             ParentFirstName: null, ParentLastName: null, ParentGender: null,
             ParentMobileCountryCode: null, ParentMobileNumber: null, ParentPhotoUrl: null,
-            PetProfileName: null, PetType: null, PetGender: null, PetPhotoUrl: null));
+            PetProfileName: null, PetType: null, PetGender: null, PetPhotoUrl: null,
+            ProviderFirstName: null, ProviderLastName: null, ProviderGender: null,
+            ProviderMobileCountryCode: null, ProviderMobileNumber: null,
+            PetBreed: null, PetVaccinationStatus: null, PetVaccinationType: null,
+            PetVaccinationDose: null, PetPrescription: null));
     }
 
     public Task<NightStayBookingResult> CancelAsync(

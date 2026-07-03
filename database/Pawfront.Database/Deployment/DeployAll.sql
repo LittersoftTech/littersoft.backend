@@ -1094,6 +1094,11 @@ BEGIN
         [SterilizationStatus] NVARCHAR(32) NULL,
         [MedicalHistory] NVARCHAR(MAX) NULL,
         [Temperament] NVARCHAR(32) NULL,
+        -- Additional medical-info fields — free text, captured via
+        -- PATCH /pets/{petId}/medical-info.
+        [VaccinationType] NVARCHAR(100) NULL,
+        [VaccinationDose] NVARCHAR(64) NULL,
+        [Prescription] NVARCHAR(MAX) NULL,
         -- Single primary/profile photo (distinct from the gallery in PetPhotos).
         [ProfilePhotoUrl] NVARCHAR(1000) NULL,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
@@ -1256,6 +1261,24 @@ BEGIN
 END
 GO
 
+-- Idempotent: add the extra medical-info columns (vaccination type/dose +
+-- prescription) to an existing [Parent].[Pets].
+IF EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Pets' AND [schema_id] = SCHEMA_ID(N'Parent'))
+AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'VaccinationType'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    PRINT 'Adding [VaccinationType]/[VaccinationDose]/[Prescription] to [Parent].[Pets].';
+    ALTER TABLE [Parent].[Pets]
+        ADD [VaccinationType] NVARCHAR(100) NULL,
+            [VaccinationDose] NVARCHAR(64) NULL,
+            [Prescription] NVARCHAR(MAX) NULL;
+END
+GO
+
 IF NOT EXISTS (
     SELECT 1 FROM sys.check_constraints
     WHERE [name] = N'CK_Pets_VaccinationStatus'
@@ -1316,6 +1339,43 @@ END
 ELSE
 BEGIN
     PRINT 'Table [Parent].[PetPhotos] already exists.';
+END
+GO
+
+
+-- 2.9.1b Parent.PetNextConsultations -------------------------------------------
+-- A pet's next-consultation dates, one row per provider type (Groomer | Vet |
+-- Trainer) — a newer date from the same type replaces the old one (upsert).
+-- Written by the provider's booking-complete flow; ON DELETE CASCADE with the pet.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'PetNextConsultations' AND [schema_id] = SCHEMA_ID(N'Parent'))
+BEGIN
+    CREATE TABLE [Parent].[PetNextConsultations]
+    (
+        [PetNextConsultationId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_PetNextConsultations_PetNextConsultationId] DEFAULT NEWSEQUENTIALID(),
+        [PetId] UNIQUEIDENTIFIER NOT NULL,
+        [ConsultationType] NVARCHAR(16) NOT NULL,
+        [NextConsultationDate] DATE NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetNextConsultations_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_PetNextConsultations_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+
+        CONSTRAINT [PK_PetNextConsultations] PRIMARY KEY CLUSTERED ([PetNextConsultationId] ASC),
+        CONSTRAINT [FK_PetNextConsultations_Pets_PetId]
+            FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]) ON DELETE CASCADE,
+        CONSTRAINT [CK_PetNextConsultations_ConsultationType]
+            CHECK ([ConsultationType] IN (N'Groomer', N'Vet', N'Trainer')),
+        CONSTRAINT [UQ_PetNextConsultations_PetId_ConsultationType]
+            UNIQUE ([PetId], [ConsultationType])
+    );
+    PRINT 'Created table [Parent].[PetNextConsultations].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Parent].[PetNextConsultations] already exists.';
 END
 GO
 
@@ -3599,7 +3659,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 
@@ -3617,7 +3680,11 @@ CREATE OR ALTER PROCEDURE [Parent].[UpdatePetMedicalInfo]
     @SterilizationStatus NVARCHAR(32),
     @MedicalHistory NVARCHAR(MAX) = NULL,
     -- Temperament is optional — null when the parent hasn't set one.
-    @Temperament NVARCHAR(32) = NULL
+    @Temperament NVARCHAR(32) = NULL,
+    -- Free-text optional medical fields — null when not provided.
+    @VaccinationType NVARCHAR(100) = NULL,
+    @VaccinationDose NVARCHAR(64) = NULL,
+    @Prescription NVARCHAR(MAX) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -3628,6 +3695,9 @@ BEGIN
         [SterilizationStatus] = @SterilizationStatus,
         [MedicalHistory] = @MedicalHistory,
         [Temperament] = @Temperament,
+        [VaccinationType] = @VaccinationType,
+        [VaccinationDose] = @VaccinationDose,
+        [Prescription] = @Prescription,
         [UpdatedAtUtc] = SYSUTCDATETIME()
     WHERE [PetId] = @PetId;
 
@@ -3652,7 +3722,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 END;
@@ -3983,7 +4056,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetParentId] = @PetParentId
     ORDER BY [CreatedAtUtc] ASC;
@@ -4001,6 +4077,17 @@ BEGIN
         ON p.[PetId] = ph.[PetId]
     WHERE p.[PetParentId] = @PetParentId
     ORDER BY ph.[CreatedAtUtc] ASC;
+
+    -- Result set 3: next-consultation dates for those pets, one row per
+    -- (pet, provider type). Grouped by PetId in the C# layer.
+    SELECT c.[PetId],
+           c.[ConsultationType],
+           c.[NextConsultationDate]
+    FROM [Parent].[PetNextConsultations] AS c
+    INNER JOIN [Parent].[Pets] AS p
+        ON p.[PetId] = c.[PetId]
+    WHERE p.[PetParentId] = @PetParentId
+    ORDER BY c.[ConsultationType] ASC;
 END;
 GO
 PRINT 'Created/updated [Parent].[ListPetParentPets].';
@@ -4032,7 +4119,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 
@@ -4046,9 +4136,71 @@ BEGIN
     FROM [Parent].[PetPhotos]
     WHERE [PetId] = @PetId
     ORDER BY [CreatedAtUtc] ASC;
+
+    -- Result set 3: the pet's next-consultation dates, one row per provider
+    -- type (Groomer | Vet | Trainer). Written by the booking-complete flow.
+    SELECT [PetId],
+           [ConsultationType],
+           [NextConsultationDate]
+    FROM [Parent].[PetNextConsultations]
+    WHERE [PetId] = @PetId
+    ORDER BY [ConsultationType] ASC;
 END;
 GO
 PRINT 'Created/updated [Parent].[GetPetParentPet].';
+GO
+
+
+-- 3.1k3 Parent.UpsertPetNextConsultation ----------------------------------------
+-- Records (or replaces) a pet's next-consultation date for one provider type
+-- (Groomer | Vet | Trainer). Called by the provider's booking-complete flow —
+-- one row per (PetId, ConsultationType). THROW 51221 when the pet is missing.
+CREATE OR ALTER PROCEDURE [Parent].[UpsertPetNextConsultation]
+    @PetId UNIQUEIDENTIFIER,
+    @ConsultationType NVARCHAR(16),
+    @NextConsultationDate DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM [Parent].[Pets] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [PetId] = @PetId)
+    BEGIN
+        THROW 51221, 'Pet was not found.', 1;
+    END
+
+    UPDATE [Parent].[PetNextConsultations]
+    SET [NextConsultationDate] = @NextConsultationDate,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    WHERE [PetId] = @PetId
+      AND [ConsultationType] = @ConsultationType;
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        INSERT INTO [Parent].[PetNextConsultations]
+            ([PetId], [ConsultationType], [NextConsultationDate])
+        VALUES
+            (@PetId, @ConsultationType, @NextConsultationDate);
+    END
+
+    SELECT [PetNextConsultationId],
+           [PetId],
+           [ConsultationType],
+           [NextConsultationDate],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Parent].[PetNextConsultations]
+    WHERE [PetId] = @PetId
+      AND [ConsultationType] = @ConsultationType;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[UpsertPetNextConsultation].';
 GO
 
 
@@ -4101,7 +4253,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 END;
@@ -5430,12 +5585,24 @@ BEGIN
            pet.[PetName]          AS [PetProfileName],
            pet.[PetType]          AS [PetType],
            pet.[Gender]           AS [PetGender],
-           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl]
+           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl],
+           prov.[FirstName]         AS [ProviderFirstName],
+           prov.[LastName]          AS [ProviderLastName],
+           prov.[Gender]            AS [ProviderGender],
+           prov.[MobileCountryCode] AS [ProviderMobileCountryCode],
+           prov.[MobileNumber]      AS [ProviderMobileNumber],
+           pet.[Breed]              AS [PetBreed],
+           pet.[VaccinationStatus]  AS [PetVaccinationStatus],
+           pet.[VaccinationType]    AS [PetVaccinationType],
+           pet.[VaccinationDose]    AS [PetVaccinationDose],
+           pet.[Prescription]       AS [PetPrescription]
     FROM [Booking].[Bookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
     LEFT JOIN [Parent].[Pets] AS pet
         ON pet.[PetId] = b.[PetId]
+    LEFT JOIN [Provider].[Providers] AS prov
+        ON prov.[ProviderId] = b.[ProviderId]
     WHERE b.[BookingId] = @BookingId;
 END;
 GO
@@ -5689,7 +5856,7 @@ BEGIN
 
     -- Engine for the simple "flip" transitions only (accept / decline / complete
     -- / cancel). Data-carrying flows (start-with-OTP, modifications) have their
-    -- own sprocs. COMPLETED is provider-only, from JOB_STARTED, evidence-gated.
+    -- own sprocs. COMPLETED is provider-only, from JOB_STARTED.
     IF @Actor NOT IN (N'Provider', N'Parent')
         THROW 51125, 'Actor must be Provider or Parent.', 1;
 
@@ -5733,10 +5900,6 @@ BEGIN
        OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
        OR (@NewStatus = N'COMPLETED'         AND @CurrentStatus <> N'JOB_STARTED')
         THROW 51126, 'This transition is not allowed from the current status.', 1;
-
-    IF @NewStatus = N'COMPLETED'
-       AND NOT EXISTS (SELECT 1 FROM [Booking].[BookingEvidence] WHERE [BookingId] = @BookingId)
-        THROW 51127, 'Upload at least one evidence photo before completing the job.', 1;
 
     UPDATE [Booking].[Bookings]
     SET [Status] = @NewStatus,
@@ -5978,12 +6141,24 @@ BEGIN
            pet.[PetName]          AS [PetProfileName],
            pet.[PetType]          AS [PetType],
            pet.[Gender]           AS [PetGender],
-           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl]
+           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl],
+           prov.[FirstName]         AS [ProviderFirstName],
+           prov.[LastName]          AS [ProviderLastName],
+           prov.[Gender]            AS [ProviderGender],
+           prov.[MobileCountryCode] AS [ProviderMobileCountryCode],
+           prov.[MobileNumber]      AS [ProviderMobileNumber],
+           pet.[Breed]              AS [PetBreed],
+           pet.[VaccinationStatus]  AS [PetVaccinationStatus],
+           pet.[VaccinationType]    AS [PetVaccinationType],
+           pet.[VaccinationDose]    AS [PetVaccinationDose],
+           pet.[Prescription]       AS [PetPrescription]
     FROM [Booking].[NightStayBookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
     LEFT JOIN [Parent].[Pets] AS pet
         ON pet.[PetId] = b.[PetId]
+    LEFT JOIN [Provider].[Providers] AS prov
+        ON prov.[ProviderId] = b.[ProviderId]
     WHERE b.[NightStayBookingId] = @NightStayBookingId;
 END;
 GO
@@ -6126,12 +6301,6 @@ BEGIN
        OR (@NewStatus = N'COMPLETED'         AND @CurrentStatus <> N'JOB_STARTED')
     BEGIN
         THROW 51246, 'This transition is not allowed from the current status.', 1;
-    END
-
-    IF @NewStatus = N'COMPLETED'
-       AND NOT EXISTS (SELECT 1 FROM [Booking].[NightStayBookingEvidence] WHERE [NightStayBookingId] = @NightStayBookingId)
-    BEGIN
-        THROW 51247, 'Upload at least one evidence photo before completing the job.', 1;
     END
 
     UPDATE [Booking].[NightStayBookings]

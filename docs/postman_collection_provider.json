@@ -1001,7 +1001,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/bookings/{{bookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","bookings","{{bookingId}}"] },
-            "description": "Sectioned detail: { bookingDetails, parentDetails, petDetails, paymentDetails, cancellationPolicy, startOtp (always null on the provider host — the OTP is parent-only), pendingModification (staged date/time proposal, populated only while a MODIFICATION_REQUEST_BY_* is open) }. `bookingDetails.serviceLocation` is now populated for App bookings (the offering's service-location) and `jobNotes` carries the booking notes; `cancellationPolicy` is a dedicated section { minimumHoursBeforeCancellation }."
+            "description": "Sectioned detail: { bookingDetails, parentDetails, petDetails, providerDetails, paymentDetails, cancellationPolicy, startOtp (always null on the provider host — the OTP is parent-only), pendingModification (staged date/time proposal, populated only while a MODIFICATION_REQUEST_BY_* is open) }. `providerDetails` = { providerId, providerName, providerMobileCountryCode, providerMobile, providerGender, providerPhotoUrl (null for now) }. `petDetails` also carries breed, vaccinationStatus, vaccinationType, vaccinationDose, prescription (from the pet's profile; null for Custom walk-ins). `bookingDetails.serviceLocation` is populated for App bookings (the offering's service-location) and `jobNotes` carries the booking notes; `cancellationPolicy` is a dedicated section { minimumHoursBeforeCancellation }."
           }
         },
         {
@@ -1057,7 +1057,7 @@
             "method": "POST",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/evidence", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","evidence"] },
             "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
-            "description": "Provider uploads a job-completion evidence photo (≤3 MB, JPEG/PNG/WebP). ≥1 photo is required before /complete."
+            "description": "Provider uploads a job-completion evidence photo (≤3 MB, JPEG/PNG/WebP). Optional — no longer required before /complete."
           }
         },
         {
@@ -1072,8 +1072,10 @@
           "name": "POST complete booking → COMPLETED",
           "request": {
             "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/complete", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","complete"] },
-            "description": "Provider completes a JOB_STARTED booking → COMPLETED. Blocked (error) until ≥1 evidence photo has been uploaded."
+            "body": { "mode": "raw", "raw": "{\n  \"nextConsultationDate\": \"2026-08-01\"\n}" },
+            "description": "Provider completes a JOB_STARTED booking → COMPLETED. Evidence photos are optional. The body is OPTIONAL: nextConsultationDate (yyyy-MM-dd) proposes the pet's next visit — stored on the pet as one entry per provider type (type derived from the booking's category: PetGroomer → Groomer, Vet → Vet, PetTrainer → Trainer) and returned on the parent host's pet reads as nextConsultations[]. Send an empty body to complete without one. 400 NextConsultationNotSupported (PetSitter/AdoptionSale booking) | NextConsultationRequiresPet (Custom walk-in, no linked pet) | InvalidNextConsultationDate (past date)."
           }
         },
         {
@@ -1152,7 +1154,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}"] },
-            "description": "Sectioned detail (now mirrors the single-day booking detail): { bookingDetails (incl. jobId, checkIn/out, nights, dropOff/pickUp, serviceLocation), parentDetails, petDetails, paymentDetails (pricePerNight, totalAmount, pawfrontFee), cancellationPolicy, startOtp (null on provider), pendingModification (staged check-in/check-out proposal) }."
+            "description": "Sectioned detail (now mirrors the single-day booking detail): { bookingDetails (incl. jobId, checkIn/out, nights, dropOff/pickUp, serviceLocation), parentDetails, petDetails (incl. breed, vaccinationStatus, vaccinationType, vaccinationDose, prescription), providerDetails, paymentDetails (pricePerNight, totalAmount, pawfrontFee), cancellationPolicy, startOtp (null on provider), pendingModification (staged check-in/check-out proposal) }."
           }
         },
         {
@@ -1205,7 +1207,7 @@
           "request": {
             "method": "POST",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/complete", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","complete"] },
-            "description": "Requires ≥1 evidence photo first."
+            "description": "Provider completes a JOB_STARTED stay → COMPLETED. Evidence photos are optional. (No nextConsultationDate here — night-stay is PetSitter-only, which has no consultation concept.)"
           }
         },
         {

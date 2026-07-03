@@ -72,7 +72,19 @@ public sealed record NightStayBookingDetailRow(
     string? PetProfileName,
     string? PetType,
     string? PetGender,
-    string? PetPhotoUrl);
+    string? PetPhotoUrl,
+    // Provider join.
+    string? ProviderFirstName,
+    string? ProviderLastName,
+    string? ProviderGender,
+    string? ProviderMobileCountryCode,
+    string? ProviderMobileNumber,
+    // Pet medical extras.
+    string? PetBreed,
+    string? PetVaccinationStatus,
+    string? PetVaccinationType,
+    string? PetVaccinationDose,
+    string? PetPrescription);
 
 /// <summary>
 /// Fully resolved night-stay booking-detail view: the raw <see cref="Row"/> plus the

@@ -381,7 +381,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "pets"]
             },
-            "description": "Returns all pets with embedded photo gallery (oldest-first). Empty array if none — list semantics, no 404."
+            "description": "Returns all pets with embedded photo gallery (oldest-first) and nextConsultations [{ type: Groomer|Vet|Trainer, nextConsultation }] — written by providers via the booking-complete flow. Empty array if none — list semantics, no 404."
           }
         },
         {
@@ -394,7 +394,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pets", "{{petId}}"]
             },
-            "description": "Single pet profile — full basic-info + medical-info snapshot + embedded photo gallery (oldest-first), same shape as the list endpoint. Ownership-filtered: 404 PetNotFound (unknown pet), 403 Forbidden (someone else's pet)."
+            "description": "Single pet profile — full basic-info + medical-info snapshot (incl. vaccinationType, vaccinationDose, prescription) + embedded photo gallery (oldest-first) + nextConsultations [{ type: Groomer|Vet|Trainer, nextConsultation }], same shape as the list endpoint. Ownership-filtered: 404 PetNotFound (unknown pet), 403 Forbidden (someone else's pet)."
           }
         },
         {
@@ -421,14 +421,14 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"vaccinationStatus\": \"Vaccinated\",\n  \"sterilizationStatus\": \"Sterilized\",\n  \"medicalHistory\": \"Mild seasonal allergies.\",\n  \"temperament\": \"Friendly\"\n}"
+              "raw": "{\n  \"vaccinationStatus\": \"Vaccinated\",\n  \"sterilizationStatus\": \"Sterilized\",\n  \"medicalHistory\": \"Mild seasonal allergies.\",\n  \"temperament\": \"Friendly\",\n  \"vaccinationType\": \"Rabies\",\n  \"vaccinationDose\": \"Booster\",\n  \"prescription\": \"Antihistamine 5mg daily during pollen season.\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/pets/{{petId}}/medical-info",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pets", "{{petId}}", "medical-info"]
             },
-            "description": "vaccinationStatus ∈ {Vaccinated, NotVaccinated}; sterilizationStatus ∈ {Sterilized, Intact}; temperament ∈ {Anxious, Friendly, Aggressive} but OPTIONAL (omit/empty → null); medicalHistory optional. Only vaccination + sterilization gate onboarding completeness."
+            "description": "vaccinationStatus ∈ {Vaccinated, NotVaccinated}; sterilizationStatus ∈ {Sterilized, Intact}; temperament ∈ {Anxious, Friendly, Aggressive} but OPTIONAL (omit/empty → null); medicalHistory, vaccinationType, vaccinationDose, and prescription are optional free text (omit/empty → null — note this PATCH overwrites ALL medical fields, so resend values you want to keep). Only vaccination + sterilization gate onboarding completeness. The extras are also surfaced on the booking-detail petDetails section."
           }
         },
         {
@@ -874,7 +874,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}"]
             },
-            "description": "Single booking read, sectioned: { bookingDetails, parentDetails, petDetails, paymentDetails, cancellationPolicy, startOtp, pendingModification }. `bookingDetails.serviceLocation` is now populated for App bookings too (the provider offering's service-location, e.g. PetHotel / CustomerPlace / Both) and `bookingDetails.jobNotes` carries the notes captured at booking time. `cancellationPolicy` is a dedicated section { minimumHoursBeforeCancellation }. When startable, startOtp carries the plaintext code + expiry for the parent to read to the provider (who enters it on the provider host's /start). pendingModification carries a staged proposed date/time. 404 if not your booking."
+            "description": "Single booking read, sectioned: { bookingDetails, parentDetails, petDetails, providerDetails, paymentDetails, cancellationPolicy, startOtp, pendingModification }. `providerDetails` = { providerId, providerName, providerMobileCountryCode, providerMobile, providerGender, providerPhotoUrl (null for now) }. `petDetails` also carries breed, vaccinationStatus, vaccinationType, vaccinationDose, prescription (from the pet's profile). `bookingDetails.serviceLocation` is populated for App bookings too (the provider offering's service-location, e.g. PetHotel / CustomerPlace / Both) and `bookingDetails.jobNotes` carries the notes captured at booking time. `cancellationPolicy` is a dedicated section { minimumHoursBeforeCancellation }. When startable, startOtp carries the plaintext code + expiry for the parent to read to the provider (who enters it on the provider host's /start). pendingModification carries a staged proposed date/time. 404 if not your booking."
           }
         },
         {
@@ -1005,7 +1005,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}"]
             },
-            "description": "Single night-stay booking — now sectioned to match the single-day booking detail: { bookingDetails (incl. jobId, checkIn/out, nights, dropOff/pickUp, serviceLocation), parentDetails, petDetails, paymentDetails (pricePerNight, totalAmount, pawfrontFee), cancellationPolicy, startOtp (when startable), pendingModification (staged date-range proposal) }. 404 NightStayBookingNotFound if unknown or not yours."
+            "description": "Single night-stay booking — now sectioned to match the single-day booking detail: { bookingDetails (incl. jobId, checkIn/out, nights, dropOff/pickUp, serviceLocation), parentDetails, petDetails (incl. breed, vaccinationStatus, vaccinationType, vaccinationDose, prescription), providerDetails, paymentDetails (pricePerNight, totalAmount, pawfrontFee), cancellationPolicy, startOtp (when startable), pendingModification (staged date-range proposal) }. 404 NightStayBookingNotFound if unknown or not yours."
           }
         },
         {

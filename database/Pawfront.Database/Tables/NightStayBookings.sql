@@ -35,7 +35,7 @@ CREATE TABLE [Booking].[NightStayBookings]
         CONSTRAINT [DF_NightStayBookings_PayoutStatus] DEFAULT N'Pending',
     [PayoutId] NVARCHAR(64) NULL,
     -- Same expanded "job" lifecycle as [Booking].[Bookings] (accept/decline,
-    -- start-with-OTP, evidence-gated complete, parent/provider modification
+    -- start-with-OTP, complete, parent/provider modification
     -- proposals). Capacity-freeing statuses are the two cancelled ones PLUS
     -- PROVIDER_DECLINED; every other status still holds the stay's per-night
     -- capacity. APPROVAL_NEEDED is deprecated but kept allowed for legacy rows.

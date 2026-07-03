@@ -3,6 +3,7 @@ using Pawfront.Application.Availability;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Offerings;
+using Pawfront.Application.ParentPets;
 using Pawfront.Application.Policies;
 using Pawfront.Domain.Services;
 
@@ -14,6 +15,7 @@ internal sealed class BookingService(
     IProviderAvailabilityService availabilityService,
     IProviderClosureReader closureReader,
     IProviderPolicyService policyService,
+    IPetNextConsultationStore nextConsultationStore,
     IOptions<PawfrontFeeOptions> feeOptions) : IBookingService, IDailyBookingReader
 {
     public async Task<BookingResult> CreateAsync(
@@ -313,6 +315,55 @@ internal sealed class BookingService(
             command.ActorId,
             command.Note,
             cancellationToken);
+    }
+
+    public async Task<BookingResult> CompleteAsync(
+        CompleteBookingCommand command,
+        CancellationToken cancellationToken)
+    {
+        // Validate the consultation request BEFORE transitioning, so a bad body
+        // doesn't leave the booking completed with the date silently dropped.
+        string? consultationType = null;
+        Guid? petId = null;
+        if (command.NextConsultationDate is { } nextDate)
+        {
+            var booking = await sqlStore.GetAsync(command.BookingId, cancellationToken)
+                ?? throw new BookingNotFoundException(command.BookingId);
+
+            consultationType = booking.ServiceCategory switch
+            {
+                nameof(ProviderServiceCategory.PetGroomer) => "Groomer",
+                nameof(ProviderServiceCategory.Vet) => "Vet",
+                nameof(ProviderServiceCategory.PetTrainer) => "Trainer",
+                _ => throw new NextConsultationNotSupportedException(booking.ServiceCategory)
+            };
+
+            petId = booking.PetId
+                ?? throw new NextConsultationRequiresPetException(command.BookingId);
+
+            if (nextDate < DateOnly.FromDateTime(DateTime.UtcNow.Date))
+            {
+                throw new InvalidNextConsultationDateException(nextDate);
+            }
+        }
+
+        var result = await sqlStore.UpdateStatusAsync(
+            command.BookingId,
+            BookingStatuses.Completed,
+            BookingStatusActor.Provider,
+            command.ProviderId,
+            note: null,
+            cancellationToken);
+
+        // Only stored once the transition succeeded — the status engine is the
+        // authority on party/from-state rules.
+        if (consultationType is not null && petId is not null)
+        {
+            await nextConsultationStore.UpsertAsync(
+                petId.Value, consultationType, command.NextConsultationDate!.Value, cancellationToken);
+        }
+
+        return result;
     }
 
     public Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(

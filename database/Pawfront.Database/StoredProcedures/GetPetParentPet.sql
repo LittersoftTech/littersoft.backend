@@ -22,7 +22,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 
@@ -36,4 +39,13 @@ BEGIN
     FROM [Parent].[PetPhotos]
     WHERE [PetId] = @PetId
     ORDER BY [CreatedAtUtc] ASC;
+
+    -- Result set 3: the pet's next-consultation dates, one row per provider
+    -- type (Groomer | Vet | Trainer). Written by the booking-complete flow.
+    SELECT [PetId],
+           [ConsultationType],
+           [NextConsultationDate]
+    FROM [Parent].[PetNextConsultations]
+    WHERE [PetId] = @PetId
+    ORDER BY [ConsultationType] ASC;
 END;

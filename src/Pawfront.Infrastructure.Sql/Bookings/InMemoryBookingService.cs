@@ -238,7 +238,17 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             PetProfileName: null,
             PetType: null,
             PetGender: null,
-            PetPhotoUrl: null);
+            PetPhotoUrl: null,
+            ProviderFirstName: null,
+            ProviderLastName: null,
+            ProviderGender: null,
+            ProviderMobileCountryCode: null,
+            ProviderMobileNumber: null,
+            PetBreed: null,
+            PetVaccinationStatus: null,
+            PetVaccinationType: null,
+            PetVaccinationDose: null,
+            PetPrescription: null);
         return Task.FromResult<BookingDetailRow?>(detail);
     }
 

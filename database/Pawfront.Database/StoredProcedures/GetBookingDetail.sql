@@ -6,7 +6,7 @@ BEGIN
 
     -- Enriched single-booking read backing the booking-detail endpoints. Returns
     -- the base booking columns PLUS the sequential JobNumber, payout fields, and
-    -- the joined pet-parent / pet records so App bookings (which store the
+    -- the joined pet-parent / pet / provider records so App bookings (which store the
     -- customer/pet fields as NULL — those columns are Custom-walk-in only) can
     -- still surface customer + pet details. The flat [Booking].[GetBooking] proc
     -- is intentionally left untouched; it backs the many internal callers that
@@ -50,11 +50,25 @@ BEGIN
            pet.[PetName]          AS [PetProfileName],
            pet.[PetType]          AS [PetType],
            pet.[Gender]           AS [PetGender],
-           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl]
+           pet.[ProfilePhotoUrl]  AS [PetPhotoUrl],
+           -- Provider join (both booking sources) ------------------------------
+           prov.[FirstName]         AS [ProviderFirstName],
+           prov.[LastName]          AS [ProviderLastName],
+           prov.[Gender]            AS [ProviderGender],
+           prov.[MobileCountryCode] AS [ProviderMobileCountryCode],
+           prov.[MobileNumber]      AS [ProviderMobileNumber],
+           -- Pet medical extras (App bookings) ---------------------------------
+           pet.[Breed]              AS [PetBreed],
+           pet.[VaccinationStatus]  AS [PetVaccinationStatus],
+           pet.[VaccinationType]    AS [PetVaccinationType],
+           pet.[VaccinationDose]    AS [PetVaccinationDose],
+           pet.[Prescription]       AS [PetPrescription]
     FROM [Booking].[Bookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
     LEFT JOIN [Parent].[Pets] AS pet
         ON pet.[PetId] = b.[PetId]
+    LEFT JOIN [Provider].[Providers] AS prov
+        ON prov.[ProviderId] = b.[ProviderId]
     WHERE b.[BookingId] = @BookingId;
 END;
