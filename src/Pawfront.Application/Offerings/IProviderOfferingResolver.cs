@@ -55,6 +55,14 @@ public abstract record OfferingResolution
     /// VetAppointment. Null for GroomingSession, where price is per menu
     /// item — use <see cref="IProviderOfferingResolver.ResolveGroomingItemAsync"/>.
     /// </param>
+    /// <param name="ServiceLocation">
+    /// Where the provider delivers this service — the offering's service-location
+    /// setting (category-specific values, e.g. PetHotel / CustomerPlace / Both for
+    /// pet sitters). For PetTrainer (which stores a set) the values are joined with
+    /// ", ". Null when the offering has none. Surfaced on the booking detail so an
+    /// app booking shows where the service happens (the Custom-walk-in analog of
+    /// the booking row's own ServiceLocation).
+    /// </param>
     public sealed record Resolved(
         Guid ServiceId,
         Guid ProviderId,
@@ -64,5 +72,6 @@ public abstract record OfferingResolution
         int Capacity,
         decimal DurationHours,
         bool IsDurationFixed,
-        decimal? Price) : OfferingResolution;
+        decimal? Price,
+        string? ServiceLocation = null) : OfferingResolution;
 }

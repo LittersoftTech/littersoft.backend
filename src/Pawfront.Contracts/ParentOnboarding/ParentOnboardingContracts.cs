@@ -40,7 +40,8 @@ public sealed record CompletePetParentProfileRequest(
     decimal Longitude,
     string ZipCode,
     string City,
-    string Description);
+    // Optional "About Me" — omit or send blank to store none.
+    string? Description);
 
 public sealed record PetParentProfileResponse(
     Guid PetParentId,
@@ -82,7 +83,8 @@ public sealed record UpdatePetParentProfileRequest(
     string AddressLine,
     string ZipCode,
     string City,
-    string Description);
+    // Optional "About Me" — omit or send blank to store none.
+    string? Description);
 
 /// <summary>
 /// Full profile read-back returned by <c>GET /pet-parents/{petParentId}/profile</c>

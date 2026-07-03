@@ -54,7 +54,8 @@ internal static class BookingEndpoints
                     request.BookingDate,
                     request.StartTime,
                     request.EndTime,
-                    request.ServiceItemCode),
+                    request.ServiceItemCode,
+                    request.JobNotes),
                 cancellationToken);
 
             return ApiResults.Created($"/api/v1/bookings/{result.BookingId}", ToResponse(result));
@@ -338,8 +339,37 @@ internal static class BookingEndpoints
     private static Task<IResult> DeclineBooking(Guid providerId, Guid bookingId, IBookingService s, CancellationToken ct)
         => SetStatusAsync(providerId, bookingId, BookingStatuses.ProviderDeclined, s, ct);
 
-    private static Task<IResult> CompleteBooking(Guid providerId, Guid bookingId, IBookingService s, CancellationToken ct)
-        => SetStatusAsync(providerId, bookingId, BookingStatuses.Completed, s, ct);
+    private static async Task<IResult> CompleteBooking(
+        Guid providerId,
+        Guid bookingId,
+        CompleteBookingRequest? request,
+        IBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await bookingService.CompleteAsync(
+                new CompleteBookingCommand(bookingId, providerId, request?.NextConsultationDate),
+                cancellationToken);
+            return ApiResults.Ok(ToResponse(result));
+        }
+        catch (NextConsultationNotSupportedException exception)
+        {
+            return ApiResults.BadRequest("NextConsultationNotSupported", exception.Message);
+        }
+        catch (NextConsultationRequiresPetException exception)
+        {
+            return ApiResults.BadRequest("NextConsultationRequiresPet", exception.Message);
+        }
+        catch (InvalidNextConsultationDateException exception)
+        {
+            return ApiResults.BadRequest("InvalidNextConsultationDate", exception.Message);
+        }
+        catch (Exception ex) when (IsBookingError(ex))
+        {
+            return MapBookingError(ex);
+        }
+    }
 
     private static Task<IResult> ProviderCancelBooking(Guid providerId, Guid bookingId, IBookingService s, CancellationToken ct)
         => SetStatusAsync(providerId, bookingId, BookingStatuses.ProviderCancelled, s, ct);
@@ -572,7 +602,7 @@ internal static class BookingEndpoints
                 row.EndTime,
                 row.Status,
                 row.Source,
-                row.ServiceLocation,
+                detail.ServiceLocation,
                 row.CustomerLocation,
                 row.JobNotes,
                 row.CreatedAtUtc,
@@ -590,7 +620,19 @@ internal static class BookingEndpoints
                 row.PetProfileName ?? row.PetName,
                 row.PetType ?? row.AnimalType,
                 row.PetGender,
-                row.PetPhotoUrl),
+                row.PetPhotoUrl,
+                row.PetBreed,
+                row.PetVaccinationStatus,
+                row.PetVaccinationType,
+                row.PetVaccinationDose,
+                row.PetPrescription),
+            new ProviderDetailsSection(
+                row.ProviderId,
+                CombineName(row.ProviderFirstName, row.ProviderLastName),
+                row.ProviderMobileCountryCode,
+                row.ProviderMobileNumber,
+                row.ProviderGender,
+                ProviderPhotoUrl: null),
             new PaymentDetailsSection(
                 detail.PricePerHour,
                 detail.TotalAmount,
@@ -598,6 +640,7 @@ internal static class BookingEndpoints
                 detail.FeePercentage,
                 row.PayoutStatus,
                 row.PayoutId),
+            new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
             startOtp,
             pendingModification);
     }

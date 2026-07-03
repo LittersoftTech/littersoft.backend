@@ -70,7 +70,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 

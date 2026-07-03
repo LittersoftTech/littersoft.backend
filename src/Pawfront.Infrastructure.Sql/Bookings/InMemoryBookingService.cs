@@ -54,6 +54,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         DateOnly bookingDate,
         TimeOnly startTime,
         TimeOnly endTime,
+        string? jobNotes,
         int capacity,
         CancellationToken cancellationToken)
     {
@@ -89,6 +90,7 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 BookingDate = bookingDate,
                 StartTime = startTime,
                 EndTime = endTime,
+                JobNotes = jobNotes,
                 Status = BookingStatuses.Created,
                 CreatedAtUtc = now,
                 UpdatedAtUtc = now,
@@ -236,7 +238,17 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             PetProfileName: null,
             PetType: null,
             PetGender: null,
-            PetPhotoUrl: null);
+            PetPhotoUrl: null,
+            ProviderFirstName: null,
+            ProviderLastName: null,
+            ProviderGender: null,
+            ProviderMobileCountryCode: null,
+            ProviderMobileNumber: null,
+            PetBreed: null,
+            PetVaccinationStatus: null,
+            PetVaccinationType: null,
+            PetVaccinationDose: null,
+            PetPrescription: null);
         return Task.FromResult<BookingDetailRow?>(detail);
     }
 

@@ -28,6 +28,7 @@ public interface IBookingSqlStore
         DateOnly bookingDate,
         TimeOnly startTime,
         TimeOnly endTime,
+        string? jobNotes,
         int capacity,
         CancellationToken cancellationToken);
 

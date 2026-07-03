@@ -17,8 +17,9 @@ public sealed record CreateEventCommand(
     // rather than inside the physical-only block.
     bool IsPaid,
     decimal? Price,
-    // Refund policy the creator advertises (every event type).
-    string CancellationPolicy,
+    // Refund policy the creator advertises. Optional (null when unset) — it
+    // doesn't apply to free events, so it's never required.
+    string? CancellationPolicy,
     // Joining link for ONLINE events (online-only; null for physical events).
     string? EventLink,
     PhysicalEventInput? Physical);
@@ -44,7 +45,7 @@ public sealed record CreateParentEventCommand(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     // Joining link for ONLINE events (online-only; null for physical events).
     string? EventLink,
     PhysicalEventInput? Physical);
@@ -71,7 +72,7 @@ public sealed record UpdateEventCommand(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     // Joining link for ONLINE events (online-only; null for physical events).
     string? EventLink,
     PhysicalEventInput? Physical);
@@ -96,7 +97,7 @@ public sealed record UpdateParentEventCommand(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     // Joining link for ONLINE events (online-only; null for physical events).
     string? EventLink,
     PhysicalEventInput? Physical);
@@ -137,7 +138,7 @@ public sealed record EventResult(
     // Ticketing is surfaced for every event type (physical AND online).
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     // Joining link for online events (null for physical events).
     string? EventLink,
     PhysicalEventResult? Physical,
@@ -176,7 +177,10 @@ public sealed record EventOrganizer(
     string Type,
     Guid Id,
     string? Name,
-    string? ImageUrl);
+    string? ImageUrl,
+    // Total events this organiser has created. Populated on the event-detail
+    // read (GET /events/{eventId}); null on list reads.
+    int? TotalEventsOrganized = null);
 
 public sealed record PhysicalEventResult(
     int MaximumCapacity,
@@ -209,7 +213,7 @@ public sealed record EventSqlSnapshot(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     // Joining link for online events (null for physical events). Read from the
     // last column of result set 1 in every event-returning sproc.
     string? EventLink,
@@ -244,7 +248,7 @@ public sealed record CreateEventSqlInput(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     string? EventLink);
 
 /// <summary>
@@ -267,7 +271,7 @@ public sealed record CreateParentEventSqlInput(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     string? EventLink);
 
 /// <summary>
@@ -291,7 +295,7 @@ public sealed record UpdateEventSqlInput(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     string? EventLink);
 
 /// <summary>
@@ -314,7 +318,7 @@ public sealed record UpdateParentEventSqlInput(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    string? CancellationPolicy,
     string? EventLink);
 
 /// <summary>

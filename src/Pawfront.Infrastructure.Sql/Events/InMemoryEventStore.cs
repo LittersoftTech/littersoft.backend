@@ -293,4 +293,15 @@ internal sealed class InMemoryEventStore : IEventSqlStore
         payoutMethods[eventId] = saved;
         return Task.FromResult<IReadOnlyList<string>>(saved);
     }
+
+    public Task<int> CountEventsByOrganizerAsync(
+        Guid? providerId,
+        Guid? petParentId,
+        CancellationToken cancellationToken)
+    {
+        var count = events.Values.Count(e =>
+            (providerId is not null && e.ProviderId == providerId)
+            || (petParentId is not null && e.PetParentId == petParentId));
+        return Task.FromResult(count);
+    }
 }

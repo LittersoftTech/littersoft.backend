@@ -32,7 +32,11 @@ public sealed record PetParentPetResponse(
     DateTimeOffset UpdatedAtUtc,
     // The pet's single primary/profile photo (distinct from the gallery). Null
     // until set via POST /pets/{petId}/profile-image.
-    string? ProfilePhotoUrl);
+    string? ProfilePhotoUrl,
+    // Free-text medical extras, captured via PATCH /pets/{petId}/medical-info.
+    string? VaccinationType,
+    string? VaccinationDose,
+    string? Prescription);
 
 public sealed record UpdatePetMedicalInfoRequest(
     string VaccinationStatus,
@@ -40,7 +44,11 @@ public sealed record UpdatePetMedicalInfoRequest(
     string? MedicalHistory,
     // Optional — a pet can be added without a known temperament. When omitted
     // or empty it's stored as null; when present it must be a valid value.
-    string? Temperament);
+    string? Temperament,
+    // Optional free-text medical extras — omitted/empty values are stored null.
+    string? VaccinationType,
+    string? VaccinationDose,
+    string? Prescription);
 
 /// <summary>
 /// Edits the basic-info subset of a pet (everything captured at AddPet time
@@ -59,6 +67,17 @@ public sealed record UpdatePetParentPetRequest(
     decimal Weight,
     string? MicrochipId,
     string? Description);
+
+/// <summary>
+/// One next-consultation entry on a pet — proposed by a provider when they
+/// complete a booking. One entry per provider type; a newer date from the same
+/// type replaces the old one.
+/// </summary>
+public sealed record PetNextConsultationResponse(
+    // "Groomer" | "Vet" | "Trainer" — derived from the completed booking's
+    // service category.
+    string Type,
+    DateOnly NextConsultation);
 
 public sealed record PetPhotoResponse(
     Guid PetPhotoId,
@@ -113,7 +132,14 @@ public sealed record PetParentPetWithPhotosResponse(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     // The pet's single primary/profile photo (distinct from the gallery above).
-    string? ProfilePhotoUrl);
+    string? ProfilePhotoUrl,
+    // Free-text medical extras, captured via PATCH /pets/{petId}/medical-info.
+    string? VaccinationType,
+    string? VaccinationDose,
+    string? Prescription,
+    // Next-consultation dates proposed by providers on booking completion —
+    // one entry per provider type (Groomer | Vet | Trainer). [] when none.
+    IReadOnlyList<PetNextConsultationResponse> NextConsultations);
 
 /// <summary>
 /// Returned by <c>POST /pets/{petId}/profile-image</c>. Slim confirmation —

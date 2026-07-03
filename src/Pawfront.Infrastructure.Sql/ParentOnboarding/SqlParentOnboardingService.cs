@@ -65,7 +65,8 @@ internal sealed class SqlParentOnboardingService(
         var addressLine = Required(request.AddressLine, nameof(request.AddressLine));
         var zipCode = Required(request.ZipCode, nameof(request.ZipCode));
         var city = Required(request.City, nameof(request.City));
-        var description = Required(request.Description, nameof(request.Description));
+        // Optional "About Me" — omitted/blank stores an empty string.
+        var description = request.Description?.Trim() ?? string.Empty;
         var latitude = ValidateLatitude(request.Latitude);
         var longitude = ValidateLongitude(request.Longitude);
 
@@ -187,7 +188,8 @@ internal sealed class SqlParentOnboardingService(
         var addressLine = Required(request.AddressLine, nameof(request.AddressLine));
         var zipCode = Required(request.ZipCode, nameof(request.ZipCode));
         var city = Required(request.City, nameof(request.City));
-        var description = Required(request.Description, nameof(request.Description));
+        // Optional "About Me" — omitted/blank stores an empty string.
+        var description = request.Description?.Trim() ?? string.Empty;
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);

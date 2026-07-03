@@ -3,6 +3,8 @@ using Pawfront.Application.Availability;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Offerings;
+using Pawfront.Application.ParentPets;
+using Pawfront.Application.Policies;
 using Pawfront.Domain.Services;
 
 namespace Pawfront.Application.Bookings;
@@ -12,6 +14,8 @@ internal sealed class BookingService(
     IProviderOfferingResolver offeringResolver,
     IProviderAvailabilityService availabilityService,
     IProviderClosureReader closureReader,
+    IProviderPolicyService policyService,
+    IPetNextConsultationStore nextConsultationStore,
     IOptions<PawfrontFeeOptions> feeOptions) : IBookingService, IDailyBookingReader
 {
     public async Task<BookingResult> CreateAsync(
@@ -102,6 +106,7 @@ internal sealed class BookingService(
             command.BookingDate,
             command.StartTime,
             command.EndTime,
+            TrimOrNull(command.JobNotes, maxLength: 2000, nameof(command.JobNotes)),
             offering.Capacity,
             cancellationToken);
     }
@@ -196,20 +201,48 @@ internal sealed class BookingService(
         }
 
         var durationHours = (decimal)(row.EndTime - row.StartTime).TotalHours;
+        var isCustom = string.Equals(row.Source, "Custom", StringComparison.Ordinal);
 
-        // Custom walk-ins carry their own per-hour price + window; App bookings
-        // are priced live from the provider's current offering.
-        var (unitPrice, total) = string.Equals(row.Source, "Custom", StringComparison.Ordinal)
-            ? ResolveCustomPricing(row, durationHours)
-            : await ResolveAppPricingAsync(row, durationHours, cancellationToken);
+        // Custom walk-ins carry their own per-hour price + window AND their own
+        // service-location ("MyLocation"/"CustomerLocation"). App bookings are
+        // priced live from the provider's current offering and inherit the
+        // offering's service-location setting (the "where" the service happens).
+        decimal? unitPrice;
+        decimal? total;
+        string? serviceLocation;
+        if (isCustom)
+        {
+            (unitPrice, total) = ResolveCustomPricing(row, durationHours);
+            serviceLocation = row.ServiceLocation;
+        }
+        else
+        {
+            var resolution = await offeringResolver.ResolveAsync(row.ServiceId, cancellationToken);
+            if (resolution is OfferingResolution.Resolved offering)
+            {
+                serviceLocation = offering.ServiceLocation;
+                (unitPrice, total) = await ResolveAppPricingAsync(offering, row, durationHours, cancellationToken);
+            }
+            else
+            {
+                // Service deactivated / not configured — can't price or locate it.
+                serviceLocation = null;
+                (unitPrice, total) = (null, null);
+            }
+        }
 
         var feePercentage = feeOptions.Value.PawfrontFeePercentage;
         decimal? fee = total is null
             ? null
             : Math.Round(total.Value * feePercentage / 100m, 2, MidpointRounding.AwayFromZero);
 
+        // The provider's advertised cancellation policy travels in its own section.
+        var policy = await policyService.GetAsync(row.ProviderId, cancellationToken);
+
         var jobId = $"PF-{row.JobNumber:D6}";
-        return new BookingDetailResult(row, jobId, unitPrice, total, fee, feePercentage);
+        return new BookingDetailResult(
+            row, jobId, unitPrice, total, fee, feePercentage,
+            serviceLocation, policy.MinimumHoursBeforeCancellation);
     }
 
     private static (decimal? UnitPrice, decimal? Total) ResolveCustomPricing(
@@ -223,15 +256,11 @@ internal sealed class BookingService(
     }
 
     private async Task<(decimal? UnitPrice, decimal? Total)> ResolveAppPricingAsync(
-        BookingDetailRow row, decimal durationHours, CancellationToken cancellationToken)
+        OfferingResolution.Resolved offering,
+        BookingDetailRow row,
+        decimal durationHours,
+        CancellationToken cancellationToken)
     {
-        var resolution = await offeringResolver.ResolveAsync(row.ServiceId, cancellationToken);
-        if (resolution is not OfferingResolution.Resolved offering)
-        {
-            // Service deactivated / not configured — can't price it; leave null.
-            return (null, null);
-        }
-
         // PetGroomer: the unit price is per menu item, resolved from the booking's
         // own ServiceItemCode. Grooming is a flat per-service charge (one item).
         if (offering.ServiceType == ProviderServiceTypes.GroomingSession)
@@ -286,6 +315,55 @@ internal sealed class BookingService(
             command.ActorId,
             command.Note,
             cancellationToken);
+    }
+
+    public async Task<BookingResult> CompleteAsync(
+        CompleteBookingCommand command,
+        CancellationToken cancellationToken)
+    {
+        // Validate the consultation request BEFORE transitioning, so a bad body
+        // doesn't leave the booking completed with the date silently dropped.
+        string? consultationType = null;
+        Guid? petId = null;
+        if (command.NextConsultationDate is { } nextDate)
+        {
+            var booking = await sqlStore.GetAsync(command.BookingId, cancellationToken)
+                ?? throw new BookingNotFoundException(command.BookingId);
+
+            consultationType = booking.ServiceCategory switch
+            {
+                nameof(ProviderServiceCategory.PetGroomer) => "Groomer",
+                nameof(ProviderServiceCategory.Vet) => "Vet",
+                nameof(ProviderServiceCategory.PetTrainer) => "Trainer",
+                _ => throw new NextConsultationNotSupportedException(booking.ServiceCategory)
+            };
+
+            petId = booking.PetId
+                ?? throw new NextConsultationRequiresPetException(command.BookingId);
+
+            if (nextDate < DateOnly.FromDateTime(DateTime.UtcNow.Date))
+            {
+                throw new InvalidNextConsultationDateException(nextDate);
+            }
+        }
+
+        var result = await sqlStore.UpdateStatusAsync(
+            command.BookingId,
+            BookingStatuses.Completed,
+            BookingStatusActor.Provider,
+            command.ProviderId,
+            note: null,
+            cancellationToken);
+
+        // Only stored once the transition succeeded — the status engine is the
+        // authority on party/from-state rules.
+        if (consultationType is not null && petId is not null)
+        {
+            await nextConsultationStore.UpsertAsync(
+                petId.Value, consultationType, command.NextConsultationDate!.Value, cancellationToken);
+        }
+
+        return result;
     }
 
     public Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(

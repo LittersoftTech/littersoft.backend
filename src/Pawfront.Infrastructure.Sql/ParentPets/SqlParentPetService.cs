@@ -123,6 +123,9 @@ internal sealed class SqlParentPetService(
         var sterilizationStatus = NormalizeSterilizationStatus(request.SterilizationStatus);
         var temperament = NormalizeTemperamentOrNull(request.Temperament);
         var medicalHistory = TrimOrNull(request.MedicalHistory);
+        var vaccinationType = TrimOrNull(request.VaccinationType);
+        var vaccinationDose = TrimOrNull(request.VaccinationDose);
+        var prescription = TrimOrNull(request.Prescription);
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -136,6 +139,9 @@ internal sealed class SqlParentPetService(
         command.Parameters.AddWithValue("@SterilizationStatus", sterilizationStatus);
         command.Parameters.AddWithValue("@MedicalHistory", DbValue(medicalHistory));
         command.Parameters.AddWithValue("@Temperament", DbValue(temperament));
+        command.Parameters.AddWithValue("@VaccinationType", DbValue(vaccinationType));
+        command.Parameters.AddWithValue("@VaccinationDose", DbValue(vaccinationDose));
+        command.Parameters.AddWithValue("@Prescription", DbValue(prescription));
 
         try
         {
@@ -168,10 +174,12 @@ internal sealed class SqlParentPetService(
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        // Result set 1: pets. We read into an intermediate list and an index
-        // by PetId so we can hang photos off the right row when set 2 lands.
-        var pets = new List<(PetParentPetWithPhotosResponseBuilder Builder, List<PetPhotoResponse> Photos)>();
+        // Result set 1: pets. We read into an intermediate list plus per-pet
+        // indexes so we can hang photos (set 2) and next-consultations (set 3)
+        // off the right row.
+        var pets = new List<(PetParentPetWithPhotosResponseBuilder Builder, List<PetPhotoResponse> Photos, List<PetNextConsultationResponse> Consultations)>();
         var index = new Dictionary<Guid, List<PetPhotoResponse>>();
+        var consultationIndex = new Dictionary<Guid, List<PetNextConsultationResponse>>();
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -192,11 +200,16 @@ internal sealed class SqlParentPetService(
                 Temperament: reader.IsDBNull(13) ? null : reader.GetString(13),
                 CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
                 UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero),
-                ProfilePhotoUrl: reader.IsDBNull(16) ? null : reader.GetString(16));
+                ProfilePhotoUrl: reader.IsDBNull(16) ? null : reader.GetString(16),
+                VaccinationType: reader.IsDBNull(17) ? null : reader.GetString(17),
+                VaccinationDose: reader.IsDBNull(18) ? null : reader.GetString(18),
+                Prescription: reader.IsDBNull(19) ? null : reader.GetString(19));
 
             var photos = new List<PetPhotoResponse>();
-            pets.Add((builder, photos));
+            var consultations = new List<PetNextConsultationResponse>();
+            pets.Add((builder, photos, consultations));
             index[builder.PetId] = photos;
+            consultationIndex[builder.PetId] = consultations;
         }
 
         // Result set 2: photos. Bucket each row by PetId; rows for pets we
@@ -221,8 +234,25 @@ internal sealed class SqlParentPetService(
             }
         }
 
+        // Result set 3: next-consultation dates. Bucket by PetId like photos.
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var petId = reader.GetGuid(0);
+                if (!consultationIndex.TryGetValue(petId, out var bucket))
+                {
+                    continue;
+                }
+
+                bucket.Add(new PetNextConsultationResponse(
+                    Type: reader.GetString(1),
+                    NextConsultation: DateOnly.FromDateTime(reader.GetDateTime(2))));
+            }
+        }
+
         return pets
-            .Select(entry => entry.Builder.Build(entry.Photos))
+            .Select(entry => entry.Builder.Build(entry.Photos, entry.Consultations))
             .ToList();
     }
 
@@ -263,7 +293,10 @@ internal sealed class SqlParentPetService(
             Temperament: reader.IsDBNull(13) ? null : reader.GetString(13),
             CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
             UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero),
-            ProfilePhotoUrl: reader.IsDBNull(16) ? null : reader.GetString(16));
+            ProfilePhotoUrl: reader.IsDBNull(16) ? null : reader.GetString(16),
+            VaccinationType: reader.IsDBNull(17) ? null : reader.GetString(17),
+            VaccinationDose: reader.IsDBNull(18) ? null : reader.GetString(18),
+            Prescription: reader.IsDBNull(19) ? null : reader.GetString(19));
 
         // Result set 2: the pet's photo gallery (oldest-first).
         var photos = new List<PetPhotoResponse>();
@@ -280,7 +313,19 @@ internal sealed class SqlParentPetService(
             }
         }
 
-        return builder.Build(photos);
+        // Result set 3: next-consultation dates (one per provider type).
+        var consultations = new List<PetNextConsultationResponse>();
+        if (await reader.NextResultAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                consultations.Add(new PetNextConsultationResponse(
+                    Type: reader.GetString(1),
+                    NextConsultation: DateOnly.FromDateTime(reader.GetDateTime(2))));
+            }
+        }
+
+        return builder.Build(photos, consultations);
     }
 
     public async Task<DeletePetResponse> DeletePetAsync(
@@ -371,9 +416,14 @@ internal sealed class SqlParentPetService(
         string? Temperament,
         DateTimeOffset CreatedAtUtc,
         DateTimeOffset UpdatedAtUtc,
-        string? ProfilePhotoUrl)
+        string? ProfilePhotoUrl,
+        string? VaccinationType,
+        string? VaccinationDose,
+        string? Prescription)
     {
-        public PetParentPetWithPhotosResponse Build(IReadOnlyList<PetPhotoResponse> photos) =>
+        public PetParentPetWithPhotosResponse Build(
+            IReadOnlyList<PetPhotoResponse> photos,
+            IReadOnlyList<PetNextConsultationResponse> nextConsultations) =>
             new(
                 PetId,
                 PetParentId,
@@ -392,7 +442,11 @@ internal sealed class SqlParentPetService(
                 photos,
                 CreatedAtUtc,
                 UpdatedAtUtc,
-                ProfilePhotoUrl);
+                ProfilePhotoUrl,
+                VaccinationType,
+                VaccinationDose,
+                Prescription,
+                nextConsultations);
     }
 
     public async Task<PetPhotoResponse> AddPhotoAsync(
@@ -490,7 +544,10 @@ internal sealed class SqlParentPetService(
             reader.IsDBNull(13) ? null : reader.GetString(13),
             new DateTimeOffset(reader.GetDateTime(14), TimeSpan.Zero),
             new DateTimeOffset(reader.GetDateTime(15), TimeSpan.Zero),
-            reader.IsDBNull(16) ? null : reader.GetString(16));
+            reader.IsDBNull(16) ? null : reader.GetString(16),
+            reader.IsDBNull(17) ? null : reader.GetString(17),
+            reader.IsDBNull(18) ? null : reader.GetString(18),
+            reader.IsDBNull(19) ? null : reader.GetString(19));
     }
 
     private static string NormalizeVaccinationStatus(string? value)

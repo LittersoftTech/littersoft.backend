@@ -25,10 +25,10 @@ CREATE TABLE [Event].[Events]
     [IsPaid] BIT NOT NULL
         CONSTRAINT [DF_Events_IsPaid] DEFAULT 0,
     [Price] DECIMAL(18, 2) NULL,
-    -- Refund policy the creator advertises (every event type). One of
-    -- FullRefundUpTo4Hours / FullRefundUpTo2Hours / NoRefund.
-    [CancellationPolicy] NVARCHAR(32) NOT NULL
-        CONSTRAINT [DF_Events_CancellationPolicy] DEFAULT N'NoRefund',
+    -- Refund policy the creator advertises. Optional (NULL when unset) — it
+    -- doesn't apply to free events, so it's never required. When set it is one
+    -- of FullRefundUpTo4Hours / FullRefundUpTo2Hours / NoRefund (CHECK below).
+    [CancellationPolicy] NVARCHAR(32) NULL,
     -- Joining link for ONLINE events (e.g. the meeting URL). NULL for physical
     -- events, which carry a venue location in the Cosmos extension doc instead.
     [EventLink] NVARCHAR(1000) NULL,

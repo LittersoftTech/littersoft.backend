@@ -59,6 +59,21 @@ public interface IBookingService
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// Provider ends the job (→ COMPLETED via the same status engine as
+    /// <see cref="UpdateStatusAsync"/>), optionally storing the pet's next
+    /// consultation date (one per provider type; the type is derived from the
+    /// booking's service category). Throws
+    /// <see cref="NextConsultationNotSupportedException"/> (PetSitter /
+    /// PetAdoptionAndSale booking), <see cref="NextConsultationRequiresPetException"/>
+    /// (no linked pet), or <see cref="InvalidNextConsultationDateException"/>
+    /// (past date) — all validated BEFORE the status transition — plus the
+    /// status-engine exceptions.
+    /// </summary>
+    Task<BookingResult> CompleteAsync(
+        CompleteBookingCommand command,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Returns the full status-change audit trail for a booking, oldest-first
     /// (the seeded creation entry is first). Empty when the booking has no
     /// history (or doesn't exist) — list semantics, no exception.

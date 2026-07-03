@@ -404,7 +404,8 @@ internal static class EventEndpoints
                 result.Organizer.Type,
                 result.Organizer.Id,
                 result.Organizer.Name,
-                result.Organizer.ImageUrl),
+                result.Organizer.ImageUrl,
+                result.Organizer.TotalEventsOrganized),
             new EventBookingStatsResponse(
                 // "Max bookings" = the physical venue capacity; null/unlimited
                 // for online events.

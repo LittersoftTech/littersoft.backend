@@ -19,9 +19,11 @@ public sealed record CreateEventRequest(
     // IsPaid is true, Price is required (>= 0); otherwise Price is ignored.
     bool IsPaid,
     decimal? Price,
-    // Refund policy the creator advertises. One of: FullRefundUpTo4Hours,
-    // FullRefundUpTo2Hours, NoRefund. Required for every event type.
-    string CancellationPolicy,
+    // Refund policy the creator advertises. Optional — one of
+    // FullRefundUpTo4Hours / FullRefundUpTo2Hours / NoRefund, or null/omitted
+    // (it doesn't apply to free events, so it's never required). When supplied it
+    // must be one of the allowed values.
+    string? CancellationPolicy,
     // Joining link for ONLINE events (e.g. the meeting URL). Captured + returned
     // only for online events; ignored (stored null) for physical events, which
     // carry a venue location instead.
@@ -48,7 +50,8 @@ public sealed record UpdateEventRequest(
     TimeOnly EndTime,
     bool IsPaid,
     decimal? Price,
-    string CancellationPolicy,
+    // Optional refund policy (see CreateEventRequest.CancellationPolicy).
+    string? CancellationPolicy,
     // Joining link for online events (see CreateEventRequest.EventLink).
     string? EventLink,
     PhysicalEventRequest? Physical);
@@ -79,7 +82,9 @@ public sealed record PatchEventRequest(
     Optional<bool> IsPaid,
     // Nullable: null is meaningful only when the merged event is free.
     Optional<decimal?> Price,
-    Optional<string> CancellationPolicy,
+    // Optional + clearable: send null to clear the advertised refund policy,
+    // omit to keep the current one.
+    Optional<string?> CancellationPolicy,
     // Joining link for online events. Nullable + clearable: send null to clear,
     // omit to keep. Only meaningful when the merged event is online.
     Optional<string?> EventLink,
@@ -128,8 +133,9 @@ public sealed record EventResponse(
     // sits on the main object rather than inside the physical-only block.
     bool IsPaid,
     decimal? Price,
-    // Refund policy (FullRefundUpTo4Hours | FullRefundUpTo2Hours | NoRefund).
-    string CancellationPolicy,
+    // Refund policy (FullRefundUpTo4Hours | FullRefundUpTo2Hours | NoRefund);
+    // null when the organiser didn't advertise one.
+    string? CancellationPolicy,
     // Joining link for online events (e.g. the meeting URL); null for physical
     // events (which carry a venue location in the `physical` block instead).
     string? EventLink,
@@ -187,7 +193,10 @@ public sealed record EventOrganizerResponse(
     string Type,
     Guid Id,
     string? Name,
-    string? ImageUrl);
+    string? ImageUrl,
+    // Total events this organiser has created. Populated on the event-detail
+    // read (GET /events/{eventId}); null on list reads.
+    int? TotalEventsOrganized = null);
 
 public sealed record PhysicalEventResponse(
     int MaximumCapacity,

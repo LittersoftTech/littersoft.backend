@@ -8,6 +8,10 @@ public sealed record CreateBookingCommand(
     TimeOnly StartTime,
     TimeOnly EndTime,
     string? ServiceItemCode,
+    // Free-text notes the parent attaches to the job (access instructions, the
+    // pet's quirks, etc.). Optional; captured at create time and surfaced on the
+    // booking-detail read.
+    string? JobNotes = null,
     // Which of the parent's pets the booking is for. Optional — the provider
     // host's booking flow doesn't capture it; the parent host's does. Ownership
     // (pet belongs to PetParentId) is validated by the caller AND the sproc.
@@ -122,7 +126,19 @@ public sealed record BookingDetailRow(
     string? PetProfileName,
     string? PetType,
     string? PetGender,
-    string? PetPhotoUrl);
+    string? PetPhotoUrl,
+    // Provider join — present for both App and Custom bookings.
+    string? ProviderFirstName,
+    string? ProviderLastName,
+    string? ProviderGender,
+    string? ProviderMobileCountryCode,
+    string? ProviderMobileNumber,
+    // Pet medical extras (App bookings) — null for Custom rows.
+    string? PetBreed,
+    string? PetVaccinationStatus,
+    string? PetVaccinationType,
+    string? PetVaccinationDose,
+    string? PetPrescription);
 
 /// <summary>
 /// Fully resolved booking-detail view: the raw <see cref="Row"/> plus the friendly
@@ -137,7 +153,14 @@ public sealed record BookingDetailResult(
     decimal? PricePerHour,
     decimal? TotalAmount,
     decimal? PawfrontFee,
-    decimal FeePercentage);
+    decimal FeePercentage,
+    // Effective service location ("where the provider delivers the service"): the
+    // Custom row's own value, or — for App bookings — the provider offering's
+    // service-location setting. Null when the offering can't be resolved.
+    string? ServiceLocation,
+    // The provider's advertised cancellation policy (minimum hours before a
+    // cancellation is allowed): null | 24 | 48 | 72 | 96. Null when none is set.
+    int? MinimumHoursBeforeCancellation);
 
 /// <summary>Which party is driving a booking status change.</summary>
 public enum BookingStatusActor
@@ -301,6 +324,29 @@ public sealed record BookingModificationResult(
     TimeOnly ProposedEndTime,
     string? Note,
     DateTimeOffset CreatedAtUtc);
+
+/// <summary>
+/// The provider ends the job (→ COMPLETED), optionally proposing the pet's next
+/// consultation date. The consultation type is derived from the booking's
+/// service category (PetGroomer → Groomer, Vet → Vet, PetTrainer → Trainer),
+/// never from the client.
+/// </summary>
+public sealed record CompleteBookingCommand(
+    Guid BookingId,
+    Guid ProviderId,
+    DateOnly? NextConsultationDate);
+
+/// <summary>A next-consultation date was supplied on a category that has no consultation concept (PetSitter / PetAdoptionAndSale).</summary>
+public sealed class NextConsultationNotSupportedException(string serviceCategory)
+    : Exception($"A next-consultation date cannot be set for a '{serviceCategory}' booking — only Groomer, Vet, and Trainer bookings support one.");
+
+/// <summary>A next-consultation date was supplied on a booking with no linked pet (Custom walk-in / legacy row).</summary>
+public sealed class NextConsultationRequiresPetException(Guid bookingId)
+    : Exception($"Booking '{bookingId}' has no linked pet to store a next-consultation date on.");
+
+/// <summary>The supplied next-consultation date is in the past.</summary>
+public sealed class InvalidNextConsultationDateException(DateOnly date)
+    : Exception($"The next-consultation date '{date:yyyy-MM-dd}' must not be in the past.");
 
 /// <summary>The booking is not in a state the job can be started from.</summary>
 public sealed class BookingNotStartableException(Guid bookingId)

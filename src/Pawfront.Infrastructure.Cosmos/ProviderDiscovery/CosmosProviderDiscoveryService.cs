@@ -93,6 +93,49 @@ internal sealed class CosmosProviderDiscoveryService(
             .ToList();
     }
 
+    public async Task<ProviderSummary?> GetSummaryAsync(
+        Guid providerId,
+        string serviceCategory,
+        CancellationToken cancellationToken)
+    {
+        var container = await containerAccessor.GetContainerAsync(cancellationToken);
+        var id = providerId.ToString();
+
+        return serviceCategory switch
+        {
+            nameof(ProviderServiceCategory.PetSitter) =>
+                await ReadSummaryAsync<PetSitterServiceDocument>(container, id, serviceCategory, ToPetSitterSummary, cancellationToken),
+            nameof(ProviderServiceCategory.PetGroomer) =>
+                await ReadSummaryAsync<PetGroomerServiceDocument>(container, id, serviceCategory, ToPetGroomerSummary, cancellationToken),
+            nameof(ProviderServiceCategory.PetTrainer) =>
+                await ReadSummaryAsync<PetTrainerServiceDocument>(container, id, serviceCategory, ToPetTrainerSummary, cancellationToken),
+            nameof(ProviderServiceCategory.PetAdoptionAndSale) =>
+                await ReadSummaryAsync<PetAdoptionSaleServiceDocument>(container, id, serviceCategory, ToPetAdoptionSaleSummary, cancellationToken),
+            nameof(ProviderServiceCategory.Vet) =>
+                await ReadSummaryAsync<VetServiceDocument>(container, id, serviceCategory, ToVetSummary, cancellationToken),
+            _ => null
+        };
+    }
+
+    private static async Task<ProviderSummary?> ReadSummaryAsync<TDoc>(
+        Container container,
+        string id,
+        string category,
+        Func<TDoc, ProviderSummary> map,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await container.ReadItemAsync<TDoc>(
+                id, new PartitionKey(category), cancellationToken: cancellationToken);
+            return map(response.Resource);
+        }
+        catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+    }
+
     private static async Task<List<ProviderSummary>> QueryAsync<TDoc>(
         Container container,
         string category,

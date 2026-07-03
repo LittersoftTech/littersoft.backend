@@ -4,7 +4,11 @@ CREATE OR ALTER PROCEDURE [Parent].[UpdatePetMedicalInfo]
     @SterilizationStatus NVARCHAR(32),
     @MedicalHistory NVARCHAR(MAX) = NULL,
     -- Temperament is optional — null when the parent hasn't set one.
-    @Temperament NVARCHAR(32) = NULL
+    @Temperament NVARCHAR(32) = NULL,
+    -- Free-text optional medical fields — null when not provided.
+    @VaccinationType NVARCHAR(100) = NULL,
+    @VaccinationDose NVARCHAR(64) = NULL,
+    @Prescription NVARCHAR(MAX) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -15,6 +19,9 @@ BEGIN
         [SterilizationStatus] = @SterilizationStatus,
         [MedicalHistory] = @MedicalHistory,
         [Temperament] = @Temperament,
+        [VaccinationType] = @VaccinationType,
+        [VaccinationDose] = @VaccinationDose,
+        [Prescription] = @Prescription,
         [UpdatedAtUtc] = SYSUTCDATETIME()
     WHERE [PetId] = @PetId;
 
@@ -39,7 +46,10 @@ BEGIN
            [Temperament],
            [CreatedAtUtc],
            [UpdatedAtUtc],
-           [ProfilePhotoUrl]
+           [ProfilePhotoUrl],
+           [VaccinationType],
+           [VaccinationDose],
+           [Prescription]
     FROM [Parent].[Pets]
     WHERE [PetId] = @PetId;
 END;

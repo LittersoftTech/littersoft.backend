@@ -6,7 +6,10 @@ public sealed record CreateBookingRequest(
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime,
-    string? ServiceItemCode);
+    string? ServiceItemCode,
+    // Optional free-text notes for the job (access instructions, the pet's
+    // quirks, etc.). Captured at create time and surfaced on the booking detail.
+    string? JobNotes);
 
 /// <summary>
 /// Body for <c>POST /pet-parents/{petParentId}/bookings</c> on the pet-parent
@@ -20,7 +23,10 @@ public sealed record CreateParentBookingRequest(
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime,
-    string? ServiceItemCode);
+    string? ServiceItemCode,
+    // Optional free-text notes for the job (access instructions, the pet's
+    // quirks, etc.). Captured at create time and surfaced on the booking detail.
+    string? JobNotes);
 
 /// <summary>
 /// Provider-initiated private/custom booking for an unregistered walk-in.
@@ -57,6 +63,17 @@ public sealed record UpdateBookingStatusRequest(string Status, string? Note);
 
 /// <summary>Body for <c>POST .../bookings/{bookingId}/start</c> (provider).</summary>
 public sealed record StartBookingRequest(string OtpCode);
+
+/// <summary>
+/// Optional body for <c>POST .../bookings/{bookingId}/complete</c> (provider).
+/// <see cref="NextConsultationDate"/> lets the provider propose the pet's next
+/// visit while ending the job — stored on the pet (one entry per provider type;
+/// the type is derived server-side from the booking's service category:
+/// PetGroomer → Groomer, Vet → Vet, PetTrainer → Trainer). Omit the body (or the
+/// field) to complete without one. Only valid for those three categories AND
+/// when the booking has a linked pet (App bookings).
+/// </summary>
+public sealed record CompleteBookingRequest(DateOnly? NextConsultationDate);
 
 /// <summary>
 /// The parent-facing start-OTP block, surfaced on the parent's booking-details
@@ -105,8 +122,8 @@ public sealed record BookingEvidenceResponse(
     DateTimeOffset CreatedAtUtc);
 
 /// <summary>
-/// Single booking-detail read, grouped into four sections — Booking, Parent, Pet,
-/// and Payment — plus the start-OTP (populated only when the booking is in a
+/// Single booking-detail read, grouped into sections — Booking, Parent, Pet,
+/// Provider, and Payment — plus the start-OTP (populated only when the booking is in a
 /// startable state — parent reads only, otherwise null) and the staged pending
 /// modification (populated only while a proposal awaits a response, otherwise
 /// null). For App bookings the Parent/Pet sections are filled from the joined
@@ -117,9 +134,22 @@ public sealed record BookingDetailResponse(
     BookingDetailsSection BookingDetails,
     ParentDetailsSection ParentDetails,
     PetDetailsSection PetDetails,
+    ProviderDetailsSection ProviderDetails,
     PaymentDetailsSection PaymentDetails,
+    // The provider's advertised cancellation policy for this booking's service,
+    // surfaced as its own section.
+    CancellationPolicyDetailsSection CancellationPolicy,
     StartOtpResponse? StartOtp,
     BookingModificationResponse? PendingModification);
+
+/// <summary>
+/// The provider's advertised cancellation policy for the booked service.
+/// <see cref="MinimumHoursBeforeCancellation"/> is null | 24 | 48 | 72 | 96 — the
+/// minimum notice (in hours) the provider requires before a cancellation; null
+/// when the provider hasn't set one.
+/// </summary>
+public sealed record CancellationPolicyDetailsSection(
+    int? MinimumHoursBeforeCancellation);
 
 /// <summary>The booking/job facts: identity, schedule, status, and (Custom-only)
 /// service-location + notes.</summary>
@@ -138,8 +168,12 @@ public sealed record BookingDetailsSection(
     string Status,
     // 'App' (registered pet parent) or 'Custom' (provider walk-in).
     string Source,
-    // Custom walk-ins only; null for App bookings.
+    // Where the provider delivers the service. For Custom walk-ins this is the
+    // booking's own MyLocation/CustomerLocation; for App bookings it's the
+    // provider offering's service-location setting (resolved live). Null when the
+    // offering can't be resolved.
     string? ServiceLocation,
+    // Free-text street address — Custom 'CustomerLocation' walk-ins only.
     string? CustomerLocation,
     string? JobNotes,
     DateTimeOffset CreatedAtUtc,
@@ -157,15 +191,35 @@ public sealed record ParentDetailsSection(
     string? ParentGender,
     string? CustomerPhotoUrl);
 
+/// <summary>The provider (service-side) facts, joined from the provider's profile —
+/// the counterpart of <see cref="ParentDetailsSection"/> so the parent app can show
+/// who delivers the service. <see cref="ProviderPhotoUrl"/> is null for now: the
+/// provider's business photo lives in the Cosmos offering doc, not on the SQL
+/// profile row (same posture as the event organizer block).</summary>
+public sealed record ProviderDetailsSection(
+    Guid ProviderId,
+    string? ProviderName,
+    string? ProviderMobileCountryCode,
+    string? ProviderMobile,
+    string? ProviderGender,
+    string? ProviderPhotoUrl);
+
 /// <summary>The pet facts. For App bookings these come from the joined pet record;
 /// for Custom walk-ins, petName + animalType come from the booking and the rest are
-/// null.</summary>
+/// null. Breed and the medical fields (vaccination status/type/dose, prescription)
+/// are joined from the pet's profile — null for Custom walk-ins and until the
+/// parent fills them via PATCH /pets/{petId}/medical-info.</summary>
 public sealed record PetDetailsSection(
     Guid? PetId,
     string? PetName,
     string? AnimalType,
     string? PetGender,
-    string? PetImageUrl);
+    string? PetImageUrl,
+    string? Breed,
+    string? VaccinationStatus,
+    string? VaccinationType,
+    string? VaccinationDose,
+    string? Prescription);
 
 /// <summary>The money facts. <c>PricePerHour</c> is the offering's unit rate (the
 /// stored per-hour price for Custom walk-ins); <c>TotalAmount</c> is rate × time;

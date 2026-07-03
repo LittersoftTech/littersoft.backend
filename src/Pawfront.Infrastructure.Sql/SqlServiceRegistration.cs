@@ -13,6 +13,7 @@ using Pawfront.Application.ParentPhotos;
 using Pawfront.Application.Policies;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.ProviderPhotos;
+using Pawfront.Application.ProviderServiceBanners;
 using Pawfront.Application.Providers;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.ProviderServiceLocations;
@@ -27,6 +28,7 @@ using Pawfront.Infrastructure.Sql.ParentPhotos;
 using Pawfront.Infrastructure.Sql.Policies;
 using Pawfront.Infrastructure.Sql.ProviderOnboarding;
 using Pawfront.Infrastructure.Sql.ProviderPhotos;
+using Pawfront.Infrastructure.Sql.ProviderServiceBanners;
 using Pawfront.Infrastructure.Sql.Providers;
 using Pawfront.Infrastructure.Sql.ProviderServices;
 
@@ -57,6 +59,7 @@ public static class SqlServiceRegistration
             services.AddSingleton<INightStayBookingSqlStore, InMemoryNightStayBookingStore>();
             services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
             services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
+            services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
         }
         else
         {
@@ -127,6 +130,11 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            services.AddScoped<IPetNextConsultationStore>(provider =>
+                new SqlPetNextConsultationStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             services.AddScoped<IPetParentPhotoService>(provider =>
                 new SqlPetParentPhotoService(
                     sqlConnectionString,
@@ -134,6 +142,11 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderPhotoService>(provider =>
                 new SqlProviderPhotoService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderServiceBannerService>(provider =>
+                new SqlProviderServiceBannerService(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 

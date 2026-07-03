@@ -1,4 +1,7 @@
+using Microsoft.Extensions.Options;
 using Pawfront.Application.Closures;
+using Pawfront.Application.Configuration;
+using Pawfront.Application.Policies;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetSitter;
 using Pawfront.Domain.Services;
@@ -9,7 +12,9 @@ internal sealed class NightStayBookingService(
     INightStayBookingSqlStore sqlStore,
     IProviderServiceCatalog serviceCatalog,
     IPetSitterServiceRegistry petSitterRegistry,
-    IProviderClosureReader closureReader) : INightStayBookingService
+    IProviderClosureReader closureReader,
+    IProviderPolicyService policyService,
+    IOptions<PawfrontFeeOptions> feeOptions) : INightStayBookingService
 {
     // A stay can span at most this many nights. Matches the cap the night-stay
     // search enforces and bounds the per-night capacity walk in the sproc.
@@ -88,6 +93,50 @@ internal sealed class NightStayBookingService(
 
     public Task<NightStayBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)
         => sqlStore.GetAsync(bookingId, cancellationToken);
+
+    public async Task<NightStayBookingDetailResult?> GetDetailAsync(
+        Guid bookingId,
+        CancellationToken cancellationToken)
+    {
+        var row = await sqlStore.GetDetailAsync(bookingId, cancellationToken);
+        if (row is null)
+        {
+            return null;
+        }
+
+        // Stayed nights = [CheckInDate, CheckOutDate); the checkout day isn't billed.
+        var nights = row.CheckOutDate.DayNumber - row.CheckInDate.DayNumber;
+
+        // Price the stay live from the provider's current NightStay offering. The
+        // BoardingOffering's PricePerHour is the night-stay's per-night rate (the
+        // same figure the night-stay search surfaces as the headline charge), and
+        // the offering carries the service location.
+        decimal? pricePerNight = null;
+        string? serviceLocation = null;
+        var doc = await petSitterRegistry.GetAsync(row.ProviderId, cancellationToken);
+        var offering = doc?.PetHotel?.Offering ?? doc?.Freelance?.Offering;
+        if (offering?.NightStay is not null)
+        {
+            pricePerNight = offering.NightStay.PricePerHour;
+            serviceLocation = offering.ServiceLocation;
+        }
+
+        decimal? total = pricePerNight is null
+            ? null
+            : Math.Round(pricePerNight.Value * nights, 2, MidpointRounding.AwayFromZero);
+
+        var feePercentage = feeOptions.Value.PawfrontFeePercentage;
+        decimal? fee = total is null
+            ? null
+            : Math.Round(total.Value * feePercentage / 100m, 2, MidpointRounding.AwayFromZero);
+
+        var policy = await policyService.GetAsync(row.ProviderId, cancellationToken);
+        var jobId = $"PF-{row.JobNumber:D6}";
+
+        return new NightStayBookingDetailResult(
+            row, jobId, nights, pricePerNight, total, fee, feePercentage,
+            serviceLocation, policy.MinimumHoursBeforeCancellation);
+    }
 
     public Task<NightStayBookingResult> CancelAsync(
         Guid bookingId,

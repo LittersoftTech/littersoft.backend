@@ -35,7 +35,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@EndTime", input.EndTime.ToTimeSpan());
         command.Parameters.AddWithValue("@IsPaid", input.IsPaid);
         command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
-        command.Parameters.AddWithValue("@CancellationPolicy", input.CancellationPolicy);
+        command.Parameters.AddWithValue("@CancellationPolicy", DbValue(input.CancellationPolicy));
         command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
@@ -84,7 +84,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@EndTime", input.EndTime.ToTimeSpan());
         command.Parameters.AddWithValue("@IsPaid", input.IsPaid);
         command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
-        command.Parameters.AddWithValue("@CancellationPolicy", input.CancellationPolicy);
+        command.Parameters.AddWithValue("@CancellationPolicy", DbValue(input.CancellationPolicy));
         command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
@@ -201,7 +201,7 @@ internal sealed class SqlEventStore(
         SqlCommand command,
         string eventCategory, bool isChildFriendly, string title, string description,
         string? bannerImageUrl, string eventType, DateOnly startDate, DateOnly endDate,
-        TimeOnly startTime, TimeOnly endTime, bool isPaid, decimal? price, string cancellationPolicy,
+        TimeOnly startTime, TimeOnly endTime, bool isPaid, decimal? price, string? cancellationPolicy,
         IReadOnlyCollection<string> amenities)
     {
         command.Parameters.AddWithValue("@EventCategory", eventCategory);
@@ -216,7 +216,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@EndTime", endTime.ToTimeSpan());
         command.Parameters.AddWithValue("@IsPaid", isPaid);
         command.Parameters.AddWithValue("@Price", price is null ? DBNull.Value : price.Value);
-        command.Parameters.AddWithValue("@CancellationPolicy", cancellationPolicy);
+        command.Parameters.AddWithValue("@CancellationPolicy", DbValue(cancellationPolicy));
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(amenities));
     }
 
@@ -504,7 +504,8 @@ internal sealed class SqlEventStore(
             IsPaid: reader.GetBoolean(18),
             Price: reader.IsDBNull(19) ? null : reader.GetDecimal(19),
             // Cancellation policy appended after ticketing in result set 1.
-            CancellationPolicy: reader.GetString(20),
+            // Optional — null when the organiser didn't advertise one.
+            CancellationPolicy: reader.IsDBNull(20) ? null : reader.GetString(20),
             // Joining link (online events) — appended as the last column of
             // result set 1 in every event-returning sproc (index 24).
             EventLink: reader.IsDBNull(24) ? null : reader.GetString(24),
@@ -607,6 +608,25 @@ internal sealed class SqlEventStore(
         }
     }
 
+    public async Task<int> CountEventsByOrganizerAsync(
+        Guid? providerId,
+        Guid? petParentId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Event.CountEventsByOrganizer", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@ProviderId", DbValue(providerId));
+        command.Parameters.AddWithValue("@PetParentId", DbValue(petParentId));
+
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is null or DBNull ? 0 : Convert.ToInt32(result);
+    }
+
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)
     {
         if (!string.IsNullOrWhiteSpace(configuredConnectionString))
@@ -624,4 +644,6 @@ internal sealed class SqlEventStore(
     }
 
     private static object DbValue(string? value) => value is null ? DBNull.Value : value;
+
+    private static object DbValue(Guid? value) => value is null ? DBNull.Value : value.Value;
 }

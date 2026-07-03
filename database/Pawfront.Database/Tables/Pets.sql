@@ -19,6 +19,11 @@ CREATE TABLE [Parent].[Pets]
     [SterilizationStatus] NVARCHAR(32) NULL,
     [MedicalHistory] NVARCHAR(MAX) NULL,
     [Temperament] NVARCHAR(32) NULL,
+    -- Additional medical-info fields — free text (no canonical vocabulary),
+    -- captured via the same PATCH /pets/{petId}/medical-info endpoint.
+    [VaccinationType] NVARCHAR(100) NULL,
+    [VaccinationDose] NVARCHAR(64) NULL,
+    [Prescription] NVARCHAR(MAX) NULL,
     -- The pet's single primary/profile photo. Distinct from the photo gallery
     -- in [Parent].[PetPhotos]; set via POST /pets/{petId}/profile-image.
     [ProfilePhotoUrl] NVARCHAR(1000) NULL,

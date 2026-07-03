@@ -97,4 +97,15 @@ public interface IEventSqlStore
         bool acceptsCash,
         bool acceptsDigital,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Counts the total events created by an organiser — provider-organised when
+    /// <paramref name="providerId"/> is set, parent-organised when
+    /// <paramref name="petParentId"/> is set. Used to surface the organiser's
+    /// event count on the event-detail read.
+    /// </summary>
+    Task<int> CountEventsByOrganizerAsync(
+        Guid? providerId,
+        Guid? petParentId,
+        CancellationToken cancellationToken);
 }

@@ -14,6 +14,13 @@ public interface INightStayBookingService
 
     Task<NightStayBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Enriched night-stay booking detail — the base row plus the friendly Job ID,
+    /// pet-parent + pet details, live-computed per-night pricing / Pawfront fee, the
+    /// provider's service location, and cancellation policy. Null when not found.
+    /// </summary>
+    Task<NightStayBookingDetailResult?> GetDetailAsync(Guid bookingId, CancellationToken cancellationToken);
+
     Task<NightStayBookingResult> CancelAsync(
         Guid bookingId,
         Guid petParentId,

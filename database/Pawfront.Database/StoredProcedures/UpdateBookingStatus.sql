@@ -9,12 +9,11 @@
 --   * the booking is not already terminal            (THROW 51123)
 --   * the status actually changes                    (THROW 51124)
 --   * the transition is allowed from the current state (THROW 51126)
---   * COMPLETED requires >= 1 evidence photo         (THROW 51127)
 -- Other THROWs: 51120 booking not found, 51125 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
 --   Provider -> CONFIRMED (from CREATED), PROVIDER_DECLINED (from CREATED),
---               COMPLETED (from JOB_STARTED, evidence-gated), PROVIDER_CANCELLED
+--               COMPLETED (from JOB_STARTED), PROVIDER_CANCELLED
 --   Parent   -> PARENT_CANCELLED
 -- Terminal states (no further change): COMPLETED, PROVIDER_DECLINED,
 -- PROVIDER_CANCELLED, PARENT_CANCELLED.
@@ -94,13 +93,6 @@ BEGIN
         THROW 51126, 'This transition is not allowed from the current status.', 1;
     END
     -- (PROVIDER_CANCELLED / PARENT_CANCELLED are allowed from any non-terminal state.)
-
-    -- Completing a job requires the provider to have uploaded evidence first.
-    IF @NewStatus = N'COMPLETED'
-       AND NOT EXISTS (SELECT 1 FROM [Booking].[BookingEvidence] WHERE [BookingId] = @BookingId)
-    BEGIN
-        THROW 51127, 'Upload at least one evidence photo before completing the job.', 1;
-    END
 
     UPDATE [Booking].[Bookings]
     SET [Status] = @NewStatus,

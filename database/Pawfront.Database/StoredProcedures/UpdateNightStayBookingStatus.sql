@@ -8,12 +8,11 @@
 --   * the booking is not already terminal            (THROW 51243)
 --   * the status actually changes                    (THROW 51244)
 --   * the transition is allowed from the current state (THROW 51246)
---   * COMPLETED requires >= 1 evidence photo         (THROW 51247)
 -- Other THROWs: 51240 booking not found, 51245 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
 --   Provider -> CONFIRMED (from CREATED), PROVIDER_DECLINED (from CREATED),
---               COMPLETED (from JOB_STARTED, evidence-gated), PROVIDER_CANCELLED
+--               COMPLETED (from JOB_STARTED), PROVIDER_CANCELLED
 --   Parent   -> PARENT_CANCELLED
 -- Terminal states: COMPLETED, PROVIDER_DECLINED, PROVIDER_CANCELLED, PARENT_CANCELLED.
 CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
@@ -85,12 +84,6 @@ BEGIN
        OR (@NewStatus = N'COMPLETED'        AND @CurrentStatus <> N'JOB_STARTED')
     BEGIN
         THROW 51246, 'This transition is not allowed from the current status.', 1;
-    END
-
-    IF @NewStatus = N'COMPLETED'
-       AND NOT EXISTS (SELECT 1 FROM [Booking].[NightStayBookingEvidence] WHERE [NightStayBookingId] = @NightStayBookingId)
-    BEGIN
-        THROW 51247, 'Upload at least one evidence photo before completing the job.', 1;
     END
 
     UPDATE [Booking].[NightStayBookings]
