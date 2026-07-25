@@ -1,15 +1,19 @@
 namespace Pawfront.Contracts.Services.PetSitter;
 
+// TelephoneCountryCode/TelephoneNumber, Website, and Description are all
+// optional — the registration screen no longer asks for a telephone number,
+// and the blurb/website may be filled in later. Omitted values read back as
+// empty strings (telephone/description) or null (website).
 public sealed record RegisterPetHotelRequest(
     string PetHotelName,
     string Address,
     string Zip,
     string City,
-    string TelephoneCountryCode,
-    string TelephoneNumber,
+    string? TelephoneCountryCode,
+    string? TelephoneNumber,
     string Email,
     string? Website,
-    string Description,
+    string? Description,
     string? HotelImageUrl,
     decimal Latitude,
     decimal Longitude);
@@ -19,7 +23,7 @@ public sealed record RegisterFreelancePetSitterRequest(
     string Zip,
     string City,
     string? Website,
-    string AboutYou,
+    string? AboutYou,
     string? ProfileImageUrl,
     decimal Latitude,
     decimal Longitude);

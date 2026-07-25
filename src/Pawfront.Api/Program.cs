@@ -65,5 +65,6 @@ api.MapProviderClosureEndpoints();
 api.MapProviderActiveStatusEndpoints();
 api.MapProviderPhotoEndpoints();
 api.MapProviderServiceBannerEndpoints();
+api.MapProviderBannerImageEndpoints();
 
 app.Run();

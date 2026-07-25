@@ -6,11 +6,11 @@ public sealed record RegisterTrainingSchoolCommand(
     string Address,
     string Zip,
     string City,
-    string TelephoneCountryCode,
-    string TelephoneNumber,
+    string? TelephoneCountryCode,
+    string? TelephoneNumber,
     string Email,
     string? Website,
-    string Description,
+    string? Description,
     string? SchoolImageUrl);
 
 public sealed record RegisterFreelanceTrainerCommand(
@@ -19,7 +19,7 @@ public sealed record RegisterFreelanceTrainerCommand(
     string Zip,
     string City,
     string? Website,
-    string AboutYou,
+    string? AboutYou,
     string? ProfileImageUrl);
 
 public sealed record SaveTrainingSchoolOfferingCommand(

@@ -19,7 +19,8 @@ BEGIN
            [OnboardingStatus],
            [IsActive],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [BannerImageUrl]
     FROM [Provider].[Providers]
     WHERE [ProviderId] = @ProviderId;
 END;

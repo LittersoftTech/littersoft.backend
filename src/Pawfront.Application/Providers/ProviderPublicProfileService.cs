@@ -2,6 +2,7 @@ using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Policies;
+using Pawfront.Application.ProviderBanners;
 using Pawfront.Application.ProviderPhotos;
 using Pawfront.Application.Services.PetAdoptionSale;
 using Pawfront.Application.Services.PetGroomer;
@@ -24,6 +25,7 @@ internal sealed class ProviderPublicProfileService(
     IProviderClosureService closureService,
     IProviderPolicyService policyService,
     IProviderPhotoService photoService,
+    IProviderBannerImageService bannerImageService,
     IProviderBookingStatsReader bookingStatsReader) : IProviderPublicProfileService
 {
     // 10-year window for "future time off" — closures rarely run beyond this,
@@ -110,6 +112,10 @@ internal sealed class ProviderPublicProfileService(
         var gallery = await photoService.ListAsync(providerId, cancellationToken);
         var galleryImages = gallery.Select(p => p.PhotoUrl).ToList();
 
+        // Provider-level banner (the wide card image uploaded at registration).
+        // Null when the provider hasn't set one.
+        var bannerImageUrl = await bannerImageService.GetAsync(providerId, cancellationToken);
+
         // Served-booking count — the same "overall provider experience" figure
         // the booking-search cards show. Absent from the dictionary = zero.
         var completedCounts = await bookingStatsReader.GetCompletedBookingCountsAsync(
@@ -130,6 +136,7 @@ internal sealed class ProviderPublicProfileService(
             description,
             servicesDescription,
             profilePhotoUrl,
+            bannerImageUrl,
             galleryImages,
             petSitterResult,
             petGroomerResult,

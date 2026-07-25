@@ -6,11 +6,11 @@ public sealed record RegisterPetHotelCommand(
     string Address,
     string Zip,
     string City,
-    string TelephoneCountryCode,
-    string TelephoneNumber,
+    string? TelephoneCountryCode,
+    string? TelephoneNumber,
     string Email,
     string? Website,
-    string Description,
+    string? Description,
     string? HotelImageUrl);
 
 public sealed record RegisterFreelancePetSitterCommand(
@@ -19,7 +19,7 @@ public sealed record RegisterFreelancePetSitterCommand(
     string Zip,
     string City,
     string? Website,
-    string AboutYou,
+    string? AboutYou,
     string? ProfileImageUrl);
 
 public sealed record SavePetHotelOfferingCommand(

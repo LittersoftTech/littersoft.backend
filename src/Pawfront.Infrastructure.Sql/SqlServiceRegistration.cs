@@ -11,6 +11,7 @@ using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
 using Pawfront.Application.ParentPhotos;
 using Pawfront.Application.Policies;
+using Pawfront.Application.ProviderBanners;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.ProviderPhotos;
 using Pawfront.Application.ProviderServiceBanners;
@@ -26,6 +27,7 @@ using Pawfront.Infrastructure.Sql.ParentOnboarding;
 using Pawfront.Infrastructure.Sql.ParentPets;
 using Pawfront.Infrastructure.Sql.ParentPhotos;
 using Pawfront.Infrastructure.Sql.Policies;
+using Pawfront.Infrastructure.Sql.ProviderBanners;
 using Pawfront.Infrastructure.Sql.ProviderOnboarding;
 using Pawfront.Infrastructure.Sql.ProviderPhotos;
 using Pawfront.Infrastructure.Sql.ProviderServiceBanners;
@@ -160,6 +162,11 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderServiceBannerService>(provider =>
                 new SqlProviderServiceBannerService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderBannerImageService>(provider =>
+                new SqlProviderBannerImageService(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 

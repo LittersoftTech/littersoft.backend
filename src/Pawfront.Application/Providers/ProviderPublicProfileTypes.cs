@@ -46,6 +46,10 @@ public sealed record ProviderPublicProfile(
     // The provider's profile/business photo — the image they uploaded for their
     // offering. Null when none set.
     string? ProfilePhotoUrl,
+    // The provider-level banner (Provider.Providers.BannerImageUrl) — the wide
+    // picture uploaded at registration and shown on their search card. Null
+    // until uploaded.
+    string? BannerImageUrl,
     // The provider's gallery photos (Provider.ProviderPhotos), oldest-first.
     // Empty when none.
     IReadOnlyList<string> GalleryImages,

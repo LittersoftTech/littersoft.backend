@@ -72,6 +72,7 @@ erDiagram
         NVARCHAR         MobileNumber
         DATE             DateOfBirth
         DATETIME2        MobileVerifiedAtUtc       "nullable"
+        NVARCHAR         BannerImageUrl            "nullable; provider-level search-card banner"
         NVARCHAR         OnboardingStatus          "MobileVerificationPending|MobileVerified"
     }
 
@@ -830,6 +831,7 @@ so the deploy script always reflects the latest version.
 | `Provider.AddProviderPhoto`         | Insert one general provider gallery photo row. Throws `51110` if the provider is missing. |
 | `Provider.ListProviderPhotos`       | List the provider's gallery photos, oldest-first. |
 | `Provider.DeleteProviderPhoto`      | Delete one photo scoped by `ProviderId` + `ProviderPhotoId`; returns the URL for blob cleanup. Throws `51111` if missing. |
+| `Provider.UpdateProviderBannerImage`| Overwrite the provider-level banner (`Providers.BannerImageUrl`). Throws `51112` if the provider is missing. |
 | `Parent.AddPetParentPhoto`          | Insert one general pet-parent gallery photo row. Throws `51212` if the parent is missing. |
 | `Parent.ListPetParentPhotos`        | List the parent's gallery photos, oldest-first. |
 | `Parent.DeletePetParentPhoto`       | Delete one photo scoped by `PetParentId` + `PetParentPhotoId`; returns the URL for blob cleanup. Throws `51213` if missing. |
@@ -869,6 +871,7 @@ Custom THROW codes used by sprocs:
 | 51097 | Invalid counter type (must be `View`, `Share`, or `Inquiry`). |
 | 51110 | Provider not found (provider photo add). |
 | 51111 | Provider photo not found (provider photo delete). |
+| 51112 | Provider not found (provider banner-image upload). |
 | 51120 | Booking not found (status update). |
 | 51121 | Caller is not a party to the booking → API `403 Forbidden`. |
 | 51122 | Status not permitted for this actor → API `400 BookingStatusNotAllowed`. |

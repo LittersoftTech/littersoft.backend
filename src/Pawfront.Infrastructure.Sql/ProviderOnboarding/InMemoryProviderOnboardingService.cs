@@ -333,7 +333,8 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
             profile.OnboardingStatus,
             profile.IsActive,
             profile.CreatedAtUtc,
-            profile.UpdatedAtUtc);
+            profile.UpdatedAtUtc,
+            profile.BannerImageUrl);
     }
 
     private static SendProviderMobileOtpResponse ToResponse(ProviderMobileOtpState otp)
@@ -489,6 +490,7 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
         public DateTimeOffset? MobileVerifiedAtUtc { get; set; }
         public required string OnboardingStatus { get; set; }
         public bool IsActive { get; set; } = true;
+        public string? BannerImageUrl { get; set; }
         public DateTimeOffset CreatedAtUtc { get; init; }
         public DateTimeOffset UpdatedAtUtc { get; set; }
     }

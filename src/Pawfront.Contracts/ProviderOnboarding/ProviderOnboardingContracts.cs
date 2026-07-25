@@ -44,7 +44,10 @@ public sealed record ProviderProfileResponse(
     string OnboardingStatus,
     bool IsActive,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    // Wide banner shown on the provider's card in the parent-facing searches.
+    // Set via POST /providers/{providerId}/banner-image; null until uploaded.
+    string? BannerImageUrl);
 
 public sealed record SendProviderMobileOtpResponse(
     Guid ProviderMobileOtpId,

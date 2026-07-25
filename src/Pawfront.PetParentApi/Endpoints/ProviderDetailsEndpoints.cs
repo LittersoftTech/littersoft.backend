@@ -257,6 +257,7 @@ internal static class ProviderDetailsEndpoints
             profile.Description,
             profile.ServicesDescription,
             profile.ProfilePhotoUrl,
+            profile.BannerImageUrl,
             profile.GalleryImages,
             // Reviews not built yet — always an empty array for now.
             Array.Empty<ProviderReviewResponse>(),

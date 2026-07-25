@@ -10,6 +10,11 @@ CREATE TABLE [Provider].[Providers]
     [MobileNumber] NVARCHAR(32) NOT NULL,
     [DateOfBirth] DATE NOT NULL,
     [MobileVerifiedAtUtc] DATETIME2(7) NULL,
+    -- Wide banner shown on the provider's card in parent-facing search results.
+    -- Provider-level (category-agnostic) and captured during registration, so it
+    -- can be set before any [Provider].[ProviderServices] row exists — distinct
+    -- from the per-service banner in [Provider].[ProviderServiceBanners].
+    [BannerImageUrl] NVARCHAR(1000) NULL,
     [OnboardingStatus] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_Providers_OnboardingStatus] DEFAULT N'MobileVerificationPending',
     -- Master Active/Inactive switch. When 0, no new bookings can be created on

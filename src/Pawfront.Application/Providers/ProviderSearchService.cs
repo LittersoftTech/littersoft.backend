@@ -1,6 +1,7 @@
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Offerings;
+using Pawfront.Application.ProviderBanners;
 using Pawfront.Application.ProviderServiceBanners;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetGroomer;
@@ -23,7 +24,8 @@ internal sealed class ProviderSearchService(
     IPetGroomerServiceRegistry petGroomerRegistry,
     IProviderBookingStatsReader bookingStatsReader,
     IProviderNameReader providerNameReader,
-    IProviderServiceBannerService bannerService) : IProviderSearchService
+    IProviderServiceBannerService bannerService,
+    IProviderBannerImageService providerBannerService) : IProviderSearchService
 {
     // 1-minute granularity when the parent's exact window must be matched
     // (day care); 15 minutes when ANY free slot on the date is enough.
@@ -287,9 +289,13 @@ internal sealed class ProviderSearchService(
             providerIds, cancellationToken);
 
         // Per-service banner (the wide card image the provider uploaded for this
-        // ServiceId). Absent from the map = the provider hasn't set one.
+        // ServiceId). Absent from the map = the provider hasn't set one, in
+        // which case the card falls back to the provider-level banner captured
+        // at registration — the picture most providers actually have.
         var serviceIds = paged.Select(r => r.ServiceId).Distinct().ToArray();
         var banners = await bannerService.GetByServiceIdsAsync(serviceIds, cancellationToken);
+        var providerBanners = await providerBannerService.GetByProviderIdsAsync(
+            providerIds, cancellationToken);
 
         return paged
             .Select(r =>
@@ -307,7 +313,9 @@ internal sealed class ProviderSearchService(
 
                 var bannerImageUrl = banners.TryGetValue(r.ServiceId, out var banner)
                     ? banner
-                    : null;
+                    : providerBanners.TryGetValue(r.ProviderId, out var providerBanner)
+                        ? providerBanner
+                        : null;
 
                 return r with
                 {

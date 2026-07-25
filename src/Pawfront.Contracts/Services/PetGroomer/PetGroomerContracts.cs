@@ -5,11 +5,11 @@ public sealed record RegisterGroomerShopRequest(
     string Address,
     string Zip,
     string City,
-    string TelephoneCountryCode,
-    string TelephoneNumber,
+    string? TelephoneCountryCode,
+    string? TelephoneNumber,
     string Email,
     string? Website,
-    string Description,
+    string? Description,
     string? ShopImageUrl,
     decimal Latitude,
     decimal Longitude);
@@ -19,7 +19,7 @@ public sealed record RegisterFreelanceGroomerRequest(
     string Zip,
     string City,
     string? Website,
-    string AboutYou,
+    string? AboutYou,
     string? ProfileImageUrl,
     decimal Latitude,
     decimal Longitude);

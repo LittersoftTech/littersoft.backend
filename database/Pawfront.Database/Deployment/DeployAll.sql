@@ -190,6 +190,11 @@ BEGIN
         [MobileNumber] NVARCHAR(32) NOT NULL,
         [DateOfBirth] DATE NOT NULL,
         [MobileVerifiedAtUtc] DATETIME2(7) NULL,
+        -- Wide banner shown on the provider's card in parent-facing search
+        -- results. Provider-level (category-agnostic) and captured during
+        -- registration, so it can be set before any ProviderServices row
+        -- exists — distinct from [Provider].[ProviderServiceBanners].
+        [BannerImageUrl] NVARCHAR(1000) NULL,
         [OnboardingStatus] NVARCHAR(32) NOT NULL
             CONSTRAINT [DF_Providers_OnboardingStatus] DEFAULT N'MobileVerificationPending',
         -- Master Active/Inactive switch. When 0, no new bookings can be created on
@@ -218,12 +223,74 @@ BEGIN
 END
 GO
 
+-- A provider's number is (country code + number): +41 791234567 and
+-- +49 791234567 are two different real numbers and must both be allowed.
+-- Deployments created before the key became composite still carry a
+-- [MobileNumber]-only index, which wrongly rejected the second registration
+-- with 409 MobileNumberAlreadyExists. The IF NOT EXISTS guard below matches on
+-- name only and so can never repair that, hence this explicit rebuild: drop the
+-- index when its key columns aren't exactly (MobileCountryCode, MobileNumber),
+-- then let the create re-add it. Widening a UNIQUE key can only ever admit more
+-- rows, so the recreate cannot fail on existing data.
+IF EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'UX_Providers_MobileNumber'
+      AND [object_id] = OBJECT_ID(N'[Provider].[Providers]'))
+AND NOT EXISTS (
+    SELECT 1
+    FROM sys.indexes i
+    WHERE i.[name] = N'UX_Providers_MobileNumber'
+      AND i.[object_id] = OBJECT_ID(N'[Provider].[Providers]')
+      AND (
+            SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), c.[name]), N',')
+                       WITHIN GROUP (ORDER BY ic.[key_ordinal])
+            FROM sys.index_columns ic
+            INNER JOIN sys.columns c
+                ON c.[object_id] = ic.[object_id]
+               AND c.[column_id] = ic.[column_id]
+            WHERE ic.[object_id] = i.[object_id]
+              AND ic.[index_id] = i.[index_id]
+              AND ic.[is_included_column] = 0
+          ) = N'MobileCountryCode,MobileNumber')
+BEGIN
+    DROP INDEX [UX_Providers_MobileNumber] ON [Provider].[Providers];
+    PRINT 'Dropped mis-keyed index [UX_Providers_MobileNumber]; recreating on (MobileCountryCode, MobileNumber).';
+END
+GO
+
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes
     WHERE [name] = N'UX_Providers_MobileNumber'
       AND [object_id] = OBJECT_ID(N'[Provider].[Providers]'))
     CREATE UNIQUE INDEX [UX_Providers_MobileNumber]
         ON [Provider].[Providers] ([MobileCountryCode], [MobileNumber]);
+GO
+
+-- The gender picker gained NonBinary / Other / PreferNotToSay. The CREATE TABLE
+-- above is skipped once the table exists, so a database created against the
+-- original Male/Female-only CHECK would keep rejecting the new values. Rebuild
+-- the constraint whenever its definition is out of date.
+IF EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Providers_Gender'
+      AND [parent_object_id] = OBJECT_ID(N'[Provider].[Providers]')
+      AND [definition] NOT LIKE N'%PreferNotToSay%')
+BEGIN
+    ALTER TABLE [Provider].[Providers] DROP CONSTRAINT [CK_Providers_Gender];
+    PRINT 'Dropped outdated constraint [CK_Providers_Gender]; recreating with the full gender set.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Providers_Gender'
+      AND [parent_object_id] = OBJECT_ID(N'[Provider].[Providers]'))
+BEGIN
+    ALTER TABLE [Provider].[Providers]
+        ADD CONSTRAINT [CK_Providers_Gender]
+            CHECK ([Gender] IN (N'Male', N'Female', N'NonBinary', N'Other', N'PreferNotToSay'));
+    PRINT 'Created constraint [CK_Providers_Gender].';
+END
 GO
 
 -- Add [IsActive] column to existing Providers tables (idempotent for upgrades).
@@ -236,6 +303,18 @@ BEGIN
         ADD [IsActive] BIT NOT NULL
             CONSTRAINT [DF_Providers_IsActive] DEFAULT 1;
     PRINT 'Added column [Provider].[Providers].[IsActive].';
+END
+GO
+
+-- Add [BannerImageUrl] column to existing Providers tables (idempotent for upgrades).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'BannerImageUrl'
+      AND [object_id] = OBJECT_ID(N'[Provider].[Providers]'))
+BEGIN
+    ALTER TABLE [Provider].[Providers]
+        ADD [BannerImageUrl] NVARCHAR(1000) NULL;
+    PRINT 'Added column [Provider].[Providers].[BannerImageUrl].';
 END
 GO
 
@@ -5368,7 +5447,8 @@ BEGIN
            [OnboardingStatus],
            [IsActive],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [BannerImageUrl]
     FROM [Provider].[Providers]
     WHERE [ProviderId] = @ProviderId;
 
@@ -5398,12 +5478,46 @@ BEGIN
            [OnboardingStatus],
            [IsActive],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [BannerImageUrl]
     FROM [Provider].[Providers]
     WHERE [ProviderId] = @ProviderId;
 END;
 GO
 PRINT 'Created/updated [Provider].[GetProviderProfile].';
+GO
+
+
+-- 3.2b-i UpdateProviderBannerImage --------------------------------------------
+CREATE OR ALTER PROCEDURE [Provider].[UpdateProviderBannerImage]
+    @ProviderId UNIQUEIDENTIFIER,
+    @BannerImageUrl NVARCHAR(1000)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    -- Provider-level banner (one per provider, overwritten on re-upload). The
+    -- per-service banner lives in [Provider].[ProviderServiceBanners] and is a
+    -- separate image.
+    UPDATE [Provider].[Providers]
+    SET [BannerImageUrl] = @BannerImageUrl,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    WHERE [ProviderId] = @ProviderId;
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        THROW 51112, 'Provider was not found.', 1;
+    END
+
+    SELECT [ProviderId],
+           [BannerImageUrl],
+           [UpdatedAtUtc]
+    FROM [Provider].[Providers]
+    WHERE [ProviderId] = @ProviderId;
+END;
+GO
+PRINT 'Created/updated [Provider].[UpdateProviderBannerImage].';
 GO
 
 

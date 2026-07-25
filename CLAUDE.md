@@ -234,6 +234,8 @@ Custom `THROW` codes used for typed errors:
 - `51100` provider profile not found (active-status toggle)
 - `51110` provider not found (provider photo add)
 - `51111` provider photo not found (provider photo delete)
+- `51112` provider not found (provider banner-image upload) → API maps to
+  **404 ProviderNotFound**
 - `51120` booking not found (status update)
 - `51121` caller is not a party to the booking (status update) → API maps to
   **403 Forbidden**
@@ -399,10 +401,13 @@ pet-parent and pet images now). Folders:
 - `pet-profile-photos/<petId>/<guid>.<ext>` (single primary photo)
 - `pet-parent-identities/<petParentId>/<guid>.<ext>`
 - `booking-evidence/<bookingId>/<guid>.<ext>` (job-completion evidence)
+- `service-banners/<serviceId>/<guid>.<ext>` (per-service card banner)
+- `provider-banners/<providerId>/<guid>.<ext>` (provider-level card banner)
 
 `BlobUploadKind` enum: `ProfilePhoto`, `ServicePhoto`, `EventBanner`,
 `PetParentProfilePhoto`, `PetPhoto`, `PetParentIdentity`, `PetParentPhoto`,
-`ProviderPhoto`, `PetProfilePhoto`, `BookingEvidence`. The
+`ProviderPhoto`, `PetProfilePhoto`, `BookingEvidence`, `ServiceBanner`,
+`ProviderBanner`. The
 `IPawfrontBlobStorage.UploadAsync` parameter is `ownerId` (generic) — it's a
 ProviderId for provider kinds, a PetParentId for pet-parent kinds, a PetId for
 pet kinds, a BookingId for `BookingEvidence`.
@@ -446,7 +451,8 @@ console exporter for traces/metrics/logs.
    checks `data.isValidated`.
 5. `GET /providers/{id}/profile` — read-back of the persisted personal info
    (`firstName`, `lastName`, `gender`, `mobileCountryCode`, `mobileNumber`,
-   `dateOfBirth`, `mobileVerifiedAtUtc`, `onboardingStatus`, timestamps).
+   `dateOfBirth`, `mobileVerifiedAtUtc`, `onboardingStatus`, `bannerImageUrl`,
+   timestamps).
    Backed by `Provider.GetProviderProfile` sproc against `Provider.Providers`.
    Returns 404 `ProviderProfileNotFound` if the row is missing. Same
    `ProviderProfileResponse` shape that step 2 returns.
@@ -482,6 +488,42 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
 - `POST /providers/{id}/policy/cancellation` — single nullable value
   (`null | 24 | 48 | 72 | 96` hours), stored in
   `Provider.ProviderCancellationPolicies` (one row per provider).
+
+### Provider profile/registration field rules (2026-07-25 QA batch)
+- **Mobile duplicates are keyed on (country code + number).**
+  `UX_Providers_MobileNumber` is UNIQUE on `(MobileCountryCode, MobileNumber)`,
+  so `+41 791234567` and `+49 791234567` both register. Deployments created
+  before the key became composite kept a `MobileNumber`-only index, and
+  `DeployAll.sql`'s `IF NOT EXISTS`-by-name guard could never repair it — the
+  script now **drops a mis-keyed index and recreates it** (widening a UNIQUE key
+  can't fail on existing rows). `SqlProviderOnboardingService` also matches the
+  index **name** before mapping SQL 2601/2627 to `409 MobileNumberAlreadyExists`,
+  so an unrelated unique violation isn't reported as a duplicate number.
+- **Gender accepts five values** — `Male`, `Female`, `NonBinary`, `Other`,
+  `PreferNotToSay` (`NormalizeGender` + `CK_Providers_Gender`). Same repair
+  problem as above: the CHECK on an already-created table was never updated, so
+  `DeployAll.sql` now **drops and recreates `CK_Providers_Gender`** whenever its
+  definition is out of date. Unknown value → `400 UnsupportedGender`.
+- **Optional on every category's basic registration:** `telephoneCountryCode`,
+  `telephoneNumber`, `website`, `description` / `aboutYou`. The "Add Your Info"
+  screen dropped the telephone field after QA, so the pair is no longer
+  `Required(...)` in the Cosmos registries — omitted telephone/description read
+  back as `""`, omitted website as `null`. Still required: name, address, zip,
+  city, email. (The historic `"0000000000"` placeholder numbers in the database
+  are from the old server-side requirement.)
+- **Provider-level banner image** — `Provider.Providers.BannerImageUrl`, set via
+  `POST /providers/{id}/banner-image` (multipart, ≤5 MB, JPEG/PNG/WebP →
+  `provider-banners/<providerId>/`). Category-agnostic and settable from the
+  moment the profile row exists, so registration can capture it alongside the
+  profile photo — unlike `Provider.ProviderServiceBanners`, which is keyed by
+  `ServiceId` and only exists once an offering is saved. Returned as
+  `bannerImageUrl` on `GET /providers/{id}/profile` (provider host) and
+  `GET /providers/{providerId}` (parent host), and used as the **fallback** for
+  the five search cards' `bannerImageUrl` when the service has no banner of its
+  own. Application interface `IProviderBannerImageService`
+  (`SaveAsync`/`GetAsync`/`GetByProviderIdsAsync`), SQL impl over sproc
+  `Provider.UpdateProviderBannerImage` (THROW 51112). Not surfaced on the slim
+  `GET /providers` discovery card, which still carries only `imageUrl`.
 
 ### Pet Groomer menu (18 services, per-groomer price + duration)
 - Pet Groomer is the only category that uses a **per-item menu** under a single
@@ -1387,9 +1429,9 @@ GET    /providers/search/groomers                                               
 GET    /providers/search/vets                                                     [?petId= &date= &city= &serviceLocation= &skip= &take=] — per-service booking search #4 (Vet/VetAppointment). date → any free appointment slot that day. Charges = PricePerAppointment (chargesUnit PerAppointment).
 GET    /providers/search/trainers                                                 [?petId= &date= &city= &serviceLocation= &skip= &take=] — per-service booking search #5 (PetTrainer/TrainingSession). Mirror of the vets search: a training session is a single fixed-duration booking, so date → any free slot of the session's duration that day. Charges = PricePerSession (chargesUnit PerSession).
 
-> All five searches: petId is ownership-enforced inline (same codes as OwnedPetFilter) and the pet's PetType becomes the animal filter; city is case-insensitive; serviceLocation ∈ { ParentsPlace, ProvidersPlace }. A provider must have the matching ACTIVE ProviderServices row + configured offering to appear at all. Response per hit: { providerId, serviceId, subCategory, businessName (business name for shops; the provider's personal name for freelancers), completedBookings, charges, chargesUnit (PerHour|PerService|PerAppointment|PerSession), serviceItemCode, imageUrl, bannerImageUrl }. imageUrl = the service image the provider uploaded for this offering (the same image the discovery card shows — sourced from the Cosmos offering's imageUrl via the shared ProviderSummary; null when unset). bannerImageUrl = the wide banner the provider uploaded for THIS service via POST /providers/{id}/services/{serviceId}/banner-image (Provider.ProviderServiceBanners, keyed by ServiceId; batch-hydrated per paged result via IProviderServiceBannerService.GetByServiceIdsAsync; null when unset). completedBookings = bookings that are explicitly COMPLETED OR whose window has elapsed (non-cancelled/non-no-show/non-expired) across ALL the provider's services, any category incl. freelance (SqlProviderBookingStatsReader, batched — UNIONs single-day `Booking.Bookings` and multi-night `Booking.NightStayBookings`). The explicit-COMPLETED arm was added 2026-07-19 — without it a future-dated booking already marked COMPLETED (e.g. a freelance vet appointment) was undercounted to 0; the night-stay UNION was added the same day — without it a PetSitter whose only completed jobs are boarding stays showed 0 (night-stay "window elapsed" = `CheckOutDate < today`, since checkout day isn't a stayed night). Pagination applies after availability filtering. Backed by IProviderSearchService → ProviderSearchService (Application orchestrator over IProviderDiscoveryService + IProviderServiceCatalog + IProviderOfferingResolver + IProviderAvailabilitySlotService + IPetGroomerServiceRegistry + IProviderBookingStatsReader + IProviderServiceBannerService). OfferingResolution.Resolved now carries Price (PricePerHour / PerSession / PerAppointment; null for grooming).
+> All five searches: petId is ownership-enforced inline (same codes as OwnedPetFilter) and the pet's PetType becomes the animal filter; city is case-insensitive; serviceLocation ∈ { ParentsPlace, ProvidersPlace }. A provider must have the matching ACTIVE ProviderServices row + configured offering to appear at all. Response per hit: { providerId, serviceId, subCategory, businessName (business name for shops; the provider's personal name for freelancers), completedBookings, charges, chargesUnit (PerHour|PerService|PerAppointment|PerSession), serviceItemCode, imageUrl, bannerImageUrl }. imageUrl = the service image the provider uploaded for this offering (the same image the discovery card shows — sourced from the Cosmos offering's imageUrl via the shared ProviderSummary; null when unset). bannerImageUrl = the wide banner the provider uploaded for THIS service via POST /providers/{id}/services/{serviceId}/banner-image (Provider.ProviderServiceBanners, keyed by ServiceId; batch-hydrated per paged result via IProviderServiceBannerService.GetByServiceIdsAsync), **falling back to the provider-level banner** (Provider.Providers.BannerImageUrl, set at registration via POST /providers/{id}/banner-image, batch-hydrated via IProviderBannerImageService.GetByProviderIdsAsync) when no per-service banner is set; null when neither is set. completedBookings = bookings that are explicitly COMPLETED OR whose window has elapsed (non-cancelled/non-no-show/non-expired) across ALL the provider's services, any category incl. freelance (SqlProviderBookingStatsReader, batched — UNIONs single-day `Booking.Bookings` and multi-night `Booking.NightStayBookings`). The explicit-COMPLETED arm was added 2026-07-19 — without it a future-dated booking already marked COMPLETED (e.g. a freelance vet appointment) was undercounted to 0; the night-stay UNION was added the same day — without it a PetSitter whose only completed jobs are boarding stays showed 0 (night-stay "window elapsed" = `CheckOutDate < today`, since checkout day isn't a stayed night). Pagination applies after availability filtering. Backed by IProviderSearchService → ProviderSearchService (Application orchestrator over IProviderDiscoveryService + IProviderServiceCatalog + IProviderOfferingResolver + IProviderAvailabilitySlotService + IPetGroomerServiceRegistry + IProviderBookingStatsReader + IProviderServiceBannerService). OfferingResolution.Resolved now carries Price (PricePerHour / PerSession / PerAppointment; null for grooming).
 
-GET    /providers/{providerId}                                                   parent-facing provider profile. Composes the registration row (category, sub-category, lat/lng), the category-specific offering (one of petSitter / petGroomer / petTrainer / petAdoptionSale / vet — exactly one populated), workingHours (7 days), timeOff (future closures across all the provider's services), the advertised booking policy (minimumHoursBeforeCancellation: null|24|48|72|96, and acceptedPaymentMethods: ["Cash"|"Digital", ...] — the provider's payout-method set, empty when unset), completedBookings (bookings explicitly COMPLETED or already served — window ended — not cancelled/no-show/expired, across all the provider's services regardless of category/freelance, spanning both single-day and multi-night boarding stays; same IProviderBookingStatsReader figure as the search cards), top-level `description` (the freelancer's about-you text; null for business sub-categories) + `servicesDescription` (the business branch's description — shop/hotel/clinic/school/shelter; null for freelancers) (2026-07-17; both lifted from the category offering so mobile doesn't dig into the nested block), and reviews (ALWAYS an empty array for now — review feature not built yet; the field is wired so mobile can bind ahead of time). Provider personal info (name, mobile, DOB) intentionally omitted — parents see business-facing data only. Backed by IProviderPublicProfileService, which fans out to the existing per-category registries, IProviderAvailabilityService, IProviderClosureService, IProviderPolicyService (cancellation + payout), and IProviderBookingStatsReader. 404 ProviderNotRegistered when no service registration row exists.
+GET    /providers/{providerId}                                                   parent-facing provider profile. Composes the registration row (category, sub-category, lat/lng), the category-specific offering (one of petSitter / petGroomer / petTrainer / petAdoptionSale / vet — exactly one populated), workingHours (7 days), timeOff (future closures across all the provider's services), the advertised booking policy (minimumHoursBeforeCancellation: null|24|48|72|96, and acceptedPaymentMethods: ["Cash"|"Digital", ...] — the provider's payout-method set, empty when unset), completedBookings (bookings explicitly COMPLETED or already served — window ended — not cancelled/no-show/expired, across all the provider's services regardless of category/freelance, spanning both single-day and multi-night boarding stays; same IProviderBookingStatsReader figure as the search cards), top-level `description` (the freelancer's about-you text; null for business sub-categories) + `servicesDescription` (the business branch's description — shop/hotel/clinic/school/shelter; null for freelancers) (2026-07-17; both lifted from the category offering so mobile doesn't dig into the nested block), `bannerImageUrl` (2026-07-25; the provider-level banner from Provider.Providers.BannerImageUrl — null until the provider uploads one), and reviews (ALWAYS an empty array for now — review feature not built yet; the field is wired so mobile can bind ahead of time). Provider personal info (name, mobile, DOB) intentionally omitted — parents see business-facing data only. Backed by IProviderPublicProfileService, which fans out to the existing per-category registries, IProviderAvailabilityService, IProviderClosureService, IProviderPolicyService (cancellation + payout), IProviderBannerImageService, and IProviderBookingStatsReader. 404 ProviderNotRegistered when no service registration row exists.
 GET    /providers/{providerId}/availability/slots                                ?serviceId= &date= [&durationHours= | &serviceItemCode=] [&granularityMinutes=] — parent-facing free-slot query (mirror of the provider host). Backed by the shared IProviderAvailabilitySlotService. PetGroomer uses ?serviceItemCode= (duration resolved server-side from the menu item); other categories use ?durationHours=. Closures, capacity, and overlapping confirmed bookings are subtracted per-service. Same error map as provider host (InvalidServiceId, ServiceNotRegistered, OfferingNotConfigured, ServiceItemCodeRequired/NotOffered/Inactive, InvalidBookingDuration, InvalidRequest). Save/get weekly-hours endpoints on the same group (`POST /` and `GET /`) are intentionally **NOT** mirrored on the parent host — those are organiser-only; the 7-day shape is already returned by GET /providers/{providerId} under workingHours.
 POST   /blob-images                                                              body: { blobUrl } — streams bytes from the private blob container (mirror of the provider host's universal fetch endpoint; duplicated because the hosts use different Firebase projects). 404 BlobNotFound; 400 InvalidRequest.
 ```
@@ -1439,6 +1481,8 @@ POST   /providers/{providerId}/policy/cancellation
 GET    /providers/{providerId}/policy
 
 POST   /providers/{providerId}/active-status                                     body { isActive } — master switch. Discriminated 200: Updated | BookingsExist (lists future confirmed bookings).
+
+POST   /providers/{providerId}/banner-image                                      (multipart { file }) the provider's single provider-level banner — the wide picture asked for at registration next to the profile photo, shown on their card in the parent-facing searches. <=5 MB, JPEG/PNG/WebP. Uploads to the [ProviderBanners] blob folder ("provider-banners/<providerId>/<guid>.<ext>") and overwrites Provider.Providers.BannerImageUrl via Provider.UpdateProviderBannerImage (sproc 51112). Returns { providerId, bannerImageUrl, updatedAtUtc }. Upload-only — the URL is read back as `bannerImageUrl` on GET /providers/{id}/profile and on the parent host's GET /providers/{providerId}. 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat; 404 ProviderNotFound. Distinct from the per-service banner below, which is keyed by ServiceId and can only be set once an offering exists.
 
 POST   /providers/{providerId}/photos                                            (multipart { file }) general provider photo gallery — uploads to [ProviderPhotos] blob folder, inserts a row in Provider.ProviderPhotos { ProviderPhotoId, ProviderId, PhotoUrl, CreatedAtUtc }. <=3 MB, JPEG/PNG/WebP. 404 ProviderNotFound (sproc 51110); 400 InvalidFile/ImageTooLarge/UnsupportedImageFormat.
 GET    /providers/{providerId}/photos                                            list the provider's gallery photos, oldest-first ([] when none).

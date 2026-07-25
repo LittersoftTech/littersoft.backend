@@ -13,6 +13,10 @@ internal sealed class SqlProviderOnboardingService(
     IPawfrontSecretProvider? secretProvider,
     IProviderMobileOtpSender otpSender) : IProviderOnboardingService
 {
+    // UNIQUE on (MobileCountryCode, MobileNumber) — the same digits under a
+    // different country code are a different number and must not collide.
+    private const string MobileNumberIndexName = "UX_Providers_MobileNumber";
+
     public async Task<ProviderFirebaseAuthResponse> SaveFirebaseAuthAsync(
         SaveProviderFirebaseAuthCommand commandInput,
         CancellationToken cancellationToken)
@@ -91,7 +95,13 @@ internal sealed class SqlProviderOnboardingService(
         {
             throw new ProviderAuthIdentityNotFoundException(request.ProviderAuthIdentityId);
         }
-        catch (SqlException exception) when (exception.Number is 2601 or 2627)
+        // Only the (MobileCountryCode, MobileNumber) index means "this number is
+        // taken". Matching on the index name keeps an unrelated unique violation
+        // (e.g. UQ_Providers_ProviderAuthIdentityId) from being reported to the
+        // caller as a duplicate mobile number.
+        catch (SqlException exception)
+            when (exception.Number is 2601 or 2627
+                  && exception.Message.Contains(MobileNumberIndexName, StringComparison.Ordinal))
         {
             throw new MobileNumberAlreadyExistsException(mobileCountryCode, mobileNumber);
         }
@@ -351,7 +361,8 @@ internal sealed class SqlProviderOnboardingService(
             reader.GetString(9),
             reader.GetBoolean(10),
             new DateTimeOffset(reader.GetDateTime(11), TimeSpan.Zero),
-            new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero));
+            new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero),
+            reader.IsDBNull(13) ? null : reader.GetString(13));
     }
 
     private static SendProviderMobileOtpResponse ReadMobileOtp(SqlDataReader reader)
