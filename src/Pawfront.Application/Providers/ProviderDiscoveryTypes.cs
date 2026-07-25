@@ -65,4 +65,9 @@ public sealed record ProviderSummary(
     string? About,
     // The category-specific animals list (AnimalsHandled / PetsTrained /
     // AnimalsTreated), normalised on the way out. Empty when no offering yet.
-    IReadOnlyCollection<string> AnimalsHandled);
+    IReadOnlyCollection<string> AnimalsHandled,
+    // The provider's registered street address + zip (from the service doc
+    // root). Used by the booking-detail location block; not on the discovery
+    // card wire shape.
+    string? Address = null,
+    string? Zip = null);

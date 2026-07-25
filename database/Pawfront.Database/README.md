@@ -640,7 +640,11 @@ per row here — if 4 tickets were bought, 4 rows come back.
 ### `Booking.Bookings`
 Confirmed booking records, scoped by `ServiceId`. Capacity check + insert
 is race-safe inside `Booking.CreateBooking` (UPDLOCK + HOLDLOCK on the
-overlap-count query).
+overlap-count query). The same locked range also rejects a **duplicate booking
+for the same pet** — an active booking on this service overlapping the requested
+window (same `PetId`) → `51069` (409 `PetAlreadyBooked`). Only fires when the
+create names a `PetId`; Custom walk-ins are unaffected. The night-stay twin uses
+`51239` (overlapping date range).
 
 - `BookingId` — PK.
 - `JobNumber` — `INT IDENTITY`, UNIQUE. Short sequential number rendered as the
@@ -655,13 +659,48 @@ overlap-count query).
   bookings remain meaningful even if the provider deregisters or changes
   sub-category.
 - `BookingDate`, `StartTime`, `EndTime` — `StartTime < EndTime` (CHECK).
-- `Status` — 6-state lifecycle: `CREATED` → `CONFIRMED` → `COMPLETED`, with
-  `APPROVAL_NEEDED` (schedule change pending) and the two terminal cancel
+- `Status` — expanded "job" lifecycle: `CREATED` → `CONFIRMED` →
+  `START_JOB` → `IN_PROGRESS` → `COMPLETED` → `PAID` (the provider taps "Start Job" →
+  `START_JOB` (start-OTP issued to the parent), enters the parent's start-code →
+  `IN_PROGRESS`, marks the job done → `COMPLETED` (no OTP), then records the parent's
+  payment → `PAID` (writes a `Booking.BookingPayments` row; App bookings only);
+  `JOB_STARTED` (the single direct-start state) and `ENDING` (the retired "End Job"
+  end-OTP state) are kept in the CHECK list for legacy rows), plus the modification statuses,
+  `APPROVAL_NEEDED` (deprecated, legacy rows), the two terminal cancel
   states `PROVIDER_CANCELLED` / `PARENT_CANCELLED` (which require
-  `CancelledAtUtc`, CHECK). New app bookings default to `CREATED`; custom
-  walk-ins start `CONFIRMED`. **A booking holds its capacity slot in every
-  status except the two cancelled ones** — that's the predicate every
-  capacity / closure-conflict / active-status / slot query uses.
+  `CancelledAtUtc`, CHECK), the two terminal no-show states
+  `PARENT_NO_SHOW` / `PROVIDER_NO_SHOW` (the named party failed to appear;
+  reportable by the counterparty 30+ minutes after the scheduled start), the
+  terminal `EXPIRED` state (sat in `CREATED` for 24+ hours without the
+  provider accepting — set by the `Booking.ExpireStaleBookings` sweeper or
+  lazily by the status-engine sprocs; never by a client), the terminal
+  `JOB_EXPIRED` state (the provider accepted but the job never reached
+  `IN_PROGRESS` — still confirmed-equivalent or sitting in `START_JOB` — and the
+  scheduled window fully elapsed; set by the same sweeper; distinct from
+  `EXPIRED`), and the terminal `OTP_ATTEMPTS_EXCEEDED` state (the provider entered
+  the wrong start-code 6 times, cancelling the job; set by
+  `Booking.VerifyBookingStartOtp` + night-stay mirror; never by a client).
+  New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
+  **A booking holds its capacity slot in every status except the two
+  cancelled ones, `PROVIDER_DECLINED`, the two no-show statuses, `EXPIRED`,
+  `JOB_EXPIRED`, and `OTP_ATTEMPTS_EXCEEDED`** — that's the predicate every
+  capacity / closure-conflict / active-status / slot query uses. (`PAID` and
+  `COMPLETED` both **hold** the slot and both count as a completed booking.)
+- `PricePerHour` — snapshot of the offering's unit rate captured at booking
+  time (price-lock). Populated for App bookings now (previously Custom-only — the
+  `CK_Bookings_SourceShape` App-must-be-NULL clause was relaxed to allow it); the
+  booking-detail read prices off it so a later rate change never re-prices an
+  existing booking. NULL only for legacy rows (detail falls back to the live rate).
+- `CancellationPolicyHours` — snapshot of the provider's advertised cancellation
+  policy at booking time (`NULL | 24 | 48 | 72 | 96`; CHECK). Frozen so a later
+  policy change never re-rules an existing booking; resolved in the create sproc
+  from `Provider.ProviderCancellationPolicies`. NULL legitimately = "no restriction".
+- `Snapshot{AddressLine, City, ZipCode, Latitude, Longitude}` — snapshot of the
+  **selected** service-location address at booking time (`LocationType`-driven:
+  the parent's profile address for `ParentLocation`, the provider's business
+  address for `ProviderLocation`). Frozen so a later address edit never moves an
+  existing booking; the detail read prefers these and falls back to live resolution
+  only for legacy rows (all-NULL). NULL for Custom walk-ins.
 - `PayoutStatus` — `Pending` / `Processing` / `Paid` / `Failed` (CHECK),
   default `Pending`. Capture-only for now — the actual provider-payout
   execution leg is not built yet.
@@ -692,11 +731,13 @@ The expanded "job" lifecycle adds three child tables per booking entity
 (`Booking.Bookings` and `Booking.NightStayBookings`), each `ON DELETE CASCADE`
 from its parent. The night-stay twin names are prefixed `NightStay…`.
 
-- **`Booking.BookingStartOtps`** — telemetry of every start-job OTP issued for a
-  booking. `{ OtpCode NVARCHAR(6) (plaintext low-secrecy share code),
-  Status (Pending|Consumed|Expired), FailedAttemptCount, IssuedAtUtc,
-  ExpiresAtUtc, ConsumedAtUtc }`. Issued/reused by `IssueBookingStartOtp`,
-  consumed by `StartBookingWithOtp`.
+- **`Booking.BookingStartOtps`** — telemetry of every start-OTP issued for a
+  booking: the code is issued at `START_JOB` and consumed by
+  `VerifyBookingStartOtp` → `IN_PROGRESS` (completion needs no OTP).
+  `{ OtpCode NVARCHAR(6) (plaintext low-secrecy share code),
+  Status (Pending|Consumed|Expired), FailedAttemptCount, IssuedAtUtc, ExpiresAtUtc,
+  ConsumedAtUtc }`. Issued/reused by `IssueBookingStartOtp` (reuse-while-valid);
+  also issued inline by `StartBooking`.
 - **`Booking.BookingEvidence`** — one row per job-completion photo
   (`PhotoUrl`, `CreatedAtUtc`); optional — `COMPLETED` no longer requires
   evidence. Same shape as `Provider.ProviderPhotos`.
@@ -709,9 +750,20 @@ from its parent. The night-stay twin names are prefixed `NightStay…`.
   just discards. Driven by `RequestBookingModification` /
   `RespondBookingModification`; read via `GetPendingBookingModification`.
 
+`Booking.BookingPayments` is a **single shared ledger** for both booking entities
+(not a per-entity twin): one row per paid booking, written when the provider marks
+a `COMPLETED` booking `PAID`. `{ BookingPaymentId, BookingType ('SingleDay' |
+'NightStay' — discriminates which booking table `BookingId` references), BookingId,
+ProviderId, PetParentId, Amount, PawfrontFee, PaymentMethod ('Cash' | 'Digital'),
+PaidAtUtc }`, UNIQUE `(BookingType, BookingId)`. Deliberately **NO FK** to the
+booking tables — a payments ledger should outlive booking deletion. Indexed on
+`ProviderId` (`IX_BookingPayments_Provider`) for the per-provider "total received"
+report. Written by `MarkBookingPaid` / `MarkNightStayBookingPaid`.
+
 `Booking.Bookings.Status`, `NightStayBookings.Status`, and the two history
 tables' `From/ToStatus` columns are `NVARCHAR(48)` and accept the expanded status
-set (decline, `JOB_STARTED`, six modification states; `APPROVAL_NEEDED` retained
+set (decline, the job states `START_JOB` / `IN_PROGRESS`, `PAID`, the retired
+`JOB_STARTED` and `ENDING`, six modification states; `APPROVAL_NEEDED` retained
 for legacy rows).
 
 ## User-defined types
@@ -797,6 +849,7 @@ Custom THROW codes used by sprocs:
 | 51060 | Pet parent not found (booking create). |
 | 51061 | Provider not found (booking create). |
 | 51062 | No remaining capacity for slot (scoped by ServiceId). |
+| 51069 | Pet already has an overlapping booking on this service → API `409 PetAlreadyBooked` (night-stay twin: 51239). |
 | 51063 | Booking not found (cancel). |
 | 51064 | Only the booker can cancel. |
 | 51065 | Booking already cancelled. |

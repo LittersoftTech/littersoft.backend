@@ -32,8 +32,11 @@ public static class ApplicationServiceRegistration
 
         // Multi-night boarding (PetSitter NightStay) — separate from the
         // single-day BookingService because a stay is a check-in/check-out date
-        // range, not a single-day time window.
-        services.TryAddScoped<INightStayBookingService, NightStayBookingService>();
+        // range, not a single-day time window. Also implements the narrow
+        // occupancy reader that feeds the slot service's per-night availability.
+        services.TryAddScoped<NightStayBookingService>();
+        services.TryAddScoped<INightStayBookingService>(sp => sp.GetRequiredService<NightStayBookingService>());
+        services.TryAddScoped<INightStayOccupancyReader>(sp => sp.GetRequiredService<NightStayBookingService>());
 
         // Enriches a parent's "my bookings" cards with provider + service details.
         services.TryAddScoped<IParentBookingEnrichmentService, ParentBookingEnrichmentService>();

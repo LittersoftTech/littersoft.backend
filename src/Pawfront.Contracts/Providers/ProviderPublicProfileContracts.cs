@@ -27,6 +27,15 @@ public sealed record ProviderPublicProfileResponse(
     // Digital); empty when none configured.
     int? MinimumHoursBeforeCancellation,
     IReadOnlyCollection<string> AcceptedPaymentMethods,
+    // Bookings this provider has already served (the booking window has ended
+    // and neither party cancelled), across all of their services.
+    int CompletedBookings,
+    // The freelancer's "about you" text — who the provider is. Null for
+    // shop/clinic/school/shelter sub-categories (see ServicesDescription).
+    string? Description,
+    // The business branch's description (shop/hotel/clinic/school/shelter/
+    // pet-shop) — what services the business offers. Null for freelancers.
+    string? ServicesDescription,
     // The provider's profile/business photo (the image they uploaded for their
     // offering); null when none set.
     string? ProfilePhotoUrl,
@@ -103,4 +112,8 @@ public sealed record ProviderSearchResultResponse(
     string? ServiceItemCode,
     // The service image the provider uploaded for this offering (same image
     // as the discovery card's). Null when the provider hasn't set one.
-    string? ImageUrl);
+    string? ImageUrl,
+    // The wide banner the provider uploaded for this specific service
+    // (POST /providers/{id}/services/{serviceId}/banner-image). Distinct from
+    // ImageUrl. Null when the provider hasn't set a banner for this service.
+    string? BannerImageUrl);

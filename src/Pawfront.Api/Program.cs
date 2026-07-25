@@ -58,6 +58,7 @@ api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapEventDashboardEndpoints();
 api.MapBookingEndpoints();
+api.MapPetParentLookupEndpoints();
 api.MapProviderNightStayBookingEndpoints();
 api.MapBlobImageEndpoints();
 api.MapProviderClosureEndpoints();

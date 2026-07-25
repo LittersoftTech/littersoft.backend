@@ -31,7 +31,7 @@ public interface INightStayBookingService
         DateOnly? onDate,
         CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<NightStayBookingResult>> ListByPetParentAsync(
+    Task<IReadOnlyList<NightStayBookingListItemResult>> ListByPetParentAsync(
         Guid petParentId,
         CancellationToken cancellationToken);
 
@@ -47,7 +47,28 @@ public interface INightStayBookingService
 
     Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken);
 
-    Task<NightStayBookingResult> StartWithOtpAsync(StartBookingCommand command, CancellationToken cancellationToken);
+    /// <summary>Provider taps "Start Job": confirmed-equivalent → START_JOB (15-min gate) + start-OTP.</summary>
+    Task<NightStayBookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken);
+
+    /// <summary>Provider enters the parent's start-OTP: START_JOB → IN_PROGRESS.</summary>
+    Task<NightStayBookingResult> VerifyStartOtpAsync(
+        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken);
+
+    /// <summary>Provider completes the job: IN_PROGRESS → COMPLETED (no OTP).</summary>
+    Task<NightStayBookingResult> CompleteAsync(
+        Guid bookingId, Guid providerId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Records that the parent has paid the provider for a stay (COMPLETED → PAID)
+    /// and writes the payment ledger row. The amount is the stay's price-locked
+    /// total. Throws <see cref="NightStayBookingNotFoundException"/>,
+    /// <see cref="BookingStatusForbiddenException"/>,
+    /// <see cref="BookingNotPayableException"/>,
+    /// <see cref="BookingAlreadyPaidException"/>, or
+    /// <see cref="BookingNotPriceableException"/>.
+    /// </summary>
+    Task<NightStayBookingResult> MarkPaidAsync(
+        MarkBookingPaidCommand command, CancellationToken cancellationToken);
 
     Task<NightStayBookingResult> RequestModificationAsync(
         RequestNightStayBookingModificationCommand command,

@@ -16,7 +16,8 @@ internal sealed class GoogleIdTokenAuthenticationHandler(
     private static readonly string[] GoogleIssuers =
     [
         "https://accounts.google.com",
-        "accounts.google.com"
+        "accounts.google.com",
+        "https://securetoken.google.com/pawfrontparent-89296"
     ];
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()

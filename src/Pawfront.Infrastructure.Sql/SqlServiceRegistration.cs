@@ -55,11 +55,15 @@ public static class SqlServiceRegistration
             services.AddSingleton<IProviderOnboardingStatusReader, InMemoryProviderOnboardingStatusReader>();
             services.AddSingleton<IEventSqlStore, InMemoryEventStore>();
             services.AddSingleton<IProviderAvailabilityService, InMemoryProviderAvailabilityService>();
+            // InMemoryBookingStore reads night-stay occupancy from the concrete
+            // night-stay store (slot capacity), so both resolve the SAME singleton.
+            services.AddSingleton<InMemoryNightStayBookingStore>();
             services.AddSingleton<IBookingSqlStore, InMemoryBookingStore>();
-            services.AddSingleton<INightStayBookingSqlStore, InMemoryNightStayBookingStore>();
+            services.AddSingleton<INightStayBookingSqlStore>(sp => sp.GetRequiredService<InMemoryNightStayBookingStore>());
             services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
             services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
             services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
+            services.AddSingleton<IProviderNameReader, NullProviderNameReader>();
         }
         else
         {
@@ -108,6 +112,15 @@ public static class SqlServiceRegistration
                 new SqlNightStayBookingStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
+
+            // Expires bookings still CREATED 24h after creation (sproc
+            // Booking.ExpireStaleBookings, both booking tables). Safe to run
+            // in both hosts — the sproc is idempotent and race-safe.
+            services.AddHostedService(provider =>
+                new BookingExpirySweeper(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>(),
+                    provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<BookingExpirySweeper>>()));
 
             services.AddScoped<IProviderClosureSqlStore>(provider =>
                 new SqlProviderClosureStore(
@@ -162,6 +175,11 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderBookingStatsReader>(provider =>
                 new SqlProviderBookingStatsReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderNameReader>(provider =>
+                new SqlProviderNameReader(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
         }

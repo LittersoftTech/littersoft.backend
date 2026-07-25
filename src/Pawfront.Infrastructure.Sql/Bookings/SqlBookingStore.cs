@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Configuration;
@@ -21,6 +22,9 @@ internal sealed class SqlBookingStore(
         TimeOnly startTime,
         TimeOnly endTime,
         string? jobNotes,
+        string? locationType,
+        decimal? pricePerHour,
+        ProviderAddressSnapshot? providerAddress,
         int capacity,
         CancellationToken cancellationToken)
     {
@@ -45,6 +49,11 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@EndTime", endTime.ToTimeSpan());
         command.Parameters.AddWithValue("@JobNotes",
             jobNotes is null ? DBNull.Value : (object)jobNotes);
+        command.Parameters.AddWithValue("@LocationType",
+            locationType is null ? DBNull.Value : (object)locationType);
+        command.Parameters.AddWithValue("@PricePerHour",
+            pricePerHour is null ? DBNull.Value : (object)pricePerHour.Value);
+        AddProviderAddressSnapshotParameters(command, providerAddress);
         command.Parameters.AddWithValue("@Capacity", capacity);
 
         try
@@ -79,6 +88,10 @@ internal sealed class SqlBookingStore(
         catch (SqlException exception) when (exception.Number == 51068)
         {
             throw new BookingPetInvalidException(petId!.Value, petParentId);
+        }
+        catch (SqlException exception) when (exception.Number == 51069)
+        {
+            throw new PetAlreadyBookedException(petId!.Value, serviceId, bookingDate, startTime, endTime);
         }
     }
 
@@ -178,7 +191,7 @@ internal sealed class SqlBookingStore(
         return await ReadAllAsync(command, cancellationToken);
     }
 
-    public async Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(
+    public async Task<IReadOnlyList<BookingListItemResult>> ListByPetParentAsync(
         Guid petParentId,
         CancellationToken cancellationToken)
     {
@@ -191,8 +204,28 @@ internal sealed class SqlBookingStore(
         };
         command.Parameters.AddWithValue("@PetParentId", petParentId);
 
-        return await ReadAllAsync(command, cancellationToken);
+        var rows = new List<BookingListItemResult>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadListItemRow(reader));
+        }
+        return rows;
     }
+
+    // The list sproc appends the frozen-at-creation extras AFTER the standard
+    // booking-row columns (ordinals 25-31), so the shared ReadBookingRow reader
+    // stays untouched for every other sproc.
+    private static BookingListItemResult ReadListItemRow(SqlDataReader reader) =>
+        new(ReadBookingRow(reader),
+            CancellationPolicyHours: reader.IsDBNull(26) ? null : reader.GetInt32(26),
+            Location: new BookingLocationResult(
+                LocationType: reader.IsDBNull(25) ? null : reader.GetString(25),
+                AddressLine: reader.IsDBNull(27) ? null : reader.GetString(27),
+                City: reader.IsDBNull(28) ? null : reader.GetString(28),
+                ZipCode: reader.IsDBNull(29) ? null : reader.GetString(29),
+                Latitude: reader.IsDBNull(30) ? null : reader.GetDecimal(30),
+                Longitude: reader.IsDBNull(31) ? null : reader.GetDecimal(31)));
 
     public async Task<IReadOnlyList<BookingWindow>> GetBookingsForDateAsync(
         Guid serviceId,
@@ -363,6 +396,27 @@ internal sealed class SqlBookingStore(
             // Defensive: the Application layer already validated the status/actor.
             throw new UnsupportedBookingStatusException(newStatus);
         }
+        catch (SqlException exception) when (exception.Number == 51126)
+        {
+            // Engine from-state guard (e.g. a no-show reported on a job that
+            // already started, or an accept on a non-CREATED booking).
+            throw new BookingNotStartableException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51128)
+        {
+            throw new BookingNoShowTooEarlyException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51129)
+        {
+            // The sproc flipped the stale CREATED booking to EXPIRED before
+            // throwing — the attempted transition (e.g. accept) is rejected.
+            throw new BookingExpiredException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51149)
+        {
+            // Cancel attempted while the job is already underway (IN_PROGRESS / ENDING).
+            throw new BookingJobInProgressException(bookingId);
+        }
     }
 
     public async Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
@@ -423,18 +477,19 @@ internal sealed class SqlBookingStore(
         }
     }
 
-    public async Task<BookingResult> StartWithOtpAsync(
-        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+    public async Task<BookingResult> StartJobAsync(
+        Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand("Booking.StartBookingWithOtp", connection)
+        await using var command = new SqlCommand("Booking.StartBooking", connection)
         {
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@BookingId", bookingId);
         command.Parameters.AddWithValue("@ProviderId", providerId);
-        command.Parameters.AddWithValue("@OtpCode", otpCode);
+        command.Parameters.AddWithValue("@NewCode", newCode);
+        command.Parameters.AddWithValue("@TtlMinutes", ttlMinutes);
 
         try
         {
@@ -457,6 +512,46 @@ internal sealed class SqlBookingStore(
         {
             throw new BookingNotStartableException(bookingId);
         }
+        catch (SqlException exception) when (exception.Number == 51137)
+        {
+            throw new BookingStartJobTooEarlyException(bookingId);
+        }
+    }
+
+    public async Task<BookingResult> VerifyStartOtpAsync(
+        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.VerifyBookingStartOtp", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@BookingId", bookingId);
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@OtpCode", otpCode);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Booking row was not returned after start-OTP verification.");
+            }
+            return ReadBookingRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51131)
+        {
+            throw new BookingNotFoundException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51132)
+        {
+            throw new BookingStatusForbiddenException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51138)
+        {
+            throw new BookingNotStartableException(bookingId);
+        }
         catch (SqlException exception) when (exception.Number == 51134)
         {
             throw new InvalidStartOtpException(bookingId);
@@ -464,6 +559,93 @@ internal sealed class SqlBookingStore(
         catch (SqlException exception) when (exception.Number == 51135)
         {
             throw new StartOtpExpiredException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51136)
+        {
+            // The 6th wrong OTP attempt cancelled the job.
+            throw new OtpAttemptsExceededException(bookingId);
+        }
+    }
+
+    public async Task<BookingResult> CompleteAsync(
+        Guid bookingId, Guid providerId, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.CompleteBooking", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@BookingId", bookingId);
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Booking row was not returned after completion.");
+            }
+            return ReadBookingRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51131)
+        {
+            throw new BookingNotFoundException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51132)
+        {
+            throw new BookingStatusForbiddenException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51133)
+        {
+            throw new BookingNotCompletableException(bookingId);
+        }
+    }
+
+    public async Task<BookingResult> MarkPaidAsync(
+        Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee,
+        string paymentMethod, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new SqlCommand("Booking.MarkBookingPaid", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@BookingId", bookingId);
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@Amount", amount);
+        command.Parameters.AddWithValue("@PawfrontFee", pawfrontFee);
+        command.Parameters.AddWithValue("@PaymentMethod", paymentMethod);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Booking row was not returned after payment.");
+            }
+            return ReadBookingRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51160)
+        {
+            throw new BookingNotFoundException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51161)
+        {
+            throw new BookingStatusForbiddenException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51162)
+        {
+            throw new BookingNotPayableException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51163)
+        {
+            throw new BookingPaymentNotAppException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51164)
+        {
+            throw new BookingAlreadyPaidException(bookingId);
         }
     }
 
@@ -605,6 +787,56 @@ internal sealed class SqlBookingStore(
         return rows;
     }
 
+    public async Task<BookingPrescriptionResult> UpsertPrescriptionAsync(
+        Guid bookingId,
+        Guid providerId,
+        string? prescriptionText,
+        bool isPetVaccinated,
+        IReadOnlyList<string> vaccinations,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Booking.UpsertBookingPrescription", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@BookingId", bookingId);
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@PrescriptionText",
+            prescriptionText is null ? DBNull.Value : (object)prescriptionText);
+        command.Parameters.AddWithValue("@IsPetVaccinated", isPetVaccinated);
+        command.Parameters.AddWithValue("@Vaccinations",
+            vaccinations.Count == 0 ? DBNull.Value : (object)SerializeVaccinations(vaccinations));
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Prescription row was not returned after upsert.");
+            }
+            return ReadPrescription(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51290)
+        {
+            throw new BookingNotFoundException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51291)
+        {
+            throw new BookingPrescriptionForbiddenException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51292)
+        {
+            throw new BookingPrescriptionNotVetException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51293)
+        {
+            throw new BookingPrescriptionInvalidStateException(bookingId);
+        }
+    }
+
     public async Task<BookingModificationResult?> GetPendingModificationAsync(
         Guid bookingId, CancellationToken cancellationToken)
     {
@@ -646,6 +878,24 @@ internal sealed class SqlBookingStore(
             BookingId: reader.GetGuid(1),
             PhotoUrl: reader.GetString(2),
             CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(3), TimeSpan.Zero));
+
+    // Binds the five @SnapshotProvider* create-sproc params from the resolved
+    // provider address (ProviderLocation bookings). All null for ParentLocation /
+    // no-location bookings — the sproc then snapshots the parent's address (or none).
+    internal static void AddProviderAddressSnapshotParameters(
+        SqlCommand command, ProviderAddressSnapshot? providerAddress)
+    {
+        command.Parameters.AddWithValue("@SnapshotProviderAddressLine",
+            providerAddress?.AddressLine is { } line ? (object)line : DBNull.Value);
+        command.Parameters.AddWithValue("@SnapshotProviderCity",
+            providerAddress?.City is { } city ? (object)city : DBNull.Value);
+        command.Parameters.AddWithValue("@SnapshotProviderZipCode",
+            providerAddress?.ZipCode is { } zip ? (object)zip : DBNull.Value);
+        command.Parameters.AddWithValue("@SnapshotProviderLatitude",
+            providerAddress?.Latitude is { } lat ? (object)lat : DBNull.Value);
+        command.Parameters.AddWithValue("@SnapshotProviderLongitude",
+            providerAddress?.Longitude is { } lng ? (object)lng : DBNull.Value);
+    }
 
     private static BookingResult ReadBookingRow(SqlDataReader reader)
     {
@@ -731,7 +981,57 @@ internal sealed class SqlBookingStore(
             PetVaccinationStatus: reader.IsDBNull(44) ? null : reader.GetString(44),
             PetVaccinationType: reader.IsDBNull(45) ? null : reader.GetString(45),
             PetVaccinationDose: reader.IsDBNull(46) ? null : reader.GetString(46),
-            PetPrescription: reader.IsDBNull(47) ? null : reader.GetString(47));
+            PetPrescription: reader.IsDBNull(47) ? null : reader.GetString(47),
+            PetSterilizationStatus: reader.IsDBNull(48) ? null : reader.GetString(48),
+            PetMedicalHistory: reader.IsDBNull(49) ? null : reader.GetString(49),
+            PetTemperament: reader.IsDBNull(50) ? null : reader.GetString(50),
+            LocationType: reader.IsDBNull(51) ? null : reader.GetString(51),
+            ParentAddressLine: reader.IsDBNull(52) ? null : reader.GetString(52),
+            ParentCity: reader.IsDBNull(53) ? null : reader.GetString(53),
+            ParentZipCode: reader.IsDBNull(54) ? null : reader.GetString(54),
+            ParentLatitude: reader.IsDBNull(55) ? null : reader.GetDecimal(55),
+            ParentLongitude: reader.IsDBNull(56) ? null : reader.GetDecimal(56),
+            HasPrescription: reader.GetInt32(57) == 1,
+            PrescriptionText: reader.IsDBNull(58) ? null : reader.GetString(58),
+            IsPetVaccinated: reader.IsDBNull(59) ? null : reader.GetBoolean(59),
+            PrescriptionVaccinations: reader.IsDBNull(60) ? null : DeserializeVaccinations(reader.GetString(60)),
+            NextConsultationDate: reader.IsDBNull(61) ? null : DateOnly.FromDateTime(reader.GetDateTime(61)),
+            // Snapshots (appended last on the sproc SELECT).
+            CancellationPolicyHours: reader.IsDBNull(62) ? null : reader.GetInt32(62),
+            SnapshotAddressLine: reader.IsDBNull(63) ? null : reader.GetString(63),
+            SnapshotCity: reader.IsDBNull(64) ? null : reader.GetString(64),
+            SnapshotZipCode: reader.IsDBNull(65) ? null : reader.GetString(65),
+            SnapshotLatitude: reader.IsDBNull(66) ? null : reader.GetDecimal(66),
+            SnapshotLongitude: reader.IsDBNull(67) ? null : reader.GetDecimal(67));
+    }
+
+    private static BookingPrescriptionResult ReadPrescription(SqlDataReader reader) =>
+        new(BookingId: reader.GetGuid(0),
+            PrescriptionText: reader.IsDBNull(1) ? null : reader.GetString(1),
+            IsPetVaccinated: reader.GetBoolean(2),
+            Vaccinations: reader.IsDBNull(3) ? Array.Empty<string>() : DeserializeVaccinations(reader.GetString(3)),
+            NextConsultationDate: reader.IsDBNull(4) ? null : DateOnly.FromDateTime(reader.GetDateTime(4)),
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero),
+            UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(6), TimeSpan.Zero));
+
+    // Vaccinations are stored as a JSON array of names in a single column. The app
+    // owns the (de)serialization — System.Text.Json, consistent with the rest of
+    // the codebase.
+    private static string SerializeVaccinations(IReadOnlyList<string> vaccinations) =>
+        JsonSerializer.Serialize(vaccinations);
+
+    private static IReadOnlyList<string> DeserializeVaccinations(string json)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
+        }
+        catch (JsonException)
+        {
+            // Defensive: a malformed value degrades to an empty list rather than
+            // failing the whole detail read.
+            return Array.Empty<string>();
+        }
     }
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)

@@ -1,10 +1,10 @@
--- Start-job OTPs for single-day bookings. When the parent opens a confirmed
--- booking's details, the server issues (or reuses) a short-lived 6-digit code
--- and returns it in the response; the parent reads it to the provider, who
--- enters it on POST .../start to move the job to JOB_STARTED. The code is a
--- low-secrecy SHARE code (already shown to the parent), so it is stored in
--- plaintext to allow reuse-while-valid. This table is the telemetry record of
--- every issuance + consumption (status, timestamps, failed attempts).
+-- Verification OTPs for single-day bookings: the parent-facing start code that
+-- gates the START_JOB -> IN_PROGRESS transition. The server issues (or reuses) a
+-- short-lived 6-digit code and returns it to the parent, who reads it to the
+-- provider; the provider enters it to begin the job. The code is a low-secrecy
+-- SHARE code (already shown to the parent), so it is stored in plaintext to
+-- allow reuse-while-valid. This table is the telemetry record of every issuance
+-- + consumption (status, timestamps, failed attempts).
 CREATE TABLE [Booking].[BookingStartOtps]
 (
     [BookingStartOtpId] UNIQUEIDENTIFIER NOT NULL

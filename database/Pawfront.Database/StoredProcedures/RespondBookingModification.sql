@@ -76,7 +76,7 @@ BEGIN
         WHERE [ServiceId] = @ServiceId
           AND [BookingDate] = @PDate
           AND [BookingId] <> @BookingId
-          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
+          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
           AND [StartTime] < @PEnd
           AND [EndTime] > @PStart;
 

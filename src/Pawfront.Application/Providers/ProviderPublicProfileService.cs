@@ -1,4 +1,5 @@
 using Pawfront.Application.Availability;
+using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Policies;
 using Pawfront.Application.ProviderPhotos;
@@ -22,7 +23,8 @@ internal sealed class ProviderPublicProfileService(
     IProviderAvailabilityService availabilityService,
     IProviderClosureService closureService,
     IProviderPolicyService policyService,
-    IProviderPhotoService photoService) : IProviderPublicProfileService
+    IProviderPhotoService photoService,
+    IProviderBookingStatsReader bookingStatsReader) : IProviderPublicProfileService
 {
     // 10-year window for "future time off" — closures rarely run beyond this,
     // and the closure list endpoint requires a bounded range. Trimmed in the
@@ -103,8 +105,16 @@ internal sealed class ProviderPublicProfileService(
         // the gallery (Provider.ProviderPhotos, oldest-first).
         var profilePhotoUrl = ResolveProfilePhoto(
             petSitterResult, petGroomerResult, petTrainerResult, petAdoptionSaleResult, vetResult);
+        var (description, servicesDescription) = ResolveDescriptions(
+            petSitterResult, petGroomerResult, petTrainerResult, petAdoptionSaleResult, vetResult);
         var gallery = await photoService.ListAsync(providerId, cancellationToken);
         var galleryImages = gallery.Select(p => p.PhotoUrl).ToList();
+
+        // Served-booking count — the same "overall provider experience" figure
+        // the booking-search cards show. Absent from the dictionary = zero.
+        var completedCounts = await bookingStatsReader.GetCompletedBookingCountsAsync(
+            new[] { providerId }, cancellationToken);
+        var completedBookings = completedCounts.TryGetValue(providerId, out var count) ? count : 0;
 
         return new ProviderPublicProfile(
             providerId,
@@ -116,6 +126,9 @@ internal sealed class ProviderPublicProfileService(
             timeOff,
             policy.MinimumHoursBeforeCancellation,
             policy.PayoutMethods,
+            completedBookings,
+            description,
+            servicesDescription,
             profilePhotoUrl,
             galleryImages,
             petSitterResult,
@@ -161,5 +174,43 @@ internal sealed class ProviderPublicProfileService(
             return vet.VetClinic?.ImageUrl ?? vet.Freelance?.ImageUrl;
         }
         return null;
+    }
+
+    /// <summary>
+    /// Resolves the two top-level descriptive texts from whichever category
+    /// offering is populated: Description = the freelancer's "about you"
+    /// (null for business sub-categories), ServicesDescription = the business
+    /// branch's description (null for freelancers).
+    /// </summary>
+    private static (string? Description, string? ServicesDescription) ResolveDescriptions(
+        PetSitterServiceResult? petSitter,
+        PetGroomerServiceResult? petGroomer,
+        PetTrainerServiceResult? petTrainer,
+        PetAdoptionSaleServiceResult? petAdoptionSale,
+        VetServiceResult? vet)
+    {
+        if (petSitter is not null)
+        {
+            return (petSitter.Freelance?.AboutYou, petSitter.PetHotel?.Description);
+        }
+        if (petGroomer is not null)
+        {
+            return (petGroomer.Freelance?.AboutYou, petGroomer.GroomerShop?.Description);
+        }
+        if (petTrainer is not null)
+        {
+            return (petTrainer.Freelance?.AboutYou, petTrainer.TrainingSchool?.Description);
+        }
+        if (petAdoptionSale is not null)
+        {
+            return (
+                petAdoptionSale.Freelance?.AboutYou,
+                petAdoptionSale.PetShelter?.Description ?? petAdoptionSale.PetShop?.Description);
+        }
+        if (vet is not null)
+        {
+            return (vet.Freelance?.AboutYou, vet.VetClinic?.Description);
+        }
+        return (null, null);
     }
 }

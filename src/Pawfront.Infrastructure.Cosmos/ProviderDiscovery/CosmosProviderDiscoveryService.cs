@@ -291,6 +291,8 @@ internal sealed class CosmosProviderDiscoveryService(
             DisplayName: doc.PetHotel?.Name,
             ImageUrl: doc.PetHotel?.ImageUrl ?? doc.Freelance?.ImageUrl,
             City: doc.City,
+            Address: doc.Address,
+            Zip: doc.Zip,
             About: doc.PetHotel?.Description ?? doc.Freelance?.AboutYou,
             AnimalsHandled: animals);
     }
@@ -308,6 +310,8 @@ internal sealed class CosmosProviderDiscoveryService(
             DisplayName: doc.GroomerShop?.Name,
             ImageUrl: doc.GroomerShop?.ImageUrl ?? doc.Freelance?.ImageUrl,
             City: doc.City,
+            Address: doc.Address,
+            Zip: doc.Zip,
             About: doc.GroomerShop?.Description ?? doc.Freelance?.AboutYou,
             AnimalsHandled: animals);
     }
@@ -328,6 +332,8 @@ internal sealed class CosmosProviderDiscoveryService(
             DisplayName: doc.TrainingSchool?.Name,
             ImageUrl: doc.TrainingSchool?.ImageUrl ?? doc.Freelance?.ImageUrl,
             City: doc.City,
+            Address: doc.Address,
+            Zip: doc.Zip,
             About: doc.TrainingSchool?.Description ?? doc.Freelance?.AboutYou,
             AnimalsHandled: animals);
     }
@@ -347,6 +353,8 @@ internal sealed class CosmosProviderDiscoveryService(
             DisplayName: displayName,
             ImageUrl: imageUrl,
             City: doc.City,
+            Address: doc.Address,
+            Zip: doc.Zip,
             About: about,
             AnimalsHandled: Array.Empty<string>());
     }
@@ -366,6 +374,8 @@ internal sealed class CosmosProviderDiscoveryService(
             DisplayName: doc.VetClinic?.Name,
             ImageUrl: doc.VetClinic?.ImageUrl ?? doc.Freelance?.ImageUrl,
             City: doc.City,
+            Address: doc.Address,
+            Zip: doc.Zip,
             About: doc.VetClinic?.Description ?? doc.Freelance?.AboutYou,
             AnimalsHandled: animals);
     }

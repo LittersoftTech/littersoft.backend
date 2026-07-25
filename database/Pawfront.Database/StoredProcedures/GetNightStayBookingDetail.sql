@@ -28,6 +28,7 @@ BEGIN
            b.[PetId],
            b.[PayoutStatus],
            b.[PayoutId],
+           b.[PricePerNight],
            -- Pet-parent join -------------------------------------------------
            pp.[FirstName]         AS [ParentFirstName],
            pp.[LastName]          AS [ParentLastName],
@@ -51,7 +52,27 @@ BEGIN
            pet.[VaccinationStatus]  AS [PetVaccinationStatus],
            pet.[VaccinationType]    AS [PetVaccinationType],
            pet.[VaccinationDose]    AS [PetVaccinationDose],
-           pet.[Prescription]       AS [PetPrescription]
+           pet.[Prescription]       AS [PetPrescription],
+           pet.[SterilizationStatus] AS [PetSterilizationStatus],
+           pet.[MedicalHistory]      AS [PetMedicalHistory],
+           pet.[Temperament]         AS [PetTemperament],
+           -- Stay notes + location choice + the parent's address ----------------
+           b.[JobNotes],
+           b.[LocationType],
+           pp.[AddressLine]         AS [ParentAddressLine],
+           pp.[City]                AS [ParentCity],
+           pp.[ZipCode]             AS [ParentZipCode],
+           pp.[Latitude]            AS [ParentLatitude],
+           pp.[Longitude]           AS [ParentLongitude],
+           -- Snapshots captured at booking time. The detail read PREFERS these over
+           -- the live provider policy / resolved address, falling back to live only
+           -- for legacy rows where they're NULL. Appended LAST for stable ordinals.
+           b.[CancellationPolicyHours],
+           b.[SnapshotAddressLine],
+           b.[SnapshotCity],
+           b.[SnapshotZipCode],
+           b.[SnapshotLatitude],
+           b.[SnapshotLongitude]
     FROM [Booking].[NightStayBookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]

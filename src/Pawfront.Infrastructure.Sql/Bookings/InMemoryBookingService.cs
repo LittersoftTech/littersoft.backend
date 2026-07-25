@@ -10,11 +10,12 @@ namespace Pawfront.Infrastructure.Sql.Bookings;
 /// async lock instead of UPDLOCK+HOLDLOCK, and is scoped by ServiceId so DayCare and NightStay
 /// each have independent capacity.
 /// </summary>
-internal sealed class InMemoryBookingStore : IBookingSqlStore
+internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightStayStore) : IBookingSqlStore
 {
     private readonly ConcurrentDictionary<Guid, BookingRow> bookings = new();
     private readonly ConcurrentDictionary<Guid, SemaphoreSlim> serviceLocks = new();
     private readonly ConcurrentDictionary<Guid, List<BookingStatusHistoryEntry>> history = new();
+    private readonly ConcurrentDictionary<Guid, PrescriptionRow> prescriptions = new();
     private int jobSequence;
 
     // A booking holds its slot unless it has been cancelled by either party.
@@ -55,6 +56,9 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         TimeOnly startTime,
         TimeOnly endTime,
         string? jobNotes,
+        string? locationType,
+        decimal? pricePerHour,
+        ProviderAddressSnapshot? providerAddress,
         int capacity,
         CancellationToken cancellationToken)
     {
@@ -62,6 +66,19 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         await serviceLock.WaitAsync(cancellationToken);
         try
         {
+            // Reject a duplicate booking for the same pet (same service, overlapping
+            // window) — mirrors THROW 51069 in [Booking].[CreateBooking].
+            if (petId is not null && bookings.Values.Any(b =>
+                    b.ServiceId == serviceId
+                    && b.PetId == petId
+                    && b.BookingDate == bookingDate
+                    && IsActive(b)
+                    && b.StartTime < endTime
+                    && b.EndTime > startTime))
+            {
+                throw new PetAlreadyBookedException(petId.Value, serviceId, bookingDate, startTime, endTime);
+            }
+
             // Count overlapping active (non-cancelled) bookings for this service+date.
             var concurrent = bookings.Values.Count(b =>
                 b.ServiceId == serviceId
@@ -91,6 +108,16 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 StartTime = startTime,
                 EndTime = endTime,
                 JobNotes = jobNotes,
+                LocationType = locationType,
+                PricePerHour = pricePerHour,
+                // Dev fallback: the parent's address isn't joined in-memory, so a
+                // ParentLocation snapshot stays null (falls back to live on read).
+                // A ProviderLocation booking snapshots the resolved provider address.
+                SnapshotAddressLine = providerAddress?.AddressLine,
+                SnapshotCity = providerAddress?.City,
+                SnapshotZipCode = providerAddress?.ZipCode,
+                SnapshotLatitude = providerAddress?.Latitude,
+                SnapshotLongitude = providerAddress?.Longitude,
                 Status = BookingStatuses.Created,
                 CreatedAtUtc = now,
                 UpdatedAtUtc = now,
@@ -248,7 +275,22 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             PetVaccinationStatus: null,
             PetVaccinationType: null,
             PetVaccinationDose: null,
-            PetPrescription: null);
+            PetPrescription: null,
+            LocationType: row.LocationType,
+            // Vet prescription (dev fallback: NextConsultationDate isn't resolved
+            // in-memory — it lives on the SQL PetNextConsultations join).
+            HasPrescription: prescriptions.ContainsKey(row.BookingId),
+            PrescriptionText: prescriptions.TryGetValue(row.BookingId, out var rx) ? rx.PrescriptionText : null,
+            IsPetVaccinated: prescriptions.TryGetValue(row.BookingId, out var rx2) ? rx2.IsPetVaccinated : null,
+            PrescriptionVaccinations: prescriptions.TryGetValue(row.BookingId, out var rx3) ? rx3.Vaccinations : null,
+            NextConsultationDate: null,
+            // Dev fallback: no provider cancellation policy is resolved in-memory.
+            CancellationPolicyHours: null,
+            SnapshotAddressLine: row.SnapshotAddressLine,
+            SnapshotCity: row.SnapshotCity,
+            SnapshotZipCode: row.SnapshotZipCode,
+            SnapshotLatitude: row.SnapshotLatitude,
+            SnapshotLongitude: row.SnapshotLongitude);
         return Task.FromResult<BookingDetailRow?>(detail);
     }
 
@@ -304,6 +346,20 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
             throw new BookingStatusForbiddenException(bookingId);
         }
 
+        // A booking left pending (CREATED) for 24+ hours has expired: persist
+        // the EXPIRED flip and reject the attempted transition — mirror of the
+        // SQL sproc's lazy guard (THROW 51129).
+        if (row.Status == BookingStatuses.Created
+            && DateTimeOffset.UtcNow >= row.CreatedAtUtc.AddHours(24))
+        {
+            var expiredFrom = row.Status;
+            row.Status = BookingStatuses.Expired;
+            row.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            AppendHistory(bookingId, expiredFrom, BookingStatuses.Expired, "System", null,
+                "Automatically expired after 24 hours awaiting provider acceptance.");
+            throw new BookingExpiredException(bookingId);
+        }
+
         var allowed = actor == BookingStatusActor.Provider
             ? BookingStatuses.ProviderSettable
             : BookingStatuses.ParentSettable;
@@ -323,10 +379,24 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         }
 
         var now = DateTimeOffset.UtcNow;
+        if (BookingStatuses.NoShow.Contains(newStatus))
+        {
+            if (!BookingStatuses.NoShowReportableFrom.Contains(row.Status))
+            {
+                throw new BookingNotStartableException(bookingId);
+            }
+
+            var startsAtUtc = new DateTimeOffset(row.BookingDate.ToDateTime(row.StartTime), TimeSpan.Zero);
+            if (now < startsAtUtc.AddMinutes(30))
+            {
+                throw new BookingNoShowTooEarlyException(bookingId);
+            }
+        }
+
         var from = row.Status;
         row.Status = newStatus;
         row.UpdatedAtUtc = now;
-        if (BookingStatuses.Cancelled.Contains(newStatus))
+        if (newStatus is BookingStatuses.ProviderCancelled or BookingStatuses.ParentCancelled)
         {
             row.CancelledAtUtc = now;
         }
@@ -368,15 +438,22 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         return Task.FromResult(list);
     }
 
-    public Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(
+    public Task<IReadOnlyList<BookingListItemResult>> ListByPetParentAsync(
         Guid petParentId,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<BookingResult> list = bookings.Values
+        // Dev fallback: no cancellation policy is resolved in-memory; the location
+        // block carries whatever snapshot the create captured (provider address).
+        IReadOnlyList<BookingListItemResult> list = bookings.Values
             .Where(b => b.PetParentId == petParentId)
             .OrderByDescending(b => b.BookingDate)
             .ThenByDescending(b => b.StartTime)
-            .Select(ToResult)
+            .Select(b => new BookingListItemResult(
+                ToResult(b),
+                CancellationPolicyHours: null,
+                Location: new BookingLocationResult(
+                    b.LocationType, b.SnapshotAddressLine, b.SnapshotCity,
+                    b.SnapshotZipCode, b.SnapshotLatitude, b.SnapshotLongitude)))
             .ToArray();
         return Task.FromResult(list);
     }
@@ -386,6 +463,11 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         DateOnly bookingDate,
         CancellationToken cancellationToken)
     {
+        // A night-stay covering this date occupies its NightStay bucket for the
+        // whole night — surfaced as full-day windows, mirroring the SQL sproc.
+        var nightStayWindow = new BookingWindow(TimeOnly.MinValue, new TimeOnly(23, 59, 59));
+        var nightStayCount = nightStayStore.CountActiveStaysCoveringNight(serviceId, bookingDate);
+
         IReadOnlyList<BookingWindow> list = bookings.Values
             .Where(b =>
                 b.ServiceId == serviceId
@@ -393,19 +475,29 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
                 && IsActive(b))
             .OrderBy(b => b.StartTime)
             .Select(b => new BookingWindow(b.StartTime, b.EndTime))
+            .Concat(Enumerable.Repeat(nightStayWindow, nightStayCount))
             .ToArray();
         return Task.FromResult(list);
     }
 
-    // The job lifecycle (start-OTP, evidence, modifications) is not implemented in
-    // the in-memory dev fallback — it requires the SQL-backed path.
+    // The job lifecycle (start/end OTP, evidence, modifications) is not implemented
+    // in the in-memory dev fallback — it requires the SQL-backed path.
     private static NotSupportedException NotInMemory()
         => new("The booking job lifecycle requires the SQL-backed store.");
 
     public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<BookingResult> StartWithOtpAsync(Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+    public Task<BookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<BookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<BookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken)
+        => throw NotInMemory();
+
+    public Task<BookingResult> MarkPaidAsync(Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee, string paymentMethod, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<BookingResult> RequestModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
@@ -424,6 +516,57 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
 
     public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(Guid bookingId, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<BookingEvidenceResult>>(Array.Empty<BookingEvidenceResult>());
+
+    public Task<BookingPrescriptionResult> UpsertPrescriptionAsync(
+        Guid bookingId,
+        Guid providerId,
+        string? prescriptionText,
+        bool isPetVaccinated,
+        IReadOnlyList<string> vaccinations,
+        CancellationToken cancellationToken)
+    {
+        if (!bookings.TryGetValue(bookingId, out var row))
+        {
+            throw new BookingNotFoundException(bookingId);
+        }
+        if (row.ProviderId != providerId)
+        {
+            throw new BookingPrescriptionForbiddenException(bookingId);
+        }
+        if (!string.Equals(row.ServiceCategory, "Vet", StringComparison.Ordinal))
+        {
+            throw new BookingPrescriptionNotVetException(bookingId);
+        }
+        if (!BookingStatuses.PrescriptionAllowedFrom.Contains(row.Status))
+        {
+            throw new BookingPrescriptionInvalidStateException(bookingId);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var stored = prescriptions.AddOrUpdate(
+            bookingId,
+            _ => new PrescriptionRow
+            {
+                PrescriptionText = prescriptionText,
+                IsPetVaccinated = isPetVaccinated,
+                Vaccinations = vaccinations,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            },
+            (_, existing) => new PrescriptionRow
+            {
+                PrescriptionText = prescriptionText,
+                IsPetVaccinated = isPetVaccinated,
+                Vaccinations = vaccinations,
+                CreatedAtUtc = existing.CreatedAtUtc,
+                UpdatedAtUtc = now
+            });
+
+        // NextConsultationDate isn't resolved in the in-memory fallback.
+        return Task.FromResult(new BookingPrescriptionResult(
+            bookingId, stored.PrescriptionText, stored.IsPetVaccinated, stored.Vaccinations,
+            NextConsultationDate: null, stored.CreatedAtUtc, stored.UpdatedAtUtc));
+    }
 
     private static BookingResult ToResult(BookingRow row) =>
         new(row.BookingId,
@@ -480,5 +623,20 @@ internal sealed class InMemoryBookingStore : IBookingSqlStore
         public string? CustomerLocation { get; init; }
         public decimal? PricePerHour { get; init; }
         public string? JobNotes { get; init; }
+        public string? LocationType { get; init; }
+        public string? SnapshotAddressLine { get; init; }
+        public string? SnapshotCity { get; init; }
+        public string? SnapshotZipCode { get; init; }
+        public decimal? SnapshotLatitude { get; init; }
+        public decimal? SnapshotLongitude { get; init; }
+    }
+
+    private sealed class PrescriptionRow
+    {
+        public string? PrescriptionText { get; init; }
+        public bool IsPetVaccinated { get; init; }
+        public required IReadOnlyList<string> Vaccinations { get; init; }
+        public DateTimeOffset CreatedAtUtc { get; init; }
+        public DateTimeOffset UpdatedAtUtc { get; init; }
     }
 }

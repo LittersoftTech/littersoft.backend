@@ -8,13 +8,26 @@
 --   * the booking is not already terminal            (THROW 51243)
 --   * the status actually changes                    (THROW 51244)
 --   * the transition is allowed from the current state (THROW 51246)
+--   * a no-show is only reportable 30+ minutes after check-in + drop-off (THROW 51248)
+--   * a booking left in CREATED for 24+ hours is flipped to EXPIRED (with a
+--     System audit row) and the attempted transition is rejected (THROW 51249)
+--     — the provider can no longer accept it. The periodic sweeper
+--     ([Booking].[ExpireStaleBookings]) normally expires these first; this
+--     in-line guard closes the race between sweeps.
 -- Other THROWs: 51240 booking not found, 51245 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
 --   Provider -> CONFIRMED (from CREATED), PROVIDER_DECLINED (from CREATED),
---               COMPLETED (from JOB_STARTED), PROVIDER_CANCELLED
---   Parent   -> PARENT_CANCELLED
--- Terminal states: COMPLETED, PROVIDER_DECLINED, PROVIDER_CANCELLED, PARENT_CANCELLED.
+--               COMPLETED (legacy /status shim, from IN_PROGRESS — ENDING
+--               tolerated for legacy rows),
+--               PROVIDER_CANCELLED, PARENT_NO_SHOW (from confirmed-equivalent or
+--               START_JOB, 30 min after drop-off)
+--   Parent   -> PARENT_CANCELLED,
+--               PROVIDER_NO_SHOW (from confirmed-equivalent or START_JOB, 30 min after drop-off)
+-- A cancel is blocked once the job is underway (IN_PROGRESS; the retired ENDING
+-- kept for legacy rows) → THROW 51269.
+-- Terminal states: COMPLETED, PROVIDER_DECLINED, PROVIDER_CANCELLED, PARENT_CANCELLED,
+-- PARENT_NO_SHOW, PROVIDER_NO_SHOW.
 CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
     @NightStayBookingId UNIQUEIDENTIFIER,
     @NewStatus NVARCHAR(48),
@@ -32,7 +45,8 @@ BEGIN
     END
 
     IF @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED',
-                          N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+                          N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
     BEGIN
         THROW 51245, 'Unknown or non-engine booking status.', 1;
     END
@@ -41,12 +55,18 @@ BEGIN
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
+    DECLARE @CheckInDate DATE;
+    DECLARE @DropOffTime TIME(0);
+    DECLARE @CreatedAtUtc DATETIME2(7);
 
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status],
            @ProviderId = [ProviderId],
-           @PetParentId = [PetParentId]
+           @PetParentId = [PetParentId],
+           @CheckInDate = [CheckInDate],
+           @DropOffTime = [DropOffTime],
+           @CreatedAtUtc = [CreatedAtUtc]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -61,15 +81,39 @@ BEGIN
         THROW 51241, 'You are not a party to this booking.', 1;
     END
 
+    -- A booking left pending (CREATED) for 24+ hours has expired: persist the
+    -- EXPIRED flip (with a System audit row) and reject the attempted
+    -- transition — the provider can no longer accept it. The periodic sweeper
+    -- normally expires these first; this guard closes the race between sweeps.
+    IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
+    BEGIN
+        UPDATE [Booking].[NightStayBookings]
+        SET [Status] = N'EXPIRED',
+            [UpdatedAtUtc] = @Now
+        WHERE [NightStayBookingId] = @NightStayBookingId;
+
+        INSERT INTO [Booking].[NightStayBookingStatusHistory]
+            ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+        VALUES
+            (@NightStayBookingId, N'CREATED', N'EXPIRED', N'System', NULL,
+             N'Automatically expired after 24 hours awaiting provider acceptance.');
+
+        COMMIT TRANSACTION;
+        THROW 51249, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
+    END
+
+    -- A no-show always names the OTHER party: the provider reports the parent's
+    -- no-show, the parent reports the provider's.
     IF (@Actor = N'Provider'
-            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PROVIDER_CANCELLED'))
+            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PROVIDER_CANCELLED', N'PARENT_NO_SHOW'))
        OR (@Actor = N'Parent'
-            AND @NewStatus NOT IN (N'PARENT_CANCELLED'))
+            AND @NewStatus NOT IN (N'PARENT_CANCELLED', N'PROVIDER_NO_SHOW'))
     BEGIN
         THROW 51242, 'This status is not permitted for this actor.', 1;
     END
 
-    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51243, 'Booking is in a terminal state and cannot change.', 1;
     END
@@ -81,9 +125,37 @@ BEGIN
 
     IF (@NewStatus = N'CONFIRMED'           AND @CurrentStatus <> N'CREATED')
        OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
-       OR (@NewStatus = N'COMPLETED'        AND @CurrentStatus <> N'JOB_STARTED')
+       OR (@NewStatus = N'COMPLETED'        AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
+       OR (@NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
+           AND @CurrentStatus NOT IN (N'CONFIRMED',
+                                      N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
+                                      N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
+                                      N'START_JOB'))
     BEGIN
         THROW 51246, 'This transition is not allowed from the current status.', 1;
+    END
+
+    -- A cancel is allowed from any non-terminal state EXCEPT once the job is
+    -- actively underway (IN_PROGRESS; the retired ENDING kept for legacy rows)
+    -- — by then it runs to completion.
+    IF @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+       AND @CurrentStatus IN (N'IN_PROGRESS', N'ENDING')
+    BEGIN
+        THROW 51269, 'The job is already in progress and can no longer be cancelled.', 1;
+    END
+
+    -- A no-show can only be reported once the counterparty is actually late:
+    -- 30 minutes past the stay's scheduled start (check-in date + drop-off
+    -- time; all times are UTC).
+    IF @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
+    BEGIN
+        DECLARE @StartsAtUtc DATETIME2(7) =
+            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+                    CAST(@CheckInDate AS DATETIME2(7)));
+        IF @Now < DATEADD(MINUTE, 30, @StartsAtUtc)
+        BEGIN
+            THROW 51248, 'A no-show can only be reported 30 minutes after the stay''s scheduled drop-off.', 1;
+        END
     END
 
     UPDATE [Booking].[NightStayBookings]

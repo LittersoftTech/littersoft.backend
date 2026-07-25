@@ -25,6 +25,16 @@ public interface IProviderServiceBannerService
     Task<ProviderServiceBannerResult?> GetAsync(
         Guid serviceId,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Batch-reads banner URLs for a set of services (used to hydrate search
+    /// result cards). Returns a map of ServiceId → BannerImageUrl containing
+    /// only the services that have a banner set; services without one are
+    /// absent from the map. Empty input yields an empty map.
+    /// </summary>
+    Task<IReadOnlyDictionary<Guid, string>> GetByServiceIdsAsync(
+        IReadOnlyCollection<Guid> serviceIds,
+        CancellationToken cancellationToken);
 }
 
 public sealed record ProviderServiceBannerResult(

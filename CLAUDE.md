@@ -225,6 +225,12 @@ Custom `THROW` codes used for typed errors:
 - `51067` provider is currently inactive (master Active/Inactive switch is off)
   → API maps to **409 ProviderInactive**
 - `51068` pet not found or not owned by the pet parent (booking create with petId)
+- `51069` the pet already has an active booking on this service overlapping the
+  requested slot (single-day booking create) → API maps to **409 PetAlreadyBooked**.
+  Enforced under the same `UPDLOCK + HOLDLOCK` range as the capacity count, so a
+  concurrent duplicate (two devices / a race) serialises and is rejected. Only fires
+  when the create names a `PetId` (App bookings); Custom walk-ins have no pet and are
+  unaffected. Scoped to the same `ServiceId` (same provider service).
 - `51100` provider profile not found (active-status toggle)
 - `51110` provider not found (provider photo add)
 - `51111` provider photo not found (provider photo delete)
@@ -243,12 +249,42 @@ Custom `THROW` codes used for typed errors:
   maps to **409 BookingNotStartable / 400** (engine from-state guard)
 - `51127` **retired** — evidence is no longer required before COMPLETED
   (the gate was removed; evidence photos are optional)
-- **Job-lifecycle sprocs (single-day `Booking.Bookings`):**
+- `51128` no-show reported before the 30-minute grace window after the
+  booking's scheduled start (`BookingDate + StartTime` UTC) has elapsed → API
+  maps to **409 NoShowTooEarly**
+- `51129` booking expired (2026-07-17): the booking sat in `CREATED` for 24+
+  hours without the provider accepting — the status engine flips it to
+  `EXPIRED` (with a `System` audit row) and rejects the attempted transition →
+  API maps to **409 BookingExpired**. Normally the periodic sweeper (sproc
+  `Booking.ExpireStaleBookings`, run every 10 min by the `BookingExpirySweeper`
+  hosted service in both hosts) expires these first; the in-sproc guard closes
+  the race between sweeps.
+- **Job-lifecycle sprocs (single-day `Booking.Bookings`) — start-OTP flow:**
   - `51130` booking not found (issue start-OTP)
-  - `51131/51132/51133` start-with-OTP: not found / not the provider (→ **403**) /
-    not in a startable state (→ **409 BookingNotStartable**)
-  - `51134` start OTP missing/incorrect (→ **400 InvalidStartOtp**); `51135` OTP
-    expired (→ **409 StartOtpExpired**)
+  - **`Booking.StartBooking`** (→ `START_JOB` + start-OTP): `51131/51132/51133` =
+    not found / not the provider (→ **403**) / not in a startable state
+    (→ **409 BookingNotStartable**); `51137` = more than 15 min before the
+    scheduled start (→ **409 StartJobTooEarly**)
+  - **`Booking.VerifyBookingStartOtp`** (start-OTP → `IN_PROGRESS`): `51131/51132`
+    = not found / not the provider (→ **403**); `51138` = not `START_JOB`
+    (→ **409 BookingNotStartable**); `51134` OTP missing/incorrect (→ **400
+    InvalidStartOtp**); `51135` expired (→ **409 StartOtpExpired**); `51136` 6th
+    wrong attempt cancels the job (→ **409 OtpAttemptsExceeded**)
+  - **`Booking.CompleteBooking`** (`IN_PROGRESS` → `COMPLETED`, no OTP):
+    `51131/51132` = not found / not the provider (→ **403**); `51133` = not
+    `IN_PROGRESS` (→ **409 BookingNotCompletable**; the retired `ENDING` is
+    tolerated as a from-state for legacy rows)
+  - **`Booking.MarkBookingPaid`** (`COMPLETED` → `PAID` + payment ledger row):
+    `51160` not found (→ **404 BookingNotFound**); `51161` not the provider
+    (→ **403 Forbidden**); `51162` not `COMPLETED` (→ **409 BookingNotPayable**);
+    `51163` Custom walk-in — App bookings only (→ **400 PaymentNotAppBooking**);
+    `51164` already paid (→ **409 BookingAlreadyPaid**)
+  - `51139` **retired** (2026-07-23) with the `ENDING` stage — the "End Job" +
+    end-OTP leg was removed (sprocs `EndBooking`/`CompleteBookingWithOtp` are
+    dropped on re-deploy)
+  - **`Booking.UpdateBookingStatus`** (engine): `51149` = cancel attempted while
+    the job is underway (`IN_PROGRESS`; retired `ENDING` kept for legacy rows) →
+    **409 BookingInProgress**
   - `51140/51141/51142/51143` request modification: not found / not a party
     (→ **403**) / not modifiable (→ **409 BookingNotModifiable**) / a proposal is
     already pending (→ **409 ModificationAlreadyPending**)
@@ -256,11 +292,29 @@ Custom `THROW` codes used for typed errors:
     (→ **403**) / no proposal awaiting your response (→ **409 NoPendingModification**) /
     no capacity for the proposed window (→ **409 CapacityExceeded**)
   - `51150` booking not found / not owned by provider (add evidence)
+  - **Vet prescription upsert (`Booking.UpsertBookingPrescription`):** `51290`
+    booking not found → **404 BookingNotFound**; `51291` caller is not the
+    booking's provider → **403 Forbidden**; `51292` not a Vet booking → **400
+    PrescriptionNotVetBooking**; `51293` job not underway/completed
+    (`IN_PROGRESS`/`COMPLETED`; retired `ENDING` tolerated) → **409 PrescriptionNotAllowed**.
 - **Job-lifecycle sprocs (night-stay):** `51246` (transition guard, mirror of
-  51126; `51247` retired with the evidence gate); `51250` (issue OTP not found);
-  `51251-51255` (start-with-OTP, mirror of 51131-51135); `51260-51263` (request
-  modification, mirror of 51140-51143); `51265-51268` (respond modification,
-  mirror of 51145-51148); `51270` (add evidence not found).
+  51126; `51247` retired with the evidence gate); `51248` (no-show too early,
+  mirror of 51128 — gated on `CheckInDate + DropOffTime` + 30 min, → **409
+  NoShowTooEarly**); `51249` (booking expired, mirror of 51129 → **409
+  BookingExpired**); `51269` (cancel while underway, mirror of 51149 → **409
+  BookingInProgress**); `51250` (issue OTP not found);
+  `51251-51253` + `51257` (`StartNightStayBooking` → `START_JOB` + start-OTP,
+  mirror of 51131-51133 + 51137 too-early); `51251/51252/51258` + `51254-51256`
+  (`VerifyNightStayBookingStartOtp` → `IN_PROGRESS`, mirror of 51131/51132/51138 +
+  51134-51136); `51251-51253` (`CompleteNightStayBooking` → `COMPLETED`, no OTP,
+  mirror of 51131-51133 — `51253` = not `IN_PROGRESS` → **409 BookingNotCompletable**);
+  `51259` **retired** with the `ENDING` stage (mirror of 51139); `51260-51263`
+  (request modification, mirror of 51140-51143); `51265-51268` (respond
+  modification, mirror of 51145-51148); `51270` (add evidence not found);
+  `51280-51283` (`MarkNightStayBookingPaid` → `PAID`, mirror of 51160/51161/51162/51164
+  — no Custom check since night-stay is App-only: `51280` not found → **404**,
+  `51281` not the provider → **403**, `51282` not `COMPLETED` → **409
+  BookingNotPayable**, `51283` already paid → **409 BookingAlreadyPaid**).
 - `51200` parent auth identity not found (pet-parent profile completion)
 - `51201` pet parent not found (profile-photo update)
 - `51202` pet parent not found (pet add)
@@ -300,6 +354,11 @@ Custom `THROW` codes used for typed errors:
   - `51236` night-stay booking not found (cancel) → **404 NightStayBookingNotFound**
   - `51237` only the booker can cancel (night-stay cancel) → **400 BookingCancellationForbidden**
   - `51238` night-stay booking already cancelled (cancel) → **409 BookingAlreadyCancelled**
+  - `51239` the pet already has an active stay on this service whose date range
+    overlaps the requested one (night-stay create) → **409 PetAlreadyBooked**. Mirror
+    of `51069`: a pet can't board in two places at once. Enforced under
+    `UPDLOCK + HOLDLOCK`; only fires when the create names a `PetId`; scoped to the
+    same `ServiceId`.
   - `51240` night-stay booking not found (status update) → **404 NightStayBookingNotFound**
   - `51241` caller is not a party to the booking (status update) → **403 Forbidden**
   - `51242` status not permitted for this actor (status update) → **400 BookingStatusNotAllowed**
@@ -509,11 +568,35 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
   requested granularity. Subtracts overlapping confirmed bookings on this
   ServiceId against the offering's capacity. Returns
   `{ providerId, serviceId, date, serviceCategory, subCategory, serviceType,
-     durationHours, capacity, granularityMinutes, slots: [...] }`.
-  - **Duration rule per service type:** PetSitter (`DayCare`, `NightStay`) and
+     durationHours, capacity, granularityMinutes, slots: [...], nights: null }`.
+  - **Each slot carries `remainingCapacity`** (2026-07-11): the offering's
+    capacity minus the active bookings overlapping that window — the same
+    overlap count the race-safe create sproc uses, so what's shown is exactly
+    what create will admit. Fully-booked slots ARE emitted with
+    `remainingCapacity: 0` (2026-07-17) so the client can render them as
+    unavailable; the window-availability checker and the five booking
+    searches only count slots with positive remaining capacity as bookable.
+  - **NightStay is DATE-granular** (2026-07-11 refactor): capacity is per
+    night, not per time window, so for a NightStay ServiceId the SAME endpoint
+    ignores `durationHours`/`granularityMinutes`, leaves `slots` empty, and
+    fills `nights: [{ date, activeBookings, remainingCapacity, isClosed,
+    isAvailable }]` — one entry per night in `[date, endDate]` (`endDate` is a
+    new optional query param on both hosts; defaults to `date`; max 31 nights
+    → 400 InvalidRequest). A night is unavailable when a FULL-DAY closure on
+    the service covers it or active stays (`CheckInDate <= night <
+    CheckOutDate`) have used every capacity unit — exactly the create-path
+    gates (the weekly time grid is deliberately NOT consulted, mirroring
+    night-stay create). Backed by `INightStayOccupancyReader`
+    (`NightStayBookingService` second interface → sproc
+    `Booking.GetNightStayOccupancy`, range-based). The
+    `/providers/search/night-stay` per-night probe and the generic
+    `/providers` window checker both branch to this night surface for
+    NightStay services.
+  - **Duration rule per service type:** PetSitter `DayCare` and
     PetGroomer (`GroomingSession`) require `durationHours >= offering minimum`;
     PetTrainer (`TrainingSession`) and Vet (`VetAppointment`) require
-    `durationHours == offering fixed duration`; PetAdoptionAndSale has no
+    `durationHours == offering fixed duration`; `NightStay` takes no duration
+    (date-granular, see above); PetAdoptionAndSale has no
     `ProviderServices` row and therefore can't be queried here.
   - **Capacity comes from the offering** (`maxPetsAtOneTime` /
     `maxConcurrentSessions` / `maxConcurrentConsultations`) but is scoped by
@@ -551,9 +634,41 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
 **job** lifecycle:
 - `CREATED` (parent booked) → `CONFIRMED` (provider accepted) **or**
   `PROVIDER_DECLINED` (provider rejected).
-- `CONFIRMED`-equivalent → `JOB_STARTED` (provider started — gated by the
-  parent's **start-OTP**) → `COMPLETED` (provider ended the job; evidence
-  photos are **optional**).
+- **Start-OTP job lifecycle (2026-07-23 — the `ENDING`/end-OTP leg was removed):**
+  `CONFIRMED`-equivalent → `START_JOB` → `IN_PROGRESS` → `COMPLETED`. Three
+  provider actions, ONE OTP (server-generated, shown to the **parent**, entered
+  by the **provider**):
+  1. `POST .../start-job` — provider taps "Start Job"; the booking moves to
+     `START_JOB` and the **start-OTP** is issued to the parent. **Only allowed from
+     15 minutes before the scheduled start onward** (single-day: `BookingDate +
+     StartTime`; night-stay: `CheckInDate + DropOffTime`; UTC) — earlier → **409
+     StartJobTooEarly** (THROW 51137 / night-stay 51257).
+  2. `POST .../start-job/verify` (body `{ otpCode }`) — provider enters the
+     start-code the parent showed → `IN_PROGRESS` (6 wrong attempts cancel the
+     job, see `OTP_ATTEMPTS_EXCEEDED`).
+  3. `POST .../complete` (body optional: `{ nextConsultationDate?, prescription? }`)
+     — provider marks the job done → `COMPLETED`. **No OTP.**
+  The start-OTP lives in `Booking.BookingStartOtps` / `NightStayBookingStartOtps`
+  (10-min TTL, reuse-while-valid; the `OtpKind` column from the short-lived
+  dual-OTP experiment was dropped). The parent reads the active code via the
+  GET-one detail (`startOtp` block, surfaced only at `START_JOB`). Sprocs:
+  `Booking.StartBooking` (issues the start-OTP + 15-min gate),
+  `VerifyBookingStartOtp`, `CompleteBooking` (no OTP; `EndBooking` /
+  `CompleteBookingWithOtp` were dropped) + night-stay mirrors. `JOB_STARTED` (the
+  single direct-start state) and `ENDING` (the "End Job" end-OTP state) are
+  **retired** — kept in the CHECK list for legacy rows, no longer settable. Once
+  `IN_PROGRESS` the job is underway: it can no longer be cancelled (→ **409
+  BookingInProgress**, THROW 51149 / night-stay 51269) or reported as a no-show;
+  it runs through to `COMPLETED`. Evidence photos remain **optional**.
+- `PAID` (2026-07-23) — the **last** stage: the parent has paid the provider. Set
+  only from `COMPLETED` by the provider via `POST .../bookings/{id}/paid` (+
+  night-stay twin), never by a client-chosen status. The transition writes a
+  **payment ledger row** to `Booking.BookingPayments` (see the "Booking payment"
+  note below). **App bookings only** — a Custom walk-in can't be marked paid (→
+  **400 PaymentNotAppBooking**). **Terminal**, and — like `COMPLETED` — it still
+  **holds** the booking's slot (NOT in the capacity-freeing set) and counts toward
+  `completedBookings`. Sprocs `Booking.MarkBookingPaid` /
+  `MarkNightStayBookingPaid` (THROW 51160-51164 / 51280-51283).
 - Either party may propose a schedule change:
   `MODIFICATION_REQUEST_BY_PARENT` / `MODIFICATION_REQUEST_BY_PROVIDER`; the
   counterparty resolves it → `PROVIDER/PARENT_ACCEPTED_MODIFICATION` (new
@@ -562,15 +677,89 @@ ones: `AnimalsHandled`, `AddOns`, `DogTemperaments`, `ServiceLocation`.
   **"live" resting states** — the job can still be started/modified/cancelled
   from them (`BookingStatuses.ConfirmedEquivalent`).
 - `PROVIDER_CANCELLED` / `PARENT_CANCELLED` are cancellation states.
+- `PARENT_NO_SHOW` / `PROVIDER_NO_SHOW` (2026-07-12) record the counterparty
+  failing to appear — a no-show always **names the absent party**: the
+  provider reports `PARENT_NO_SHOW`, the parent reports `PROVIDER_NO_SHOW`
+  (each via its own host's `POST .../no-show` endpoint; also settable through
+  the legacy generic `/status` shim). Allowed from a confirmed-equivalent state
+  **or `START_JOB`** (the provider tapped start but the counterparty never turned
+  up / handed over the code) — not from `CREATED`, and not once `IN_PROGRESS`
+  (by then both parties met) — and only **30+ minutes after the
+  scheduled start** (single-day:
+  `BookingDate + StartTime`; night-stay: `CheckInDate + DropOffTime`; UTC) —
+  earlier → **409 NoShowTooEarly** (THROW 51128 / night-stay 51248). Both are
+  **terminal** and free capacity. Same rules on `Booking.NightStayBookings`.
+- `EXPIRED` (2026-07-17) — the booking sat in `CREATED` for **24+ hours**
+  without the provider accepting. Set automatically, never by a client:
+  the `BookingExpirySweeper` hosted service (registered in both hosts) runs
+  sproc `Booking.ExpireStaleBookings` every 10 minutes (flips stale CREATED
+  rows in BOTH booking tables + writes `System` audit rows), and the two
+  status-engine sprocs apply the same flip **lazily** when any transition is
+  attempted on a stale CREATED booking — so a provider accept after 24 hours
+  is rejected with **409 BookingExpired** (THROW 51129 / night-stay 51249)
+  even between sweeps. **Terminal** and frees capacity.
+- `JOB_EXPIRED` (2026-07-21) — the provider **accepted** the booking but the job
+  never got underway, and its scheduled window **fully elapsed** while still
+  confirmed-equivalent **or sitting in `START_JOB`** (start-OTP issued, never
+  verified — i.e. never reached `IN_PROGRESS`). Distinct from `EXPIRED` (which is
+  a `CREATED` booking never accepted). Set automatically by the
+  `Booking.ExpireStaleBookings` sweeper (a second sweep arm, both tables;
+  single-day window-elapsed = `BookingDate+EndTime` past, night-stay =
+  `CheckOutDate < today`), never by a client. **Terminal** and frees capacity.
+  There is no lazy status-engine flip for it. Once `IN_PROGRESS`, the
+  job started, so a started-but-never-completed job is **not** `JOB_EXPIRED`.
+- `OTP_ATTEMPTS_EXCEEDED` (2026-07-21) — the provider entered the wrong
+  **start-code 6 times** on `.../start-job/verify`; the 6th failure
+  cancels the job. Set by `Booking.VerifyBookingStartOtp` (+ night-stay mirror —
+  bump the OTP's `FailedAttemptCount`; on the 6th, invalidate the OTP + flip the
+  booking + audit), never by a client → the endpoint returns **409
+  OtpAttemptsExceeded** (THROW 51136 / night-stay 51256 →
+  `OtpAttemptsExceededException`). **Terminal** and frees capacity.
 - `APPROVAL_NEEDED` is **deprecated** (superseded by modifications) — still in
   the CHECK list so legacy rows stay valid, no longer settable.
 
 **Capacity-freeing ("inactive booking") predicate is now
-`Status NOT IN ('PROVIDER_CANCELLED','PARENT_CANCELLED','PROVIDER_DECLINED')`**
-— a declined job releases its slot. This predicate is keyed off by every
-capacity / closure-conflict / active-status / slot query (and `GetBookingsForDate`).
+`Status NOT IN ('PROVIDER_CANCELLED','PARENT_CANCELLED','PROVIDER_DECLINED','PARENT_NO_SHOW','PROVIDER_NO_SHOW','EXPIRED','JOB_EXPIRED','OTP_ATTEMPTS_EXCEEDED')`**
+— a declined, no-show, expired, job-expired, or otp-cancelled job releases its
+slot. This predicate is keyed off by every capacity / closure-conflict /
+active-status / slot query (and `GetBookingsForDate`), and
+no-show/expired/job-expired/otp-exceeded rows are excluded from the
+`completedBookings` stat (`SqlProviderBookingStatsReader`).
 New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
 
+- **Booking location choice (`LocationType`, 2026-07-08).** Both
+  `Booking.Bookings` and `Booking.NightStayBookings` carry a nullable
+  `LocationType` column (`'ParentLocation' | 'ProviderLocation'` CHECK) — the
+  parent's choice of where the service happens. **Required** on the parent-host
+  creates (`POST /pet-parents/{id}/bookings` + `/night-stay-bookings` → 400
+  `InvalidRequest` when missing, 400 `UnsupportedLocationType` when invalid);
+  **optional** on the provider-host create (`CreateBookingRequest.locationType`).
+  Every booking-detail read (single-day + night-stay, both hosts) returns a
+  top-level **`location`** section `{ locationType, addressLine, city, zipCode,
+  latitude, longitude }`. It is now **snapshotted at booking creation** (2026-07-24,
+  see the "Snapshots at creation" note below) — frozen so a later edit to either
+  party's address never moves an existing booking. The detail read prefers the
+  frozen `Snapshot*` columns and falls back to **live** resolution only for legacy
+  rows (no snapshot): ParentLocation → the parent's profile
+  address (joined in the detail sprocs); ProviderLocation → the provider's
+  business address (Cosmos doc root `address`/`zip`/`city` via
+  `IProviderDiscoveryService.GetSummaryAsync` — `ProviderSummary` gained
+  `Address`/`Zip`) + lat/lng from `Provider.ProviderServiceRegistrations`
+  (best-effort; nulls when unresolvable). Shared helpers:
+  `BookingService.ResolveProviderLocationAsync` (live) +
+  `BookingService.TrySnapshotLocation` (frozen). Only the **selected** `location`
+  block is snapshotted; the `parentDetails` / `providerDetails` **contact** address
+  blocks stay **live** (current party contact info, by design). `parentDetails`
+  (both detail shapes, both hosts) also always carries the parent's profile address
+  (`addressLine`/`city`/`zipCode`/`latitude`/`longitude`; null for Custom
+  walk-ins). `petDetails` now carries the **full** medical snapshot — added
+  `sterilizationStatus`, `medicalHistory`, `temperament` alongside the existing
+  breed/vaccination/prescription fields.
+- **Night-stay `JobNotes` (2026-07-08).** `Booking.NightStayBookings.JobNotes
+  NVARCHAR(2000) NULL` — optional free-text captured on the parent night-stay
+  create (`jobNotes`), surfaced on the night-stay detail's
+  `bookingDetails.jobNotes` (both hosts). The flat `NightStayBookingResponse`
+  intentionally does NOT carry it.
 - **Enriched booking-detail read (single-day only).** `GET /bookings/{bookingId}`
   (provider) and `GET /pet-parents/{petParentId}/bookings/{bookingId}` (parent)
   return `BookingDetailResponse` grouped into **five sections** — `bookingDetails`
@@ -578,8 +767,14 @@ New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
   IDENTITY column), `parentDetails`, `petDetails`, `providerDetails` (provider
   name/mobile/gender joined from `Provider.Providers`; `providerPhotoUrl` null for
   now — the business photo lives in Cosmos, same posture as the event organizer
-  block), `paymentDetails` — plus the
-  top-level `startOtp` (parent reads, when startable) + `pendingModification`.
+  block; **plus the provider's business `address`/`city`/`zip`** resolved live from
+  the Cosmos service doc via `IProviderDiscoveryService.GetSummaryAsync` — so the
+  client needn't call `GET /providers/{id}` just for the address; null when the
+  offering can't be resolved), `paymentDetails` — plus the
+  top-level `startOtp` (parent reads, when startable) + `pendingModification` +
+  `prescription` (the Vet prescription block: `{ prescriptionText, isPetVaccinated,
+  vaccinations: [...], nextConsultationDate }`; **null until a vet records one**,
+  Vet bookings only — see the "Vet prescription" note below).
   Backed by the new `Booking.GetBookingDetail` sproc (base row + `JobNumber` +
   payout columns, LEFT JOIN `Parent.PetParents` + `Parent.Pets`) and
   `IBookingService.GetDetailAsync`. **App** bookings fill parent/pet (name,
@@ -587,7 +782,9 @@ New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
   booking's own free-text fields (gender/photo null). `paymentDetails` is
   computed **live**: `pricePerHour` = the offering's unit rate (Custom = stored
   `PricePerHour`); `totalAmount` = rate × time (flat fee for fixed Vet/Trainer/
-  grooming-item); `pawfrontFee` = `totalAmount × Payments:PawfrontFeePercentage`;
+  grooming-item); `pawfrontFee` = `totalAmount × Payments:PawfrontFeePercentage`
+  — **except private (Custom walk-in) jobs, which carry `pawfrontFee` = 0 and
+  `feePercentage` = 0** (off-platform, no commission/taxes; 2026-07-11);
   `payoutStatus`/`payoutId` from the capture-only columns (`Pending` default).
   Pricing is null when the offering can't be resolved (deactivated service). The
   flat `BookingResponse` (create/list/status) is unchanged. Night-stay detail is
@@ -596,19 +793,26 @@ New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
   the legacy `POST .../bookings/{id}/status` stays as a back-compat shim). Each
   is a thin handler that pins the target status + actor (from the host/route);
   the actor's id is never taken from the body. Provider host:
-  `POST /providers/{providerId}/bookings/{bookingId}/{accept|decline|start|complete|cancel}`
+  `POST /providers/{providerId}/bookings/{bookingId}/{accept|decline|start-job|start-job/verify|complete|cancel|no-show}`
   + `/modifications`, `/modifications/{accept|decline}`, `POST/GET /evidence`.
-  Parent host: `POST /pet-parents/{petParentId}/bookings/{bookingId}/{cancel}` +
+  Parent host: `POST /pet-parents/{petParentId}/bookings/{bookingId}/{cancel|no-show}` +
   `/modifications`, `/modifications/{accept|decline}`, `GET /evidence`, and
   `GET /pet-parents/{petParentId}/bookings/{bookingId}` (single read that
-  **issues the start-OTP** when the booking is confirmed-equivalent). `/accept`,
-  `/decline`, `/complete`, `/cancel` flow through `Booking.UpdateBookingStatus`
-  (UPDLOCK+HOLDLOCK), which enforces party + per-actor settable set + from-state.
-  The former **`COMPLETED` evidence gate** (THROW 51127/51247) was **removed** —
-  evidence photos are optional. `COMPLETED` is **provider-only, from
-  `JOB_STARTED`** (was settable by both parties — behaviour change).
-  `/complete` takes an **optional body** `{ nextConsultationDate?: "yyyy-MM-dd" }`
-  — the provider can propose the pet's next visit while ending the job. Stored in
+  **issues the start-OTP** while the booking is `START_JOB`). `/accept`, `/decline`,
+  `/cancel`, `/no-show` flow through `Booking.UpdateBookingStatus`
+  (UPDLOCK+HOLDLOCK), which enforces party + per-actor settable set + from-state
+  (+ the 30-minute no-show grace window + the cancel-blocked-once-underway guard).
+  `/start-job` (→ `START_JOB` + start-OTP, 15-min gate) via `Booking.StartBooking`
+  / `StartNightStayBooking`; `/start-job/verify` (body `{ otpCode }`, →
+  `IN_PROGRESS`) via `Booking.VerifyBookingStartOtp` / `VerifyNightStayBookingStartOtp`;
+  `/complete` (**provider-only, from `IN_PROGRESS`, no OTP**)
+  via `Booking.CompleteBooking` / `CompleteNightStayBooking`.
+  The provider's `/no-show` sets `PARENT_NO_SHOW`; the parent's sets
+  `PROVIDER_NO_SHOW`. The former **`COMPLETED` evidence gate** (THROW
+  51127/51247) was **removed** — evidence photos are optional.
+  `/complete` takes an **optional body** `{ nextConsultationDate?:
+  "yyyy-MM-dd" }` — the provider can propose the pet's next visit while completing
+  the job. Stored in
   `Parent.PetNextConsultations` (one row per pet + provider type, upserted; type
   derived server-side from the booking's category: PetGroomer → `Groomer`, Vet →
   `Vet`, PetTrainer → `Trainer`) and surfaced on pet reads as
@@ -617,14 +821,83 @@ New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
   400 `NextConsultationRequiresPet` (Custom walk-in / no linked pet), 400
   `InvalidNextConsultationDate` (past date). Sproc
   `Parent.UpsertPetNextConsultation` (THROW 51221).
-- **Start-OTP** (`Booking.BookingStartOtps`, telemetry-tracked): when the parent
-  opens a confirmed booking, `IssueBookingStartOtp` issues/reuses a 6-digit
-  plaintext share-code (10-min TTL, reuse-while-valid) returned in the booking
-  details. The provider posts it to `/start` → `StartBookingWithOtp` validates
-  (consume on success, bump `FailedAttemptCount` on mismatch) → `JOB_STARTED`.
+  `/complete` also accepts an optional `prescription` block (Vet bookings only —
+  see the "Vet prescription" note below).
+- **Vet prescription** (`Booking.BookingPrescriptions`, one row per booking,
+  upserted): a vet records the visit's prescription — `{ prescriptionText?,
+  isPetVaccinated, vaccinations: [...] }` (vaccine names stored as a JSON array in
+  a single column; app-owned System.Text.Json (de)serialization). Written **two
+  ways**: (1) the optional `prescription` block on `POST .../bookings/{id}/complete`,
+  and (2) the dedicated `POST /providers/{providerId}/bookings/{bookingId}/prescription`
+  (upsert — lets the vet fill/edit independently of ending the job). Both go through
+  `Booking.UpsertBookingPrescription` (Vet-only, provider-only, only from
+  `IN_PROGRESS`/`COMPLETED` — the retired `ENDING` tolerated; THROW 51290-51293).
+  Surfaced on the single-day
+  booking-detail read (both hosts) as the top-level `prescription` section — **null
+  until recorded**. The block's `nextConsultationDate` is **NOT** stored on the
+  prescription row: it's the pet's rolling Vet follow-up
+  (`Parent.PetNextConsultations`, type `Vet`), LEFT-JOINed into `GetBookingDetail`
+  by `PetId` — so it reflects the pet's latest Vet next-consult, not necessarily
+  this booking's. Night-stay detail does not carry a prescription (PetSitter, not Vet).
+- **Start-OTP** (`Booking.BookingStartOtps` / `NightStayBookingStartOtps`,
+  telemetry-tracked): the provider's `/start-job` action issues the code; the
+  parent shows it and the provider enters it via `/start-job/verify` →
+  `IN_PROGRESS`. Completion needs no OTP. 6-digit plaintext share-codes (10-min
+  TTL, reuse-while-valid). The parent reads the active code off the GET-one
+  detail (`startOtp` block, present only at `START_JOB`). `VerifyBookingStartOtp`
+  validates (consume on success, bump `FailedAttemptCount` on mismatch, cancel
+  the job on the 6th → `OTP_ATTEMPTS_EXCEEDED`). The `OtpKind` column from the
+  short-lived dual-OTP experiment was dropped.
 - **Evidence** (`Booking.BookingEvidence`): provider uploads photo(s) via
   `POST .../evidence` (blob `BlobUploadKind.BookingEvidence`, `booking-evidence/`
   folder, 3 MB, JPEG/PNG/WebP); **optional** — no longer gates `COMPLETED`.
+- **Booking payment** (`Booking.BookingPayments`, 2026-07-23): one row per paid
+  booking, written when the provider marks a `COMPLETED` booking `PAID`
+  (`POST /providers/{id}/bookings/{bookingId}/paid` + night-stay twin, body
+  `{ paymentMethod: "Cash" | "Digital" }`). Columns: `{ BookingPaymentId,
+  BookingType ('SingleDay'|'NightStay' — discriminates which booking table
+  `BookingId` points at), BookingId, ProviderId, PetParentId, Amount, PawfrontFee,
+  PaymentMethod, PaidAtUtc }`, UNIQUE `(BookingType, BookingId)` (paid once). It's
+  a **financial ledger — NO FK** to the booking tables (payment history survives
+  booking deletion), indexed on `ProviderId` for the future per-provider "total
+  received" report (`SUM(Amount)` = gross the parent paid; `SUM(Amount) −
+  SUM(PawfrontFee)` = provider net). `Amount`/`PawfrontFee` are computed
+  server-side by `BookingService.MarkPaidAsync` (and the night-stay twin) from the
+  booking's **price-locked total** — it reuses `GetDetailAsync`'s `TotalAmount` /
+  `PawfrontFee`, so there's a single pricing source of truth.
+  **Snapshots at creation (price / cancellation policy / selected-location address —
+  2026-07-24).** Three things are frozen onto the booking row **at creation** so a
+  later provider edit never re-prices / re-rules / re-addresses an already-created
+  booking (protects even CONFIRMED bookings). All three read paths **prefer the
+  snapshot, falling back to live only for legacy rows**:
+  1. **Price (price-lock):** the offering's unit rate → `Booking.Bookings.PricePerHour`
+     (now populated for App bookings too, not just Custom — the old
+     `CK_Bookings_SourceShape` App-`PricePerHour`-must-be-NULL clause was **relaxed**,
+     which had made App inserts fail once the offering had a price) /
+     `Booking.NightStayBookings.PricePerNight`. Only the unit *rate* is snapshotted;
+     the total is always `rate × quantity` (hours / nights), so an accepted
+     modification that changes duration/nights still recomputes against the locked
+     rate. Fallback: `ResolveAppPricingAsync` / night-stay `pricePerNight ??=`.
+  2. **Cancellation policy:** the provider's current
+     `Provider.ProviderCancellationPolicies.MinimumHoursBeforeCancellation` →
+     `CancellationPolicyHours INT NULL` (both booking tables; CHECK `NULL|24|48|72|96`).
+     Resolved **in the create sproc** (no new C# param). The detail read now returns
+     `MinimumHoursBeforeCancellation` from this column — the live `IProviderPolicyService`
+     read was **removed** from both booking services (constructor dep dropped). A null
+     column value legitimately means "no restriction".
+  3. **Selected-location address:** the `LocationType`-driven address →
+     `Snapshot{AddressLine,City,ZipCode,Latitude,Longitude}` (both booking tables).
+     ParentLocation is snapshotted **in the sproc** (from `Parent.PetParents`);
+     ProviderLocation is resolved in C# (Cosmos summary + registration coords via
+     `BookingService.ResolveProviderAddressSnapshotAsync`) and passed to the sproc as
+     `@SnapshotProvider*` params. See the `location` note above.
+  Existing rows are **backfilled** once by `DeployAll.sql` (policy from the current
+  provider policy; ParentLocation address from `Parent.PetParents`). SQL can't reach
+  Cosmos, so **ProviderLocation address text** and **legacy App `PricePerHour`** are
+  NOT backfilled — those legacy rows keep live-falling-back on read (a future C# pass
+  could freeze them). New bookings snapshot all three at creation. Wire contract is
+  unchanged — only the *source* of `location` / `minimumHoursBeforeCancellation` moved
+  from live to frozen.
 - **Modifications** (`Booking.BookingModifications` is the **staging area** —
   holds ONLY the open proposal, UNIQUE per booking; **editing is limited to date
   + time**, no service-item change): `RequestBookingModification` stages the
@@ -666,6 +939,19 @@ window. It lives in `Booking.NightStayBookings` (+ `NightStayBookingStatusHistor
   Max 30 nights (validated in `NightStayBookingService`).
 - **Capacity** is the shop-wide `maxPetsAtOneTime` from the NightStay offering;
   `DropOffTime`/`PickUpTime` are snapshotted onto the booking from the offering.
+- **Night-stay availability is date-granular (2026-07-11).** The slots
+  endpoint, the `/providers/search/night-stay` per-night probe, and the generic
+  `/providers` window checker all read per-night occupancy (sproc
+  `Booking.GetNightStayOccupancy` via `INightStayOccupancyReader`) against the
+  offering's per-night capacity — see the "weekly availability + slot
+  computation" section for the `nights` response shape. Fully-booked nights
+  report `remainingCapacity: 0` / `isAvailable: false` (previously they showed
+  as available and only failed at create time, 51235). Additionally,
+  `Booking.GetBookingsForDate` UNIONs active night-stay bookings covering the
+  date as full-day `00:00–23:59:59` windows (rows only match a NightStay
+  ServiceId) — defense-in-depth for any residual hourly-slot path. The
+  in-memory dev fallback mirrors both (`InMemoryBookingStore` +
+  `InMemoryNightStayBookingStore` resolve the same singleton).
 - **Same 6-state lifecycle + audit trail** as single-day bookings (CREATED →
   CONFIRMED → COMPLETED, APPROVAL_NEEDED, PROVIDER/PARENT_CANCELLED). Cancelled
   rows free their per-night capacity.
@@ -1046,14 +1332,16 @@ POST   /pet-parents/{petParentId}/profile-image                                 
 POST   /pet-parents/{petParentId}/pets                                           body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? }. Inserts into Parent.Pets via Parent.AddPetParentPet. PetType ∈ {Dog, Cat, Hamster, GuineaPig}; Gender ∈ {Male, Female}; Weight DECIMAL(5,2) > 0. MicrochipId is globally UNIQUE (filtered) — collision returns 409 MicrochipIdAlreadyExists. 404 PetParentNotFound (sproc 51202); 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest. Response carries medical-info fields too — all null until PATCH below runs.
 GET    /pet-parents/{petParentId}/pets                                           returns every pet on file for the parent with the full medical-info snapshot, embedded photo gallery, and nextConsultations [{ type: Groomer|Vet|Trainer, nextConsultation }] (written by the provider booking-complete flow). Backed by Parent.ListPetParentPets (three result sets: pets + photos + next-consultations, joined in C# by PetId). Photos within each pet are ordered oldest-first. Empty array when the parent has no pets (or doesn't exist) — list semantics, no 404. Distinct response type PetParentPetWithPhotosResponse so AddPet / PATCH medical-info responses stay unchanged.
 GET    /pet-parents/{petParentId}/event-bookings                                 returns the caller's event-ticket bookings — slim summary cards with the joined event (title, category, eventType, start date/time, banner URL, and venue `eventLocation` for physical events — null for online) so the mobile "My Bookings" screen can render without a follow-up fetch. Backed by Event.ListEventBookingsByBookerEmail (SQL) + a per-booking Cosmos point read that hydrates the venue location (physical events only, fanned out in parallel; a failed read returns that card with a null location). **Booker identity on Event.EventBookings is free text (no FK to PetParents), so the filter matches on the caller's Firebase email claim** — the route's petParentId is verified by the ownership filter, then the JWT email is used as the SQL filter. Ordered most-recent first; cancelled bookings included. Mobile drills into GET /event-bookings/{bookingId} for the full shape with attendee names. 403 EmailClaimMissing when the JWT carries no email claim (rare).
-GET    /pet-parents/{petParentId}/bookings                                       the parent's own SERVICE bookings ("my bookings"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered (petParentId from JWT), so a caller only sees their own. [] when none — no 404. Backed by IBookingService.ListByPetParentAsync (sproc Booking.ListBookingsByPetParent). Same BookingResponse shape as the create/status endpoints. (Mirror of the provider host's GET /pet-parents/{petParentId}/bookings, which is unscoped on that host.)
-POST   /pet-parents/{petParentId}/bookings                                       body { petId, serviceId, bookingDate, startTime, endTime, serviceItemCode? } — parent-initiated SERVICE booking ("book now" from a search result/slot). Booker = route petParentId (ownership-filtered; never from body). Provider resolved server-side from serviceId. petId must be one of the caller's pets (404 PetNotFound / 403 Forbidden inline; sproc re-checks via THROW 51068 → 400 InvalidPetId). Same shared IBookingService.CreateAsync + race-safe Booking.CreateBooking sproc as the provider host — full validation chain (working hours, closures → 409 ServiceClosed, duration rules, groomer serviceItemCode, capacity → 409 CapacityExceeded, 409 ProviderInactive). Booking.Bookings now carries nullable PetId (FK → Parent.Pets), surfaced as petId on every booking read.
-POST   /pet-parents/{petParentId}/bookings/{bookingId}/status                    body { status, note? } — parent sets APPROVAL_NEEDED|COMPLETED|PARENT_CANCELLED on their own booking; audited. Actor=Parent, actorId=route petParentId. 403 Forbidden (not the parent's booking), 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged. Shared Booking.UpdateBookingStatus sproc with the provider host.
+GET    /pet-parents/{petParentId}/bookings                                       the parent's own SERVICE bookings ("my bookings"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered (petParentId from JWT), so a caller only sees their own. [] when none — no 404. Backed by IBookingService.ListByPetParentAsync (sproc Booking.ListBookingsByPetParent) + IParentBookingEnrichmentService. Returns sectioned cards `ParentServiceBookingCardResponse` { booking, providerDetails, serviceDetails, cancellationPolicy, location } — the last two added 2026-07-24, both read from the booking's frozen-at-creation snapshot (serviceDetails.pricePerHour likewise prefers the price-locked rate, live only as the legacy fallback). `location` address fields are null on legacy rows without a snapshot (the booking-DETAIL read is the live-fallback authority) and on Custom walk-ins. (The provider host's GET /pet-parents/{petParentId}/bookings is unscoped there and keeps the flat BookingResponse shape.)
+POST   /pet-parents/{petParentId}/bookings                                       body { petId, serviceId, bookingDate, startTime, endTime, serviceItemCode?, jobNotes?, locationType } — parent-initiated SERVICE booking. locationType is REQUIRED (ParentLocation | ProviderLocation → 400 InvalidRequest / UnsupportedLocationType); drives the detail read's `location` address block. ("book now" from a search result/slot). Booker = route petParentId (ownership-filtered; never from body). Provider resolved server-side from serviceId. petId must be one of the caller's pets (404 PetNotFound / 403 Forbidden inline; sproc re-checks via THROW 51068 → 400 InvalidPetId). Same shared IBookingService.CreateAsync + race-safe Booking.CreateBooking sproc as the provider host — full validation chain (working hours, closures → 409 ServiceClosed, duration rules, groomer serviceItemCode, capacity → 409 CapacityExceeded, 409 ProviderInactive). Booking.Bookings now carries nullable PetId (FK → Parent.Pets), surfaced as petId on every booking read.
+POST   /pet-parents/{petParentId}/bookings/{bookingId}/status                    body { status, note? } — parent sets APPROVAL_NEEDED|COMPLETED|PARENT_CANCELLED|PROVIDER_NO_SHOW on their own booking; audited. Actor=Parent, actorId=route petParentId. 403 Forbidden (not the parent's booking), 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged. Shared Booking.UpdateBookingStatus sproc with the provider host.
+POST   /pet-parents/{petParentId}/bookings/{bookingId}/no-show                   parent reports the PROVIDER never showed up → sets PROVIDER_NO_SHOW (terminal, frees capacity, audited). Allowed only from a confirmed-equivalent state and only 30+ minutes after the booking's scheduled start (BookingDate + StartTime, UTC). 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state), 409 NoShowTooEarly (grace window not elapsed, THROW 51128), 409 BookingStatusTerminal.
 GET    /pet-parents/{petParentId}/bookings/{bookingId}/status-history            full status audit trail, oldest-first (404 if not the parent's booking). Ownership-filtered group; bookingId re-checked against the booking's PetParentId.
-POST   /pet-parents/{petParentId}/night-stay-bookings                            body { petId, serviceId, checkInDate, checkOutDate } — multi-night boarding booking (PetSitter NightStay only). Distinct entity from single-day bookings: the stay spans [checkInDate, checkOutDate) — checkOutDate is the pickup day, NOT a stayed night. Booker = route petParentId (ownership-filtered). Provider resolved server-side from serviceId; petId must be one of the caller's pets. Per-night capacity is race-safe (Booking.CreateNightStayBooking). DropOff/PickUp times snapshotted from the offering. Max 30 nights. Errors: 404 PetNotFound / 403 Forbidden (pet), 400 InvalidServiceId / NotNightStayService / OfferingNotConfigured / InvalidPetId / InvalidNightStayDates, 404 ProviderNotFound / PetParentNotFound, 409 ProviderInactive / CapacityExceeded / ServiceClosed.
-GET    /pet-parents/{petParentId}/night-stay-bookings                            the parent's own night-stay bookings, most-recent first (CheckInDate DESC), cancelled included. Ownership-filtered. [] when none.
+POST   /pet-parents/{petParentId}/night-stay-bookings                            body { petId, serviceId, checkInDate, checkOutDate, jobNotes?, locationType } — multi-night boarding booking (PetSitter NightStay only). jobNotes is optional free text (returned on the detail read); locationType is REQUIRED (ParentLocation | ProviderLocation → 400 InvalidRequest / UnsupportedLocationType). Distinct entity from single-day bookings: the stay spans [checkInDate, checkOutDate) — checkOutDate is the pickup day, NOT a stayed night. Booker = route petParentId (ownership-filtered). Provider resolved server-side from serviceId; petId must be one of the caller's pets. Per-night capacity is race-safe (Booking.CreateNightStayBooking). DropOff/PickUp times snapshotted from the offering. Max 30 nights. Errors: 404 PetNotFound / 403 Forbidden (pet), 400 InvalidServiceId / NotNightStayService / OfferingNotConfigured / InvalidPetId / InvalidNightStayDates, 404 ProviderNotFound / PetParentNotFound, 409 ProviderInactive / CapacityExceeded / ServiceClosed.
+GET    /pet-parents/{petParentId}/night-stay-bookings                            the parent's own night-stay bookings, most-recent first (CheckInDate DESC), cancelled included. Ownership-filtered. [] when none. Returns sectioned cards `ParentNightStayBookingCardResponse` { booking, providerDetails, serviceDetails, cancellationPolicy, location } — the last two added 2026-07-24, from the frozen-at-creation snapshot (serviceDetails.pricePerNight likewise prefers the price-locked rate, live only as the legacy fallback). `location` address fields are null on legacy rows without a snapshot.
 GET    /pet-parents/{petParentId}/night-stay-bookings/{bookingId}                single night-stay booking (404 NightStayBookingNotFound if unknown or not the caller's). Ownership-filtered.
-POST   /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/status         body { status, note? } — parent sets APPROVAL_NEEDED|COMPLETED|PARENT_CANCELLED (cancel is done here, mirroring single-day). Actor=Parent. 404 NightStayBookingNotFound, 403 Forbidden, 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged.
+POST   /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/status         body { status, note? } — parent sets APPROVAL_NEEDED|COMPLETED|PARENT_CANCELLED|PROVIDER_NO_SHOW (cancel is done here, mirroring single-day). Actor=Parent. 404 NightStayBookingNotFound, 403 Forbidden, 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged.
+POST   /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/no-show        parent reports the PROVIDER never showed up for the stay → sets PROVIDER_NO_SHOW (terminal, frees remaining per-night capacity, audited). Allowed only from a confirmed-equivalent state and only 30+ minutes after CheckInDate + DropOffTime (UTC). 404 NightStayBookingNotFound, 403 Forbidden, 409 BookingNotStartable, 409 NoShowTooEarly (THROW 51248), 409 BookingStatusTerminal.
 GET    /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/status-history full status audit trail, oldest-first (404 if not the parent's booking).
 GET    /pets/{petId}                                                             single pet profile — full basic-info + medical-info snapshot + embedded photo gallery (oldest-first), the same PetParentPetWithPhotosResponse shape as the list endpoint. Backed by Parent.GetPetParentPet (two result sets: pet + photos). Ownership-filtered (RequireOwnedPet → 404 PetNotFound for unknown pet, 403 Forbidden for someone else's). The handler also maps an empty result set to 404 defensively.
 PATCH  /pets/{petId}                                                             body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? } — same shape as AddPet. Updates the basic-info subset via Parent.UpdatePetParentPet; medical-info columns are deliberately untouched (use PATCH /medical-info). Same validations and error map as AddPet: 404 PetNotFound (sproc 51205); 409 MicrochipIdAlreadyExists; 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest.
@@ -1099,9 +1387,9 @@ GET    /providers/search/groomers                                               
 GET    /providers/search/vets                                                     [?petId= &date= &city= &serviceLocation= &skip= &take=] — per-service booking search #4 (Vet/VetAppointment). date → any free appointment slot that day. Charges = PricePerAppointment (chargesUnit PerAppointment).
 GET    /providers/search/trainers                                                 [?petId= &date= &city= &serviceLocation= &skip= &take=] — per-service booking search #5 (PetTrainer/TrainingSession). Mirror of the vets search: a training session is a single fixed-duration booking, so date → any free slot of the session's duration that day. Charges = PricePerSession (chargesUnit PerSession).
 
-> All five searches: petId is ownership-enforced inline (same codes as OwnedPetFilter) and the pet's PetType becomes the animal filter; city is case-insensitive; serviceLocation ∈ { ParentsPlace, ProvidersPlace }. A provider must have the matching ACTIVE ProviderServices row + configured offering to appear at all. Response per hit: { providerId, serviceId, subCategory, businessName (null for freelancers), completedBookings, charges, chargesUnit (PerHour|PerService|PerAppointment|PerSession), serviceItemCode, imageUrl }. imageUrl = the service image the provider uploaded for this offering (the same image the discovery card shows — sourced from the Cosmos offering's imageUrl via the shared ProviderSummary; null when unset). completedBookings = past non-cancelled/non-no-show bookings across ALL the provider's services (SqlProviderBookingStatsReader, batched). Pagination applies after availability filtering. Backed by IProviderSearchService → ProviderSearchService (Application orchestrator over IProviderDiscoveryService + IProviderServiceCatalog + IProviderOfferingResolver + IProviderAvailabilitySlotService + IPetGroomerServiceRegistry + IProviderBookingStatsReader). OfferingResolution.Resolved now carries Price (PricePerHour / PerSession / PerAppointment; null for grooming).
+> All five searches: petId is ownership-enforced inline (same codes as OwnedPetFilter) and the pet's PetType becomes the animal filter; city is case-insensitive; serviceLocation ∈ { ParentsPlace, ProvidersPlace }. A provider must have the matching ACTIVE ProviderServices row + configured offering to appear at all. Response per hit: { providerId, serviceId, subCategory, businessName (business name for shops; the provider's personal name for freelancers), completedBookings, charges, chargesUnit (PerHour|PerService|PerAppointment|PerSession), serviceItemCode, imageUrl, bannerImageUrl }. imageUrl = the service image the provider uploaded for this offering (the same image the discovery card shows — sourced from the Cosmos offering's imageUrl via the shared ProviderSummary; null when unset). bannerImageUrl = the wide banner the provider uploaded for THIS service via POST /providers/{id}/services/{serviceId}/banner-image (Provider.ProviderServiceBanners, keyed by ServiceId; batch-hydrated per paged result via IProviderServiceBannerService.GetByServiceIdsAsync; null when unset). completedBookings = bookings that are explicitly COMPLETED OR whose window has elapsed (non-cancelled/non-no-show/non-expired) across ALL the provider's services, any category incl. freelance (SqlProviderBookingStatsReader, batched — UNIONs single-day `Booking.Bookings` and multi-night `Booking.NightStayBookings`). The explicit-COMPLETED arm was added 2026-07-19 — without it a future-dated booking already marked COMPLETED (e.g. a freelance vet appointment) was undercounted to 0; the night-stay UNION was added the same day — without it a PetSitter whose only completed jobs are boarding stays showed 0 (night-stay "window elapsed" = `CheckOutDate < today`, since checkout day isn't a stayed night). Pagination applies after availability filtering. Backed by IProviderSearchService → ProviderSearchService (Application orchestrator over IProviderDiscoveryService + IProviderServiceCatalog + IProviderOfferingResolver + IProviderAvailabilitySlotService + IPetGroomerServiceRegistry + IProviderBookingStatsReader + IProviderServiceBannerService). OfferingResolution.Resolved now carries Price (PricePerHour / PerSession / PerAppointment; null for grooming).
 
-GET    /providers/{providerId}                                                   parent-facing provider profile. Composes the registration row (category, sub-category, lat/lng), the category-specific offering (one of petSitter / petGroomer / petTrainer / petAdoptionSale / vet — exactly one populated), workingHours (7 days), timeOff (future closures across all the provider's services), the advertised booking policy (minimumHoursBeforeCancellation: null|24|48|72|96, and acceptedPaymentMethods: ["Cash"|"Digital", ...] — the provider's payout-method set, empty when unset), and reviews (ALWAYS an empty array for now — review feature not built yet; the field is wired so mobile can bind ahead of time). Provider personal info (name, mobile, DOB) intentionally omitted — parents see business-facing data only. Backed by IProviderPublicProfileService, which fans out to the existing per-category registries, IProviderAvailabilityService, IProviderClosureService, and IProviderPolicyService (cancellation + payout). 404 ProviderNotRegistered when no service registration row exists.
+GET    /providers/{providerId}                                                   parent-facing provider profile. Composes the registration row (category, sub-category, lat/lng), the category-specific offering (one of petSitter / petGroomer / petTrainer / petAdoptionSale / vet — exactly one populated), workingHours (7 days), timeOff (future closures across all the provider's services), the advertised booking policy (minimumHoursBeforeCancellation: null|24|48|72|96, and acceptedPaymentMethods: ["Cash"|"Digital", ...] — the provider's payout-method set, empty when unset), completedBookings (bookings explicitly COMPLETED or already served — window ended — not cancelled/no-show/expired, across all the provider's services regardless of category/freelance, spanning both single-day and multi-night boarding stays; same IProviderBookingStatsReader figure as the search cards), top-level `description` (the freelancer's about-you text; null for business sub-categories) + `servicesDescription` (the business branch's description — shop/hotel/clinic/school/shelter; null for freelancers) (2026-07-17; both lifted from the category offering so mobile doesn't dig into the nested block), and reviews (ALWAYS an empty array for now — review feature not built yet; the field is wired so mobile can bind ahead of time). Provider personal info (name, mobile, DOB) intentionally omitted — parents see business-facing data only. Backed by IProviderPublicProfileService, which fans out to the existing per-category registries, IProviderAvailabilityService, IProviderClosureService, IProviderPolicyService (cancellation + payout), and IProviderBookingStatsReader. 404 ProviderNotRegistered when no service registration row exists.
 GET    /providers/{providerId}/availability/slots                                ?serviceId= &date= [&durationHours= | &serviceItemCode=] [&granularityMinutes=] — parent-facing free-slot query (mirror of the provider host). Backed by the shared IProviderAvailabilitySlotService. PetGroomer uses ?serviceItemCode= (duration resolved server-side from the menu item); other categories use ?durationHours=. Closures, capacity, and overlapping confirmed bookings are subtracted per-service. Same error map as provider host (InvalidServiceId, ServiceNotRegistered, OfferingNotConfigured, ServiceItemCodeRequired/NotOffered/Inactive, InvalidBookingDuration, InvalidRequest). Save/get weekly-hours endpoints on the same group (`POST /` and `GET /`) are intentionally **NOT** mirrored on the parent host — those are organiser-only; the 7-day shape is already returned by GET /providers/{providerId} under workingHours.
 POST   /blob-images                                                              body: { blobUrl } — streams bytes from the private blob container (mirror of the provider host's universal fetch endpoint; duplicated because the hosts use different Firebase projects). 404 BlobNotFound; 400 InvalidRequest.
 ```
@@ -1126,11 +1414,22 @@ GET    /providers/{providerId}/services                                         
 
 POST   /providers/{providerId}/bookings                                          body carries serviceId; PetGroomer also requires serviceItemCode (one of the 18 canonical codes from the GET /pet-groomer response)
 GET    /providers/{providerId}/bookings                                          [?date=YYYY-MM-DD] — day-view filter
-POST   /providers/{providerId}/bookings/{bookingId}/status                       body { status, note? } — provider sets CONFIRMED|COMPLETED|APPROVAL_NEEDED|PROVIDER_CANCELLED; audited. 403 Forbidden (not this provider's booking), 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged
+POST   /providers/{providerId}/bookings/{bookingId}/accept                        provider accepts → CONFIRMED; audited.
+POST   /providers/{providerId}/bookings/{bookingId}/decline                       provider rejects → PROVIDER_DECLINED (terminal, frees capacity); audited.
+POST   /providers/{providerId}/bookings/{bookingId}/start-job                     provider taps "Start Job" → START_JOB + issues the parent's start-OTP. Only from 15 min before the scheduled start (BookingDate + StartTime, UTC). 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state), 409 StartJobTooEarly (THROW 51137 / night-stay 51257).
+POST   /providers/{providerId}/bookings/{bookingId}/start-job/verify              body { otpCode } — provider enters the parent's start-code → IN_PROGRESS. 6 wrong attempts cancel the job (OTP_ATTEMPTS_EXCEEDED). 400 InvalidRequest (blank), 409 BookingNotStartable (not START_JOB), 400 InvalidStartOtp, 409 StartOtpExpired, 409 OtpAttemptsExceeded.
+POST   /providers/{providerId}/bookings/{bookingId}/complete                      body OPTIONAL { nextConsultationDate?, prescription? } — provider marks the job done → COMPLETED (from IN_PROGRESS; no OTP). 409 BookingNotCompletable (not IN_PROGRESS); next-consultation/prescription validated first.
+POST   /providers/{providerId}/bookings/{bookingId}/paid                          body { paymentMethod: "Cash"|"Digital" } — the parent has paid the provider → PAID (from COMPLETED) + writes a Booking.BookingPayments ledger row (Amount/PawfrontFee from the price-locked total). App bookings only. 400 InvalidRequest (no method) / UnsupportedPaymentMethod / PaymentNotAppBooking (Custom walk-in), 403 Forbidden, 404 BookingNotFound, 409 BookingNotPayable (not COMPLETED) / BookingAlreadyPaid / BookingNotPriceable. Night-stay twin: POST /providers/{providerId}/night-stay-bookings/{bookingId}/paid.
+POST   /providers/{providerId}/bookings/{bookingId}/status                       body { status, note? } — LEGACY back-compat shim. provider sets CONFIRMED|COMPLETED|APPROVAL_NEEDED|PROVIDER_CANCELLED|PARENT_NO_SHOW; audited. COMPLETED here mirrors /complete (from IN_PROGRESS) but skips the next-consultation/prescription extras; cancel blocked once underway (409 BookingInProgress). 403 Forbidden, 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged
+POST   /providers/{providerId}/bookings/{bookingId}/no-show                      provider reports the PARENT (pet) never showed up → sets PARENT_NO_SHOW (terminal, frees capacity, audited). Allowed from a confirmed-equivalent state or START_JOB, and only 30+ minutes after the booking's scheduled start (BookingDate + StartTime, UTC). Night-stay twin: POST /providers/{providerId}/night-stay-bookings/{bookingId}/no-show (gated on CheckInDate + DropOffTime). 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state), 409 NoShowTooEarly (THROW 51128 / 51248), 409 BookingStatusTerminal
+POST   /providers/{providerId}/bookings/{bookingId}/prescription               body { prescriptionText?, isPetVaccinated, vaccinations: [...] } — vet records/edits the visit prescription (upsert). Vet bookings only, provider-only, only from IN_PROGRESS/COMPLETED. Returns the saved prescription block. 404 BookingNotFound, 403 Forbidden, 400 PrescriptionNotVetBooking, 409 PrescriptionNotAllowed. Also settable via the `prescription` block on .../complete.
 GET    /providers/{providerId}/bookings/{bookingId}/status-history               full status audit trail, oldest-first (404 if not this provider's booking)
 GET    /bookings/{bookingId}
 POST   /bookings/{bookingId}/cancel                                              parent cancel → sets PARENT_CANCELLED + audit
 GET    /pet-parents/{petParentId}/bookings
+
+GET    /pet-parents/{petParentId}/details                              provider-facing customer card (PetParentLookupEndpoints.cs): { petParentId, profileImageUrl, rating (ALWAYS null — reviews not built, wired ahead), name, gender, age (full years, computed from DOB at UTC today), dateOfBirth, address { addressLine, city, zipCode, latitude, longitude }, aboutParent, email, mobileCountryCode, mobileNumber, pets: [{ petId, name, petType, breed, gender, age { years, months }, profileImageUrl }] }. Composed from IParentOnboardingService.GetProfileAsync + IParentPetService.GetPetsAsync (no new SQL). 404 PetParentNotFound. NOT ownership-scoped — any signed-in provider can read any parent by GUID (same posture as the booking-detail parentDetails block).
+GET    /pets/{petId}                                                   provider-facing full pet profile (PetParentLookupEndpoints.cs): { petId, petParentId, profileImageUrl, name, microchipId, petType, gender, weight, age { years, months }, dateOfBirth, breed, aboutPet (description), healthOfPet (medical history), vaccinationStatus, sterilizationStatus, vaccinationType, vaccinationDose, prescription, temperament, photos: [url, ...] (gallery, oldest-first) }. Backed by IParentPetService.GetPetAsync. 404 PetNotFound. NOT ownership-scoped (same posture as above).
 
 POST   /providers/{providerId}/mobile-verification/otp
 POST   /providers/{providerId}/mobile-verification/otp/{otpId}/verify

@@ -12,7 +12,15 @@ public sealed record CreateParentNightStayBookingRequest(
     Guid PetId,
     Guid ServiceId,
     DateOnly CheckInDate,
-    DateOnly CheckOutDate);
+    DateOnly CheckOutDate,
+    // Optional free-text notes for the stay (feeding instructions, the pet's
+    // quirks, etc.). Captured at create time and surfaced on the detail read.
+    string? JobNotes = null,
+    // Where the service is delivered: "ParentLocation" (the sitter comes to
+    // the parent's address) or "ProviderLocation" (the pet boards at the
+    // sitter's place). Required. The detail read resolves the matching
+    // address live.
+    string? LocationType = null);
 
 public sealed record NightStayBookingResponse(
     Guid NightStayBookingId,
@@ -67,6 +75,10 @@ public sealed record NightStayBookingDetailResponse(
     ProviderDetailsSection ProviderDetails,
     NightStayPaymentDetailsSection PaymentDetails,
     CancellationPolicyDetailsSection CancellationPolicy,
+    // Where the service is delivered, resolved from the booking's LocationType
+    // (the parent's address for ParentLocation, the provider's for
+    // ProviderLocation). Fields are null when the type is unset or unresolvable.
+    BookingLocationDetailsSection Location,
     StartOtpResponse? StartOtp,
     NightStayBookingModificationResponse? PendingModification);
 
@@ -91,7 +103,9 @@ public sealed record NightStayBookingDetailsSection(
     string? ServiceLocation,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? CancelledAtUtc);
+    DateTimeOffset? CancelledAtUtc,
+    // Optional free-text notes the parent attached to the stay at booking time.
+    string? JobNotes = null);
 
 /// <summary>The money facts for a night stay. <c>PricePerNight</c> is the offering's
 /// per-night rate; <c>TotalAmount</c> is rate × nights; <c>PawfrontFee</c> is

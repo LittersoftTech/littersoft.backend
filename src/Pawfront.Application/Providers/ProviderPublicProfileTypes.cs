@@ -32,6 +32,17 @@ public sealed record ProviderPublicProfile(
     // AcceptedPaymentMethods is the Cash/Digital payout set (empty when none).
     int? MinimumHoursBeforeCancellation,
     IReadOnlyCollection<string> AcceptedPaymentMethods,
+    // Bookings this provider has already served (the booking window has ended
+    // and neither party cancelled), across all of their services. Same figure
+    // the booking-search cards surface.
+    int CompletedBookings,
+    // The freelancer's "about you" text — who the provider is. Null for
+    // shop/clinic/school/shelter sub-categories (they describe the business
+    // instead, see ServicesDescription).
+    string? Description,
+    // The business branch's description (shop/hotel/clinic/school/shelter/
+    // pet-shop) — what services the business offers. Null for freelancers.
+    string? ServicesDescription,
     // The provider's profile/business photo — the image they uploaded for their
     // offering. Null when none set.
     string? ProfilePhotoUrl,

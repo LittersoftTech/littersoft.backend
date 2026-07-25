@@ -253,6 +253,9 @@ internal static class ProviderDetailsEndpoints
                 .ToArray(),
             profile.MinimumHoursBeforeCancellation,
             profile.AcceptedPaymentMethods,
+            profile.CompletedBookings,
+            profile.Description,
+            profile.ServicesDescription,
             profile.ProfilePhotoUrl,
             profile.GalleryImages,
             // Reviews not built yet — always an empty array for now.

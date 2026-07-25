@@ -1,0 +1,1866 @@
+{
+  "info": {
+    "_postman_id": "e2e10000-0000-4000-8000-000000000001",
+    "name": "Pawfront E2E Scenario Suite",
+    "description": "Real-life end-to-end scenarios across BOTH hosts (provider Pawfront.Api + parent Pawfront.PetParentApi), with pm.test assertions and chained variables. Run TOP TO BOTTOM with the Collection Runner (or newman) against the 'Pawfront E2E' environment.\n\nPrerequisites:\n1. Both hosts running; latest DeployAll.sql deployed (the night-stay scenario depends on the 2026-07-11 GetBookingsForDate change).\n2. A DEDICATED provider test account that is either unregistered or already registered as PetSitter (any other category gives 409 ServiceCategoryConflict in Scenario A).\n3. A parent test account; `parentEmail` in the environment MUST be that account's Firebase email (event isBookable/cancel match on the JWT email claim).\n\nRe-runs are safe: booking dates are randomised into the future per run, and every scenario cancels the bookings it created (except Scenario C, which ends in COMPLETED by design).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "providerToken", "value": "" },
+    { "key": "parentToken", "value": "" },
+    { "key": "providerAuthIdentityId", "value": "" },
+    { "key": "providerId", "value": "" },
+    { "key": "petParentId", "value": "" },
+    { "key": "petId", "value": "" },
+    { "key": "serviceIdDayCare", "value": "" },
+    { "key": "serviceIdNightStay", "value": "" },
+    { "key": "happyBookingId", "value": "" },
+    { "key": "startOtp", "value": "" },
+    { "key": "modBookingId", "value": "" },
+    { "key": "capBooking1", "value": "" },
+    { "key": "capBooking2", "value": "" },
+    { "key": "nsBooking1", "value": "" },
+    { "key": "nsBooking2", "value": "" },
+    { "key": "closureId", "value": "" },
+    { "key": "conflictBookingId", "value": "" },
+    { "key": "customBookingId", "value": "" },
+    { "key": "e2eEventId", "value": "" },
+    { "key": "e2eEventBookingId", "value": "" },
+    { "key": "microchipId", "value": "" },
+    { "key": "dateHappy", "value": "" },
+    { "key": "dateMod", "value": "" },
+    { "key": "dateModNew", "value": "" },
+    { "key": "dateCapacity", "value": "" },
+    { "key": "dateClosure", "value": "" },
+    { "key": "dateClosureConflict", "value": "" },
+    { "key": "nsCheckIn", "value": "" },
+    { "key": "nsCheckOut", "value": "" },
+    { "key": "dateCustom", "value": "" },
+    { "key": "eventDate", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0. Setup - tokens, identities, run variables",
+      "item": [
+        {
+          "name": "Sign in PROVIDER (Firebase) + seed run dates",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Randomise all scenario dates into the future so re-runs never collide",
+                  "// with capacity held by earlier runs. All dates are UTC (project rule).",
+                  "const base = 7 + Math.floor(Math.random() * 300);",
+                  "const d = (off) => new Date(Date.now() + (base + off) * 86400000).toISOString().slice(0, 10);",
+                  "const cv = (k, v) => pm.collectionVariables.set(k, v);",
+                  "cv('dateHappy', d(0));",
+                  "cv('dateMod', d(1));",
+                  "cv('dateModNew', d(2));",
+                  "cv('dateCapacity', d(3));",
+                  "cv('dateClosure', d(4));",
+                  "cv('dateClosureConflict', d(5));",
+                  "cv('nsCheckIn', d(8));",
+                  "cv('nsCheckOut', d(10));",
+                  "cv('dateCustom', d(12));",
+                  "cv('eventDate', d(20));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('provider signed in', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "if (j.idToken) pm.collectionVariables.set('providerToken', j.idToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={{providerFirebaseApiKey}}",
+            "body": { "mode": "raw", "raw": "{ \"email\": \"{{providerEmail}}\", \"password\": \"{{providerPassword}}\", \"returnSecureToken\": true }" }
+          }
+        },
+        {
+          "name": "Sign in PARENT (Firebase)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('parent signed in', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "if (j.idToken) pm.collectionVariables.set('parentToken', j.idToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={{parentFirebaseApiKey}}",
+            "body": { "mode": "raw", "raw": "{ \"email\": \"{{parentEmail}}\", \"password\": \"{{parentPassword}}\", \"returnSecureToken\": true }" }
+          }
+        },
+        {
+          "name": "Provider host is up",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('provider /health 200', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/health"
+          }
+        },
+        {
+          "name": "Parent host is up",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('parent /health 200', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/health"
+          }
+        },
+        {
+          "name": "Provider: firebase-auth (upsert auth identity)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('auth identity upserted', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "const j = pm.response.json();",
+                  "pm.test('envelope success', () => pm.expect(j.success).to.be.true);",
+                  "if (j.data && j.data.providerAuthIdentityId) pm.collectionVariables.set('providerAuthIdentityId', j.data.providerAuthIdentityId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/provider-onboarding/firebase-auth",
+            "body": { "mode": "raw", "raw": "{ \"fcmToken\": \"e2e-fcm-token\", \"deviceId\": \"e2e-device-1\", \"devicePlatform\": \"Android\" }" }
+          }
+        },
+        {
+          "name": "Provider: whoami (recover providerId)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('whoami 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "if (j.data && j.data.providerId) pm.collectionVariables.set('providerId', j.data.providerId);",
+                  "if (j.data && j.data.providerAuthIdentityId) pm.collectionVariables.set('providerAuthIdentityId', j.data.providerAuthIdentityId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/provider-onboarding/me"
+          }
+        },
+        {
+          "name": "Provider: complete profile (skipped when it already exists)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.collectionVariables.get('providerId') && typeof pm.execution !== 'undefined' && typeof pm.execution.skipRequest === 'function') {",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const j = pm.response.json();",
+                  "  if (j.data && j.data.providerId) pm.collectionVariables.set('providerId', j.data.providerId);",
+                  "}",
+                  "pm.test('providerId resolved', () => {",
+                  "  pm.expect(pm.collectionVariables.get('providerId')).to.be.a('string').and.to.have.length.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/provider-onboarding/profile",
+            "body": { "mode": "raw", "raw": "{ \"providerAuthIdentityId\": \"{{providerAuthIdentityId}}\", \"firstName\": \"E2E\", \"lastName\": \"Provider\", \"gender\": \"Male\", \"mobileCountryCode\": \"+41\", \"mobileNumber\": \"780000001\", \"dateOfBirth\": \"1990-01-15\" }" }
+          }
+        },
+        {
+          "name": "Parent: firebase-auth (upsert auth identity)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('parent auth identity upserted', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.test('envelope success', () => pm.expect(pm.response.json().success).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/parent-onboarding/firebase-auth",
+            "body": { "mode": "raw", "raw": "{ \"fcmToken\": \"e2e-parent-fcm\", \"deviceId\": \"e2e-parent-device\", \"devicePlatform\": \"iOS\" }" }
+          }
+        },
+        {
+          "name": "Parent: whoami (recover petParentId)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('whoami 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "if (j.data && j.data.petParentId) pm.collectionVariables.set('petParentId', j.data.petParentId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/parent-onboarding/me"
+          }
+        },
+        {
+          "name": "Parent: complete profile (skipped when it already exists)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.collectionVariables.get('petParentId') && typeof pm.execution !== 'undefined' && typeof pm.execution.skipRequest === 'function') {",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const j = pm.response.json();",
+                  "  if (j.data && j.data.petParentId) pm.collectionVariables.set('petParentId', j.data.petParentId);",
+                  "}",
+                  "pm.test('petParentId resolved', () => {",
+                  "  pm.expect(pm.collectionVariables.get('petParentId')).to.be.a('string').and.to.have.length.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/parent-onboarding/profile",
+            "body": { "mode": "raw", "raw": "{ \"firstName\": \"E2E\", \"lastName\": \"Parent\", \"gender\": \"Female\", \"mobileCountryCode\": \"+41\", \"mobileNumber\": \"791112233\", \"dateOfBirth\": \"1992-03-14\", \"addressLine\": \"Bahnhofstrasse 1\", \"latitude\": 47.3769, \"longitude\": 8.5417, \"zipCode\": \"8001\", \"city\": \"Zurich\", \"description\": \"E2E test pet parent.\" }" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "A. Provider sets up shop (PetSitter PetHotel)",
+      "item": [
+        {
+          "name": "Register pet-hotel (basic)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('registered (or re-registered) pet-hotel', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.test('envelope success', () => pm.expect(pm.response.json().success).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter/pet-hotel",
+            "body": { "mode": "raw", "raw": "{ \"petHotelName\": \"E2E Happy Tails Hotel\", \"address\": \"42 Park Lane\", \"zip\": \"8001\", \"city\": \"Zurich\", \"telephoneCountryCode\": \"+41\", \"telephoneNumber\": \"442223344\", \"email\": \"e2e-hotel@example.com\", \"website\": null, \"description\": \"E2E boarding facility for cats and dogs.\", \"hotelImageUrl\": \"https://example.com/images/hotel.jpg\", \"latitude\": 47.3769, \"longitude\": 8.5417 }" }
+          }
+        },
+        {
+          "name": "Save pet-hotel offering (DayCare min 2h + NightStay min 12h, capacity 2)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('offering saved', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.test('envelope success', () => pm.expect(pm.response.json().success).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/services/pet-sitter/pet-hotel/offering",
+            "body": { "mode": "raw", "raw": "{ \"licenseNumber\": \"E2E-PSL-001\", \"licenseType\": \"State\", \"licenseImageUrl\": \"https://example.com/images/license.jpg\", \"dayCare\": { \"pricePerHour\": 200, \"addOns\": [\"Feeding\"], \"minimumBookingHours\": 2, \"latePickupCharges\": 100, \"dropOffTime\": \"08:00:00\", \"pickUpTime\": \"20:00:00\" }, \"nightStay\": { \"pricePerHour\": 150, \"addOns\": [\"GiveMedicines\"], \"minimumBookingHours\": 12, \"latePickupCharges\": 200, \"dropOffTime\": \"19:00:00\", \"pickUpTime\": \"08:00:00\" }, \"animalsHandled\": [\"Dogs\", \"Cats\"], \"maxPetsAtOneTime\": 2, \"dogTemperaments\": [\"Friendly\", \"Anxious\"], \"serviceLocation\": \"PetHotel\", \"allowParentFood\": true }" }
+          }
+        },
+        {
+          "name": "Read service catalog -> capture DayCare + NightStay ServiceIds",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('catalog 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "const services = j.data || [];",
+                  "const dayCare = services.find(s => s.serviceType === 'DayCare');",
+                  "const nightStay = services.find(s => s.serviceType === 'NightStay');",
+                  "pm.test('DayCare + NightStay rows exist and are active', () => {",
+                  "  pm.expect(dayCare, 'DayCare row').to.exist;",
+                  "  pm.expect(nightStay, 'NightStay row').to.exist;",
+                  "});",
+                  "if (dayCare) pm.collectionVariables.set('serviceIdDayCare', dayCare.serviceId);",
+                  "if (nightStay) pm.collectionVariables.set('serviceIdNightStay', nightStay.serviceId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/services"
+          }
+        },
+        {
+          "name": "Set weekly availability (open 7 days, 08:00-20:00)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('availability saved', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.test('envelope success', () => pm.expect(pm.response.json().success).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/availability",
+            "body": { "mode": "raw", "raw": "{ \"days\": [ { \"dayOfWeek\": 0, \"isOpen\": true, \"startTime\": \"08:00:00\", \"endTime\": \"20:00:00\", \"breakStartTime\": null, \"breakEndTime\": null }, { \"dayOfWeek\": 1, \"isOpen\": true, \"startTime\": \"08:00:00\", \"endTime\": \"20:00:00\", \"breakStartTime\": null, \"breakEndTime\": null }, { \"dayOfWeek\": 2, \"isOpen\": true, \"startTime\": \"08:00:00\", \"endTime\": \"20:00:00\", \"breakStartTime\": null, \"breakEndTime\": null }, { \"dayOfWeek\": 3, \"isOpen\": true, \"startTime\": \"08:00:00\", \"endTime\": \"20:00:00\", \"breakStartTime\": null, \"breakEndTime\": null }, { \"dayOfWeek\": 4, \"isOpen\": true, \"startTime\": \"08:00:00\", \"endTime\": \"20:00:00\", \"breakStartTime\": null, \"breakEndTime\": null }, { \"dayOfWeek\": 5, \"isOpen\": true, \"startTime\": \"08:00:00\", \"endTime\": \"20:00:00\", \"breakStartTime\": null, \"breakEndTime\": null }, { \"dayOfWeek\": 6, \"isOpen\": true, \"startTime\": \"08:00:00\", \"endTime\": \"20:00:00\", \"breakStartTime\": null, \"breakEndTime\": null } ] }" }
+          }
+        },
+        {
+          "name": "Set payout methods",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('payout methods saved', () => pm.expect([200, 201]).to.include(pm.response.code));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/policy/payout-methods",
+            "body": { "mode": "raw", "raw": "{ \"payoutMethods\": [\"Cash\", \"Digital\"] }" }
+          }
+        },
+        {
+          "name": "Set cancellation policy (48h)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('cancellation policy saved', () => pm.expect([200, 201]).to.include(pm.response.code));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/policy/cancellation",
+            "body": { "mode": "raw", "raw": "{ \"minimumHoursBeforeCancellation\": 48 }" }
+          }
+        },
+        {
+          "name": "Onboarding status reflects setup",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('onboarding status 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('service selection completed', () => {",
+                  "  pm.expect(j.data).to.have.property('serviceSelection');",
+                  "  pm.expect(j.data).to.have.property('payoutAndCancellation');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/onboarding-status"
+          }
+        }
+      ]
+    },
+    {
+      "name": "B. Parent adds a pet with medical info",
+      "item": [
+        {
+          "name": "List pets (reuse an existing one when present)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('pets list 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "if (Array.isArray(j.data) && j.data.length > 0) pm.collectionVariables.set('petId', j.data[0].petId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/pets"
+          }
+        },
+        {
+          "name": "Add pet (skipped when one already exists)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.collectionVariables.get('petId') && typeof pm.execution !== 'undefined' && typeof pm.execution.skipRequest === 'function') {",
+                  "  pm.execution.skipRequest();",
+                  "}",
+                  "// Microchip ids are globally unique - randomise per run.",
+                  "pm.collectionVariables.set('microchipId', '982' + Date.now());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const j = pm.response.json();",
+                  "  if (j.data && j.data.petId) pm.collectionVariables.set('petId', j.data.petId);",
+                  "}",
+                  "pm.test('petId resolved', () => {",
+                  "  pm.expect(pm.collectionVariables.get('petId')).to.be.a('string').and.to.have.length.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/pets",
+            "body": { "mode": "raw", "raw": "{ \"petType\": \"Dog\", \"petName\": \"Bruno\", \"breed\": \"Labrador\", \"gender\": \"Male\", \"dateOfBirth\": \"2023-03-04\", \"weight\": 28.5, \"microchipId\": \"{{microchipId}}\", \"description\": \"Friendly and energetic E2E dog.\" }" }
+          }
+        },
+        {
+          "name": "Fill medical info",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('medical info saved', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('vaccination + sterilization persisted', () => {",
+                  "  pm.expect(j.data.vaccinationStatus).to.eql('Vaccinated');",
+                  "  pm.expect(j.data.sterilizationStatus).to.eql('Sterilized');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pets/{{petId}}/medical-info",
+            "body": { "mode": "raw", "raw": "{ \"vaccinationStatus\": \"Vaccinated\", \"sterilizationStatus\": \"Sterilized\", \"medicalHistory\": \"Mild seasonal allergies.\", \"temperament\": \"Friendly\", \"vaccinationType\": \"Rabies\", \"vaccinationDose\": \"Booster\", \"prescription\": \"Antihistamine 5mg daily during pollen season.\" }" }
+          }
+        },
+        {
+          "name": "Read pet back (parent host)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('pet read 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('full snapshot present', () => {",
+                  "  pm.expect(j.data.petName).to.be.a('string');",
+                  "  pm.expect(j.data.vaccinationStatus).to.eql('Vaccinated');",
+                  "  pm.expect(j.data.photos).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/pets/{{petId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "C. Happy path - book, accept, start with OTP, complete",
+      "item": [
+        {
+          "name": "Parent checks free slots",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('slots 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "const slots = j.data.slots || [];",
+                  "const starts = slots.map(s => s.startTime);",
+                  "pm.test('10:00 slot is free on a fresh date', () => pm.expect(starts).to.include('10:00:00'));",
+                  "pm.test('every slot carries its remaining capacity (full capacity on a fresh date)', () => {",
+                  "  const ten = slots.find(s => s.startTime === '10:00:00');",
+                  "  pm.expect(ten.remainingCapacity).to.eql(j.data.capacity);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdDayCare}}&date={{dateHappy}}&durationHours=2&granularityMinutes=30"
+          }
+        },
+        {
+          "name": "Parent books DayCare 10:00-12:00",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('booking created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "const j = pm.response.json();",
+                  "pm.test('status CREATED + pet linked', () => {",
+                  "  pm.expect(j.data.status).to.eql('CREATED');",
+                  "  pm.expect(j.data.petId).to.eql(pm.collectionVariables.get('petId'));",
+                  "});",
+                  "pm.collectionVariables.set('happyBookingId', j.data.bookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdDayCare}}\", \"bookingDate\": \"{{dateHappy}}\", \"startTime\": \"10:00:00\", \"endTime\": \"12:00:00\", \"serviceItemCode\": null, \"jobNotes\": \"Gate code 1234; Bruno is shy around strangers.\", \"locationType\": \"ParentLocation\" }" }
+          }
+        },
+        {
+          "name": "Provider sees it in the day view",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('day view 200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "pm.test('new booking listed', () => {",
+                  "  const ids = (j.data || []).map(b => b.bookingId);",
+                  "  pm.expect(ids).to.include(pm.collectionVariables.get('happyBookingId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings?date={{dateHappy}}"
+          }
+        },
+        {
+          "name": "Provider accepts -> CONFIRMED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('accepted', () => pm.response.to.have.status(200));",
+                  "pm.test('status CONFIRMED', () => pm.expect(pm.response.json().data.status).to.eql('CONFIRMED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/{{happyBookingId}}/accept"
+          }
+        },
+        {
+          "name": "Parent opens booking -> gets start-OTP + verified payment block",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('detail 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('start OTP issued for confirmed booking', () => {",
+                  "  pm.expect(d.startOtp, 'startOtp').to.exist;",
+                  "  pm.expect(d.startOtp.code).to.match(/^\\d{6}$/);",
+                  "});",
+                  "if (d.startOtp) pm.collectionVariables.set('startOtp', d.startOtp.code);",
+                  "pm.test('jobId is friendly PF-XXXXXX', () => pm.expect(d.bookingDetails.jobId).to.match(/^PF-\\d{6}$/));",
+                  "pm.test('payment math is consistent (rate x 2h, fee = pct of total)', () => {",
+                  "  const p = d.paymentDetails;",
+                  "  pm.expect(p.pricePerHour).to.be.a('number').above(0);",
+                  "  pm.expect(p.totalAmount).to.eql(p.pricePerHour * 2);",
+                  "  const expectedFee = Math.round(p.totalAmount * p.feePercentage) / 100;",
+                  "  pm.expect(p.pawfrontFee).to.eql(expectedFee);",
+                  "});",
+                  "pm.test('location resolved from ParentLocation', () => {",
+                  "  pm.expect(d.location.locationType).to.eql('ParentLocation');",
+                  "  pm.expect(d.location.addressLine).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{happyBookingId}}"
+          }
+        },
+        {
+          "name": "Provider starts the job with the parent's OTP -> JOB_STARTED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('started', () => pm.response.to.have.status(200));",
+                  "pm.test('status JOB_STARTED', () => pm.expect(pm.response.json().data.status).to.eql('JOB_STARTED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/{{happyBookingId}}/start",
+            "body": { "mode": "raw", "raw": "{ \"otpCode\": \"{{startOtp}}\" }" }
+          }
+        },
+        {
+          "name": "Provider completes the job -> COMPLETED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('completed', () => pm.response.to.have.status(200));",
+                  "pm.test('status COMPLETED', () => pm.expect(pm.response.json().data.status).to.eql('COMPLETED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/{{happyBookingId}}/complete",
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        },
+        {
+          "name": "Audit trail shows the full journey",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('history 200', () => pm.response.to.have.status(200));",
+                  "const rows = pm.response.json().data || [];",
+                  "const statuses = rows.map(r => r.toStatus);",
+                  "pm.test('CREATED -> CONFIRMED -> JOB_STARTED -> COMPLETED, oldest first', () => {",
+                  "  pm.expect(statuses[0]).to.eql('CREATED');",
+                  "  pm.expect(statuses).to.include.members(['CONFIRMED', 'JOB_STARTED', 'COMPLETED']);",
+                  "  pm.expect(statuses[statuses.length - 1]).to.eql('COMPLETED');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/{{happyBookingId}}/status-history"
+          }
+        }
+      ]
+    },
+    {
+      "name": "D. Reschedule - parent proposes, provider accepts",
+      "item": [
+        {
+          "name": "Parent books DayCare (to be moved)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('booking created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.collectionVariables.set('modBookingId', pm.response.json().data.bookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdDayCare}}\", \"bookingDate\": \"{{dateMod}}\", \"startTime\": \"10:00:00\", \"endTime\": \"12:00:00\", \"serviceItemCode\": null, \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Provider accepts",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('CONFIRMED', () => pm.expect(pm.response.json().data.status).to.eql('CONFIRMED'));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/{{modBookingId}}/accept"
+          }
+        },
+        {
+          "name": "Parent proposes a new date + time",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('modification staged', () => pm.response.to.have.status(200));",
+                  "pm.test('status MODIFICATION_REQUEST_BY_PARENT', () => {",
+                  "  pm.expect(pm.response.json().data.status).to.eql('MODIFICATION_REQUEST_BY_PARENT');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{modBookingId}}/modifications",
+            "body": { "mode": "raw", "raw": "{ \"bookingDate\": \"{{dateModNew}}\", \"startTime\": \"14:00:00\", \"endTime\": \"16:00:00\", \"note\": \"Can we move it to the afternoon?\" }" }
+          }
+        },
+        {
+          "name": "Provider sees the pending proposal on the detail read",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('detail 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('pendingModification carries the proposed schedule', () => {",
+                  "  pm.expect(d.pendingModification, 'pendingModification').to.exist;",
+                  "  pm.expect(d.pendingModification.proposedBookingDate).to.eql(pm.collectionVariables.get('dateModNew'));",
+                  "  pm.expect(d.pendingModification.proposedStartTime).to.eql('14:00:00');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/bookings/{{modBookingId}}"
+          }
+        },
+        {
+          "name": "Provider accepts the proposal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('accepted', () => pm.response.to.have.status(200));",
+                  "pm.test('status PROVIDER_ACCEPTED_MODIFICATION', () => {",
+                  "  pm.expect(pm.response.json().data.status).to.eql('PROVIDER_ACCEPTED_MODIFICATION');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/{{modBookingId}}/modifications/accept",
+            "body": { "mode": "raw", "raw": "{ \"note\": \"Works for me.\" }" }
+          }
+        },
+        {
+          "name": "Booking now carries the new schedule, staging cleared",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('detail 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('new date + time applied to the SAME booking id', () => {",
+                  "  pm.expect(d.bookingDetails.bookingDate).to.eql(pm.collectionVariables.get('dateModNew'));",
+                  "  pm.expect(d.bookingDetails.startTime).to.eql('14:00:00');",
+                  "  pm.expect(d.bookingDetails.endTime).to.eql('16:00:00');",
+                  "});",
+                  "pm.test('pendingModification cleared', () => pm.expect(d.pendingModification).to.be.null);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/bookings/{{modBookingId}}"
+          }
+        },
+        {
+          "name": "Cleanup: provider cancels",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('cancelled', () => pm.expect(pm.response.json().data.status).to.eql('PROVIDER_CANCELLED'));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/{{modBookingId}}/cancel"
+          }
+        }
+      ]
+    },
+    {
+      "name": "E. Capacity - full slots disappear from availability",
+      "item": [
+        {
+          "name": "Booking 1 of 2 (capacity is 2)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.collectionVariables.set('capBooking1', pm.response.json().data.bookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdDayCare}}\", \"bookingDate\": \"{{dateCapacity}}\", \"startTime\": \"10:00:00\", \"endTime\": \"12:00:00\", \"serviceItemCode\": null, \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Booking 2 of 2",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.collectionVariables.set('capBooking2', pm.response.json().data.bookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdDayCare}}\", \"bookingDate\": \"{{dateCapacity}}\", \"startTime\": \"10:00:00\", \"endTime\": \"12:00:00\", \"serviceItemCode\": null, \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Booking 3 is rejected - 409 CapacityExceeded",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "const j = pm.response.json();",
+                  "pm.test('error code CapacityExceeded', () => pm.expect(j.error.code).to.eql('CapacityExceeded'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdDayCare}}\", \"bookingDate\": \"{{dateCapacity}}\", \"startTime\": \"10:00:00\", \"endTime\": \"12:00:00\", \"serviceItemCode\": null, \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Full slot is NOT offered anymore; adjacent slots still are",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('slots 200', () => pm.response.to.have.status(200));",
+                  "const starts = (pm.response.json().data.slots || []).map(s => s.startTime);",
+                  "pm.test('10:00 and 11:00 starts are gone (overlap at capacity)', () => {",
+                  "  pm.expect(starts).to.not.include('10:00:00');",
+                  "  pm.expect(starts).to.not.include('11:00:00');",
+                  "});",
+                  "pm.test('08:00 start (ends exactly at 10:00) is still free', () => {",
+                  "  pm.expect(starts).to.include('08:00:00');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdDayCare}}&date={{dateCapacity}}&durationHours=2&granularityMinutes=30"
+          }
+        },
+        {
+          "name": "Parent cancels booking 1 - capacity partially freed",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('cancelled', () => pm.expect(pm.response.json().data.status).to.eql('PARENT_CANCELLED'));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{capBooking1}}/cancel"
+          }
+        },
+        {
+          "name": "Slot is offered again after the cancel",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('slots 200', () => pm.response.to.have.status(200));",
+                  "const slots = pm.response.json().data.slots || [];",
+                  "const ten = slots.find(s => s.startTime === '10:00:00');",
+                  "pm.test('10:00 start is back (1 of 2 capacity used)', () => pm.expect(ten, '10:00 slot').to.exist);",
+                  "pm.test('remaining capacity reflects the one still-active booking', () => {",
+                  "  pm.expect(ten.remainingCapacity).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdDayCare}}&date={{dateCapacity}}&durationHours=2&granularityMinutes=30"
+          }
+        },
+        {
+          "name": "Cleanup: parent cancels booking 2",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('cancelled', () => pm.expect(pm.response.json().data.status).to.eql('PARENT_CANCELLED'));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{capBooking2}}/cancel"
+          }
+        }
+      ]
+    },
+    {
+      "name": "F. Night-stay boarding - per-night capacity feeds availability",
+      "item": [
+        {
+          "name": "Stay 1 of 2 (2 nights)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('stay created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "const j = pm.response.json();",
+                  "pm.test('status CREATED', () => pm.expect(j.data.status).to.eql('CREATED'));",
+                  "pm.collectionVariables.set('nsBooking1', j.data.nightStayBookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdNightStay}}\", \"checkInDate\": \"{{nsCheckIn}}\", \"checkOutDate\": \"{{nsCheckOut}}\", \"jobNotes\": \"Feed twice a day; meds in the side pocket.\", \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Stay 2 of 2 (same nights)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('stay created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.collectionVariables.set('nsBooking2', pm.response.json().data.nightStayBookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdNightStay}}\", \"checkInDate\": \"{{nsCheckIn}}\", \"checkOutDate\": \"{{nsCheckOut}}\", \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Fully-booked night reports ZERO remaining capacity (night-based availability)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('availability 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('NightStay is date-granular: nights[] filled, slots[] empty', () => {",
+                  "  pm.expect(d.slots).to.be.an('array').with.lengthOf(0);",
+                  "  pm.expect(d.nights).to.be.an('array').with.length.above(0);",
+                  "});",
+                  "const night = d.nights.find(n => n.date === pm.collectionVariables.get('nsCheckIn'));",
+                  "pm.test('both stays occupy the night: activeBookings 2, remainingCapacity 0, unavailable', () => {",
+                  "  pm.expect(night, 'night entry').to.exist;",
+                  "  pm.expect(night.activeBookings).to.eql(2);",
+                  "  pm.expect(night.remainingCapacity).to.eql(0);",
+                  "  pm.expect(night.isAvailable).to.be.false;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdNightStay}}&date={{nsCheckIn}}&endDate={{nsCheckOut}}"
+          }
+        },
+        {
+          "name": "Stay 3 is rejected - 409 CapacityExceeded",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('error code CapacityExceeded', () => pm.expect(pm.response.json().error.code).to.eql('CapacityExceeded'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdNightStay}}\", \"checkInDate\": \"{{nsCheckIn}}\", \"checkOutDate\": \"{{nsCheckOut}}\", \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Parent cancels stay 1",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('cancelled', () => pm.expect(pm.response.json().data.status).to.eql('PARENT_CANCELLED'));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nsBooking1}}/status",
+            "body": { "mode": "raw", "raw": "{ \"status\": \"PARENT_CANCELLED\", \"note\": \"Plans changed.\" }" }
+          }
+        },
+        {
+          "name": "Night has capacity again after the cancel",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('availability 200', () => pm.response.to.have.status(200));",
+                  "const night = (pm.response.json().data.nights || []).find(n => n.date === pm.collectionVariables.get('nsCheckIn'));",
+                  "pm.test('one capacity unit freed: remainingCapacity 1, available again', () => {",
+                  "  pm.expect(night, 'night entry').to.exist;",
+                  "  pm.expect(night.activeBookings).to.eql(1);",
+                  "  pm.expect(night.remainingCapacity).to.eql(1);",
+                  "  pm.expect(night.isAvailable).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdNightStay}}&date={{nsCheckIn}}"
+          }
+        },
+        {
+          "name": "Cleanup: parent cancels stay 2",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('cancelled', () => pm.expect(pm.response.json().data.status).to.eql('PARENT_CANCELLED'));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nsBooking2}}/status",
+            "body": { "mode": "raw", "raw": "{ \"status\": \"PARENT_CANCELLED\", \"note\": \"Cleanup.\" }" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "G. Closures - sick day blocks bookings; conflicts are surfaced",
+      "item": [
+        {
+          "name": "Provider closes DayCare for a day",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('closure call 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('closure Created (no conflicts on a fresh date)', () => pm.expect(d.status).to.eql('Created'));",
+                  "if (d.closures && d.closures.length > 0) pm.collectionVariables.set('closureId', d.closures[0].closureId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/closures",
+            "body": { "mode": "raw", "raw": "{ \"serviceIds\": [\"{{serviceIdDayCare}}\"], \"startDate\": \"{{dateClosure}}\", \"endDate\": \"{{dateClosure}}\", \"startTime\": null, \"endTime\": null, \"reason\": \"E2E sick day\" }" }
+          }
+        },
+        {
+          "name": "Closed day shows zero slots",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('slots 200', () => pm.response.to.have.status(200));",
+                  "pm.test('no slots on a fully-closed day', () => pm.expect(pm.response.json().data.slots).to.have.lengthOf(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdDayCare}}&date={{dateClosure}}&durationHours=2&granularityMinutes=30"
+          }
+        },
+        {
+          "name": "Booking on the closed day is rejected - 409 ServiceClosed",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('error code ServiceClosed', () => pm.expect(pm.response.json().error.code).to.eql('ServiceClosed'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdDayCare}}\", \"bookingDate\": \"{{dateClosure}}\", \"startTime\": \"10:00:00\", \"endTime\": \"12:00:00\", \"serviceItemCode\": null, \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Parent books another day (will conflict with next closure)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "pm.collectionVariables.set('conflictBookingId', pm.response.json().data.bookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdDayCare}}\", \"bookingDate\": \"{{dateClosureConflict}}\", \"startTime\": \"10:00:00\", \"endTime\": \"12:00:00\", \"serviceItemCode\": null, \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        },
+        {
+          "name": "Closing over an active booking reports BookingsExist (nothing closed)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('closure call 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('discriminated BookingsExist with the conflicting booking listed', () => {",
+                  "  pm.expect(d.status).to.eql('BookingsExist');",
+                  "  pm.expect(d.conflictingBookings.length).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/closures",
+            "body": { "mode": "raw", "raw": "{ \"serviceIds\": [\"{{serviceIdDayCare}}\"], \"startDate\": \"{{dateClosureConflict}}\", \"endDate\": \"{{dateClosureConflict}}\", \"startTime\": null, \"endTime\": null, \"reason\": \"E2E conflict probe\" }" }
+          }
+        },
+        {
+          "name": "Cleanup: cancel the conflicting booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('cancelled', () => pm.expect(pm.response.json().data.status).to.eql('PARENT_CANCELLED'));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{conflictBookingId}}/cancel"
+          }
+        },
+        {
+          "name": "Cleanup: reopen the sick day (delete closure)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('closure removed', () => pm.expect([200, 204]).to.include(pm.response.code));"] }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/closures/{{closureId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "H. Private job (walk-in) - zero Pawfront fee",
+      "item": [
+        {
+          "name": "Provider adds a custom walk-in job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('custom booking created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "const j = pm.response.json();",
+                  "pm.test('walk-ins start CONFIRMED', () => pm.expect(j.data.status).to.eql('CONFIRMED'));",
+                  "pm.collectionVariables.set('customBookingId', j.data.bookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/custom",
+            "body": { "mode": "raw", "raw": "{ \"serviceId\": \"{{serviceIdDayCare}}\", \"customerName\": \"Walk-in Wanda\", \"customerMobileCountryCode\": \"+41\", \"customerMobile\": \"790000001\", \"animalType\": \"Dog\", \"petName\": \"Rex\", \"bookingDate\": \"{{dateCustom}}\", \"startTime\": \"10:00:00\", \"endTime\": \"12:00:00\", \"serviceLocation\": \"MyLocation\", \"customerLocation\": null, \"pricePerHour\": 300, \"jobNotes\": \"Off-platform private job.\" }" }
+          }
+        },
+        {
+          "name": "Detail shows fee AND fee percentage of ZERO",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('detail 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('source is Custom', () => pm.expect(d.bookingDetails.source).to.eql('Custom'));",
+                  "pm.test('private job carries NO Pawfront fee or taxes', () => {",
+                  "  pm.expect(d.paymentDetails.feePercentage).to.eql(0);",
+                  "  pm.expect(d.paymentDetails.pawfrontFee).to.eql(0);",
+                  "});",
+                  "pm.test('total = stored rate x 2h', () => {",
+                  "  pm.expect(d.paymentDetails.pricePerHour).to.eql(300);",
+                  "  pm.expect(d.paymentDetails.totalAmount).to.eql(600);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/bookings/{{customBookingId}}"
+          }
+        },
+        {
+          "name": "Cleanup: provider cancels the walk-in",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('cancelled', () => pm.expect(pm.response.json().data.status).to.eql('PROVIDER_CANCELLED'));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings/{{customBookingId}}/cancel"
+          }
+        }
+      ]
+    },
+    {
+      "name": "I. Event - create, sell out, dashboard, cancel frees the seat",
+      "item": [
+        {
+          "name": "Provider creates a paid physical event (capacity 3)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('event created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "const j = pm.response.json();",
+                  "pm.test('ticketing persisted', () => {",
+                  "  pm.expect(j.data.isPaid).to.be.true;",
+                  "  pm.expect(j.data.price).to.eql(100);",
+                  "});",
+                  "pm.collectionVariables.set('e2eEventId', j.data.eventId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/events",
+            "body": { "mode": "raw", "raw": "{ \"eventCategory\": \"AdoptionAndRescue\", \"isChildFriendly\": true, \"title\": \"E2E Adoption Meetup\", \"description\": \"E2E test event - small paid meetup.\", \"bannerImageUrl\": null, \"amenities\": [\"FreeParking\", \"DrinkingWater\"], \"eventType\": \"Physical\", \"startDate\": \"{{eventDate}}\", \"endDate\": \"{{eventDate}}\", \"startTime\": \"10:00:00\", \"endTime\": \"17:00:00\", \"isPaid\": true, \"price\": 100, \"cancellationPolicy\": \"FullRefundUpTo4Hours\", \"eventLink\": null, \"physical\": { \"maximumCapacity\": 3, \"location\": { \"houseNumber\": \"42\", \"street\": \"Park Lane\", \"city\": \"Zurich\", \"zip\": \"8001\", \"country\": \"Switzerland\", \"latitude\": 47.3769, \"longitude\": 8.5417 } } }" }
+          }
+        },
+        {
+          "name": "Organiser sets event payout methods",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('payout methods saved', () => pm.expect([200, 201]).to.include(pm.response.code));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/events/{{e2eEventId}}/payout-methods",
+            "body": { "mode": "raw", "raw": "{ \"payoutMethods\": [\"Cash\", \"Digital\"] }" }
+          }
+        },
+        {
+          "name": "Parent sees the event as bookable",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('event detail 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('bookable, 0 of 3 seats taken', () => {",
+                  "  pm.expect(d.isBookable).to.be.true;",
+                  "  pm.expect(d.bookings.maxBookings).to.eql(3);",
+                  "  pm.expect(d.bookings.totalBookings).to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/events/{{e2eEventId}}"
+          }
+        },
+        {
+          "name": "Parent buys 2 tickets",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('booking created', () => pm.expect([200, 201]).to.include(pm.response.code));",
+                  "const j = pm.response.json();",
+                  "pm.test('2 tickets, payment Pending, total = 2 x price', () => {",
+                  "  pm.expect(j.data.tickets).to.have.lengthOf(2);",
+                  "  pm.expect(j.data.paymentStatus).to.eql('Pending');",
+                  "  pm.expect(j.data.totalAmount).to.eql(200);",
+                  "});",
+                  "pm.collectionVariables.set('e2eEventBookingId', j.data.bookingId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/events/{{e2eEventId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"bookerName\": \"E2E Parent\", \"bookerEmail\": \"{{parentEmail}}\", \"bookerMobile\": null, \"attendeeNames\": [\"E2E Parent\", \"Plus One\"], \"paymentMethod\": \"CreditCard\" }" }
+          }
+        },
+        {
+          "name": "Gateway confirms payment (webhook)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.collectionVariables.set('paymentRef', 'e2e-tx-' + Date.now());"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('payment confirmed', () => pm.response.to.have.status(200));",
+                  "pm.test('paymentStatus Paid', () => pm.expect(pm.response.json().data.paymentStatus).to.eql('Paid'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{providerBaseUrl}}/api/v1/event-bookings/{{e2eEventBookingId}}/payment-confirmation",
+            "body": { "mode": "raw", "raw": "{ \"paymentStatus\": \"Paid\", \"paymentReference\": \"{{paymentRef}}\" }" }
+          }
+        },
+        {
+          "name": "Event no longer bookable for this parent; 2 of 3 seats taken",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('event detail 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('isBookable false once the caller holds tickets', () => pm.expect(d.isBookable).to.be.false);",
+                  "pm.test('2 seats taken', () => pm.expect(d.bookings.totalBookings).to.eql(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/events/{{e2eEventId}}"
+          }
+        },
+        {
+          "name": "A 2-ticket booking no longer fits - 409 EventSoldOut",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+                  "pm.test('error code EventSoldOut', () => pm.expect(pm.response.json().error.code).to.eql('EventSoldOut'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/events/{{e2eEventId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"bookerName\": \"Second Buyer\", \"bookerEmail\": \"second.buyer@example.com\", \"bookerMobile\": null, \"attendeeNames\": [\"Second Buyer\", \"Friend\"], \"paymentMethod\": \"Cash\" }" }
+          }
+        },
+        {
+          "name": "Someone views + shares the event",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('counter bumped', () => pm.response.to.have.status(200));",
+                  "pm.test('viewCount >= 1', () => pm.expect(pm.response.json().data.viewCount).to.be.at.least(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/events/{{e2eEventId}}/views"
+          }
+        },
+        {
+          "name": "Organiser dashboard - paid attendees + earnings",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('metrics 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('2 confirmed paid attendees, earnings 200', () => {",
+                  "  pm.expect(d.confirmedAttendees).to.eql(2);",
+                  "  pm.expect(d.earnings).to.eql(200);",
+                  "});",
+                  "pm.test('views tracked', () => pm.expect(d.views).to.be.at.least(1));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/events/{{e2eEventId}}/metrics"
+          }
+        },
+        {
+          "name": "Parent cancels the ticket booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('cancel 200', () => pm.response.to.have.status(200));",
+                  "pm.test('status Cancelled', () => pm.expect(pm.response.json().data.status).to.eql('Cancelled'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/event-bookings/{{e2eEventBookingId}}"
+          }
+        },
+        {
+          "name": "Seats freed, event bookable again",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('event detail 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('capacity released + bookable again', () => {",
+                  "  pm.expect(d.bookings.totalBookings).to.eql(0);",
+                  "  pm.expect(d.isBookable).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/events/{{e2eEventId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "J. Provider looks up the customer + pet",
+      "item": [
+        {
+          "name": "Customer card (parent details)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('details 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('card shape: rating null (reviews not built), contact + address present', () => {",
+                  "  pm.expect(d.rating).to.be.null;",
+                  "  pm.expect(d.name).to.be.a('string').and.not.empty;",
+                  "  pm.expect(d.email).to.be.a('string').and.not.empty;",
+                  "  pm.expect(d.address).to.have.property('city');",
+                  "  pm.expect(d.age).to.be.a('number');",
+                  "});",
+                  "pm.test('pets list includes the E2E pet', () => {",
+                  "  const ids = (d.pets || []).map(p => p.petId);",
+                  "  pm.expect(ids).to.include(pm.collectionVariables.get('petId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/pet-parents/{{petParentId}}/details"
+          }
+        },
+        {
+          "name": "Full pet profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('pet 200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('full profile: age split, medical snapshot, photo gallery', () => {",
+                  "  pm.expect(d.age).to.have.property('years');",
+                  "  pm.expect(d.age).to.have.property('months');",
+                  "  pm.expect(d.vaccinationStatus).to.eql('Vaccinated');",
+                  "  pm.expect(d.sterilizationStatus).to.eql('Sterilized');",
+                  "  pm.expect(d.photos).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/pets/{{petId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "K. Negative + security checks",
+      "item": [
+        {
+          "name": "No token -> 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('401 Unauthorized without a token', () => pm.response.to.have.status(401));"] }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{providerBaseUrl}}/api/v1/providers/{{providerId}}/bookings"
+          }
+        },
+        {
+          "name": "Parent cannot read another parent's profile -> 403",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('403 Forbidden for someone else\\'s petParentId', () => pm.response.to.have.status(403));"] }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/00000000-0000-0000-0000-000000000001/profile"
+          }
+        },
+        {
+          "name": "Unknown pet on provider lookup -> 404 PetNotFound",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
+                  "pm.test('error code PetNotFound', () => pm.expect(pm.response.json().error.code).to.eql('PetNotFound'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{providerToken}}" }],
+            "url": "{{providerBaseUrl}}/api/v1/pets/{{$guid}}"
+          }
+        },
+        {
+          "name": "Parent booking without locationType -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('error envelope present', () => pm.expect(pm.response.json().error.code).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{serviceIdDayCare}}\", \"bookingDate\": \"{{dateHappy}}\", \"startTime\": \"14:00:00\", \"endTime\": \"16:00:00\" }" }
+          }
+        },
+        {
+          "name": "Unknown serviceId on booking -> 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('error envelope present', () => pm.expect(pm.response.json().error.code).to.be.a('string'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{parentToken}}" }, { "key": "Content-Type", "value": "application/json" }],
+            "url": "{{parentBaseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings",
+            "body": { "mode": "raw", "raw": "{ \"petId\": \"{{petId}}\", \"serviceId\": \"{{$guid}}\", \"bookingDate\": \"{{dateHappy}}\", \"startTime\": \"14:00:00\", \"endTime\": \"16:00:00\", \"serviceItemCode\": null, \"jobNotes\": null, \"locationType\": \"ProviderLocation\" }" }
+          }
+        }
+      ]
+    }
+  ]
+}

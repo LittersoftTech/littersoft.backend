@@ -73,8 +73,10 @@ public sealed record TrainerProviderSearchCriteria(
 /// go straight to the slots / booking endpoints without a follow-up lookup.
 /// </summary>
 /// <param name="BusinessName">
-/// Shop/hotel/clinic name; null for freelance sub-categories (mobile renders
-/// e.g. "Freelance Pet Sitter").
+/// Display label for the provider: the shop/hotel/clinic business name for
+/// businesses, or the provider's personal name (FirstName + LastName) for
+/// freelance sub-categories, which have no business name in the offering doc.
+/// Null only when neither can be resolved (e.g. missing profile row).
 /// </param>
 /// <param name="CompletedBookings">
 /// Bookings already finished (not cancelled / no-show) across ALL the
@@ -90,6 +92,11 @@ public sealed record TrainerProviderSearchCriteria(
 /// The service image the provider uploaded for this offering (the same image
 /// shown on the discovery card). Null when the provider hasn't set one.
 /// </param>
+/// <param name="BannerImageUrl">
+/// The wide banner the provider uploaded for this specific service
+/// (Provider.ProviderServiceBanners, keyed by ServiceId). Distinct from
+/// ImageUrl (the offering/discovery photo). Null when no banner is set.
+/// </param>
 public sealed record ProviderSearchResult(
     Guid ProviderId,
     Guid ServiceId,
@@ -99,7 +106,8 @@ public sealed record ProviderSearchResult(
     decimal? Charges,
     string ChargesUnit,
     string? ServiceItemCode,
-    string? ImageUrl);
+    string? ImageUrl,
+    string? BannerImageUrl = null);
 
 public static class ProviderSearchChargesUnits
 {

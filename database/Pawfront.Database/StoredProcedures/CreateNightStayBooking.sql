@@ -15,6 +15,25 @@ CREATE OR ALTER PROCEDURE [Booking].[CreateNightStayBooking]
     @CheckOutDate DATE,
     @DropOffTime TIME(0),
     @PickUpTime TIME(0),
+    -- Optional free-text notes the parent attaches to the stay (feeding
+    -- instructions, the pet's quirks, etc.). Surfaced on the detail read.
+    @JobNotes NVARCHAR(2000) = NULL,
+    -- Where the service is delivered: 'ParentLocation' or 'ProviderLocation'.
+    -- Optional (NULL for legacy callers); the detail read resolves the address.
+    @LocationType NVARCHAR(32) = NULL,
+    -- Snapshot of the offering's per-night rate at booking time. Locks the price
+    -- in so a later rate change never re-prices this stay. NULL only for legacy
+    -- callers (the detail read falls back to the live offering rate).
+    @PricePerNight DECIMAL(10, 2) = NULL,
+    -- Provider business address, resolved by the caller (Cosmos service doc +
+    -- registration coordinates) and passed in so a ProviderLocation stay can
+    -- snapshot the service-location address. Ignored for ParentLocation (the
+    -- parent's address is snapshotted from SQL) and when no location is set.
+    @SnapshotProviderAddressLine NVARCHAR(500) = NULL,
+    @SnapshotProviderCity NVARCHAR(200) = NULL,
+    @SnapshotProviderZipCode NVARCHAR(32) = NULL,
+    @SnapshotProviderLatitude DECIMAL(9, 6) = NULL,
+    @SnapshotProviderLongitude DECIMAL(9, 6) = NULL,
     @Capacity INT
 AS
 BEGIN
@@ -77,6 +96,25 @@ BEGIN
         THROW 51234, 'Service is not a valid, active NightStay service for this provider.', 1;
     END
 
+    -- Reject a duplicate stay for the same pet: if this pet already has an active
+    -- (non-cancelled) stay on THIS service whose date range overlaps
+    -- [@CheckInDate, @CheckOutDate), block it — a pet can't board in two places at
+    -- once. Ranges overlap when existing.CheckInDate < @CheckOutDate AND
+    -- existing.CheckOutDate > @CheckInDate (checkout day is not a stayed night).
+    -- Enforced under UPDLOCK + HOLDLOCK so a concurrent duplicate serialises.
+    IF @PetId IS NOT NULL AND EXISTS (
+        SELECT 1
+        FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [ServiceId] = @ServiceId
+          AND [PetId] = @PetId
+          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+          AND [CheckInDate] < @CheckOutDate
+          AND [CheckOutDate] > @CheckInDate
+    )
+    BEGIN
+        THROW 51239, 'This pet already has a booking for these dates.', 1;
+    END
+
     -- Per-night capacity check. Enumerate every stayed night in
     -- [@CheckInDate, @CheckOutDate) and count active bookings whose range
     -- covers that night (existing.CheckInDate <= night < existing.CheckOutDate).
@@ -96,7 +134,7 @@ BEGIN
     FROM [Nights] n
     LEFT JOIN [Booking].[NightStayBookings] b WITH (UPDLOCK, HOLDLOCK)
         ON b.[ServiceId] = @ServiceId
-       AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
+       AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
        AND b.[CheckInDate] <= n.[Night]
        AND b.[CheckOutDate] > n.[Night]
     GROUP BY n.[Night]
@@ -106,6 +144,39 @@ BEGIN
     IF @FullNight IS NOT NULL
     BEGIN
         THROW 51235, 'No remaining capacity for one or more nights in the stay.', 1;
+    END
+
+    -- Snapshot the provider's current cancellation policy so a later policy change
+    -- never re-rules this stay. NULL = no restriction (itself a valid snapshot).
+    DECLARE @CancellationPolicyHours INT =
+        (SELECT [MinimumHoursBeforeCancellation]
+         FROM [Provider].[ProviderCancellationPolicies]
+         WHERE [ProviderId] = @ProviderId);
+
+    -- Snapshot the SELECTED service-location address (see [Booking].[CreateBooking]).
+    DECLARE @SnapshotAddressLine NVARCHAR(500) = NULL;
+    DECLARE @SnapshotCity NVARCHAR(200) = NULL;
+    DECLARE @SnapshotZipCode NVARCHAR(32) = NULL;
+    DECLARE @SnapshotLatitude DECIMAL(9, 6) = NULL;
+    DECLARE @SnapshotLongitude DECIMAL(9, 6) = NULL;
+
+    IF @LocationType = N'ParentLocation'
+    BEGIN
+        SELECT @SnapshotAddressLine = [AddressLine],
+               @SnapshotCity        = [City],
+               @SnapshotZipCode     = [ZipCode],
+               @SnapshotLatitude    = [Latitude],
+               @SnapshotLongitude   = [Longitude]
+        FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId;
+    END
+    ELSE IF @LocationType = N'ProviderLocation'
+    BEGIN
+        SET @SnapshotAddressLine = @SnapshotProviderAddressLine;
+        SET @SnapshotCity        = @SnapshotProviderCity;
+        SET @SnapshotZipCode     = @SnapshotProviderZipCode;
+        SET @SnapshotLatitude    = @SnapshotProviderLatitude;
+        SET @SnapshotLongitude   = @SnapshotProviderLongitude;
     END
 
     DECLARE @InsertedId TABLE ([NightStayBookingId] UNIQUEIDENTIFIER);
@@ -121,7 +192,16 @@ BEGIN
         [CheckInDate],
         [CheckOutDate],
         [DropOffTime],
-        [PickUpTime]
+        [PickUpTime],
+        [JobNotes],
+        [LocationType],
+        [PricePerNight],
+        [CancellationPolicyHours],
+        [SnapshotAddressLine],
+        [SnapshotCity],
+        [SnapshotZipCode],
+        [SnapshotLatitude],
+        [SnapshotLongitude]
     )
     OUTPUT inserted.[NightStayBookingId] INTO @InsertedId
     VALUES
@@ -135,7 +215,16 @@ BEGIN
         @CheckInDate,
         @CheckOutDate,
         @DropOffTime,
-        @PickUpTime
+        @PickUpTime,
+        @JobNotes,
+        @LocationType,
+        @PricePerNight,
+        @CancellationPolicyHours,
+        @SnapshotAddressLine,
+        @SnapshotCity,
+        @SnapshotZipCode,
+        @SnapshotLatitude,
+        @SnapshotLongitude
     );
 
     DECLARE @NightStayBookingId UNIQUEIDENTIFIER =

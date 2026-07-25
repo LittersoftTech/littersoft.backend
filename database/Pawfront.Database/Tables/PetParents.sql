@@ -36,8 +36,12 @@ CREATE TABLE [Parent].[PetParents]
 
 GO
 
+-- Filtered so legacy rows migrated without a mobile number (nullable on the
+-- upgrade path in DeployAll.sql) don't collide; inert on fresh installs where
+-- the column is NOT NULL.
 CREATE UNIQUE INDEX [UX_PetParents_MobileNumber]
-    ON [Parent].[PetParents] ([MobileCountryCode], [MobileNumber]);
+    ON [Parent].[PetParents] ([MobileCountryCode], [MobileNumber])
+    WHERE [MobileNumber] IS NOT NULL;
 
 GO
 

@@ -8,6 +8,13 @@ public interface IProviderAvailabilitySlotService
     /// (<paramref name="durationHours"/> is ignored). For every other category,
     /// duration comes from <paramref name="durationHours"/> and the code is
     /// ignored.
+    ///
+    /// NightStay services are DATE-granular: <paramref name="durationHours"/> and
+    /// <paramref name="granularityMinutes"/> are ignored, hourly <c>Slots</c> stay
+    /// empty, and the result's <c>Nights</c> carries per-night remaining capacity
+    /// for every night in [<paramref name="date"/>, <paramref name="endDate"/>]
+    /// (<paramref name="endDate"/> defaults to <paramref name="date"/>; ignored
+    /// for hourly services).
     /// </summary>
     Task<AvailableSlotsResult> GetAvailableSlotsAsync(
         Guid providerId,
@@ -16,5 +23,6 @@ public interface IProviderAvailabilitySlotService
         decimal durationHours,
         int granularityMinutes,
         string? serviceItemCode,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        DateOnly? endDate = null);
 }

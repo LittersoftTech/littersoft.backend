@@ -28,6 +28,32 @@ CREATE TABLE [Booking].[NightStayBookings]
     -- Snapshot of the offering's drop-off / pick-up times at booking time.
     [DropOffTime] TIME(0) NOT NULL,
     [PickUpTime] TIME(0) NOT NULL,
+    -- Snapshot of the offering's per-night rate at booking time. Locks the price
+    -- in so a later rate change by the provider never re-prices an existing stay.
+    -- NULL for legacy rows created before snapshotting shipped (the detail read
+    -- falls back to the live offering rate in that case).
+    [PricePerNight] DECIMAL(10, 2) NULL,
+    -- Optional free-text notes the parent attaches to the stay at booking time
+    -- (feeding instructions, the pet's quirks, etc.). Surfaced on the
+    -- night-stay booking-detail read.
+    [JobNotes] NVARCHAR(2000) NULL,
+    -- Where the service is delivered, as chosen by the parent at booking time:
+    -- 'ParentLocation' or 'ProviderLocation'. NULL for legacy rows. The
+    -- booking-detail read resolves the matching address live.
+    [LocationType] NVARCHAR(32) NULL,
+    -- Snapshot of the provider's advertised cancellation policy at booking time
+    -- (24/48/72/96 hours, or NULL for no restriction). Locked in so a later policy
+    -- change never re-rules an existing stay. Mirror of [Booking].[Bookings].
+    [CancellationPolicyHours] INT NULL,
+    -- Snapshot of the SELECTED service-location address at booking time, driven by
+    -- [LocationType] (parent's profile address vs provider's business address).
+    -- Frozen so a later address edit never moves an existing stay. NULL for legacy
+    -- rows — the detail read resolves the address live then.
+    [SnapshotAddressLine] NVARCHAR(500) NULL,
+    [SnapshotCity] NVARCHAR(200) NULL,
+    [SnapshotZipCode] NVARCHAR(32) NULL,
+    [SnapshotLatitude] DECIMAL(9, 6) NULL,
+    [SnapshotLongitude] DECIMAL(9, 6) NULL,
     -- Payout (capture-only for now — mirrors [Booking].[Bookings]). [PayoutStatus]
     -- tracks where the provider's money is in the payout pipeline; [PayoutId] is
     -- the external payout reference once issued.
@@ -35,9 +61,11 @@ CREATE TABLE [Booking].[NightStayBookings]
         CONSTRAINT [DF_NightStayBookings_PayoutStatus] DEFAULT N'Pending',
     [PayoutId] NVARCHAR(64) NULL,
     -- Same expanded "job" lifecycle as [Booking].[Bookings] (accept/decline,
-    -- start-with-OTP, complete, parent/provider modification
-    -- proposals). Capacity-freeing statuses are the two cancelled ones PLUS
-    -- PROVIDER_DECLINED; every other status still holds the stay's per-night
+    -- start-with-OTP, complete, PAID, parent/provider modification proposals,
+    -- PARENT/PROVIDER_NO_SHOW, EXPIRED, JOB_EXPIRED, OTP_ATTEMPTS_EXCEEDED).
+    -- Capacity-freeing statuses are the two cancelled ones PLUS
+    -- PROVIDER_DECLINED, the two no-show statuses, EXPIRED, JOB_EXPIRED, and
+    -- OTP_ATTEMPTS_EXCEEDED; every other status still holds the stay's per-night
     -- capacity. APPROVAL_NEEDED is deprecated but kept allowed for legacy rows.
     [Status] NVARCHAR(48) NOT NULL
         CONSTRAINT [DF_NightStayBookings_Status] DEFAULT N'CREATED',
@@ -58,18 +86,27 @@ CREATE TABLE [Booking].[NightStayBookings]
         FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]),
     CONSTRAINT [CK_NightStayBookings_DateOrder] CHECK ([CheckOutDate] > [CheckInDate]),
     CONSTRAINT [CK_NightStayBookings_Status]
-        CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED', N'JOB_STARTED',
-                            N'COMPLETED', N'APPROVAL_NEEDED',
+        CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED',
+                            N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED',
+                            N'COMPLETED', N'PAID', N'APPROVAL_NEEDED',
                             N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER',
                             N'PROVIDER_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
                             N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
-                            N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')),
+                            N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+                            N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                            N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')),
     CONSTRAINT [CK_NightStayBookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
     ),
     CONSTRAINT [CK_NightStayBookings_PayoutStatus]
-        CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed'))
+        CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed')),
+    CONSTRAINT [CK_NightStayBookings_CancellationPolicyHours]
+        CHECK ([CancellationPolicyHours] IS NULL
+               OR [CancellationPolicyHours] IN (24, 48, 72, 96)),
+    CONSTRAINT [CK_NightStayBookings_LocationType]
+        CHECK ([LocationType] IS NULL
+            OR [LocationType] IN (N'ParentLocation', N'ProviderLocation'))
 );
 
 GO

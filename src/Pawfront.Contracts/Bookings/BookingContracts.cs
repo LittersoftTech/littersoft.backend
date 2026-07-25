@@ -9,7 +9,11 @@ public sealed record CreateBookingRequest(
     string? ServiceItemCode,
     // Optional free-text notes for the job (access instructions, the pet's
     // quirks, etc.). Captured at create time and surfaced on the booking detail.
-    string? JobNotes);
+    string? JobNotes,
+    // Where the service is delivered: "ParentLocation" or "ProviderLocation".
+    // Optional on the provider host; the booking detail resolves the matching
+    // address live.
+    string? LocationType = null);
 
 /// <summary>
 /// Body for <c>POST /pet-parents/{petParentId}/bookings</c> on the pet-parent
@@ -26,7 +30,12 @@ public sealed record CreateParentBookingRequest(
     string? ServiceItemCode,
     // Optional free-text notes for the job (access instructions, the pet's
     // quirks, etc.). Captured at create time and surfaced on the booking detail.
-    string? JobNotes);
+    string? JobNotes,
+    // Where the service is delivered: "ParentLocation" (the provider comes to
+    // the parent's address) or "ProviderLocation" (the parent goes to the
+    // provider's place). Required. The booking detail resolves the matching
+    // address live.
+    string? LocationType = null);
 
 /// <summary>
 /// Provider-initiated private/custom booking for an unregistered walk-in.
@@ -61,25 +70,70 @@ public sealed record CancelBookingRequest(Guid PetParentId);
 /// </summary>
 public sealed record UpdateBookingStatusRequest(string Status, string? Note);
 
-/// <summary>Body for <c>POST .../bookings/{bookingId}/start</c> (provider).</summary>
-public sealed record StartBookingRequest(string OtpCode);
+/// <summary>
+/// Body for <c>POST .../bookings/{bookingId}/complete</c> (provider). Completion
+/// itself needs no OTP (the parent's code gates only <c>.../start-job/verify</c>),
+/// so the whole body is OPTIONAL — send it only to attach the extras below.
+/// <see cref="NextConsultationDate"/> lets the provider propose the pet's next
+/// visit while completing the job — stored on the pet (one entry per provider type;
+/// the type is derived server-side from the booking's service category:
+/// PetGroomer → Groomer, Vet → Vet, PetTrainer → Trainer). Omit the field to
+/// complete without one. Only valid for those three categories AND when the
+/// booking has a linked pet (App bookings).
+/// <see cref="Prescription"/> lets a vet record the visit's prescription while
+/// completing the job (Vet bookings only) — the same payload the dedicated
+/// <c>POST .../bookings/{id}/prescription</c> endpoint accepts. Omit for non-vet jobs.
+/// </summary>
+public sealed record CompleteBookingRequest(
+    DateOnly? NextConsultationDate = null,
+    PrescriptionRequest? Prescription = null);
 
 /// <summary>
-/// Optional body for <c>POST .../bookings/{bookingId}/complete</c> (provider).
-/// <see cref="NextConsultationDate"/> lets the provider propose the pet's next
-/// visit while ending the job — stored on the pet (one entry per provider type;
-/// the type is derived server-side from the booking's service category:
-/// PetGroomer → Groomer, Vet → Vet, PetTrainer → Trainer). Omit the body (or the
-/// field) to complete without one. Only valid for those three categories AND
-/// when the booking has a linked pet (App bookings).
+/// Body for <c>POST .../bookings/{bookingId}/paid</c> (provider) — records that
+/// the parent has paid the provider (COMPLETED → PAID). The amount is computed
+/// server-side from the booking's price-locked total, so the only field is how
+/// the parent paid. <see cref="PaymentMethod"/> is 'Cash' or 'Digital'.
 /// </summary>
-public sealed record CompleteBookingRequest(DateOnly? NextConsultationDate);
+public sealed record MarkBookingPaidRequest(string PaymentMethod);
+
+/// <summary>
+/// The vet's per-visit prescription payload. Body for
+/// <c>POST /providers/{providerId}/bookings/{bookingId}/prescription</c> and the
+/// optional <c>prescription</c> block on the complete-booking body. The
+/// next-consultation date is NOT part of this payload — it's set via the
+/// complete-booking <see cref="CompleteBookingRequest.NextConsultationDate"/> and
+/// surfaced (joined) on the read.
+/// </summary>
+public sealed record PrescriptionRequest(
+    string? PrescriptionText,
+    bool IsPetVaccinated,
+    IReadOnlyList<string>? Vaccinations);
+
+/// <summary>
+/// The Vet prescription block on a booking-detail read — populated only once a vet
+/// has recorded one (null otherwise). <see cref="NextConsultationDate"/> is the
+/// pet's rolling Vet follow-up (from the complete-booking flow), joined here; null
+/// when none has been set. Also returned by the dedicated prescription upsert.
+/// </summary>
+public sealed record PrescriptionDetailsSection(
+    string? PrescriptionText,
+    bool IsPetVaccinated,
+    IReadOnlyList<string> Vaccinations,
+    DateOnly? NextConsultationDate);
 
 /// <summary>
 /// The parent-facing start-OTP block, surfaced on the parent's booking-details
-/// read when the booking is startable. The code is read to the provider.
+/// read while the booking is START_JOB. The parent reads the code to the
+/// provider, who enters it to move the job to IN_PROGRESS.
 /// </summary>
 public sealed record StartOtpResponse(string Code, DateTimeOffset ExpiresAtUtc);
+
+/// <summary>
+/// Body for <c>POST .../bookings/{bookingId}/start-job/verify</c> (provider) — the
+/// start-code the parent showed. Entering the correct code moves the booking
+/// START_JOB → IN_PROGRESS (6 wrong attempts cancel the job).
+/// </summary>
+public sealed record VerifyStartOtpRequest(string OtpCode);
 
 /// <summary>
 /// Body for a single-day modification request
@@ -139,8 +193,32 @@ public sealed record BookingDetailResponse(
     // The provider's advertised cancellation policy for this booking's service,
     // surfaced as its own section.
     CancellationPolicyDetailsSection CancellationPolicy,
+    // Where the service is delivered, resolved from the booking's LocationType:
+    // the parent's address for ParentLocation, the provider's for
+    // ProviderLocation. Fields are null when the type is unset (legacy/Custom
+    // rows) or the address can't be resolved.
+    BookingLocationDetailsSection Location,
     StartOtpResponse? StartOtp,
-    BookingModificationResponse? PendingModification);
+    BookingModificationResponse? PendingModification,
+    // The Vet prescription recorded for this booking — null until a vet records
+    // one (Vet bookings only). Drives the parent app's "View Prescription" screen.
+    PrescriptionDetailsSection? Prescription);
+
+/// <summary>
+/// The resolved "where does the service happen" block on a booking-detail read.
+/// <see cref="LocationType"/> is <c>ParentLocation</c> or <c>ProviderLocation</c>
+/// (the parent's choice at booking time; null on legacy/Custom rows). The
+/// address fields carry the matching party's address: the pet parent's profile
+/// address for ParentLocation, the provider's registered business address for
+/// ProviderLocation. Null when unresolvable (e.g. deregistered provider).
+/// </summary>
+public sealed record BookingLocationDetailsSection(
+    string? LocationType,
+    string? AddressLine,
+    string? City,
+    string? ZipCode,
+    decimal? Latitude,
+    decimal? Longitude);
 
 /// <summary>
 /// The provider's advertised cancellation policy for the booked service.
@@ -189,7 +267,14 @@ public sealed record ParentDetailsSection(
     string? CustomerMobileCountryCode,
     string? CustomerMobile,
     string? ParentGender,
-    string? CustomerPhotoUrl);
+    string? CustomerPhotoUrl,
+    // The parent's profile address — App bookings only (null for Custom
+    // walk-ins, which have no linked pet-parent record).
+    string? AddressLine = null,
+    string? City = null,
+    string? ZipCode = null,
+    decimal? Latitude = null,
+    decimal? Longitude = null);
 
 /// <summary>The provider (service-side) facts, joined from the provider's profile —
 /// the counterpart of <see cref="ParentDetailsSection"/> so the parent app can show
@@ -202,7 +287,14 @@ public sealed record ProviderDetailsSection(
     string? ProviderMobileCountryCode,
     string? ProviderMobile,
     string? ProviderGender,
-    string? ProviderPhotoUrl);
+    string? ProviderPhotoUrl,
+    // The provider's registered business address (street / city / zip), resolved
+    // live from the Cosmos service doc — so the detail screen needn't make a
+    // second call to GET /providers/{providerId}. Null when the offering can't be
+    // resolved (e.g. deregistered provider).
+    string? Address = null,
+    string? City = null,
+    string? Zip = null);
 
 /// <summary>The pet facts. For App bookings these come from the joined pet record;
 /// for Custom walk-ins, petName + animalType come from the booking and the rest are
@@ -219,13 +311,20 @@ public sealed record PetDetailsSection(
     string? VaccinationStatus,
     string? VaccinationType,
     string? VaccinationDose,
-    string? Prescription);
+    string? Prescription,
+    // Remaining medical-info fields from the pet's profile — null for Custom
+    // walk-ins and until the parent fills them via PATCH /pets/{petId}/medical-info.
+    string? SterilizationStatus = null,
+    string? MedicalHistory = null,
+    string? Temperament = null);
 
 /// <summary>The money facts. <c>PricePerHour</c> is the offering's unit rate (the
 /// stored per-hour price for Custom walk-ins); <c>TotalAmount</c> is rate × time;
-/// <c>PawfrontFee</c> is <c>FeePercentage</c> percent of the total. Pricing fields
-/// are null when the provider's offering can't be resolved (e.g. deactivated
-/// service). Payout fields are capture-only for now.</summary>
+/// <c>PawfrontFee</c> is <c>FeePercentage</c> percent of the total. Private
+/// (Custom walk-in) jobs carry <c>PawfrontFee</c> = 0 and <c>FeePercentage</c> = 0
+/// — Pawfront takes no commission (and hence no taxes) on off-platform jobs.
+/// Pricing fields are null when the provider's offering can't be resolved (e.g.
+/// deactivated service). Payout fields are capture-only for now.</summary>
 public sealed record PaymentDetailsSection(
     decimal? PricePerHour,
     decimal? TotalAmount,
