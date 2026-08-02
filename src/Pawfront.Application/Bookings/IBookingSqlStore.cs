@@ -29,6 +29,14 @@ public interface IBookingSqlStore
         TimeOnly startTime,
         TimeOnly endTime,
         string? jobNotes,
+        string? locationType,
+        // Snapshot of the offering's unit rate at booking time (price-lock); null
+        // when the caller can't resolve a price.
+        decimal? pricePerHour,
+        // The provider's business address for a ProviderLocation booking (resolved
+        // from Cosmos + registration), snapshotted onto the booking. Null for
+        // ParentLocation (the sproc snapshots the parent's address) / no location.
+        ProviderAddressSnapshot? providerAddress,
         int capacity,
         CancellationToken cancellationToken);
 
@@ -76,11 +84,25 @@ public interface IBookingSqlStore
         DateOnly? date,
         CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(
+    /// <summary>
+    /// The parent's own bookings, each carrying the frozen-at-creation extras
+    /// (cancellation-policy + selected-location snapshots) for the list cards.
+    /// </summary>
+    Task<IReadOnlyList<BookingListItemResult>> ListByPetParentAsync(
         Guid petParentId,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingWindow>> GetBookingsForDateAsync(
+        Guid serviceId,
+        DateOnly bookingDate,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The same occupied windows as <see cref="GetBookingsForDateAsync"/>, but
+    /// carrying booking id / job number / owning parent / status
+    /// (<c>Booking.GetAgendaForDate</c>). Backs the parent-facing daily agenda.
+    /// </summary>
+    Task<IReadOnlyList<AgendaBookingRow>> GetAgendaForDateAsync(
         Guid serviceId,
         DateOnly bookingDate,
         CancellationToken cancellationToken);
@@ -111,14 +133,57 @@ public interface IBookingSqlStore
         int ttlMinutes,
         CancellationToken cancellationToken);
 
-    /// <summary>Validates the start-OTP and moves the booking to JOB_STARTED.</summary>
-    Task<BookingResult> StartWithOtpAsync(
+    /// <summary>
+    /// Provider taps "Start Job": moves confirmed-equivalent → START_JOB (gated on
+    /// the booking's service date and the provider's weekly working hours) and
+    /// issues the start-OTP, atomically. Maps 51132 forbidden, 51133 not startable,
+    /// 51144 not the service date, 51137 outside working hours.
+    /// </summary>
+    Task<BookingResult> StartJobAsync(
+        Guid bookingId,
+        Guid providerId,
+        string newCode,
+        int ttlMinutes,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Validates the start-OTP and moves the booking START_JOB → IN_PROGRESS
+    /// (6th wrong attempt cancels the job).
+    /// </summary>
+    Task<BookingResult> VerifyStartOtpAsync(
         Guid bookingId,
         Guid providerId,
         string otpCode,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Moves the booking IN_PROGRESS → COMPLETED (no OTP). Maps 51132 forbidden,
+    /// 51133 not completable.
+    /// </summary>
+    Task<BookingResult> CompleteAsync(
+        Guid bookingId,
+        Guid providerId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Flips a COMPLETED booking to PAID and inserts the payment ledger row
+    /// (<c>Booking.BookingPayments</c>). Maps 51160 not found, 51161 forbidden,
+    /// 51162 not payable, 51163 Custom walk-in, 51164 already paid.
+    /// </summary>
+    Task<BookingResult> MarkPaidAsync(
+        Guid bookingId,
+        Guid providerId,
+        decimal amount,
+        decimal pawfrontFee,
+        string paymentMethod,
+        CancellationToken cancellationToken);
+
     /// <summary>Stages a date/time-change proposal and flips the booking status.</summary>
+    /// <param name="acknowledgedTerms">
+    /// The provider's current terms, staged alongside the proposal when they had
+    /// drifted from the booking's frozen ones and the requester confirmed them.
+    /// Null leaves the booking's frozen terms alone on accept.
+    /// </param>
     Task<BookingResult> RequestModificationAsync(
         Guid bookingId,
         BookingStatusActor actor,
@@ -127,6 +192,7 @@ public interface IBookingSqlStore
         TimeOnly startTime,
         TimeOnly endTime,
         string? note,
+        BookingAcknowledgedTerms? acknowledgedTerms,
         CancellationToken cancellationToken);
 
     /// <summary>Reads the staged (pending) proposal, or null when none.</summary>
@@ -154,5 +220,20 @@ public interface IBookingSqlStore
 
     Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
         Guid bookingId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Upserts the vet's prescription for a booking (<c>Booking.UpsertBookingPrescription</c>).
+    /// Maps the sproc's typed THROWs: 51290 not found → <see cref="BookingNotFoundException"/>,
+    /// 51291 forbidden → <see cref="BookingPrescriptionForbiddenException"/>, 51292 not a Vet
+    /// booking → <see cref="BookingPrescriptionNotVetException"/>, 51293 wrong state →
+    /// <see cref="BookingPrescriptionInvalidStateException"/>.
+    /// </summary>
+    Task<BookingPrescriptionResult> UpsertPrescriptionAsync(
+        Guid bookingId,
+        Guid providerId,
+        string? prescriptionText,
+        bool isPetVaccinated,
+        IReadOnlyList<string> vaccinations,
         CancellationToken cancellationToken);
 }

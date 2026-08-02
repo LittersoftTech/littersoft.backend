@@ -7,7 +7,19 @@
       "Bash(awk '/```mermaid/,/```$/' database/Pawfront.Database/README.md)",
       "Bash(xargs -I {} echo \"Entity definition lines: {}\")",
       "PowerShell(dotnet build .\\\\Pawfront.slnx --configfile .\\\\NuGet.Config --nologo 2>&1)",
-      "Bash(python -)"
+      "Bash(python -)",
+      "PowerShell(\\(Get-Content .\\\\docs\\\\postman_collection_provider.json -Raw | ConvertFrom-Json\\).variable | ForEach-Object { $_.key })",
+      "PowerShell(try { $null = Get-Content .\\\\docs\\\\postman_collection_provider.json -Raw | ConvertFrom-Json; 'JSON valid' } catch { $_.Exception.Message }; dotnet build .\\\\Pawfront.slnx --configfile .\\\\NuGet.Config -v q)",
+      "PowerShell(try { $null = Get-Content .\\\\docs\\\\Pawfront.E2E-Scenarios.postman_collection.json -Raw | ConvertFrom-Json; 'collection JSON valid' } catch { 'COLLECTION INVALID: ' + $_.Exception.Message }; try { $null = Get-Content .\\\\docs\\\\Pawfront.E2E.postman_environment.json -Raw | ConvertFrom-Json; 'environment JSON valid' } catch { 'ENV INVALID: ' + $_.Exception.Message }; \\(Get-Command node -ErrorAction SilentlyContinue\\) -ne $null)",
+      "PowerShell(node \"C:\\\\Users\\\\patil\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\E--Codes-Littersoft-Backend\\\\4e0a69a2-b331-4bff-848d-b8bde1ae72ec\\\\scratchpad\\\\check_scripts.js\" \".\\\\docs\\\\Pawfront.E2E-Scenarios.postman_collection.json\")",
+      "Bash(python \"C:\\\\Users\\\\patil\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\E--Codes-Littersoft-Backend\\\\c8807495-47fa-4b25-8996-0365cb1663e3\\\\scratchpad\\\\cosmos_phone_check.py\")",
+      "Bash(sqlcmd -S littersoftdb.database.windows.net -d littersoft-dev -U littersoftadmin -P '$NewProject@12$' -b -i parse_deployall.sql)",
+      "Bash(echo \"exit=$?\")",
+      "PowerShell(if \\($?\\) { \"PARENT collection: valid JSON\" })",
+      "PowerShell(if \\($?\\) { \"PROVIDER collection: valid JSON\" })",
+      "PowerShell(dotnet build .\\\\Pawfront.slnx --configfile .\\\\NuGet.Config --nologo -v q 2>&1)",
+      "Bash(grep -n \"Modifications\\\\*\\\\* \\(\\\\`Booking.BookingModifications\\\\`\\\\|51145/51146/51147/51148\\\\|modifications/{accept|decline}\\\\|/modifications\\\\`\" CLAUDE.md)",
+      "Bash(grep -n \"bookings/{bookingId}/status-history\\\\|/modifications\\\\`, \\\\`/modifications\" CLAUDE.md)"
     ]
   }
 }

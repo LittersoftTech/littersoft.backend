@@ -45,8 +45,14 @@ CREATE TABLE [Parent].[Pets]
         CHECK ([VaccinationStatus] IS NULL OR [VaccinationStatus] IN (N'Vaccinated', N'NotVaccinated')),
     CONSTRAINT [CK_Pets_SterilizationStatus]
         CHECK ([SterilizationStatus] IS NULL OR [SterilizationStatus] IN (N'Sterilized', N'Intact')),
+    -- Must stay in step with [Pawfront.Domain.Vocabularies.Behaviour] — the API
+    -- validates against that enum, so anything missing here is accepted by the
+    -- app and then rejected by SQL. DeployAll rebuilds this constraint when an
+    -- already-deployed database carries an older list.
     CONSTRAINT [CK_Pets_Temperament]
-        CHECK ([Temperament] IS NULL OR [Temperament] IN (N'Anxious', N'Friendly', N'Aggressive'))
+        CHECK ([Temperament] IS NULL OR [Temperament] IN (
+            N'Anxious', N'Friendly', N'Aggressive', N'HyperActive', N'Shy',
+            N'Calm', N'Playful', N'Independent', N'Protective'))
 );
 
 GO

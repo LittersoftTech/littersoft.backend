@@ -1,3 +1,15 @@
+-- Creates the [Parent].[PetParents] profile row behind
+-- POST /parent-onboarding/profile, linking it to the caller's auth identity.
+-- Idempotent: an identity that already has a profile gets its existing row back.
+--
+-- A mobile number can back only ONE account. That is enforced twice: an explicit
+-- pre-check here (THROW 51222 -> 409 MobileNumberAlreadyExists), which is what
+-- gives the caller a clean, deterministic error, and the UNIQUE index
+-- UX_PetParents_MobileNumber, which is the race-safe backstop for two
+-- registrations landing at once. The pre-check reads under UPDLOCK + HOLDLOCK so
+-- concurrent completions on the same number serialise rather than both passing.
+--
+-- THROW 51200 = parent auth identity not found; 51222 = mobile already registered.
 CREATE OR ALTER PROCEDURE [Parent].[CompletePetParentProfile]
     -- The auth identity is resolved server-side from the caller's Firebase
     -- user id (sub/user_id claim) rather than trusting the client. The
@@ -39,6 +51,19 @@ BEGIN
 
     IF @PetParentId IS NULL
     BEGIN
+        -- The number is only free if no OTHER parent already holds it. UPDLOCK +
+        -- HOLDLOCK takes a range lock on the (MobileCountryCode, MobileNumber)
+        -- key so a concurrent completion of the same number waits here instead of
+        -- reading "free" at the same instant.
+        IF EXISTS (
+            SELECT 1
+            FROM [Parent].[PetParents] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [MobileCountryCode] = @MobileCountryCode
+              AND [MobileNumber] = @MobileNumber)
+        BEGIN
+            THROW 51222, 'Mobile number is already registered to another account.', 1;
+        END
+
         INSERT INTO [Parent].[PetParents]
         (
             [ParentAuthIdentityId],

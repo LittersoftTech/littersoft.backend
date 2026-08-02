@@ -52,8 +52,10 @@ internal sealed class CosmosPetSitterServiceRegistry(
             PetHotel = new PetHotelDetails
             {
                 Name = Required(command.PetHotelName, nameof(command.PetHotelName)),
-                TelephoneCountryCode = Required(command.TelephoneCountryCode, nameof(command.TelephoneCountryCode)),
-                TelephoneNumber = Required(command.TelephoneNumber, nameof(command.TelephoneNumber)),
+                // Optional — the registration screen no longer collects a
+                // telephone number, so the pair may be absent entirely.
+                TelephoneCountryCode = Trim(command.TelephoneCountryCode) ?? string.Empty,
+                TelephoneNumber = Trim(command.TelephoneNumber) ?? string.Empty,
                 Email = Required(command.Email, nameof(command.Email)),
                 // Optional — the "about the provider" blurb may be omitted at registration.
                 Description = Trim(command.Description) ?? string.Empty,

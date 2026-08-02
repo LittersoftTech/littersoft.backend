@@ -58,6 +58,38 @@ internal sealed class SqlProviderServiceBannerService(
         return ReadBanner(reader);
     }
 
+    public async Task<IReadOnlyDictionary<Guid, string>> GetByServiceIdsAsync(
+        IReadOnlyCollection<Guid> serviceIds,
+        CancellationToken cancellationToken)
+    {
+        if (serviceIds.Count == 0)
+        {
+            return new Dictionary<Guid, string>();
+        }
+
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        // Batch point-read the banner rows for the requested services. Mirrors
+        // the STRING_SPLIT batch pattern used by SqlProviderBookingStatsReader.
+        await using var command = new SqlCommand(
+            "SELECT b.[ServiceId], b.[BannerImageUrl] " +
+            "FROM [Provider].[ProviderServiceBanners] b " +
+            "INNER JOIN STRING_SPLIT(@ServiceIds, ',') ids " +
+            "    ON b.[ServiceId] = TRY_CONVERT(UNIQUEIDENTIFIER, ids.[value]);",
+            connection);
+        command.Parameters.AddWithValue(
+            "@ServiceIds", string.Join(',', serviceIds.Select(id => id.ToString("D"))));
+
+        var banners = new Dictionary<Guid, string>(serviceIds.Count);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            banners[reader.GetGuid(0)] = reader.GetString(1);
+        }
+        return banners;
+    }
+
     private static ProviderServiceBannerResult ReadBanner(SqlDataReader reader) =>
         new(
             reader.GetGuid(0),

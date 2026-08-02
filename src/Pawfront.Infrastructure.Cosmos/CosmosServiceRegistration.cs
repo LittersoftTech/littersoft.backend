@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Pawfront.Application.Events;
 using Pawfront.Application.Providers;
+using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetAdoptionSale;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.PetSitter;
@@ -37,6 +38,7 @@ public static class CosmosServiceRegistration
         services.TryAddSingleton<IPetAdoptionSaleServiceRegistry, CosmosPetAdoptionSaleServiceRegistry>();
         services.TryAddSingleton<IVetServiceRegistry, CosmosVetServiceRegistry>();
         services.TryAddSingleton<IEventCosmosStore, CosmosEventStore>();
+        services.TryAddSingleton<IProviderServiceCosmosStore, CosmosProviderServiceStore>();
 
         services.TryAddSingleton<IProviderDiscoveryService, CosmosProviderDiscoveryService>();
 

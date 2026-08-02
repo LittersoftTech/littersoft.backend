@@ -1,0 +1,101 @@
+-- Records that the parent has paid the provider for a single-day booking:
+-- flips COMPLETED -> PAID, writes an audit row, and inserts the payment ledger
+-- row in [Booking].[BookingPayments]. Provider-only, App bookings only (Custom
+-- walk-ins are off-platform and never reach PAID), a booking is paid at most
+-- once. @Amount / @PawfrontFee are computed by the app layer from the booking's
+-- price-locked snapshot; @PaymentMethod is 'Cash' or 'Digital'.
+-- THROWs: 51160 not found, 51161 not the provider, 51162 not COMPLETED,
+-- 51163 Custom walk-in (App only), 51164 already paid.
+CREATE OR ALTER PROCEDURE [Booking].[MarkBookingPaid]
+    @BookingId UNIQUEIDENTIFIER,
+    @ProviderId UNIQUEIDENTIFIER,
+    @Amount DECIMAL(10, 2),
+    @PawfrontFee DECIMAL(10, 2),
+    @PaymentMethod NVARCHAR(16)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @CurrentStatus NVARCHAR(48);
+    DECLARE @RowProvider UNIQUEIDENTIFIER;
+    DECLARE @RowPetParent UNIQUEIDENTIFIER;
+    DECLARE @Source NVARCHAR(16);
+
+    BEGIN TRANSACTION;
+
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
+           @RowPetParent = [PetParentId], @Source = [Source]
+    FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [BookingId] = @BookingId;
+
+    IF @CurrentStatus IS NULL
+    BEGIN
+        THROW 51160, 'Booking was not found.', 1;
+    END
+
+    IF @RowProvider <> @ProviderId
+    BEGIN
+        THROW 51161, 'You are not the provider on this booking.', 1;
+    END
+
+    IF @Source <> N'App'
+    BEGIN
+        THROW 51163, 'Only app bookings can be marked paid.', 1;
+    END
+
+    IF @CurrentStatus = N'PAID'
+    BEGIN
+        THROW 51164, 'Booking is already marked paid.', 1;
+    END
+
+    IF @CurrentStatus <> N'COMPLETED'
+    BEGIN
+        THROW 51162, 'Booking must be completed before it can be marked paid.', 1;
+    END
+
+    UPDATE [Booking].[Bookings]
+    SET [Status] = N'PAID', [UpdatedAtUtc] = @Now
+    WHERE [BookingId] = @BookingId;
+
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    VALUES
+        (@BookingId, @CurrentStatus, N'PAID', N'Provider', @ProviderId, N'Payment received from parent');
+
+    INSERT INTO [Booking].[BookingPayments]
+        ([BookingType], [BookingId], [ProviderId], [PetParentId], [Amount], [PawfrontFee], [PaymentMethod], [PaidAtUtc])
+    VALUES
+        (N'SingleDay', @BookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
+
+    SELECT [BookingId],
+           [ProviderId],
+           [PetParentId],
+           [ServiceId],
+           [ServiceCategory],
+           [SubCategory],
+           [BookingDate],
+           [StartTime],
+           [EndTime],
+           [Status],
+           [CreatedAtUtc],
+           [UpdatedAtUtc],
+           [CancelledAtUtc],
+           [ServiceItemCode],
+           [Source],
+           [CustomerName],
+           [CustomerMobileCountryCode],
+           [CustomerMobile],
+           [AnimalType],
+           [PetName],
+           [ServiceLocation],
+           [CustomerLocation],
+           [PricePerHour],
+           [JobNotes],
+           [PetId]
+    FROM [Booking].[Bookings]
+    WHERE [BookingId] = @BookingId;
+
+    COMMIT TRANSACTION;
+END;

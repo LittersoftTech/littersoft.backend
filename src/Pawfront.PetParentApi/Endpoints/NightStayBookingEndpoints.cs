@@ -33,6 +33,10 @@ internal static class NightStayBookingEndpoints
         group.MapGet("/{bookingId:guid}/status-history", GetStatusHistory);
         // Per-transition endpoints (parent actor).
         group.MapPost("/{bookingId:guid}/cancel", ParentCancel);
+        group.MapPost("/{bookingId:guid}/no-show", ReportProviderNoShow);
+        // What the provider has changed since the stay was booked — read this
+        // before opening the edit screen so the app can confirm the new terms.
+        group.MapGet("/{bookingId:guid}/terms-changes", GetTermsChanges);
         group.MapPost("/{bookingId:guid}/modifications", RequestModification);
         group.MapPost("/{bookingId:guid}/modifications/accept", AcceptModification);
         group.MapPost("/{bookingId:guid}/modifications/decline", DeclineModification);
@@ -56,6 +60,15 @@ internal static class NightStayBookingEndpoints
         IPetParentOwnershipReader ownershipReader,
         CancellationToken cancellationToken)
     {
+        // The parent must say where the service happens — the detail read
+        // resolves the matching address from this choice.
+        if (string.IsNullOrWhiteSpace(request.LocationType))
+        {
+            return ApiResults.BadRequest(
+                "InvalidRequest",
+                "locationType is required. Use 'ParentLocation' or 'ProviderLocation'.");
+        }
+
         var pet = await ownershipReader.GetPetLookupAsync(request.PetId, cancellationToken);
         if (pet is null)
         {
@@ -85,7 +98,9 @@ internal static class NightStayBookingEndpoints
                     request.ServiceId,
                     request.CheckInDate,
                     request.CheckOutDate,
-                    request.PetId),
+                    request.PetId,
+                    request.JobNotes,
+                    request.LocationType),
                 cancellationToken);
 
             return ApiResults.Created(
@@ -124,6 +139,10 @@ internal static class NightStayBookingEndpoints
         {
             return ApiResults.Conflict("CapacityExceeded", exception.Message);
         }
+        catch (NightStayPetAlreadyBookedException exception)
+        {
+            return ApiResults.Conflict("PetAlreadyBooked", exception.Message);
+        }
         catch (ProviderClosedOnDateException exception)
         {
             return ApiResults.Conflict("ServiceClosed", exception.Message);
@@ -131,6 +150,14 @@ internal static class NightStayBookingEndpoints
         catch (InvalidNightStayDatesException exception)
         {
             return ApiResults.BadRequest("InvalidNightStayDates", exception.Message);
+        }
+        catch (BookingLeadTimeTooShortException exception)
+        {
+            return ApiResults.Conflict("BookingLeadTimeTooShort", exception.Message);
+        }
+        catch (UnsupportedBookingLocationTypeException exception)
+        {
+            return ApiResults.BadRequest("UnsupportedLocationType", exception.Message);
         }
         catch (ArgumentException exception)
         {
@@ -155,8 +182,9 @@ internal static class NightStayBookingEndpoints
 
     /// <summary>
     /// Maps an enriched night-stay booking into the sectioned "my bookings" card —
-    /// the booking, the booked provider's details, and the service details + the
-    /// per-night price.
+    /// the booking, the booked provider's details, the service details + the
+    /// per-night price, and the frozen-at-creation cancellation-policy +
+    /// selected-location blocks.
     /// </summary>
     private static ParentNightStayBookingCardResponse ToNightStayBookingCard(EnrichedNightStayBookingCard card)
     {
@@ -173,7 +201,15 @@ internal static class NightStayBookingEndpoints
             new NightStayServiceDetailsSection(
                 b.ServiceId,
                 ProviderServiceTypes.NightStay,
-                card.PricePerNight));
+                card.PricePerNight),
+            new CancellationPolicyDetailsSection(card.CancellationPolicyHours),
+            new BookingLocationDetailsSection(
+                card.Location.LocationType,
+                card.Location.AddressLine,
+                card.Location.City,
+                card.Location.ZipCode,
+                card.Location.Latitude,
+                card.Location.Longitude));
     }
 
     private static async Task<IResult> GetBooking(
@@ -190,10 +226,11 @@ internal static class NightStayBookingEndpoints
             return ApiResults.NotFound("NightStayBookingNotFound", $"Night stay booking '{bookingId}' was not found.");
         }
 
-        // Issue/return the start-OTP when the stay is in a startable state, so the
-        // parent can read it to the provider (same model as single-day bookings).
+        // Issue/return the start-OTP only while the stay is START_JOB. The parent
+        // reads it to the provider, who enters it to move the job to IN_PROGRESS
+        // (same model as single-day).
         StartOtpResponse? startOtp = null;
-        if (BookingStatuses.ConfirmedEquivalent.Contains(detail.Row.Status))
+        if (detail.Row.Status == BookingStatuses.StartJob)
         {
             var otp = await bookingService.IssueStartOtpAsync(bookingId, cancellationToken);
             startOtp = new StartOtpResponse(otp.OtpCode, otp.ExpiresAtUtc);
@@ -232,14 +269,20 @@ internal static class NightStayBookingEndpoints
                 detail.ServiceLocation,
                 row.CreatedAtUtc,
                 row.UpdatedAtUtc,
-                row.CancelledAtUtc),
+                row.CancelledAtUtc,
+                row.JobNotes),
             new ParentDetailsSection(
                 row.PetParentId,
                 CombineName(row.ParentFirstName, row.ParentLastName),
                 row.ParentMobileCountryCode,
                 row.ParentMobileNumber,
                 row.ParentGender,
-                row.ParentPhotoUrl),
+                row.ParentPhotoUrl,
+                row.ParentAddressLine,
+                row.ParentCity,
+                row.ParentZipCode,
+                row.ParentLatitude,
+                row.ParentLongitude),
             new PetDetailsSection(
                 row.PetId,
                 row.PetProfileName,
@@ -250,14 +293,20 @@ internal static class NightStayBookingEndpoints
                 row.PetVaccinationStatus,
                 row.PetVaccinationType,
                 row.PetVaccinationDose,
-                row.PetPrescription),
+                row.PetPrescription,
+                row.PetSterilizationStatus,
+                row.PetMedicalHistory,
+                row.PetTemperament),
             new ProviderDetailsSection(
                 row.ProviderId,
                 CombineName(row.ProviderFirstName, row.ProviderLastName),
                 row.ProviderMobileCountryCode,
                 row.ProviderMobileNumber,
                 row.ProviderGender,
-                ProviderPhotoUrl: null),
+                ProviderPhotoUrl: null,
+                detail.ProviderAddress,
+                detail.ProviderCity,
+                detail.ProviderZip),
             new NightStayPaymentDetailsSection(
                 detail.PricePerNight,
                 detail.TotalAmount,
@@ -266,6 +315,7 @@ internal static class NightStayBookingEndpoints
                 row.PayoutStatus,
                 row.PayoutId),
             new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
+            PetParentEndpoints.ToLocationSection(detail.Location),
             startOtp,
             pendingModification);
     }
@@ -289,7 +339,8 @@ internal static class NightStayBookingEndpoints
             ? null
             : new NightStayBookingModificationResponse(
                 mod.NightStayBookingModificationId, mod.NightStayBookingId, mod.RequestedByActor, mod.RequestedByActorId,
-                mod.ProposedCheckInDate, mod.ProposedCheckOutDate, mod.Note, mod.CreatedAtUtc);
+                mod.ProposedCheckInDate, mod.ProposedCheckOutDate, mod.Note, mod.CreatedAtUtc,
+                PetParentEndpoints.ToAcknowledgedTermsResponse(mod.AcknowledgedTerms));
     }
 
     private static async Task<IResult> ParentCancel(
@@ -308,6 +359,47 @@ internal static class NightStayBookingEndpoints
         }
     }
 
+    /// <summary>
+    /// The parent reports that the provider never showed up for the stay. Only
+    /// allowed 30+ minutes after check-in + drop-off (409 NoShowTooEarly).
+    /// </summary>
+    private static async Task<IResult> ReportProviderNoShow(
+        Guid petParentId, Guid bookingId, INightStayBookingService bookingService, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await bookingService.UpdateStatusAsync(
+                new UpdateNightStayBookingStatusCommand(bookingId, BookingStatuses.ProviderNoShow, BookingStatusActor.Parent, petParentId, null),
+                cancellationToken);
+            return ApiResults.Ok(ToResponse(result));
+        }
+        catch (Exception ex) when (IsBookingError(ex))
+        {
+            return MapBookingError(ex);
+        }
+    }
+
+    /// <summary>
+    /// The provider's terms that changed since this stay was booked. Always 200 —
+    /// an unchanged stay reports <c>hasChanges: false</c> with an empty list.
+    /// </summary>
+    private static async Task<IResult> GetTermsChanges(
+        Guid petParentId,
+        Guid bookingId,
+        INightStayBookingService bookingService,
+        IBookingTermsChangeService termsChangeService,
+        CancellationToken cancellationToken)
+    {
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.PetParentId != petParentId)
+        {
+            return ApiResults.NotFound("NightStayBookingNotFound", $"Night stay booking '{bookingId}' was not found.");
+        }
+
+        var result = await termsChangeService.GetForNightStayBookingAsync(bookingId, cancellationToken);
+        return ApiResults.Ok(PetParentEndpoints.ToTermsChangesResponse(result));
+    }
+
     private static async Task<IResult> RequestModification(
         Guid petParentId, Guid bookingId, RequestNightStayBookingModificationRequest request,
         INightStayBookingService bookingService, CancellationToken cancellationToken)
@@ -321,7 +413,8 @@ internal static class NightStayBookingEndpoints
         {
             var result = await bookingService.RequestModificationAsync(
                 new RequestNightStayBookingModificationCommand(
-                    bookingId, BookingStatusActor.Parent, petParentId, request.CheckInDate, request.CheckOutDate, request.Note),
+                    bookingId, BookingStatusActor.Parent, petParentId, request.CheckInDate, request.CheckOutDate,
+                    request.Note, request.AcknowledgeTermsChanges),
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
@@ -372,30 +465,41 @@ internal static class NightStayBookingEndpoints
 
     private static bool IsBookingError(Exception ex) => ex is
         NightStayBookingNotFoundException or BookingStatusForbiddenException or BookingNotStartableException
+        or BookingJobInProgressException
         or InvalidStartOtpException or StartOtpExpiredException or BookingNotModifiableException
         or BookingModificationConflictException or NoPendingModificationException
-        or BookingModificationCapacityException or InvalidNightStayDatesException
+        or BookingModificationCapacityException or BookingTermsChangedException
+        or BookingModificationWindowClosedException or BookingModificationExpiredException
+        or InvalidNightStayDatesException or BookingLeadTimeTooShortException
         or ProviderClosedOnDateException or BookingOfferingNotConfiguredException
         or BookingStatusNotAllowedException or BookingStatusTerminalException
-        or BookingStatusUnchangedException or UnsupportedBookingStatusException or ArgumentException;
+        or BookingStatusUnchangedException or BookingNoShowTooEarlyException or BookingExpiredException
+        or UnsupportedBookingStatusException or ArgumentException;
 
     private static IResult MapBookingError(Exception ex) => ex switch
     {
         NightStayBookingNotFoundException e => ApiResults.NotFound("NightStayBookingNotFound", e.Message),
         BookingStatusForbiddenException e => ApiResults.Forbidden("Forbidden", e.Message),
         BookingNotStartableException e => ApiResults.Conflict("BookingNotStartable", e.Message),
+        BookingJobInProgressException e => ApiResults.Conflict("BookingInProgress", e.Message),
         InvalidStartOtpException e => ApiResults.BadRequest("InvalidStartOtp", e.Message),
         StartOtpExpiredException e => ApiResults.Conflict("StartOtpExpired", e.Message),
         BookingNotModifiableException e => ApiResults.Conflict("BookingNotModifiable", e.Message),
         BookingModificationConflictException e => ApiResults.Conflict("ModificationAlreadyPending", e.Message),
         NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
         BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
+        BookingTermsChangedException e => ApiResults.Conflict("BookingTermsChanged", e.Message),
+        BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
+        BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         InvalidNightStayDatesException e => ApiResults.BadRequest("InvalidNightStayDates", e.Message),
+        BookingLeadTimeTooShortException e => ApiResults.Conflict("BookingLeadTimeTooShort", e.Message),
         ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
         BookingOfferingNotConfiguredException e => ApiResults.BadRequest("OfferingNotConfigured", e.Message),
         BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),
         BookingStatusTerminalException e => ApiResults.Conflict("BookingStatusTerminal", e.Message),
         BookingStatusUnchangedException e => ApiResults.Conflict("BookingStatusUnchanged", e.Message),
+        BookingNoShowTooEarlyException e => ApiResults.Conflict("NoShowTooEarly", e.Message),
+        BookingExpiredException e => ApiResults.Conflict("BookingExpired", e.Message),
         UnsupportedBookingStatusException e => ApiResults.BadRequest("UnsupportedBookingStatus", e.Message),
         _ => ApiResults.BadRequest("InvalidRequest", ex.Message)
     };
@@ -429,29 +533,9 @@ internal static class NightStayBookingEndpoints
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
-        catch (UnsupportedBookingStatusException exception)
+        catch (Exception ex) when (IsBookingError(ex))
         {
-            return ApiResults.BadRequest("UnsupportedBookingStatus", exception.Message);
-        }
-        catch (NightStayBookingNotFoundException exception)
-        {
-            return ApiResults.NotFound("NightStayBookingNotFound", exception.Message);
-        }
-        catch (BookingStatusForbiddenException exception)
-        {
-            return ApiResults.Forbidden("Forbidden", exception.Message);
-        }
-        catch (BookingStatusNotAllowedException exception)
-        {
-            return ApiResults.BadRequest("BookingStatusNotAllowed", exception.Message);
-        }
-        catch (BookingStatusTerminalException exception)
-        {
-            return ApiResults.Conflict("BookingStatusTerminal", exception.Message);
-        }
-        catch (BookingStatusUnchangedException exception)
-        {
-            return ApiResults.Conflict("BookingStatusUnchanged", exception.Message);
+            return MapBookingError(ex);
         }
     }
 

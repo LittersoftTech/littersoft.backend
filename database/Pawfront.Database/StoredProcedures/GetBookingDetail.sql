@@ -62,7 +62,37 @@ BEGIN
            pet.[VaccinationStatus]  AS [PetVaccinationStatus],
            pet.[VaccinationType]    AS [PetVaccinationType],
            pet.[VaccinationDose]    AS [PetVaccinationDose],
-           pet.[Prescription]       AS [PetPrescription]
+           pet.[Prescription]       AS [PetPrescription],
+           pet.[SterilizationStatus] AS [PetSterilizationStatus],
+           pet.[MedicalHistory]      AS [PetMedicalHistory],
+           pet.[Temperament]         AS [PetTemperament],
+           -- Location choice + the parent's address (App bookings) -------------
+           b.[LocationType],
+           pp.[AddressLine]         AS [ParentAddressLine],
+           pp.[City]                AS [ParentCity],
+           pp.[ZipCode]             AS [ParentZipCode],
+           pp.[Latitude]            AS [ParentLatitude],
+           pp.[Longitude]           AS [ParentLongitude],
+           -- Vet prescription (per-visit snapshot) — present only once a vet has
+           -- recorded one for this booking; NULLs otherwise. NextConsultationDate
+           -- is the pet's rolling Vet follow-up (Parent.PetNextConsultations), not
+           -- stored on the prescription row. Appended LAST so existing column
+           -- ordinals in the reader stay stable.
+           CASE WHEN rx.[BookingId] IS NULL THEN 0 ELSE 1 END AS [HasPrescription],
+           rx.[PrescriptionText],
+           rx.[IsPetVaccinated],
+           rx.[Vaccinations]        AS [PrescriptionVaccinations],
+           nc.[NextConsultationDate] AS [NextConsultationDate],
+           -- Snapshots captured at booking time (price-lock siblings). The detail
+           -- read PREFERS these over the live provider policy / resolved address,
+           -- falling back to live only for legacy rows where they're NULL. Appended
+           -- LAST so existing reader ordinals stay stable.
+           b.[CancellationPolicyHours],
+           b.[SnapshotAddressLine],
+           b.[SnapshotCity],
+           b.[SnapshotZipCode],
+           b.[SnapshotLatitude],
+           b.[SnapshotLongitude]
     FROM [Booking].[Bookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
@@ -70,5 +100,9 @@ BEGIN
         ON pet.[PetId] = b.[PetId]
     LEFT JOIN [Provider].[Providers] AS prov
         ON prov.[ProviderId] = b.[ProviderId]
+    LEFT JOIN [Booking].[BookingPrescriptions] AS rx
+        ON rx.[BookingId] = b.[BookingId]
+    LEFT JOIN [Parent].[PetNextConsultations] AS nc
+        ON nc.[PetId] = b.[PetId] AND nc.[ConsultationType] = N'Vet'
     WHERE b.[BookingId] = @BookingId;
 END;

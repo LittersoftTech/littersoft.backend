@@ -19,6 +19,14 @@ BEGIN
         THROW 51100, 'Provider profile was not found.', 1;
     END
 
+    -- A deleted account stays disabled permanently — reactivating it would make
+    -- an anonymised provider bookable again.
+    IF EXISTS (SELECT 1 FROM [Provider].[Providers]
+               WHERE [ProviderId] = @ProviderId AND [IsDeleted] = 1)
+    BEGIN
+        THROW 51115, 'This provider account has been deleted.', 1;
+    END
+
     -- When DEACTIVATING, check whether any future active (non-cancelled) bookings
     -- exist across ALL of this provider's services. A booking is "in the future"
     -- when its date is strictly after today, OR it's today but hasn't ended yet.
@@ -49,7 +57,7 @@ BEGIN
                b.[BookingDate], b.[StartTime], b.[EndTime]
         FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
         WHERE b.[ProviderId] = @ProviderId
-          AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
+          AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND (
               b.[BookingDate] > @Today
               OR (b.[BookingDate] = @Today AND b.[EndTime] > @NowTime)

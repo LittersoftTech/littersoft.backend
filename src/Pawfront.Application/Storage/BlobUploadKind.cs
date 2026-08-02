@@ -13,5 +13,8 @@ public enum BlobUploadKind
     PetProfilePhoto = 8,
     BookingEvidence = 9,
     // A provider's per-service banner image (owner = ServiceId).
-    ServiceBanner = 10
+    ServiceBanner = 10,
+    // A provider's single provider-level banner image (owner = ProviderId),
+    // captured at registration and shown on their search card.
+    ProviderBanner = 11
 }

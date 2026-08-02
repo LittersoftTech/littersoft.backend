@@ -10,8 +10,9 @@ namespace Pawfront.Contracts.Providers;
 /// Parent-facing public profile of a provider — returned by
 /// <c>GET /api/v1/providers/{providerId}</c> on the pet-parent host.
 /// Exactly one of the per-category fields is populated, matching
-/// <see cref="ServiceCategory"/>. Provider personal info (name, mobile,
-/// DOB) is intentionally omitted.
+/// <see cref="ServiceCategory"/>. Provider personal info (name, DOB) is
+/// intentionally omitted; the contact fields are the exception, since a parent
+/// needs a way to reach the provider.
 /// </summary>
 public sealed record ProviderPublicProfileResponse(
     Guid ProviderId,
@@ -27,9 +28,36 @@ public sealed record ProviderPublicProfileResponse(
     // Digital); empty when none configured.
     int? MinimumHoursBeforeCancellation,
     IReadOnlyCollection<string> AcceptedPaymentMethods,
+    // Bookings this provider has already served (the booking window has ended
+    // and neither party cancelled), across all of their services.
+    int CompletedBookings,
+    // The freelancer's "about you" text — who the provider is. Null for
+    // shop/clinic/school/shelter sub-categories (see ServicesDescription).
+    string? Description,
+    // The business branch's description (shop/hotel/clinic/school/shelter/
+    // pet-shop) — what services the business offers. Null for freelancers.
+    string? ServicesDescription,
+    // What the provider says about the bookable SERVICE itself. PetTrainer only
+    // (its offering's privateTrainingDescription, lifted here for both
+    // sub-categories). Null elsewhere — a groomer's blurbs are per menu item,
+    // under petGroomer...offering.session.services[].description.
+    string? ServiceDescription,
+    // How to contact the provider, at the top level so it doesn't have to be dug
+    // out of the category branch. A business reports the e-mail + telephone it
+    // registered; a freelancer registers neither, so theirs comes from their own
+    // account (sign-in e-mail + verified mobile). A business that left the
+    // optional telephone blank falls back the same way. Null when neither source
+    // has a value.
+    string? Email,
+    string? MobileCountryCode,
+    string? MobileNumber,
     // The provider's profile/business photo (the image they uploaded for their
     // offering); null when none set.
     string? ProfilePhotoUrl,
+    // The provider-level banner (POST /providers/{id}/banner-image on the
+    // provider host) — the wide picture shown on their search card. Null until
+    // the provider uploads one.
+    string? BannerImageUrl,
     // The provider's gallery photos (Provider.ProviderPhotos), oldest-first;
     // empty when none.
     IReadOnlyList<string> GalleryImages,
@@ -101,6 +129,15 @@ public sealed record ProviderSearchResultResponse(
     decimal? Charges,
     string ChargesUnit,
     string? ServiceItemCode,
+    // What the provider says about the service being searched: the menu item's
+    // blurb for a grooming search with a serviceItemCode, the session
+    // description for trainers. Null for the other searches and for a grooming
+    // search without a code (no single item is being described).
+    string? Description,
     // The service image the provider uploaded for this offering (same image
     // as the discovery card's). Null when the provider hasn't set one.
-    string? ImageUrl);
+    string? ImageUrl,
+    // The wide banner the provider uploaded for this specific service
+    // (POST /providers/{id}/services/{serviceId}/banner-image). Distinct from
+    // ImageUrl. Null when the provider hasn't set a banner for this service.
+    string? BannerImageUrl);

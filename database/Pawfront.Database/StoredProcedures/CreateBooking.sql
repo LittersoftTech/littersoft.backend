@@ -13,6 +13,24 @@ CREATE OR ALTER PROCEDURE [Booking].[CreateBooking]
     -- access instructions, the pet's quirks). Optional; surfaced on the
     -- booking-detail read. Stored on App rows too (not a Custom-only column).
     @JobNotes NVARCHAR(2000) = NULL,
+    -- Where the service is delivered, as chosen by the parent at booking time:
+    -- 'ParentLocation' or 'ProviderLocation'. Optional (NULL for provider-host
+    -- and legacy callers); the booking-detail read resolves the address live.
+    @LocationType NVARCHAR(32) = NULL,
+    -- Snapshot of the offering's unit rate at booking time (per-hour for DayCare,
+    -- the flat fee for Vet/Trainer/grooming). Locks the price in so a later rate
+    -- change by the provider never re-prices this booking. NULL only for legacy
+    -- callers that don't pass it (the detail read falls back to the live rate).
+    @PricePerHour DECIMAL(10, 2) = NULL,
+    -- Provider business address, resolved by the caller (Cosmos service doc +
+    -- registration coordinates) and passed in so a ProviderLocation booking can
+    -- snapshot the "where the service happens" address. Ignored for ParentLocation
+    -- (the parent's address is snapshotted from SQL) and when no location is set.
+    @SnapshotProviderAddressLine NVARCHAR(500) = NULL,
+    @SnapshotProviderCity NVARCHAR(200) = NULL,
+    @SnapshotProviderZipCode NVARCHAR(32) = NULL,
+    @SnapshotProviderLatitude DECIMAL(9, 6) = NULL,
+    @SnapshotProviderLongitude DECIMAL(9, 6) = NULL,
     @Capacity INT
 AS
 BEGIN
@@ -75,6 +93,27 @@ BEGIN
         THROW 51066, 'Service is not valid or active for this provider.', 1;
     END
 
+    -- Reject a duplicate booking for the same pet: if this pet already has an
+    -- active (non-cancelled) booking on THIS service overlapping the requested
+    -- window, block it — a pet can't be in two places for the same slot. The
+    -- client can't fully prevent this (two devices, races), so it's enforced here
+    -- under the SAME UPDLOCK + HOLDLOCK range as the capacity count below (fully
+    -- race-safe: a concurrent duplicate serialises behind us and then sees our row).
+    -- Only applies to App bookings that name a pet; Custom walk-ins carry no @PetId.
+    IF @PetId IS NOT NULL AND EXISTS (
+        SELECT 1
+        FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [ServiceId] = @ServiceId
+          AND [PetId] = @PetId
+          AND [BookingDate] = @BookingDate
+          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+          AND [StartTime] < @EndTime
+          AND [EndTime] > @StartTime
+    )
+    BEGIN
+        THROW 51069, 'This pet already has a booking for this slot.', 1;
+    END
+
     -- Race-safe capacity check: count active (non-cancelled) bookings overlapping
     -- the requested window FOR THIS SERVICE, holding UPDLOCK + HOLDLOCK so
     -- concurrent CreateBooking calls on the same service serialise. DayCare and
@@ -85,13 +124,49 @@ BEGIN
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
       AND [StartTime] < @EndTime
       AND [EndTime] > @StartTime;
 
     IF @Concurrent >= @Capacity
     BEGIN
         THROW 51062, 'No remaining capacity for this slot.', 1;
+    END
+
+    -- Snapshot the provider's current cancellation policy so a later policy change
+    -- never re-rules this booking. NULL = no restriction (itself a valid snapshot).
+    DECLARE @CancellationPolicyHours INT =
+        (SELECT [MinimumHoursBeforeCancellation]
+         FROM [Provider].[ProviderCancellationPolicies]
+         WHERE [ProviderId] = @ProviderId);
+
+    -- Snapshot the SELECTED service-location address. ParentLocation → the parent's
+    -- profile address (in SQL); ProviderLocation → the provider's business address,
+    -- resolved by the caller (Cosmos) and passed in. Frozen so a later edit to
+    -- either party's address never moves this booking.
+    DECLARE @SnapshotAddressLine NVARCHAR(500) = NULL;
+    DECLARE @SnapshotCity NVARCHAR(200) = NULL;
+    DECLARE @SnapshotZipCode NVARCHAR(32) = NULL;
+    DECLARE @SnapshotLatitude DECIMAL(9, 6) = NULL;
+    DECLARE @SnapshotLongitude DECIMAL(9, 6) = NULL;
+
+    IF @LocationType = N'ParentLocation'
+    BEGIN
+        SELECT @SnapshotAddressLine = [AddressLine],
+               @SnapshotCity        = [City],
+               @SnapshotZipCode     = [ZipCode],
+               @SnapshotLatitude    = [Latitude],
+               @SnapshotLongitude   = [Longitude]
+        FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId;
+    END
+    ELSE IF @LocationType = N'ProviderLocation'
+    BEGIN
+        SET @SnapshotAddressLine = @SnapshotProviderAddressLine;
+        SET @SnapshotCity        = @SnapshotProviderCity;
+        SET @SnapshotZipCode     = @SnapshotProviderZipCode;
+        SET @SnapshotLatitude    = @SnapshotProviderLatitude;
+        SET @SnapshotLongitude   = @SnapshotProviderLongitude;
     END
 
     DECLARE @InsertedBookingId TABLE ([BookingId] UNIQUEIDENTIFIER);
@@ -108,7 +183,15 @@ BEGIN
         [BookingDate],
         [StartTime],
         [EndTime],
-        [JobNotes]
+        [JobNotes],
+        [LocationType],
+        [PricePerHour],
+        [CancellationPolicyHours],
+        [SnapshotAddressLine],
+        [SnapshotCity],
+        [SnapshotZipCode],
+        [SnapshotLatitude],
+        [SnapshotLongitude]
     )
     OUTPUT inserted.[BookingId] INTO @InsertedBookingId
     VALUES
@@ -123,7 +206,15 @@ BEGIN
         @BookingDate,
         @StartTime,
         @EndTime,
-        @JobNotes
+        @JobNotes,
+        @LocationType,
+        @PricePerHour,
+        @CancellationPolicyHours,
+        @SnapshotAddressLine,
+        @SnapshotCity,
+        @SnapshotZipCode,
+        @SnapshotLatitude,
+        @SnapshotLongitude
     );
 
     DECLARE @BookingId UNIQUEIDENTIFIER = (SELECT TOP (1) [BookingId] FROM @InsertedBookingId);

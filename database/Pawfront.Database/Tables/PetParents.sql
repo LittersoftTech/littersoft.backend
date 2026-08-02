@@ -17,6 +17,13 @@ CREATE TABLE [Parent].[PetParents]
     [Description] NVARCHAR(2000) NOT NULL,
     [ProfilePhotoUrl] NVARCHAR(1000) NULL,
     [MobileVerifiedAtUtc] DATETIME2(7) NULL,
+    -- Account delete = anonymise + permanently disable, never a row delete: the
+    -- PetParentId has to keep its meaning for every booking, event, and payment
+    -- that references it. [Parent].[DeletePetParent] sets these; [IsDeleted] is
+    -- permanent and blocks profile edits (which would undo the anonymisation).
+    [IsDeleted] BIT NOT NULL
+        CONSTRAINT [DF_PetParents_IsDeleted] DEFAULT 0,
+    [DeletedAtUtc] DATETIME2(7) NULL,
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_PetParents_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
     [UpdatedAtUtc] DATETIME2(7) NOT NULL
@@ -36,8 +43,12 @@ CREATE TABLE [Parent].[PetParents]
 
 GO
 
+-- Filtered so legacy rows migrated without a mobile number (nullable on the
+-- upgrade path in DeployAll.sql) don't collide; inert on fresh installs where
+-- the column is NOT NULL.
 CREATE UNIQUE INDEX [UX_PetParents_MobileNumber]
-    ON [Parent].[PetParents] ([MobileCountryCode], [MobileNumber]);
+    ON [Parent].[PetParents] ([MobileCountryCode], [MobileNumber])
+    WHERE [MobileNumber] IS NOT NULL;
 
 GO
 

@@ -13,6 +13,21 @@ CREATE TABLE [Booking].[NightStayBookingModifications]
     [ProposedCheckInDate] DATE NOT NULL,
     [ProposedCheckOutDate] DATE NOT NULL,
     [RequestNote] NVARCHAR(500) NULL,
+    -- The provider's CURRENT terms as acknowledged by the requester — see the
+    -- matching block on [Booking].[BookingModifications]. A night stay adds the
+    -- offering's drop-off / pick-up times to the set, since those are frozen onto
+    -- the stay at creation too.
+    [HasAcknowledgedTerms] BIT NOT NULL
+        CONSTRAINT [DF_NightStayBookingModifications_HasAcknowledgedTerms] DEFAULT 0,
+    [AcknowledgedPricePerNight] DECIMAL(10, 2) NULL,
+    [AcknowledgedCancellationPolicyHours] INT NULL,
+    [AcknowledgedDropOffTime] TIME(0) NULL,
+    [AcknowledgedPickUpTime] TIME(0) NULL,
+    [AcknowledgedAddressLine] NVARCHAR(500) NULL,
+    [AcknowledgedCity] NVARCHAR(200) NULL,
+    [AcknowledgedZipCode] NVARCHAR(32) NULL,
+    [AcknowledgedLatitude] DECIMAL(9, 6) NULL,
+    [AcknowledgedLongitude] DECIMAL(9, 6) NULL,
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_NightStayBookingModifications_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
 
@@ -24,5 +39,10 @@ CREATE TABLE [Booking].[NightStayBookingModifications]
     CONSTRAINT [CK_NightStayBookingModifications_RequestedByActor]
         CHECK ([RequestedByActor] IN (N'Provider', N'Parent')),
     CONSTRAINT [CK_NightStayBookingModifications_DateOrder]
-        CHECK ([ProposedCheckOutDate] > [ProposedCheckInDate])
+        CHECK ([ProposedCheckOutDate] > [ProposedCheckInDate]),
+    CONSTRAINT [CK_NightStayBookingModifications_AcknowledgedPrice]
+        CHECK ([AcknowledgedPricePerNight] IS NULL OR [AcknowledgedPricePerNight] >= 0),
+    CONSTRAINT [CK_NightStayBookingModifications_AcknowledgedCancellationPolicy]
+        CHECK ([AcknowledgedCancellationPolicyHours] IS NULL
+               OR [AcknowledgedCancellationPolicyHours] IN (24, 48, 72, 96))
 );

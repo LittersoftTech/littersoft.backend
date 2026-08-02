@@ -22,6 +22,37 @@ public interface IProviderOnboardingService
         Guid providerId,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Updates the provider's personal details (first name, last name, gender,
+    /// date of birth) and returns the persisted row. The mobile number is not
+    /// editable here — a change there must go back through OTP verification.
+    /// Throws <see cref="ProviderProfileNotFoundException"/> when the row is
+    /// missing, <see cref="ProviderAccountDeletedException"/> when the account has
+    /// been deleted (an edit would undo the anonymisation), and
+    /// <see cref="UnsupportedGenderException"/> for an unknown gender.
+    /// </summary>
+    Task<ProviderProfileResponse> UpdateProviderProfileAsync(
+        Guid providerId,
+        UpdateProviderProfileRequest request,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Anonymises the provider's SQL footprint: scrubs the personal fields on the
+    /// profile row, severs the Firebase auth identity, forces the account
+    /// permanently disabled, deactivates the bookable services, and clears the
+    /// operational config (availability, closures, policies, payout methods,
+    /// media, device tokens, OTPs). Bookings, night-stay bookings, organised
+    /// events and the <c>Booking.BookingPayments</c> ledger are all
+    /// <b>retained</b> — the ProviderId stays valid.
+    /// Returns the keys of the Cosmos listing and blobs the caller must still
+    /// clean up; prefer <see cref="IProviderAccountService.DeleteAsync"/>, which
+    /// does that for you. Throws <see cref="ProviderProfileNotFoundException"/>
+    /// when the provider row is missing.
+    /// </summary>
+    Task<ProviderAccountDeletionResult> DeleteProviderAccountAsync(
+        Guid providerId,
+        CancellationToken cancellationToken);
+
     Task<SendProviderMobileOtpResponse> SendProviderMobileOtpAsync(
         Guid providerId,
         CancellationToken cancellationToken);

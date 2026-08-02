@@ -40,8 +40,10 @@ public sealed record CompletePetParentProfileRequest(
     decimal Longitude,
     string ZipCode,
     string City,
-    // Optional "About Me" — omit or send blank to store none.
-    string? Description);
+    // Optional "About Me" — omit or send blank to store none. The default keeps
+    // it out of the OpenAPI `required` list, so generated clients don't have to
+    // send it either.
+    string? Description = null);
 
 public sealed record PetParentProfileResponse(
     Guid PetParentId,
@@ -83,8 +85,9 @@ public sealed record UpdatePetParentProfileRequest(
     string AddressLine,
     string ZipCode,
     string City,
-    // Optional "About Me" — omit or send blank to store none.
-    string? Description);
+    // Optional "About Me" — omit or send blank to store none (see
+    // CompletePetParentProfileRequest for why it carries a default).
+    string? Description = null);
 
 /// <summary>
 /// Full profile read-back returned by <c>GET /pet-parents/{petParentId}/profile</c>
@@ -131,6 +134,24 @@ public sealed record ResolvePetParentByFirebaseUidResponse(
     string SignUpStatus,
     bool HasProfile,
     DateTimeOffset? MobileVerifiedAtUtc);
+
+/// <summary>
+/// Outcome of <c>DELETE /api/v1/pet-parents/{petParentId}</c>. The delete
+/// anonymises the parent (and their pets) and permanently disables the account —
+/// it does not remove the row — so the retained counts report the history that
+/// deliberately survived, on both sides of every booking.
+/// </summary>
+public sealed record DeletePetParentAccountResponse(
+    Guid PetParentId,
+    DateTimeOffset DeletedAtUtc,
+    // True when the account was already deleted — the call is idempotent and
+    // this is the original DeletedAtUtc, not a fresh one.
+    bool WasAlreadyDeleted,
+    int AnonymisedPetCount,
+    int RetainedBookingCount,
+    int RetainedNightStayBookingCount,
+    int RetainedEventCount,
+    int RetainedPaymentCount);
 
 public sealed record PetParentOnboardingStatusResponse(
     Guid PetParentId,

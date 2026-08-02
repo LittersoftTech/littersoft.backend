@@ -22,6 +22,7 @@
     { "key": "nightStayBookingId", "value": "", "description": "A multi-night booking id (created on the parent host) for the provider-side night-stay management endpoints." },
     { "key": "providerPhotoId", "value": "", "description": "Populated by POST /providers/{id}/photos." },
     { "key": "petParentId", "value": "11111111-1111-1111-1111-111111111111" },
+    { "key": "petId", "value": "", "description": "A pet id (from GET /pet-parents/{petParentId}/details pets[] or a booking's petDetails) for the provider-facing pet lookup." },
     { "key": "closureId", "value": "" },
     { "key": "blobUrl", "value": "" },
     { "key": "serviceId", "value": "", "description": "Catch-all: first active ServiceId returned by GET /services. Use when you only care about one service (single-offering categories)." },
@@ -111,6 +112,19 @@
           }
         },
         {
+          "name": "PATCH provider profile (edit name / gender / DOB)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/profile", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","profile"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Ayur\",\n  \"lastName\": \"Shitarale\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"1995-08-22\"\n}"
+            },
+            "description": "Edits the provider's personal details (the app's \"Edit Profile\" screen): firstName, lastName, gender, dateOfBirth. Returns the same shape as GET profile, so the client can rebind straight from the response. Deliberately NOT editable here: mobileCountryCode / mobileNumber (a change must go back through OTP verification, and the pair is UNIQUE), bannerImageUrl (own endpoint), onboardingStatus / isActive (own flows). gender ∈ { Male, Female, NonBinary, Other, PreferNotToSay }. 404 ProviderProfileNotFound; 409 ProviderAccountDeleted (the account was deleted — editing would undo the anonymisation); 400 UnsupportedGender | InvalidRequest."
+          }
+        },
+        {
           "name": "GET /provider-onboarding/me",
           "event": [
             {
@@ -133,6 +147,14 @@
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/provider-onboarding/me", "host": ["{{baseUrl}}"], "path": ["api","v1","provider-onboarding","me"] },
             "description": "Resolves the caller's Firebase uid → { providerAuthIdentityId, providerId?, hasProfile, onboardingStatus?, isActive? }. Used by mobile after reinstall to recover the ProviderId. Re-captures providerAuthIdentityId / providerId."
+          }
+        },
+        {
+          "name": "DELETE provider account (anonymise + disable — irreversible)",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}"] },
+            "description": "The app's \"Delete account\" action. IRREVERSIBLE — it disables the account you are signed in as. This is an ANONYMISE + DISABLE, not a row delete: the ProviderId stays valid so nothing that references it loses meaning.\n\nRETAINED untouched: single-day and night-stay bookings with all their audit / evidence / OTP / modification / prescription children, the events you organised plus their ticket bookings, and the Booking.BookingPayments ledger. Deleting those would destroy the pet parents' history too, since their bookings reference you.\n\nANONYMISED: the Providers row — name becomes \"Deleted Provider\", gender/DOB/mobile are replaced, banner + mobileVerifiedAtUtc cleared, IsActive → 0 and IsDeleted → 1. IsActive = 0 blocks new bookings (409 ProviderInactive); IsDeleted = 1 is permanent and also blocks reactivation and profile edits (409 ProviderAccountDeleted). The Firebase auth identity is scrubbed too, which severs the login AND frees the real Firebase uid + phone number — so you can sign up again and get a brand-new ProviderId.\n\nDELETED: operational config + media only — device tokens, mobile OTPs, gallery photos, per-service banners, weekly availability, closures, cancellation policy, payout methods, service registration. Bookable services are DEACTIVATED (their rows must stay: bookings FK to ServiceId). The provider's Cosmos offering document (the public listing) is removed, so you drop out of parent-facing discovery, and GET /providers/{providerId} then returns 404 ProviderNotRegistered.\n\nIdempotent: a second call returns the original deletedAtUtc with wasAlreadyDeleted = true. Response carries retained* counts so you can confirm history survived.\n\nThe caller's ProviderId is taken from the JWT and must match the route → 403 Forbidden otherwise. 404 ProviderProfileNotFound when the provider row is missing."
           }
         }
       ]
@@ -762,25 +784,24 @@
                 { "key": "granularityMinutes", "value": "30" }
               ]
             },
-            "description": "Slots are computed per-service: capacity, duration rule, partial-day closures, and overlap-with-existing-bookings are all scoped by `serviceId`. For single-offering categories (PetGroomer/PetTrainer/Vet) use `{{serviceId}}` instead of `{{serviceIdDayCare}}`. For PetSitter NightStay use `{{serviceIdNightStay}}`."
+            "description": "Slots are computed per-service: capacity, duration rule, partial-day closures, and overlap-with-existing-bookings are all scoped by `serviceId`. Each returned slot carries `remainingCapacity` (capacity minus active bookings overlapping the window); fully-booked windows are returned with `remainingCapacity: 0` so the client can render them as unavailable. For single-offering categories (PetGroomer/PetTrainer/Vet) use `{{serviceId}}` instead of `{{serviceIdDayCare}}`."
           }
         },
         {
-          "name": "GET available slots (NightStay example)",
+          "name": "GET available nights (NightStay - date-granular)",
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdNightStay}}&date=2026-05-20&durationHours=12&granularityMinutes=60",
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/availability/slots?serviceId={{serviceIdNightStay}}&date=2026-05-20&endDate=2026-05-24",
               "host": ["{{baseUrl}}"],
               "path": ["api","v1","providers","{{providerId}}","availability","slots"],
               "query": [
                 { "key": "serviceId", "value": "{{serviceIdNightStay}}" },
                 { "key": "date", "value": "2026-05-20" },
-                { "key": "durationHours", "value": "12" },
-                { "key": "granularityMinutes", "value": "60" }
+                { "key": "endDate", "value": "2026-05-24" }
               ]
             },
-            "description": "Same date, different service — NightStay returns its own slot grid independent of DayCare (different capacity bucket, different duration rule, different closures)."
+            "description": "NightStay is DATE-granular: capacity is per night, not per time window. The response fills `nights` (one entry per night in date..endDate, max 31: `{ date, activeBookings, remainingCapacity, isClosed, isAvailable }`) and leaves `slots` empty; `durationHours`/`granularityMinutes` are ignored. A night is unavailable when a full-day closure covers it or active stays (CheckInDate <= night < CheckOutDate) have used every capacity unit. `endDate` defaults to `date` (single night)."
           }
         }
       ]
@@ -941,9 +962,9 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"petParentId\": \"{{petParentId}}\",\n  \"serviceId\": \"{{serviceIdDayCare}}\",\n  \"bookingDate\": \"2026-05-20\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"jobNotes\": \"Gate code is 1234; Bruno is shy around strangers.\"\n}"
+              "raw": "{\n  \"petParentId\": \"{{petParentId}}\",\n  \"serviceId\": \"{{serviceIdDayCare}}\",\n  \"bookingDate\": \"2026-05-20\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"12:00:00\",\n  \"jobNotes\": \"Gate code is 1234; Bruno is shy around strangers.\",\n  \"locationType\": \"ProviderLocation\"\n}"
             },
-            "description": "`serviceId` is REQUIRED. The server validates that this ServiceId belongs to the provider and is active (else 400 InvalidServiceId). Capacity is checked per-service — DayCare bookings count separately from NightStay bookings, and closures only block if they target the same ServiceId.\n\n`jobNotes` is optional free-text (access instructions, the pet's quirks) — captured here and returned on the booking detail. For PetSitter NightStay use `{{serviceIdNightStay}}`. For single-offering categories (PetGroomer / PetTrainer / Vet) use `{{serviceId}}`."
+            "description": "`serviceId` is REQUIRED. The server validates that this ServiceId belongs to the provider and is active (else 400 InvalidServiceId). Capacity is checked per-service — DayCare bookings count separately from NightStay bookings, and closures only block if they target the same ServiceId.\n\n`jobNotes` is optional free-text (access instructions, the pet's quirks) — captured here and returned on the booking detail. `locationType` is OPTIONAL on this host ('ParentLocation' | 'ProviderLocation'; 400 UnsupportedLocationType otherwise) — when set, the booking detail resolves the matching address. For PetSitter NightStay use `{{serviceIdNightStay}}`. For single-offering categories (PetGroomer / PetTrainer / Vet) use `{{serviceId}}`."
           }
         },
         {
@@ -1001,7 +1022,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/bookings/{{bookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","bookings","{{bookingId}}"] },
-            "description": "Sectioned detail: { bookingDetails, parentDetails, petDetails, providerDetails, paymentDetails, cancellationPolicy, startOtp (always null on the provider host — the OTP is parent-only), pendingModification (staged date/time proposal, populated only while a MODIFICATION_REQUEST_BY_* is open) }. `providerDetails` = { providerId, providerName, providerMobileCountryCode, providerMobile, providerGender, providerPhotoUrl (null for now) }. `petDetails` also carries breed, vaccinationStatus, vaccinationType, vaccinationDose, prescription (from the pet's profile; null for Custom walk-ins). `bookingDetails.serviceLocation` is populated for App bookings (the offering's service-location) and `jobNotes` carries the booking notes; `cancellationPolicy` is a dedicated section { minimumHoursBeforeCancellation }."
+            "description": "Sectioned detail: { bookingDetails, parentDetails, petDetails, providerDetails, paymentDetails, cancellationPolicy, location, startOtp (always null on the provider host — the OTP is parent-only), pendingModification (staged date/time proposal, populated only while a MODIFICATION_REQUEST_BY_* is open), prescription }. `providerDetails` = { providerId, providerName, providerMobileCountryCode, providerMobile, providerGender, providerPhotoUrl (null for now), address, city, zip } — address/city/zip are the provider's registered BUSINESS address (Cosmos service doc), added so the client needn't call GET /providers/{id} just for the address; null when the offering can't be resolved. `parentDetails` also carries the parent's profile address (addressLine, city, zipCode, latitude, longitude — App bookings only). `petDetails` carries the FULL medical snapshot: breed, vaccinationStatus, vaccinationType, vaccinationDose, prescription, sterilizationStatus, medicalHistory, temperament (from the pet's profile; null for Custom walk-ins). `location` = { locationType (ParentLocation | ProviderLocation | null), addressLine, city, zipCode, latitude, longitude } — the parent's address for ParentLocation, the provider's registered business address for ProviderLocation. `bookingDetails.serviceLocation` is populated for App bookings (the offering's service-location) and `jobNotes` carries the booking notes; `cancellationPolicy` is a dedicated section { minimumHoursBeforeCancellation }. `prescription` = { prescriptionText, isPetVaccinated, vaccinations[], nextConsultationDate } — the vet's recorded prescription; NULL until a vet records one (Vet bookings only, via POST .../complete or POST .../prescription).\n\nSNAPSHOTS (2026-07-24): `paymentDetails.pricePerHour`, `cancellationPolicy.minimumHoursBeforeCancellation` and the `location` address are read from values FROZEN onto the booking at creation, so editing your price, cancellation policy, or business address never changes bookings that already exist. Bookings created before this shipped fall back to live resolution. (The `parentDetails` / `providerDetails` CONTACT addresses are deliberately NOT frozen — they always show current contact info.)"
           }
         },
         {
@@ -1030,7 +1051,7 @@
           "request": {
             "method": "POST",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/accept", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","accept"] },
-            "description": "Provider accepts a CREATED booking → CONFIRMED."
+            "description": "Provider accepts a CREATED booking → CONFIRMED A booking left in CREATED for 24+ hours is automatically EXPIRED (by the background sweeper, or lazily on this call) and can no longer be accepted → 409 BookingExpired."
           }
         },
         {
@@ -1042,13 +1063,21 @@
           }
         },
         {
-          "name": "POST start booking (with parent OTP) → JOB_STARTED",
+          "name": "POST start-job → START_JOB (issues parent start-OTP)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/start-job", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","start-job"] },
+            "description": "Provider taps \"Start Job\" (no body): the booking moves to START_JOB and the parent's start-OTP is issued (the parent reads it from GET .../bookings/{id} on the parent host). Two gates: today must BE the booking's service date (bookingDate), and the provider must be inside their own weekly working hours (Provider.ProviderWeeklyAvailability for today, UTC). The scheduled start TIME does not gate it. 409 BookingNotOnServiceDate | OutsideWorkingHours | BookingNotStartable."
+          }
+        },
+        {
+          "name": "POST start-job/verify (parent start-OTP) → IN_PROGRESS",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/start", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","start"] },
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/start-job/verify", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","start-job","verify"] },
             "body": { "mode": "raw", "raw": "{\n  \"otpCode\": \"123456\"\n}" },
-            "description": "Provider starts the job by entering the OTP the parent read out to them (the parent gets it from GET .../bookings/{id} on the parent host). 400 InvalidStartOtp; 409 StartOtpExpired | BookingNotStartable."
+            "description": "Provider enters the start-code the parent showed → IN_PROGRESS. 6 wrong attempts cancel the job (409 OtpAttemptsExceeded). 400 InvalidStartOtp; 409 StartOtpExpired | BookingNotStartable."
           }
         },
         {
@@ -1074,8 +1103,28 @@
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/complete", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","complete"] },
-            "body": { "mode": "raw", "raw": "{\n  \"nextConsultationDate\": \"2026-08-01\"\n}" },
-            "description": "Provider completes a JOB_STARTED booking → COMPLETED. Evidence photos are optional. The body is OPTIONAL: nextConsultationDate (yyyy-MM-dd) proposes the pet's next visit — stored on the pet as one entry per provider type (type derived from the booking's category: PetGroomer → Groomer, Vet → Vet, PetTrainer → Trainer) and returned on the parent host's pet reads as nextConsultations[]. Send an empty body to complete without one. 400 NextConsultationNotSupported (PetSitter/AdoptionSale booking) | NextConsultationRequiresPet (Custom walk-in, no linked pet) | InvalidNextConsultationDate (past date)."
+            "body": { "mode": "raw", "raw": "{\n  \"nextConsultationDate\": \"2026-08-20\",\n  \"prescription\": {\n    \"prescriptionText\": \"Amoxicillin 250mg twice daily for 7 days.\",\n    \"isPetVaccinated\": true,\n    \"vaccinations\": [\"Rabies\", \"DHPP\"]\n  }\n}" },
+            "description": "Provider completes an IN_PROGRESS booking → COMPLETED. No OTP is required (the parent's code gates only start-job/verify). Evidence photos are optional. The body is OPTIONAL: nextConsultationDate (yyyy-MM-dd) proposes the pet's next visit — stored on the pet as one entry per provider type (type derived from the booking's category: PetGroomer → Groomer, Vet → Vet, PetTrainer → Trainer) and returned on the parent host's pet reads as nextConsultations[]. The optional `prescription` block { prescriptionText?, isPetVaccinated, vaccinations[] } records the visit prescription — VET BOOKINGS ONLY (400 PrescriptionNotVetBooking otherwise); it's the same payload as POST .../prescription and is surfaced on the booking-detail read's `prescription` section. Send an empty body to complete without either. 400 NextConsultationNotSupported (PetSitter/AdoptionSale booking) | NextConsultationRequiresPet (Custom walk-in, no linked pet) | InvalidNextConsultationDate (past date)."
+          }
+        },
+        {
+          "name": "POST mark paid → PAID",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/paid", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","paid"] },
+            "body": { "mode": "raw", "raw": "{\n  \"paymentMethod\": \"Cash\"\n}" },
+            "description": "The parent has paid the provider → PAID (the last stage; only from COMPLETED). Writes a Booking.BookingPayments ledger row { Amount, PawfrontFee, PaymentMethod, ... } — Amount is computed server-side from the booking's PRICE-LOCKED total (the unit rate snapshotted at booking time, so a later price change by the provider never changes it), PawfrontFee is the platform commission on it. paymentMethod is Cash or Digital. App bookings only (Custom walk-ins are off-platform). PAID is terminal and still holds the slot / counts as a completed booking. 400 InvalidRequest (no method) | UnsupportedPaymentMethod | PaymentNotAppBooking (Custom walk-in); 403 Forbidden; 404 BookingNotFound; 409 BookingNotPayable (not COMPLETED) | BookingAlreadyPaid | BookingNotPriceable."
+          }
+        },
+        {
+          "name": "POST record prescription (vet) — upsert",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/prescription", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","prescription"] },
+            "body": { "mode": "raw", "raw": "{\n  \"prescriptionText\": \"Amoxicillin 250mg twice daily for 7 days.\",\n  \"isPetVaccinated\": true,\n  \"vaccinations\": [\"Rabies\", \"DHPP\"]\n}" },
+            "description": "Records/edits the vet's per-visit prescription for a booking (upsert), independent of ending the job. VET bookings only, the booking's provider only, only once the job is IN_PROGRESS or COMPLETED. Returns the saved { prescriptionText, isPetVaccinated, vaccinations, nextConsultationDate } block — nextConsultationDate is the pet's rolling Vet follow-up (Parent.PetNextConsultations), set via /complete, joined here (null when none). The block is surfaced on the booking-detail read (GET /bookings/{id} and the parent host's GET /pet-parents/{id}/bookings/{id}) under `prescription`, null until recorded. 404 BookingNotFound; 403 Forbidden (not this provider's booking); 400 PrescriptionNotVetBooking (not a Vet booking); 409 PrescriptionNotAllowed (job not started/completed)."
           }
         },
         {
@@ -1084,6 +1133,14 @@
             "method": "POST",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/cancel", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","cancel"] },
             "description": "Provider cancels the booking → PROVIDER_CANCELLED."
+          }
+        },
+        {
+          "name": "POST mark parent no-show (provider) → PARENT_NO_SHOW",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/no-show", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","no-show"] },
+            "description": "Provider reports the parent (pet) never showed up → PARENT_NO_SHOW (terminal, frees the slot). Allowed only from a confirmed-equivalent state and only 30+ minutes after the booking's scheduled start (BookingDate + StartTime, UTC). 409 NoShowTooEarly before the grace window elapses; 409 BookingNotStartable from the wrong state (e.g. JOB_STARTED — the job already began)."
           }
         },
         {
@@ -1139,7 +1196,7 @@
     },
     {
       "name": "6b. Night-Stay Bookings (provider management)",
-      "description": "Provider-side management of multi-night boarding bookings. The booking itself is created on the parent host; set {{nightStayBookingId}} to one of the provider's stays. Same job lifecycle as single-day bookings (accept/decline/start-with-OTP/evidence+complete/cancel/modifications) but modifications propose a check-in/check-out date range.",
+      "description": "Provider-side management of multi-night boarding bookings. The booking itself is created on the parent host; set {{nightStayBookingId}} to one of the provider's stays. Same job lifecycle as single-day bookings (accept/decline/start-job + start-OTP verify/complete/cancel/modifications, evidence optional) but modifications propose a check-in/check-out date range.",
       "item": [
         {
           "name": "GET night-stay bookings by provider",
@@ -1154,7 +1211,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}"] },
-            "description": "Sectioned detail (now mirrors the single-day booking detail): { bookingDetails (incl. jobId, checkIn/out, nights, dropOff/pickUp, serviceLocation), parentDetails, petDetails (incl. breed, vaccinationStatus, vaccinationType, vaccinationDose, prescription), providerDetails, paymentDetails (pricePerNight, totalAmount, pawfrontFee), cancellationPolicy, startOtp (null on provider), pendingModification (staged check-in/check-out proposal) }."
+            "description": "Sectioned detail (mirrors the single-day booking detail): { bookingDetails (incl. jobId, checkIn/out, nights, dropOff/pickUp, serviceLocation, jobNotes), parentDetails (incl. the parent's address: addressLine, city, zipCode, latitude, longitude), petDetails (FULL medical snapshot: breed, vaccinationStatus, vaccinationType, vaccinationDose, prescription, sterilizationStatus, medicalHistory, temperament), providerDetails (providerId, providerName, mobile, gender, providerPhotoUrl (null), plus the provider's business address/city/zip from the Cosmos service doc — added so the client needn't call GET /providers/{id} just for the address), paymentDetails (pricePerNight, totalAmount, pawfrontFee), cancellationPolicy, location ({ locationType, addressLine, city, zipCode, latitude, longitude }), startOtp (null on provider), pendingModification (staged check-in/check-out proposal) }.\n\nSNAPSHOTS (2026-07-24): `paymentDetails.pricePerNight`, `cancellationPolicy.minimumHoursBeforeCancellation` and the `location` address are read from values FROZEN onto the stay at creation, so editing your rate, cancellation policy, or business address never changes stays that already exist. Stays created before this shipped fall back to live resolution."
           }
         },
         {
@@ -1179,12 +1236,21 @@
           }
         },
         {
-          "name": "POST start (with parent OTP) → JOB_STARTED",
+          "name": "POST start-job → START_JOB (issues parent start-OTP)",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/start-job", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","start-job"] },
+            "description": "No body. Only on the stay's check-in (drop-off) day, and only while the provider is inside their own weekly working hours (today, UTC). 409 BookingNotOnServiceDate | OutsideWorkingHours | BookingNotStartable."
+          }
+        },
+        {
+          "name": "POST start-job/verify (parent start-OTP) → IN_PROGRESS",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/start", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","start"] },
-            "body": { "mode": "raw", "raw": "{\n  \"otpCode\": \"123456\"\n}" }
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/start-job/verify", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","start-job","verify"] },
+            "body": { "mode": "raw", "raw": "{\n  \"otpCode\": \"123456\"\n}" },
+            "description": "Provider enters the start-code the parent showed → IN_PROGRESS. 6 wrong attempts cancel the job (409 OtpAttemptsExceeded). 400 InvalidStartOtp; 409 StartOtpExpired | BookingNotStartable."
           }
         },
         {
@@ -1207,7 +1273,17 @@
           "request": {
             "method": "POST",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/complete", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","complete"] },
-            "description": "Provider completes a JOB_STARTED stay → COMPLETED. Evidence photos are optional. (No nextConsultationDate here — night-stay is PetSitter-only, which has no consultation concept.)"
+            "description": "Provider completes an IN_PROGRESS stay → COMPLETED. No OTP and no body required. Evidence photos are optional. (No nextConsultationDate here — night-stay is PetSitter-only, which has no consultation concept.)"
+          }
+        },
+        {
+          "name": "POST mark paid → PAID",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/paid", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","paid"] },
+            "body": { "mode": "raw", "raw": "{\n  \"paymentMethod\": \"Digital\"\n}" },
+            "description": "The parent has paid the provider → PAID (only from COMPLETED). Writes a Booking.BookingPayments ledger row (BookingType 'NightStay') — Amount is the stay's PRICE-LOCKED total (per-night rate snapshotted at booking time × nights). paymentMethod is Cash or Digital. Terminal; still counts as a completed booking. 400 InvalidRequest | UnsupportedPaymentMethod; 403 Forbidden; 404 NightStayBookingNotFound; 409 BookingNotPayable | BookingAlreadyPaid | BookingNotPriceable."
           }
         },
         {
@@ -1215,6 +1291,14 @@
           "request": {
             "method": "POST",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/cancel", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","cancel"] }
+          }
+        },
+        {
+          "name": "POST mark parent no-show → PARENT_NO_SHOW",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/no-show", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","no-show"] },
+            "description": "Provider reports the parent (pet) never showed up for the stay → PARENT_NO_SHOW (terminal, frees the remaining per-night capacity). Allowed only from a confirmed-equivalent state and only 30+ minutes after CheckInDate + DropOffTime (UTC). 409 NoShowTooEarly before the grace window elapses; 409 BookingNotStartable from the wrong state."
           }
         },
         {
@@ -1243,6 +1327,27 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/modifications/decline", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","modifications","decline"] },
             "body": { "mode": "raw", "raw": "{\n  \"note\": \"Those dates don't work.\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6c. Pet Parent & Pet Lookup (provider-facing)",
+      "item": [
+        {
+          "name": "GET pet-parent details (customer card)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/details", "host": ["{{baseUrl}}"], "path": ["api","v1","pet-parents","{{petParentId}}","details"] },
+            "description": "Provider-facing customer card: profileImageUrl, rating (ALWAYS null for now - reviews not built yet), name, gender, age (full years, computed from dateOfBirth at UTC today), dateOfBirth, address { addressLine, city, zipCode, latitude, longitude }, aboutParent, email, mobileCountryCode/mobileNumber, and pets[] (slim cards: petId, name, petType, breed, gender, age { years, months }, profileImageUrl - drill into GET /pets/{petId} for the full profile).\n\n404 PetParentNotFound when no parent row exists for the id."
+          }
+        },
+        {
+          "name": "GET pet details (full profile)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/pets/{{petId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","pets","{{petId}}"] },
+            "description": "Provider-facing full pet profile: profileImageUrl, name, microchipId, petType, gender, weight, age { years, months } + dateOfBirth, breed, aboutPet, healthOfPet (medical history), vaccinationStatus (Vaccinated | NotVaccinated), sterilizationStatus (Sterilized | Intact), vaccinationType/vaccinationDose/prescription, temperament, photos[] (gallery URLs, oldest-first; fetch bytes via POST /blob-images).\n\nMedical fields are null until the parent fills them in the parent app. 404 PetNotFound for an unknown id."
           }
         }
       ]

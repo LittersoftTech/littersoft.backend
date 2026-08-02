@@ -125,6 +125,7 @@ internal sealed class AzureBlobStorageService(
             BlobUploadKind.PetProfilePhoto => options.Folders.PetProfilePhotos,
             BlobUploadKind.BookingEvidence => options.Folders.BookingEvidence,
             BlobUploadKind.ServiceBanner => options.Folders.ServiceBanners,
+            BlobUploadKind.ProviderBanner => options.Folders.ProviderBanners,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported blob upload kind.")
         };
 

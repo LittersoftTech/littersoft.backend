@@ -12,7 +12,15 @@ public sealed record CreateParentNightStayBookingRequest(
     Guid PetId,
     Guid ServiceId,
     DateOnly CheckInDate,
-    DateOnly CheckOutDate);
+    DateOnly CheckOutDate,
+    // Optional free-text notes for the stay (feeding instructions, the pet's
+    // quirks, etc.). Captured at create time and surfaced on the detail read.
+    string? JobNotes = null,
+    // Where the service is delivered: "ParentLocation" (the sitter comes to
+    // the parent's address) or "ProviderLocation" (the pet boards at the
+    // sitter's place). Required. The detail read resolves the matching
+    // address live.
+    string? LocationType = null);
 
 public sealed record NightStayBookingResponse(
     Guid NightStayBookingId,
@@ -37,12 +45,22 @@ public sealed record NightStayBookingResponse(
 /// check-in / check-out range. Accept/decline reuses
 /// <see cref="RespondBookingModificationRequest"/>.
 /// </summary>
+/// <param name="AcknowledgeTermsChanges">
+/// Set when the user has confirmed the provider's current terms — see
+/// <see cref="RequestBookingModificationRequest.AcknowledgeTermsChanges"/>. Read
+/// the drift from <c>GET .../night-stay-bookings/{bookingId}/terms-changes</c>.
+/// </param>
 public sealed record RequestNightStayBookingModificationRequest(
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    string? Note);
+    string? Note,
+    bool AcknowledgeTermsChanges = false);
 
 /// <summary>The staged (pending) check-in/check-out change proposal on a night-stay booking.</summary>
+/// <param name="AcknowledgedTerms">
+/// The terms the requester confirmed when proposing, staged because they had
+/// drifted from what the stay froze. Null in the ordinary case.
+/// </param>
 public sealed record NightStayBookingModificationResponse(
     Guid NightStayBookingModificationId,
     Guid NightStayBookingId,
@@ -51,7 +69,8 @@ public sealed record NightStayBookingModificationResponse(
     DateOnly ProposedCheckInDate,
     DateOnly ProposedCheckOutDate,
     string? Note,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    AcknowledgedTermsResponse? AcknowledgedTerms = null);
 
 /// <summary>
 /// Night-stay single booking read, grouped into the same sections as the single-day
@@ -67,6 +86,10 @@ public sealed record NightStayBookingDetailResponse(
     ProviderDetailsSection ProviderDetails,
     NightStayPaymentDetailsSection PaymentDetails,
     CancellationPolicyDetailsSection CancellationPolicy,
+    // Where the service is delivered, resolved from the booking's LocationType
+    // (the parent's address for ParentLocation, the provider's for
+    // ProviderLocation). Fields are null when the type is unset or unresolvable.
+    BookingLocationDetailsSection Location,
     StartOtpResponse? StartOtp,
     NightStayBookingModificationResponse? PendingModification);
 
@@ -91,7 +114,9 @@ public sealed record NightStayBookingDetailsSection(
     string? ServiceLocation,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? CancelledAtUtc);
+    DateTimeOffset? CancelledAtUtc,
+    // Optional free-text notes the parent attached to the stay at booking time.
+    string? JobNotes = null);
 
 /// <summary>The money facts for a night stay. <c>PricePerNight</c> is the offering's
 /// per-night rate; <c>TotalAmount</c> is rate × nights; <c>PawfrontFee</c> is

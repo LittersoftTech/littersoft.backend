@@ -10,6 +10,11 @@ CREATE TABLE [Provider].[Providers]
     [MobileNumber] NVARCHAR(32) NOT NULL,
     [DateOfBirth] DATE NOT NULL,
     [MobileVerifiedAtUtc] DATETIME2(7) NULL,
+    -- Wide banner shown on the provider's card in parent-facing search results.
+    -- Provider-level (category-agnostic) and captured during registration, so it
+    -- can be set before any [Provider].[ProviderServices] row exists — distinct
+    -- from the per-service banner in [Provider].[ProviderServiceBanners].
+    [BannerImageUrl] NVARCHAR(1000) NULL,
     [OnboardingStatus] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_Providers_OnboardingStatus] DEFAULT N'MobileVerificationPending',
     -- Master Active/Inactive switch. When 0, no new bookings can be created on
@@ -18,6 +23,15 @@ CREATE TABLE [Provider].[Providers]
     -- the toggle if future confirmed bookings still exist.
     [IsActive] BIT NOT NULL
         CONSTRAINT [DF_Providers_IsActive] DEFAULT 1,
+    -- Account-deleted marker. The provider app's "Delete account" action
+    -- anonymises this row rather than removing it ([Provider].[DeleteProvider]):
+    -- the ProviderId stays valid so bookings, events and the payment ledger keep
+    -- their meaning, the personal fields are scrubbed, and IsActive is forced to
+    -- 0. IsDeleted is what distinguishes that from an ordinary Inactive toggle —
+    -- it is permanent, blocks reactivation and blocks profile edits.
+    [IsDeleted] BIT NOT NULL
+        CONSTRAINT [DF_Providers_IsDeleted] DEFAULT 0,
+    [DeletedAtUtc] DATETIME2(7) NULL,
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_Providers_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
     [UpdatedAtUtc] DATETIME2(7) NOT NULL

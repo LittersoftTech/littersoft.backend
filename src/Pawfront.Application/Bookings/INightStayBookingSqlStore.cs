@@ -23,6 +23,14 @@ public interface INightStayBookingSqlStore
         DateOnly checkOutDate,
         TimeOnly dropOffTime,
         TimeOnly pickUpTime,
+        string? jobNotes,
+        string? locationType,
+        // Snapshot of the offering's per-night rate at booking time (price-lock).
+        decimal? pricePerNight,
+        // The provider's business address for a ProviderLocation stay (resolved from
+        // Cosmos + registration), snapshotted onto the booking. Null for
+        // ParentLocation (the sproc snapshots the parent's address) / no location.
+        ProviderAddressSnapshot? providerAddress,
         int capacity,
         CancellationToken cancellationToken);
 
@@ -45,8 +53,24 @@ public interface INightStayBookingSqlStore
         DateOnly? onDate,
         CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<NightStayBookingResult>> ListByPetParentAsync(
+    /// <summary>
+    /// The parent's own stays, each carrying the frozen-at-creation extras
+    /// (price-locked rate + cancellation-policy + selected-location snapshots)
+    /// for the list cards.
+    /// </summary>
+    Task<IReadOnlyList<NightStayBookingListItemResult>> ListByPetParentAsync(
         Guid petParentId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Active-stay count per night over [fromNight, toNight] inclusive
+    /// (<c>Booking.GetNightStayOccupancy</c>). Backs the NightStay availability
+    /// surface — every night in the range is returned, zero occupancy included.
+    /// </summary>
+    Task<IReadOnlyDictionary<DateOnly, int>> GetNightlyOccupancyAsync(
+        Guid serviceId,
+        DateOnly fromNight,
+        DateOnly toNight,
         CancellationToken cancellationToken);
 
     /// <summary>
@@ -74,12 +98,41 @@ public interface INightStayBookingSqlStore
         int ttlMinutes,
         CancellationToken cancellationToken);
 
-    Task<NightStayBookingResult> StartWithOtpAsync(
+    Task<NightStayBookingResult> StartJobAsync(
+        Guid bookingId,
+        Guid providerId,
+        string newCode,
+        int ttlMinutes,
+        CancellationToken cancellationToken);
+
+    Task<NightStayBookingResult> VerifyStartOtpAsync(
         Guid bookingId,
         Guid providerId,
         string otpCode,
         CancellationToken cancellationToken);
 
+    Task<NightStayBookingResult> CompleteAsync(
+        Guid bookingId,
+        Guid providerId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Flips a COMPLETED stay to PAID and inserts the payment ledger row. Maps
+    /// 51280 not found, 51281 forbidden, 51282 not payable, 51283 already paid.
+    /// </summary>
+    Task<NightStayBookingResult> MarkPaidAsync(
+        Guid bookingId,
+        Guid providerId,
+        decimal amount,
+        decimal pawfrontFee,
+        string paymentMethod,
+        CancellationToken cancellationToken);
+
+    /// <param name="acknowledgedTerms">
+    /// The provider's current terms, staged alongside the proposal when they had
+    /// drifted and the requester confirmed them. Null leaves the stay's frozen
+    /// terms alone on accept.
+    /// </param>
     Task<NightStayBookingResult> RequestModificationAsync(
         Guid bookingId,
         BookingStatusActor actor,
@@ -87,6 +140,7 @@ public interface INightStayBookingSqlStore
         DateOnly checkInDate,
         DateOnly checkOutDate,
         string? note,
+        BookingAcknowledgedTerms? acknowledgedTerms,
         CancellationToken cancellationToken);
 
     Task<NightStayBookingModificationResult?> GetPendingModificationAsync(

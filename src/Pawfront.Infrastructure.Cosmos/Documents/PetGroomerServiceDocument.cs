@@ -129,6 +129,14 @@ public sealed class GroomingServiceItem
     [JsonPropertyName("code")]
     public string Code { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The groomer's own words about this menu item, shown to the parent when
+    /// they pick a service to book. Optional — null when the provider left it
+    /// blank (and on every document saved before the field existed).
+    /// </summary>
+    [JsonPropertyName("description")]
+    public string? Description { get; set; }
+
     [JsonPropertyName("price")]
     public decimal Price { get; set; }
 

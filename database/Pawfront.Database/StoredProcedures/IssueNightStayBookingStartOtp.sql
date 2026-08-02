@@ -1,5 +1,6 @@
--- Issues (or reuses) the start-job OTP for a multi-night booking. Mirror of
--- [Booking].[IssueBookingStartOtp]. THROW 51250 booking not found.
+-- Issues (or reuses) the parent-facing start-OTP for a multi-night booking.
+-- Mirror of [Booking].[IssueBookingStartOtp].
+-- THROW 51250 booking not found.
 CREATE OR ALTER PROCEDURE [Booking].[IssueNightStayBookingStartOtp]
     @NightStayBookingId UNIQUEIDENTIFIER,
     @NewCode NVARCHAR(6),

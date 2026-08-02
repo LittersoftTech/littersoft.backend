@@ -62,5 +62,6 @@ api.MapProviderDetailsEndpoints();
 api.MapProviderSearchEndpoints();
 api.MapBlobImageEndpoints();
 api.MapAvailabilitySlotsEndpoints();
+api.MapProviderAgendaEndpoints();
 
 app.Run();

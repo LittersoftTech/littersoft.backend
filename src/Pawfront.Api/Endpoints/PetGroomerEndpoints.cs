@@ -227,7 +227,8 @@ internal static class PetGroomerEndpoints
     private static GroomingOfferingInput ToGroomingInput(GroomingOfferingRequest request)
     {
         var services = request.Services?
-            .Select(s => new GroomingServiceItemInput(s.Code, s.Price, s.DurationMinutes, s.IsActive))
+            .Select(s => new GroomingServiceItemInput(
+                s.Code, s.Description, s.Price, s.DurationMinutes, s.IsActive))
             .ToArray() ?? Array.Empty<GroomingServiceItemInput>();
 
         return new GroomingOfferingInput(
@@ -302,7 +303,8 @@ internal static class PetGroomerEndpoints
             ? null
             : new GroomingOfferingResponse(
                 offering.Services
-                    .Select(s => new GroomingServiceItemResponse(s.Code, s.Price, s.DurationMinutes, s.IsActive))
+                    .Select(s => new GroomingServiceItemResponse(
+                        s.Code, s.Description, s.Price, s.DurationMinutes, s.IsActive))
                     .ToArray(),
                 offering.AddOns,
                 offering.LatePickupCharges,

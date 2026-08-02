@@ -28,3 +28,12 @@ public sealed class UnsupportedPetParentIdentityTypeException(string identityTyp
 
 public sealed class PetParentIdentityNotFoundException(Guid petParentId)
     : Exception($"No identity document is on file for pet parent '{petParentId}'.");
+
+/// <summary>
+/// The account has been deleted — anonymised and permanently disabled by
+/// <c>Parent.DeletePetParent</c>. Raised by the flows that would undo that
+/// (today, the profile edit). The delete is not reversible: signing up again
+/// creates a brand-new account.
+/// </summary>
+public sealed class PetParentAccountDeletedException(Guid petParentId)
+    : Exception($"Pet parent account '{petParentId}' has been deleted and can no longer be changed.");

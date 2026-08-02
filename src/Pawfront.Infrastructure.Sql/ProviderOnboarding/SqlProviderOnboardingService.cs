@@ -13,6 +13,10 @@ internal sealed class SqlProviderOnboardingService(
     IPawfrontSecretProvider? secretProvider,
     IProviderMobileOtpSender otpSender) : IProviderOnboardingService
 {
+    // UNIQUE on (MobileCountryCode, MobileNumber) — the same digits under a
+    // different country code are a different number and must not collide.
+    private const string MobileNumberIndexName = "UX_Providers_MobileNumber";
+
     public async Task<ProviderFirebaseAuthResponse> SaveFirebaseAuthAsync(
         SaveProviderFirebaseAuthCommand commandInput,
         CancellationToken cancellationToken)
@@ -91,7 +95,13 @@ internal sealed class SqlProviderOnboardingService(
         {
             throw new ProviderAuthIdentityNotFoundException(request.ProviderAuthIdentityId);
         }
-        catch (SqlException exception) when (exception.Number is 2601 or 2627)
+        // Only the (MobileCountryCode, MobileNumber) index means "this number is
+        // taken". Matching on the index name keeps an unrelated unique violation
+        // (e.g. UQ_Providers_ProviderAuthIdentityId) from being reported to the
+        // caller as a duplicate mobile number.
+        catch (SqlException exception)
+            when (exception.Number is 2601 or 2627
+                  && exception.Message.Contains(MobileNumberIndexName, StringComparison.Ordinal))
         {
             throw new MobileNumberAlreadyExistsException(mobileCountryCode, mobileNumber);
         }
@@ -116,6 +126,108 @@ internal sealed class SqlProviderOnboardingService(
         }
 
         return ReadProviderProfile(reader);
+    }
+
+    public async Task<ProviderProfileResponse> UpdateProviderProfileAsync(
+        Guid providerId,
+        UpdateProviderProfileRequest request,
+        CancellationToken cancellationToken)
+    {
+        var firstName = Required(request.FirstName, nameof(request.FirstName));
+        var lastName = Required(request.LastName, nameof(request.LastName));
+        var gender = NormalizeGender(request.Gender);
+
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Provider.UpdateProviderProfile");
+
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@FirstName", firstName);
+        command.Parameters.AddWithValue("@LastName", lastName);
+        command.Parameters.AddWithValue("@Gender", gender);
+        command.Parameters.AddWithValue("@DateOfBirth", request.DateOfBirth.ToDateTime(TimeOnly.MinValue));
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Provider profile was not returned after update.");
+            }
+
+            return ReadProviderProfile(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51113)
+        {
+            throw new ProviderProfileNotFoundException(providerId);
+        }
+        catch (SqlException exception) when (exception.Number == 51115)
+        {
+            throw new ProviderAccountDeletedException(providerId);
+        }
+    }
+
+    public async Task<ProviderAccountDeletionResult> DeleteProviderAccountAsync(
+        Guid providerId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Provider.DeleteProvider");
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+
+        try
+        {
+            // Three result sets: summary, Cosmos listing partition keys, blob
+            // URLs. See the sproc's header for what is retained vs cleared.
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Provider delete summary was not returned.");
+            }
+
+            var summary = new DeleteProviderAccountResponse(
+                reader.GetGuid(0),
+                new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
+                reader.GetBoolean(2),
+                reader.GetInt32(3),
+                reader.GetInt32(4),
+                reader.GetInt32(5),
+                reader.GetInt32(6),
+                reader.GetInt32(7));
+
+            var serviceCategories = new List<string>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    serviceCategories.Add(reader.GetString(0));
+                }
+            }
+
+            var blobUrls = new List<string>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    blobUrls.Add(reader.GetString(0));
+                }
+            }
+
+            return new ProviderAccountDeletionResult(summary, serviceCategories, blobUrls);
+        }
+        catch (SqlException exception) when (exception.Number == 51114)
+        {
+            throw new ProviderProfileNotFoundException(providerId);
+        }
     }
 
     public async Task<ResolveProviderByFirebaseUidResponse> ResolveProviderByFirebaseUidAsync(
@@ -209,6 +321,10 @@ internal sealed class SqlProviderOnboardingService(
         catch (SqlException exception) when (exception.Number == 51100)
         {
             throw new ProviderProfileNotFoundException(providerId);
+        }
+        catch (SqlException exception) when (exception.Number == 51115)
+        {
+            throw new ProviderAccountDeletedException(providerId);
         }
     }
 
@@ -351,7 +467,8 @@ internal sealed class SqlProviderOnboardingService(
             reader.GetString(9),
             reader.GetBoolean(10),
             new DateTimeOffset(reader.GetDateTime(11), TimeSpan.Zero),
-            new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero));
+            new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero),
+            reader.IsDBNull(13) ? null : reader.GetString(13));
     }
 
     private static SendProviderMobileOtpResponse ReadMobileOtp(SqlDataReader reader)

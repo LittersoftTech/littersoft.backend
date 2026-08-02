@@ -27,7 +27,7 @@ BEGIN
         THROW 51064, 'Only the original booker can cancel this booking.', 1;
     END
 
-    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED')
+    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51065, 'Booking is already cancelled.', 1;
     END

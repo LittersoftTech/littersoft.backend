@@ -63,6 +63,7 @@ internal static class ProviderAvailabilityEndpoints
         decimal? durationHours,
         int? granularityMinutes,
         string? serviceItemCode,
+        DateOnly? endDate,
         IProviderAvailabilitySlotService slotService,
         CancellationToken cancellationToken)
     {
@@ -75,7 +76,8 @@ internal static class ProviderAvailabilityEndpoints
                 durationHours ?? 0m,
                 granularityMinutes ?? DefaultGranularityMinutes,
                 serviceItemCode,
-                cancellationToken);
+                cancellationToken,
+                endDate);
 
             return ApiResults.Ok(ToResponse(result));
         }
@@ -135,6 +137,10 @@ internal static class ProviderAvailabilityEndpoints
             result.DurationHours,
             result.Capacity,
             result.GranularityMinutes,
-            result.Slots.Select(s => new TimeSlotResponse(s.StartTime, s.EndTime)).ToArray());
+            result.Slots.Select(s => new TimeSlotResponse(s.StartTime, s.EndTime, s.RemainingCapacity)).ToArray(),
+            result.Nights?
+                .Select(n => new NightAvailabilityResponse(
+                    n.Date, n.ActiveBookings, n.RemainingCapacity, n.IsClosed, n.IsAvailable))
+                .ToArray());
     }
 }

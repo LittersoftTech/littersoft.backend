@@ -52,11 +52,25 @@ public interface IParentOnboardingService
     /// Edits the basic-profile subset (name, gender, birth date, address
     /// fields, description). Mobile number, coordinates, and profile photo
     /// are deliberately not editable here. Throws
-    /// <see cref="PetParentNotFoundException"/> when the row is missing.
+    /// <see cref="PetParentNotFoundException"/> when the row is missing, or
+    /// <see cref="PetParentAccountDeletedException"/> when the account has been
+    /// deleted (an edit would undo the anonymisation).
     /// </summary>
     Task<PetParentProfileDetailsResponse> UpdateProfileAsync(
         Guid petParentId,
         UpdatePetParentProfileRequest request,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// SQL half of the account delete: anonymises the parent row (and their
+    /// pets), severs the Firebase login, and clears the operational data +
+    /// media rows. SQL cannot reach Blob Storage, so the returned result also
+    /// carries the blob URLs the caller must clean up —
+    /// <see cref="IParentAccountService"/> is the orchestrator that does.
+    /// Throws <see cref="PetParentNotFoundException"/> when the row is missing.
+    /// </summary>
+    Task<PetParentAccountDeletionResult> DeletePetParentAccountAsync(
+        Guid petParentId,
         CancellationToken cancellationToken);
 
     /// <summary>

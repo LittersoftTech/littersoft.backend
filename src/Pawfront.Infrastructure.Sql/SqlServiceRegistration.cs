@@ -11,6 +11,7 @@ using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
 using Pawfront.Application.ParentPhotos;
 using Pawfront.Application.Policies;
+using Pawfront.Application.ProviderBanners;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.ProviderPhotos;
 using Pawfront.Application.ProviderServiceBanners;
@@ -26,6 +27,7 @@ using Pawfront.Infrastructure.Sql.ParentOnboarding;
 using Pawfront.Infrastructure.Sql.ParentPets;
 using Pawfront.Infrastructure.Sql.ParentPhotos;
 using Pawfront.Infrastructure.Sql.Policies;
+using Pawfront.Infrastructure.Sql.ProviderBanners;
 using Pawfront.Infrastructure.Sql.ProviderOnboarding;
 using Pawfront.Infrastructure.Sql.ProviderPhotos;
 using Pawfront.Infrastructure.Sql.ProviderServiceBanners;
@@ -55,11 +57,16 @@ public static class SqlServiceRegistration
             services.AddSingleton<IProviderOnboardingStatusReader, InMemoryProviderOnboardingStatusReader>();
             services.AddSingleton<IEventSqlStore, InMemoryEventStore>();
             services.AddSingleton<IProviderAvailabilityService, InMemoryProviderAvailabilityService>();
+            // InMemoryBookingStore reads night-stay occupancy from the concrete
+            // night-stay store (slot capacity), so both resolve the SAME singleton.
+            services.AddSingleton<InMemoryNightStayBookingStore>();
             services.AddSingleton<IBookingSqlStore, InMemoryBookingStore>();
-            services.AddSingleton<INightStayBookingSqlStore, InMemoryNightStayBookingStore>();
+            services.AddSingleton<INightStayBookingSqlStore>(sp => sp.GetRequiredService<InMemoryNightStayBookingStore>());
             services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
             services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
             services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
+            services.AddSingleton<IProviderNameReader, NullProviderNameReader>();
+            services.AddSingleton<IProviderContactReader, NullProviderContactReader>();
         }
         else
         {
@@ -109,6 +116,15 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            // NOTE (2026-08-02): the BookingExpirySweeper hosted service used to
+            // be registered here, running Booking.ExpireStaleBookings every 10
+            // minutes in BOTH hosts. Time-driven booking settlement (stale
+            // CREATED -> EXPIRED, expired parent modification requests,
+            // unstarted-job no-shows) has moved out of the API hosts and out of
+            // the database into a scheduled external job. Nothing in-process
+            // settles bookings on a clock any more — do not re-add a sweeper
+            // here without retiring that job first, or the two will race.
+
             services.AddScoped<IProviderClosureSqlStore>(provider =>
                 new SqlProviderClosureStore(
                     sqlConnectionString,
@@ -150,6 +166,11 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            services.AddScoped<IProviderBannerImageService>(provider =>
+                new SqlProviderBannerImageService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             services.AddScoped<IPetParentOnboardingStatusReader>(provider =>
                 new SqlPetParentOnboardingStatusReader(
                     sqlConnectionString,
@@ -162,6 +183,16 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderBookingStatsReader>(provider =>
                 new SqlProviderBookingStatsReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderNameReader>(provider =>
+                new SqlProviderNameReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderContactReader>(provider =>
+                new SqlProviderContactReader(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
         }

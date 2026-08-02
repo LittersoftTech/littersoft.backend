@@ -1,4 +1,5 @@
--- Start-job OTPs for multi-night boarding bookings. Mirror of
+-- Verification OTPs for multi-night boarding bookings: the parent-facing start
+-- code that gates START_JOB -> IN_PROGRESS. Mirror of
 -- [Booking].[BookingStartOtps], FK'd to [Booking].[NightStayBookings].
 CREATE TABLE [Booking].[NightStayBookingStartOtps]
 (

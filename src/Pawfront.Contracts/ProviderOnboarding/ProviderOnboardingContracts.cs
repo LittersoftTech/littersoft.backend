@@ -31,6 +31,16 @@ public sealed record CompleteProviderProfileRequest(
     string MobileNumber,
     DateOnly DateOfBirth);
 
+/// <summary>
+/// Edits the provider's personal details. Mobile number + country code are
+/// deliberately absent — a change there must go back through OTP verification.
+/// </summary>
+public sealed record UpdateProviderProfileRequest(
+    string FirstName,
+    string LastName,
+    string Gender,
+    DateOnly DateOfBirth);
+
 public sealed record ProviderProfileResponse(
     Guid ProviderId,
     Guid ProviderAuthIdentityId,
@@ -44,7 +54,10 @@ public sealed record ProviderProfileResponse(
     string OnboardingStatus,
     bool IsActive,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    // Wide banner shown on the provider's card in the parent-facing searches.
+    // Set via POST /providers/{providerId}/banner-image; null until uploaded.
+    string? BannerImageUrl);
 
 public sealed record SendProviderMobileOtpResponse(
     Guid ProviderMobileOtpId,
@@ -78,6 +91,23 @@ public sealed record ResolveProviderByFirebaseUidResponse(
     string? OnboardingStatus,
     DateTimeOffset? MobileVerifiedAtUtc,
     bool? IsActive);
+
+/// <summary>
+/// Outcome of a provider account delete. The delete anonymises the provider and
+/// disables the account — it does not remove the row — so the retained counts
+/// report the history that deliberately survived.
+/// </summary>
+public sealed record DeleteProviderAccountResponse(
+    Guid ProviderId,
+    DateTimeOffset DeletedAtUtc,
+    // True when the account was already deleted — the call is idempotent and
+    // this is the original DeletedAtUtc, not a fresh one.
+    bool WasAlreadyDeleted,
+    int DeactivatedServiceCount,
+    int RetainedBookingCount,
+    int RetainedNightStayBookingCount,
+    int RetainedEventCount,
+    int RetainedPaymentCount);
 
 public sealed record SetProviderActiveStatusRequest(bool IsActive);
 

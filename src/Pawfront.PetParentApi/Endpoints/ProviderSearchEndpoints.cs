@@ -337,5 +337,7 @@ internal static class ProviderSearchEndpoints
             result.Charges,
             result.ChargesUnit,
             result.ServiceItemCode,
-            result.ImageUrl);
+            result.Description,
+            result.ImageUrl,
+            result.BannerImageUrl);
 }

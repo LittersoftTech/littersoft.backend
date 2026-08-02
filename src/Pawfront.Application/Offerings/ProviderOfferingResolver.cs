@@ -60,7 +60,11 @@ internal sealed class ProviderOfferingResolver(
             DurationHours: branch.MinimumBookingHours,
             IsDurationFixed: false,
             Price: branch.PricePerHour,
-            ServiceLocation: offering.ServiceLocation);
+            ServiceLocation: offering.ServiceLocation,
+            // A stay starts at drop-off on its check-in day; a day-care booking
+            // starts at whatever slot was picked, so the time is only meaningful
+            // (and only populated) for NightStay.
+            DropOffTime: includeDayCare ? null : branch.DropOffTime);
     }
 
     private async Task<OfferingResolution> ResolvePetGroomerAsync(
@@ -113,7 +117,8 @@ internal sealed class ProviderOfferingResolver(
             return new GroomingItemResolution.Inactive(code);
         }
 
-        return new GroomingItemResolution.Resolved(match.Code, match.DurationMinutes, match.Price);
+        return new GroomingItemResolution.Resolved(
+            match.Code, match.DurationMinutes, match.Price, match.Description);
     }
 
     private async Task<OfferingResolution> ResolvePetTrainerAsync(
@@ -139,7 +144,12 @@ internal sealed class ProviderOfferingResolver(
             // booking-detail field.
             ServiceLocation: offering.ServiceLocations is { Count: > 0 }
                 ? string.Join(", ", offering.ServiceLocations)
-                : null);
+                : null,
+            // The trainer's description of the session itself — the category's
+            // equivalent of a groomer's per-menu-item blurb.
+            Description: string.IsNullOrWhiteSpace(offering.PrivateTrainingDescription)
+                ? null
+                : offering.PrivateTrainingDescription.Trim());
     }
 
     private async Task<OfferingResolution> ResolveVetAsync(

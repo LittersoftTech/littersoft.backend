@@ -1,6 +1,8 @@
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Offerings;
+using Pawfront.Application.ProviderBanners;
+using Pawfront.Application.ProviderServiceBanners;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Domain.Services;
@@ -20,7 +22,10 @@ internal sealed class ProviderSearchService(
     IProviderOfferingResolver offeringResolver,
     IProviderAvailabilitySlotService slotService,
     IPetGroomerServiceRegistry petGroomerRegistry,
-    IProviderBookingStatsReader bookingStatsReader) : IProviderSearchService
+    IProviderBookingStatsReader bookingStatsReader,
+    IProviderNameReader providerNameReader,
+    IProviderServiceBannerService bannerService,
+    IProviderBannerImageService providerBannerService) : IProviderSearchService
 {
     // 1-minute granularity when the parent's exact window must be matched
     // (day care); 15 minutes when ANY free slot on the date is enough.
@@ -77,18 +82,17 @@ internal sealed class ProviderSearchService(
                 if (criteria.StartDate is not null)
                 {
                     // Every stayed night needs free capacity; the pickup date
-                    // itself is checkout and not checked. Probe the offering's
-                    // minimum duration — any free slot on the date means the
-                    // night-stay bucket still has room.
-                    for (var night = criteria.StartDate.Value; night < criteria.PickupDate!.Value; night = night.AddDays(1))
+                    // itself is checkout and not checked. NightStay availability
+                    // is date-granular — one per-night query covers the whole
+                    // range (closures + occupancy vs the per-night capacity).
+                    var lastNight = criteria.PickupDate!.Value.AddDays(-1);
+                    var nightResult = await TryGetSlotsAsync(
+                        resolved.ProviderId, service.ServiceId, criteria.StartDate.Value,
+                        durationHours: 0m, AnySlotGranularityMinutes, serviceItemCode: null, ct,
+                        endDate: lastNight);
+                    if (nightResult?.Nights is null || nightResult.Nights.Any(n => !n.IsAvailable))
                     {
-                        var slots = await TryGetSlotsAsync(
-                            resolved.ProviderId, service.ServiceId, night,
-                            resolved.DurationHours, AnySlotGranularityMinutes, serviceItemCode: null, ct);
-                        if (slots is null || slots.Slots.Count == 0)
-                        {
-                            return null;
-                        }
+                        return null;
                     }
                 }
 
@@ -111,6 +115,9 @@ internal sealed class ProviderSearchService(
             {
                 decimal? charges = null;
                 string? probeCode;
+                // Only a code-scoped search describes one item; a browse across
+                // the whole menu has no single blurb to show.
+                string? description = null;
 
                 if (criteria.ServiceItemCode is not null)
                 {
@@ -124,6 +131,7 @@ internal sealed class ProviderSearchService(
                     }
                     charges = item.Price;
                     probeCode = item.Code;
+                    description = item.Description;
                 }
                 else
                 {
@@ -149,7 +157,7 @@ internal sealed class ProviderSearchService(
                     var slots = await TryGetSlotsAsync(
                         resolved.ProviderId, service.ServiceId, criteria.Date.Value,
                         durationHours: 0m, AnySlotGranularityMinutes, probeCode, ct);
-                    if (slots is null || slots.Slots.Count == 0)
+                    if (slots is null || !slots.Slots.Any(s => s.RemainingCapacity > 0))
                     {
                         return null;
                     }
@@ -158,7 +166,7 @@ internal sealed class ProviderSearchService(
                 return new ProviderSearchResult(
                     summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
                     CompletedBookings: 0, charges, ProviderSearchChargesUnits.PerService,
-                    criteria.ServiceItemCode, summary.ImageUrl);
+                    criteria.ServiceItemCode, summary.ImageUrl, description);
             },
             cancellationToken);
 
@@ -177,7 +185,7 @@ internal sealed class ProviderSearchService(
                     var slots = await TryGetSlotsAsync(
                         resolved.ProviderId, service.ServiceId, criteria.Date.Value,
                         resolved.DurationHours, AnySlotGranularityMinutes, serviceItemCode: null, ct);
-                    if (slots is null || slots.Slots.Count == 0)
+                    if (slots is null || !slots.Slots.Any(s => s.RemainingCapacity > 0))
                     {
                         return null;
                     }
@@ -207,7 +215,7 @@ internal sealed class ProviderSearchService(
                     var slots = await TryGetSlotsAsync(
                         resolved.ProviderId, service.ServiceId, criteria.Date.Value,
                         resolved.DurationHours, AnySlotGranularityMinutes, serviceItemCode: null, ct);
-                    if (slots is null || slots.Slots.Count == 0)
+                    if (slots is null || !slots.Slots.Any(s => s.RemainingCapacity > 0))
                     {
                         return null;
                     }
@@ -216,7 +224,7 @@ internal sealed class ProviderSearchService(
                 return new ProviderSearchResult(
                     summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
                     CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerSession,
-                    ServiceItemCode: null, summary.ImageUrl);
+                    ServiceItemCode: null, summary.ImageUrl, resolved.Description);
             },
             cancellationToken);
 
@@ -274,13 +282,52 @@ internal sealed class ProviderSearchService(
             return paged;
         }
 
+        var providerIds = paged.Select(r => r.ProviderId).Distinct().ToArray();
+
         var counts = await bookingStatsReader.GetCompletedBookingCountsAsync(
-            paged.Select(r => r.ProviderId).Distinct().ToArray(), cancellationToken);
+            providerIds, cancellationToken);
+
+        // Freelancers have no business name in the Cosmos offering doc — fall
+        // back to the provider's personal name so the card always has a label.
+        var names = await providerNameReader.GetProviderDisplayNamesAsync(
+            providerIds, cancellationToken);
+
+        // Per-service banner (the wide card image the provider uploaded for this
+        // ServiceId). Absent from the map = the provider hasn't set one, in
+        // which case the card falls back to the provider-level banner captured
+        // at registration — the picture most providers actually have.
+        var serviceIds = paged.Select(r => r.ServiceId).Distinct().ToArray();
+        var banners = await bannerService.GetByServiceIdsAsync(serviceIds, cancellationToken);
+        var providerBanners = await providerBannerService.GetByProviderIdsAsync(
+            providerIds, cancellationToken);
 
         return paged
-            .Select(r => counts.TryGetValue(r.ProviderId, out var completed)
-                ? r with { CompletedBookings = completed }
-                : r)
+            .Select(r =>
+            {
+                var businessName = r.BusinessName;
+                if (string.IsNullOrWhiteSpace(businessName)
+                    && names.TryGetValue(r.ProviderId, out var personName))
+                {
+                    businessName = personName;
+                }
+
+                var completed = counts.TryGetValue(r.ProviderId, out var count)
+                    ? count
+                    : r.CompletedBookings;
+
+                var bannerImageUrl = banners.TryGetValue(r.ServiceId, out var banner)
+                    ? banner
+                    : providerBanners.TryGetValue(r.ProviderId, out var providerBanner)
+                        ? providerBanner
+                        : null;
+
+                return r with
+                {
+                    BusinessName = businessName,
+                    CompletedBookings = completed,
+                    BannerImageUrl = bannerImageUrl
+                };
+            })
             .ToList();
     }
 
@@ -291,13 +338,14 @@ internal sealed class ProviderSearchService(
         decimal durationHours,
         int granularityMinutes,
         string? serviceItemCode,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DateOnly? endDate = null)
     {
         try
         {
             return await slotService.GetAvailableSlotsAsync(
                 providerId, serviceId, date, durationHours, granularityMinutes,
-                serviceItemCode, cancellationToken);
+                serviceItemCode, cancellationToken, endDate);
         }
         catch (Exception ex) when (
             ex is SlotServiceInvalidException
@@ -321,7 +369,8 @@ internal sealed class ProviderSearchService(
     {
         foreach (var slot in slots)
         {
-            if (slot.StartTime >= startTime && slot.EndTime <= endTime)
+            // Zero-capacity slots are emitted for display but are not bookable.
+            if (slot.RemainingCapacity > 0 && slot.StartTime >= startTime && slot.EndTime <= endTime)
             {
                 return true;
             }

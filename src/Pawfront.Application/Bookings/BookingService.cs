@@ -4,7 +4,8 @@ using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Offerings;
 using Pawfront.Application.ParentPets;
-using Pawfront.Application.Policies;
+using Pawfront.Application.Providers;
+using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Domain.Services;
 
 namespace Pawfront.Application.Bookings;
@@ -14,9 +15,11 @@ internal sealed class BookingService(
     IProviderOfferingResolver offeringResolver,
     IProviderAvailabilityService availabilityService,
     IProviderClosureReader closureReader,
-    IProviderPolicyService policyService,
     IPetNextConsultationStore nextConsultationStore,
-    IOptions<PawfrontFeeOptions> feeOptions) : IBookingService, IDailyBookingReader
+    IProviderDiscoveryService providerDiscovery,
+    IProviderServiceLocationRegistry providerLocationRegistry,
+    IBookingTermsChangeService termsChangeService,
+    IOptions<PawfrontFeeOptions> feeOptions) : IBookingService, IDailyBookingReader, IDailyAgendaReader
 {
     public async Task<BookingResult> CreateAsync(
         CreateBookingCommand command,
@@ -53,6 +56,10 @@ internal sealed class BookingService(
         // categories ignore ServiceItemCode entirely — duration comes from the
         // offering itself (DayCare/NightStay minimum, Trainer/Vet fixed).
         string? serviceItemCode = null;
+        // Snapshot of the offering's unit rate, captured now so a later price edit
+        // by the provider never re-prices this booking. For DayCare/Vet/Trainer the
+        // rate is the offering price; for grooming it's the chosen menu item's price.
+        decimal? snapshotUnitPrice = offering.Price;
         if (offering.ServiceType == ProviderServiceTypes.GroomingSession)
         {
             if (string.IsNullOrWhiteSpace(command.ServiceItemCode))
@@ -64,27 +71,36 @@ internal sealed class BookingService(
             var itemResolution = await offeringResolver.ResolveGroomingItemAsync(
                 command.ProviderId, serviceItemCode, cancellationToken);
 
-            offering = itemResolution switch
+            switch (itemResolution)
             {
-                GroomingItemResolution.OfferingMissing
-                    => throw new BookingOfferingNotConfiguredException(command.ProviderId, offering.ServiceCategory),
-                GroomingItemResolution.NotOffered no
-                    => throw new BookingGroomingItemNotOfferedException(command.ProviderId, no.Code),
-                GroomingItemResolution.Inactive ia
-                    => throw new BookingGroomingItemInactiveException(command.ProviderId, ia.Code),
-                GroomingItemResolution.Resolved ri => offering with
-                {
-                    DurationHours = (decimal)ri.DurationMinutes / 60m,
-                    IsDurationFixed = true
-                },
-                _ => throw new InvalidOperationException("Unknown grooming item resolution.")
-            };
+                case GroomingItemResolution.OfferingMissing:
+                    throw new BookingOfferingNotConfiguredException(command.ProviderId, offering.ServiceCategory);
+                case GroomingItemResolution.NotOffered no:
+                    throw new BookingGroomingItemNotOfferedException(command.ProviderId, no.Code);
+                case GroomingItemResolution.Inactive ia:
+                    throw new BookingGroomingItemInactiveException(command.ProviderId, ia.Code);
+                case GroomingItemResolution.Resolved ri:
+                    offering = offering with
+                    {
+                        DurationHours = (decimal)ri.DurationMinutes / 60m,
+                        IsDurationFixed = true
+                    };
+                    snapshotUnitPrice = ri.Price;
+                    break;
+                default:
+                    throw new InvalidOperationException("Unknown grooming item resolution.");
+            }
         }
 
         // 2. Validate the booking duration matches the offering rule.
         var bookingDurationSpan = command.EndTime - command.StartTime;
         var bookingDurationHours = (decimal)bookingDurationSpan.TotalHours;
         ValidateDuration(bookingDurationHours, offering);
+
+        // 2b. The service must start at least the minimum lead time from now. The
+        // slot surfaces already hide these windows, so reaching here means a stale
+        // slot list or a hand-rolled request.
+        BookingLeadTime.EnsureFarEnoughAhead(command.BookingDate, command.StartTime, DateTimeOffset.UtcNow);
 
         // 3. Validate the requested window fits inside the provider's weekly availability.
         await ValidateAgainstAvailabilityAsync(
@@ -94,7 +110,15 @@ internal sealed class BookingService(
         await ValidateAgainstClosuresAsync(
             command.ServiceId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
-        // 4. Hand off to the SQL sproc (capacity check + insert is race-safe there).
+        // 4. Snapshot the provider's business address when the service happens at
+        // their place (price-lock sibling): resolve it now (Cosmos + registration)
+        // and hand it to the sproc so a later address edit never moves this booking.
+        // ParentLocation snapshots the parent's address inside the sproc.
+        var locationType = BookingLocationTypes.NormalizeOptional(command.LocationType);
+        var providerAddress = await ResolveProviderAddressSnapshotAsync(
+            command.ProviderId, locationType, offering.ServiceCategory, cancellationToken);
+
+        // 5. Hand off to the SQL sproc (capacity check + insert is race-safe there).
         return await sqlStore.CreateAsync(
             command.ProviderId,
             command.PetParentId,
@@ -107,8 +131,67 @@ internal sealed class BookingService(
             command.StartTime,
             command.EndTime,
             TrimOrNull(command.JobNotes, maxLength: 2000, nameof(command.JobNotes)),
+            locationType,
+            snapshotUnitPrice,
+            providerAddress,
             offering.Capacity,
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Resolves the provider's business address to snapshot onto a ProviderLocation
+    /// booking (Cosmos service doc + registration coordinates). Returns null for any
+    /// other location type — the sproc snapshots the parent's address instead.
+    /// Best-effort: a failed lookup yields a snapshot with null sub-fields, so the
+    /// detail read falls back to live resolution for that booking. Shared with the
+    /// night-stay create flow.
+    /// </summary>
+    internal static async Task<ProviderAddressSnapshot?> ResolveProviderAddressSnapshotAsync(
+        IProviderDiscoveryService providerDiscovery,
+        IProviderServiceLocationRegistry providerLocationRegistry,
+        Guid providerId,
+        string? locationType,
+        string serviceCategory,
+        CancellationToken cancellationToken)
+    {
+        if (locationType != BookingLocationTypes.ProviderLocation)
+        {
+            return null;
+        }
+
+        var summary = await TryGetProviderSummaryAsync(
+            providerDiscovery, providerId, serviceCategory, cancellationToken);
+        var location = await ResolveProviderLocationAsync(
+            providerLocationRegistry, providerId, summary, cancellationToken);
+        return new ProviderAddressSnapshot(
+            location.AddressLine, location.City, location.ZipCode, location.Latitude, location.Longitude);
+    }
+
+    private Task<ProviderAddressSnapshot?> ResolveProviderAddressSnapshotAsync(
+        Guid providerId, string? locationType, string serviceCategory, CancellationToken cancellationToken)
+        => ResolveProviderAddressSnapshotAsync(
+            providerDiscovery, providerLocationRegistry, providerId, locationType, serviceCategory, cancellationToken);
+
+    /// <summary>
+    /// Builds the location block from the booking's frozen snapshot columns, or null
+    /// when the booking predates snapshotting (all snapshot fields null) so the caller
+    /// falls back to live resolution. Shared with the night-stay detail flow.
+    /// </summary>
+    internal static BookingLocationResult? TrySnapshotLocation(
+        string? locationType,
+        string? addressLine,
+        string? city,
+        string? zipCode,
+        decimal? latitude,
+        decimal? longitude)
+    {
+        if (addressLine is null && city is null && zipCode is null
+            && latitude is null && longitude is null)
+        {
+            return null;
+        }
+
+        return new BookingLocationResult(locationType, addressLine, city, zipCode, latitude, longitude);
     }
 
     public async Task<BookingResult> CreateCustomAsync(
@@ -160,7 +243,10 @@ internal sealed class BookingService(
         }
 
         // 2. Scheduling: working hours, break, closure. Same gates as the app
-        // booking path so the provider's calendar stays consistent.
+        // booking path so the provider's calendar stays consistent — EXCEPT the
+        // booking lead time, which deliberately does not apply here. A custom
+        // booking records a walk-in the provider is serving now; requiring it to
+        // be entered two hours ahead would make the feature unusable.
         await ValidateAgainstAvailabilityAsync(
             command.ProviderId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
@@ -217,32 +303,116 @@ internal sealed class BookingService(
         }
         else
         {
+            // The offering supplies the service location (and, for legacy rows
+            // without a price snapshot, the live rate). A price-locked booking is
+            // still priced from its snapshot even if the offering was since
+            // deactivated — that's the whole point of the snapshot.
             var resolution = await offeringResolver.ResolveAsync(row.ServiceId, cancellationToken);
-            if (resolution is OfferingResolution.Resolved offering)
-            {
-                serviceLocation = offering.ServiceLocation;
-                (unitPrice, total) = await ResolveAppPricingAsync(offering, row, durationHours, cancellationToken);
-            }
-            else
-            {
-                // Service deactivated / not configured — can't price or locate it.
-                serviceLocation = null;
-                (unitPrice, total) = (null, null);
-            }
+            var offering = resolution as OfferingResolution.Resolved;
+            serviceLocation = offering?.ServiceLocation;
+            (unitPrice, total) = await ResolveAppPricingAsync(offering, row, durationHours, cancellationToken);
         }
 
-        var feePercentage = feeOptions.Value.PawfrontFeePercentage;
+        // Private (Custom walk-in) jobs are arranged off-platform — Pawfront takes
+        // no commission on them, so the fee facts are zero (not null: the payment
+        // block still renders, it just shows no fee/taxes).
+        var feePercentage = isCustom ? 0m : feeOptions.Value.PawfrontFeePercentage;
         decimal? fee = total is null
             ? null
             : Math.Round(total.Value * feePercentage / 100m, 2, MidpointRounding.AwayFromZero);
 
-        // The provider's advertised cancellation policy travels in its own section.
-        var policy = await policyService.GetAsync(row.ProviderId, cancellationToken);
+        // The provider's business summary (name/address/city/zip) is needed for the
+        // providerDetails address block on every read, and — when a legacy row has no
+        // frozen location snapshot — for the location block too. Fetch it once
+        // (best-effort) and reuse.
+        var providerSummary = await TryGetProviderSummaryAsync(
+            providerDiscovery, row.ProviderId, row.ServiceCategory, cancellationToken);
+
+        // Prefer the "where does the service happen" address frozen onto the booking
+        // at creation, falling back to live resolution (parent profile / provider
+        // business address) only for legacy rows created before snapshotting shipped.
+        var location = TrySnapshotLocation(
+                row.LocationType, row.SnapshotAddressLine, row.SnapshotCity,
+                row.SnapshotZipCode, row.SnapshotLatitude, row.SnapshotLongitude)
+            ?? row.LocationType switch
+            {
+                BookingLocationTypes.ParentLocation => new BookingLocationResult(
+                    BookingLocationTypes.ParentLocation,
+                    row.ParentAddressLine, row.ParentCity, row.ParentZipCode,
+                    row.ParentLatitude, row.ParentLongitude),
+                BookingLocationTypes.ProviderLocation => await ResolveProviderLocationAsync(
+                    providerLocationRegistry, row.ProviderId, providerSummary, cancellationToken),
+                _ => new BookingLocationResult(row.LocationType, null, null, null, null, null)
+            };
 
         var jobId = $"PF-{row.JobNumber:D6}";
+        // The advertised cancellation policy is snapshotted onto the booking (frozen
+        // at creation); a null value legitimately means "no cancellation restriction".
         return new BookingDetailResult(
             row, jobId, unitPrice, total, fee, feePercentage,
-            serviceLocation, policy.MinimumHoursBeforeCancellation);
+            serviceLocation, row.CancellationPolicyHours, location,
+            providerSummary?.Address, providerSummary?.City, providerSummary?.Zip);
+    }
+
+    /// <summary>
+    /// Best-effort read of the provider's business summary (name / address / city /
+    /// zip from the Cosmos service doc). Returns null on any failure so a booking
+    /// detail never fails on the provider-side lookup. Shared with the night-stay
+    /// detail flow.
+    /// </summary>
+    internal static async Task<ProviderSummary?> TryGetProviderSummaryAsync(
+        IProviderDiscoveryService providerDiscovery,
+        Guid providerId,
+        string serviceCategory,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await providerDiscovery.GetSummaryAsync(providerId, serviceCategory, cancellationToken);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Builds the ProviderLocation block from the (pre-fetched, best-effort)
+    /// provider business <paramref name="providerSummary"/> — its street / city /
+    /// zip — plus the registered coordinates (SQL registration row). A
+    /// failed/missing registration lookup yields null lat/lng rather than failing
+    /// the detail read. Shared with the night-stay detail flow. The summary is
+    /// resolved by the caller via <see cref="TryGetProviderSummaryAsync"/> so it can
+    /// be reused for the providerDetails address block on the same read.
+    /// </summary>
+    internal static async Task<BookingLocationResult> ResolveProviderLocationAsync(
+        IProviderServiceLocationRegistry providerLocationRegistry,
+        Guid providerId,
+        ProviderSummary? providerSummary,
+        CancellationToken cancellationToken)
+    {
+        var addressLine = providerSummary?.Address;
+        var city = providerSummary?.City;
+        var zip = providerSummary?.Zip;
+        decimal? latitude = null;
+        decimal? longitude = null;
+
+        try
+        {
+            var registration = await providerLocationRegistry.GetByProviderIdAsync(providerId, cancellationToken);
+            if (registration is not null)
+            {
+                latitude = registration.Latitude;
+                longitude = registration.Longitude;
+            }
+        }
+        catch
+        {
+            // Best-effort — coordinates degrade to null.
+        }
+
+        return new BookingLocationResult(
+            BookingLocationTypes.ProviderLocation, addressLine, city, zip, latitude, longitude);
     }
 
     private static (decimal? UnitPrice, decimal? Total) ResolveCustomPricing(
@@ -256,11 +426,30 @@ internal sealed class BookingService(
     }
 
     private async Task<(decimal? UnitPrice, decimal? Total)> ResolveAppPricingAsync(
-        OfferingResolution.Resolved offering,
+        OfferingResolution.Resolved? offering,
         BookingDetailRow row,
         decimal durationHours,
         CancellationToken cancellationToken)
     {
+        // Prefer the price-locked snapshot captured on the booking at creation
+        // time, so a later rate change (or a full deactivation) by the provider
+        // never re-prices this booking. Only DayCare (PetSitter) bills per hour;
+        // every other single-day service (Vet / Trainer / grooming item) is a flat
+        // fee. Legacy rows with no snapshot fall through to the live offering below.
+        if (row.PricePerHour is decimal snapshot)
+        {
+            var perHour = string.Equals(
+                row.ServiceCategory, nameof(ProviderServiceCategory.PetSitter), StringComparison.Ordinal);
+            var snapshotTotal = perHour ? snapshot * durationHours : snapshot;
+            return (snapshot, Math.Round(snapshotTotal, 2, MidpointRounding.AwayFromZero));
+        }
+
+        // No snapshot (legacy row) AND the offering is gone — can't price it.
+        if (offering is null)
+        {
+            return (null, null);
+        }
+
         // PetGroomer: the unit price is per menu item, resolved from the booking's
         // own ServiceItemCode. Grooming is a flat per-service charge (one item).
         if (offering.ServiceType == ProviderServiceTypes.GroomingSession)
@@ -298,7 +487,7 @@ internal sealed class BookingService(
         CancellationToken cancellationToken)
         => sqlStore.ListByProviderAsync(providerId, date, cancellationToken);
 
-    public Task<IReadOnlyList<BookingResult>> ListByPetParentAsync(Guid petParentId, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<BookingListItemResult>> ListByPetParentAsync(Guid petParentId, CancellationToken cancellationToken)
         => sqlStore.ListByPetParentAsync(petParentId, cancellationToken);
 
     public Task<BookingResult> UpdateStatusAsync(
@@ -321,16 +510,22 @@ internal sealed class BookingService(
         CompleteBookingCommand command,
         CancellationToken cancellationToken)
     {
-        // Validate the consultation request BEFORE transitioning, so a bad body
-        // doesn't leave the booking completed with the date silently dropped.
+        // Validate the consultation + prescription requests BEFORE transitioning,
+        // so a bad body doesn't leave the booking completed with the extras
+        // silently dropped. Fetch the booking once if either rides along.
         string? consultationType = null;
         Guid? petId = null;
+
+        BookingResult? booking = null;
+        if (command.NextConsultationDate is not null || command.Prescription is not null)
+        {
+            booking = await sqlStore.GetAsync(command.BookingId, cancellationToken)
+                ?? throw new BookingNotFoundException(command.BookingId);
+        }
+
         if (command.NextConsultationDate is { } nextDate)
         {
-            var booking = await sqlStore.GetAsync(command.BookingId, cancellationToken)
-                ?? throw new BookingNotFoundException(command.BookingId);
-
-            consultationType = booking.ServiceCategory switch
+            consultationType = booking!.ServiceCategory switch
             {
                 nameof(ProviderServiceCategory.PetGroomer) => "Groomer",
                 nameof(ProviderServiceCategory.Vet) => "Vet",
@@ -347,23 +542,118 @@ internal sealed class BookingService(
             }
         }
 
-        var result = await sqlStore.UpdateStatusAsync(
+        // A prescription is Vet-only. The sproc re-checks (defense-in-depth) after
+        // the transition, but reject early so we don't complete then fail.
+        if (command.Prescription is not null
+            && !string.Equals(
+                booking!.ServiceCategory, nameof(ProviderServiceCategory.Vet), StringComparison.Ordinal))
+        {
+            throw new BookingPrescriptionNotVetException(command.BookingId);
+        }
+
+        // No OTP gates completion — the sproc enforces party + from-state
+        // (IN_PROGRESS) and flips the booking to COMPLETED with an audit row.
+        var result = await sqlStore.CompleteAsync(
             command.BookingId,
-            BookingStatuses.Completed,
-            BookingStatusActor.Provider,
             command.ProviderId,
-            note: null,
             cancellationToken);
 
-        // Only stored once the transition succeeded — the status engine is the
-        // authority on party/from-state rules.
+        // Extras are stored only once the transition succeeded — the status engine
+        // is the authority on party/from-state rules.
         if (consultationType is not null && petId is not null)
         {
             await nextConsultationStore.UpsertAsync(
                 petId.Value, consultationType, command.NextConsultationDate!.Value, cancellationToken);
         }
 
+        if (command.Prescription is { } prescription)
+        {
+            await sqlStore.UpsertPrescriptionAsync(
+                command.BookingId,
+                command.ProviderId,
+                NormalizePrescriptionText(prescription.PrescriptionText),
+                prescription.IsPetVaccinated,
+                NormalizeVaccinations(prescription.Vaccinations),
+                cancellationToken);
+        }
+
         return result;
+    }
+
+    public async Task<BookingResult> MarkPaidAsync(
+        MarkBookingPaidCommand command,
+        CancellationToken cancellationToken)
+    {
+        var method = BookingPaymentMethods.Normalize(command.PaymentMethod);
+
+        // The amount is the booking's price-locked total (same figure the detail
+        // read shows) — a single source of truth for pricing. The sproc enforces
+        // party / from-state (COMPLETED) / App-only and rejects otherwise.
+        var detail = await GetDetailAsync(command.BookingId, cancellationToken)
+            ?? throw new BookingNotFoundException(command.BookingId);
+        if (detail.TotalAmount is null)
+        {
+            throw new BookingNotPriceableException(command.BookingId);
+        }
+
+        return await sqlStore.MarkPaidAsync(
+            command.BookingId,
+            command.ProviderId,
+            detail.TotalAmount.Value,
+            detail.PawfrontFee ?? 0m,
+            method,
+            cancellationToken);
+    }
+
+    public Task<BookingPrescriptionResult> UpsertPrescriptionAsync(
+        UpsertBookingPrescriptionCommand command,
+        CancellationToken cancellationToken)
+        => sqlStore.UpsertPrescriptionAsync(
+            command.BookingId,
+            command.ProviderId,
+            NormalizePrescriptionText(command.PrescriptionText),
+            command.IsPetVaccinated,
+            NormalizeVaccinations(command.Vaccinations),
+            cancellationToken);
+
+    private static string? NormalizePrescriptionText(string? value)
+    {
+        var trimmed = value?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return null;
+        }
+        if (trimmed.Length > 4000)
+        {
+            throw new ArgumentException(
+                "PrescriptionText must be 4000 characters or fewer.", nameof(value));
+        }
+        return trimmed;
+    }
+
+    private static IReadOnlyList<string> NormalizeVaccinations(IReadOnlyList<string>? values)
+    {
+        if (values is null || values.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var cleaned = values
+            .Select(v => v?.Trim())
+            .Where(v => !string.IsNullOrEmpty(v))
+            .Select(v => v!)
+            .ToArray();
+
+        foreach (var vaccine in cleaned)
+        {
+            if (vaccine.Length > 200)
+            {
+                throw new ArgumentException(
+                    "Each vaccination name must be 200 characters or fewer.", nameof(values));
+            }
+        }
+
+        return cleaned;
     }
 
     public Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
@@ -377,6 +667,12 @@ internal sealed class BookingService(
         CancellationToken cancellationToken)
         => sqlStore.GetBookingsForDateAsync(serviceId, date, cancellationToken);
 
+    public Task<IReadOnlyList<AgendaBookingRow>> GetAgendaForDateAsync(
+        Guid serviceId,
+        DateOnly date,
+        CancellationToken cancellationToken)
+        => sqlStore.GetAgendaForDateAsync(serviceId, date, cancellationToken);
+
     // --- Job lifecycle: start-OTP, evidence, modifications ------------------
 
     private const int StartOtpTtlMinutes = 10;
@@ -384,8 +680,13 @@ internal sealed class BookingService(
     public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken)
         => sqlStore.IssueStartOtpAsync(bookingId, GenerateOtpCode(), StartOtpTtlMinutes, cancellationToken);
 
-    public Task<BookingResult> StartWithOtpAsync(StartBookingCommand command, CancellationToken cancellationToken)
-        => sqlStore.StartWithOtpAsync(command.BookingId, command.ProviderId, (command.OtpCode ?? string.Empty).Trim(), cancellationToken);
+    public Task<BookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken)
+        => sqlStore.StartJobAsync(
+            command.BookingId, command.ProviderId, GenerateOtpCode(), StartOtpTtlMinutes, cancellationToken);
+
+    public Task<BookingResult> VerifyStartOtpAsync(
+        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+        => sqlStore.VerifyStartOtpAsync(bookingId, providerId, (otpCode ?? string.Empty).Trim(), cancellationToken);
 
     public async Task<BookingResult> RequestModificationAsync(
         RequestBookingModificationCommand command,
@@ -446,10 +747,27 @@ internal sealed class BookingService(
         await ValidateAgainstClosuresAsync(
             booking.ServiceId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
+        // The booking froze the provider's terms at creation. If they have drifted
+        // since, the requester must have seen and confirmed the new ones — the app
+        // shows them from the terms-changes endpoint. An un-acknowledged request
+        // against a drifted booking is rejected rather than silently proposing a
+        // schedule under terms the requester never saw.
+        var drift = await termsChangeService.GetForBookingAsync(command.BookingId, cancellationToken);
+        BookingAcknowledgedTerms? acknowledgedTerms = null;
+        if (drift.HasChanges)
+        {
+            if (!command.AcknowledgeTermsChanges)
+            {
+                throw new BookingTermsChangedException(command.BookingId);
+            }
+
+            acknowledgedTerms = drift.AcknowledgedTerms;
+        }
+
         return await sqlStore.RequestModificationAsync(
             command.BookingId, command.Actor, command.ActorId,
             command.BookingDate, command.StartTime, command.EndTime,
-            command.Note, cancellationToken);
+            command.Note, acknowledgedTerms, cancellationToken);
     }
 
     public Task<BookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)

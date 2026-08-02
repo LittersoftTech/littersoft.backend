@@ -69,6 +69,17 @@ internal sealed class ProviderWindowAvailabilityChecker(
             return false;
         }
 
+        // NightStay is date-granular — the window maps to "can the pet board
+        // that night", so probe the night's remaining capacity instead of the
+        // hourly slot walk.
+        if (offering.ServiceType == ProviderServiceTypes.NightStay)
+        {
+            var nightResult = await TryGetSlotsAsync(
+                providerId, serviceId, date, durationHours: 0m, serviceItemCode: null, cancellationToken);
+            return nightResult?.Nights is not null
+                && nightResult.Nights.Any(n => n.Date == date && n.IsAvailable);
+        }
+
         // Window shorter than the service's fixed/minimum duration can never
         // host a booking — skip without hitting the slot walker.
         if (windowHours < offering.DurationHours)
@@ -167,7 +178,8 @@ internal sealed class ProviderWindowAvailabilityChecker(
     {
         foreach (var slot in slots)
         {
-            if (slot.StartTime >= startTime && slot.EndTime <= endTime)
+            // Zero-capacity slots are emitted for display but are not bookable.
+            if (slot.RemainingCapacity > 0 && slot.StartTime >= startTime && slot.EndTime <= endTime)
             {
                 return true;
             }

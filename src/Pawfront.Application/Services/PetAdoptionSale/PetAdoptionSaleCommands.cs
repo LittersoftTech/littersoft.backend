@@ -6,11 +6,11 @@ public sealed record RegisterPetShelterCommand(
     string Address,
     string Zip,
     string City,
-    string TelephoneCountryCode,
-    string TelephoneNumber,
+    string? TelephoneCountryCode,
+    string? TelephoneNumber,
     string Email,
     string? Website,
-    string Description,
+    string? Description,
     string? ShelterImageUrl);
 
 public sealed record RegisterPetShopCommand(
@@ -19,11 +19,11 @@ public sealed record RegisterPetShopCommand(
     string Address,
     string Zip,
     string City,
-    string TelephoneCountryCode,
-    string TelephoneNumber,
+    string? TelephoneCountryCode,
+    string? TelephoneNumber,
     string Email,
     string? Website,
-    string Description,
+    string? Description,
     string? ShopImageUrl);
 
 public sealed record RegisterFreelancePetAdoptionSaleCommand(
@@ -32,7 +32,7 @@ public sealed record RegisterFreelancePetAdoptionSaleCommand(
     string Zip,
     string City,
     string? Website,
-    string AboutYou,
+    string? AboutYou,
     string? ProfileImageUrl);
 
 public sealed record PetAdoptionSaleServiceResult(

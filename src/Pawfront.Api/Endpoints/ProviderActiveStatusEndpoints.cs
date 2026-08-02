@@ -61,5 +61,11 @@ internal static class ProviderActiveStatusEndpoints
         {
             return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
         }
+        catch (ProviderAccountDeletedException exception)
+        {
+            // A deleted account stays disabled — reactivating would make an
+            // anonymised provider bookable again.
+            return ApiResults.Conflict("ProviderAccountDeleted", exception.Message);
+        }
     }
 }

@@ -43,6 +43,9 @@ internal static class PetParentEndpoints
         var group = builder.MapGroup("/pet-parents/{petParentId:guid}").RequireOwnedPetParent();
         group.MapGet("/profile", GetProfile);
         group.MapPatch("/profile", UpdateProfile);
+        // "Delete account" — anonymise + permanently disable. The ownership
+        // filter on this group is what restricts it to the caller's own account.
+        group.MapDelete("/", DeleteAccount);
         group.MapPost("/profile-image", UploadProfilePhoto).DisableAntiforgery();
         group.MapPost("/pets", AddPet);
         group.MapGet("/pets", ListPets);
@@ -63,6 +66,10 @@ internal static class PetParentEndpoints
         group.MapGet("/bookings/{bookingId:guid}/status-history", GetBookingStatusHistory);
         // Per-transition endpoints (parent actor).
         group.MapPost("/bookings/{bookingId:guid}/cancel", ParentCancelServiceBooking);
+        group.MapPost("/bookings/{bookingId:guid}/no-show", ReportProviderNoShow);
+        // What the provider has changed since the booking was made — read this
+        // before opening the edit screen so the app can confirm the new terms.
+        group.MapGet("/bookings/{bookingId:guid}/terms-changes", GetServiceBookingTermsChanges);
         group.MapPost("/bookings/{bookingId:guid}/modifications", RequestServiceBookingModification);
         group.MapPost("/bookings/{bookingId:guid}/modifications/accept", AcceptServiceBookingModification);
         group.MapPost("/bookings/{bookingId:guid}/modifications/decline", DeclineServiceBookingModification);
@@ -165,7 +172,8 @@ internal static class PetParentEndpoints
 
     /// <summary>
     /// Maps an enriched single-day booking into the sectioned "my bookings" card —
-    /// the booking, the booked provider's details, and the service details + price.
+    /// the booking, the booked provider's details, the service details + price, and
+    /// the frozen-at-creation cancellation-policy + selected-location blocks.
     /// </summary>
     private static ParentServiceBookingCardResponse ToServiceBookingCard(EnrichedBookingCard card)
     {
@@ -183,7 +191,16 @@ internal static class PetParentEndpoints
                 b.ServiceId,
                 card.ServiceType,
                 b.ServiceItemCode,
-                card.PricePerHour));
+                card.PricePerHour,
+                card.ServiceDescription),
+            new CancellationPolicyDetailsSection(card.CancellationPolicyHours),
+            new BookingLocationDetailsSection(
+                card.Location.LocationType,
+                card.Location.AddressLine,
+                card.Location.City,
+                card.Location.ZipCode,
+                card.Location.Latitude,
+                card.Location.Longitude));
     }
 
     /// <summary>
@@ -201,6 +218,15 @@ internal static class PetParentEndpoints
         IPetParentOwnershipReader ownershipReader,
         CancellationToken cancellationToken)
     {
+        // The parent must say where the service happens — the detail read
+        // resolves the matching address from this choice.
+        if (string.IsNullOrWhiteSpace(request.LocationType))
+        {
+            return ApiResults.BadRequest(
+                "InvalidRequest",
+                "locationType is required. Use 'ParentLocation' or 'ProviderLocation'.");
+        }
+
         var pet = await ownershipReader.GetPetLookupAsync(request.PetId, cancellationToken);
         if (pet is null)
         {
@@ -233,7 +259,8 @@ internal static class PetParentEndpoints
                     request.EndTime,
                     request.ServiceItemCode,
                     request.JobNotes,
-                    request.PetId),
+                    request.PetId,
+                    request.LocationType),
                 cancellationToken);
             return ApiResults.Ok(ToBookingResponse(result));
         }
@@ -281,6 +308,10 @@ internal static class PetParentEndpoints
         {
             return ApiResults.Conflict("CapacityExceeded", exception.Message);
         }
+        catch (PetAlreadyBookedException exception)
+        {
+            return ApiResults.Conflict("PetAlreadyBooked", exception.Message);
+        }
         catch (ProviderClosedOnDateException exception)
         {
             return ApiResults.Conflict("ServiceClosed", exception.Message);
@@ -289,9 +320,17 @@ internal static class PetParentEndpoints
         {
             return ApiResults.BadRequest("InvalidBookingTime", exception.Message);
         }
+        catch (BookingLeadTimeTooShortException exception)
+        {
+            return ApiResults.Conflict("BookingLeadTimeTooShort", exception.Message);
+        }
         catch (BookingNightStayUseDedicatedEndpointException exception)
         {
             return ApiResults.BadRequest("UseNightStayEndpoint", exception.Message);
+        }
+        catch (UnsupportedBookingLocationTypeException exception)
+        {
+            return ApiResults.BadRequest("UnsupportedLocationType", exception.Message);
         }
         catch (ArgumentException exception)
         {
@@ -323,29 +362,9 @@ internal static class PetParentEndpoints
                 cancellationToken);
             return ApiResults.Ok(ToBookingResponse(result));
         }
-        catch (UnsupportedBookingStatusException exception)
+        catch (Exception ex) when (IsBookingError(ex))
         {
-            return ApiResults.BadRequest("UnsupportedBookingStatus", exception.Message);
-        }
-        catch (BookingNotFoundException exception)
-        {
-            return ApiResults.NotFound("BookingNotFound", exception.Message);
-        }
-        catch (BookingStatusForbiddenException exception)
-        {
-            return ApiResults.Forbidden("Forbidden", exception.Message);
-        }
-        catch (BookingStatusNotAllowedException exception)
-        {
-            return ApiResults.BadRequest("BookingStatusNotAllowed", exception.Message);
-        }
-        catch (BookingStatusTerminalException exception)
-        {
-            return ApiResults.Conflict("BookingStatusTerminal", exception.Message);
-        }
-        catch (BookingStatusUnchangedException exception)
-        {
-            return ApiResults.Conflict("BookingStatusUnchanged", exception.Message);
+            return MapBookingError(ex);
         }
     }
 
@@ -382,8 +401,11 @@ internal static class PetParentEndpoints
             return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
         }
 
+        // The start-OTP is shown only while the booking is START_JOB (provider
+        // tapped "Start Job"). The parent reads it to the provider, who enters it
+        // to move the job to IN_PROGRESS. Absent in every other state.
         StartOtpResponse? startOtp = null;
-        if (BookingStatuses.ConfirmedEquivalent.Contains(detail.Row.Status))
+        if (detail.Row.Status == BookingStatuses.StartJob)
         {
             var otp = await bookingService.IssueStartOtpAsync(bookingId, cancellationToken);
             startOtp = new StartOtpResponse(otp.OtpCode, otp.ExpiresAtUtc);
@@ -397,7 +419,8 @@ internal static class PetParentEndpoints
                 ? null
                 : new BookingModificationResponse(
                     mod.BookingModificationId, mod.BookingId, mod.RequestedByActor, mod.RequestedByActorId,
-                    mod.ProposedBookingDate, mod.ProposedStartTime, mod.ProposedEndTime, mod.Note, mod.CreatedAtUtc);
+                    mod.ProposedBookingDate, mod.ProposedStartTime, mod.ProposedEndTime, mod.Note, mod.CreatedAtUtc,
+                    ToAcknowledgedTermsResponse(mod.AcknowledgedTerms));
         }
 
         return ApiResults.Ok(ToBookingDetailResponse(detail, startOtp, pending));
@@ -406,6 +429,14 @@ internal static class PetParentEndpoints
     private static Task<IResult> ParentCancelServiceBooking(
         Guid petParentId, Guid bookingId, IBookingService s, CancellationToken ct)
         => SetParentBookingStatusAsync(petParentId, bookingId, BookingStatuses.ParentCancelled, s, ct);
+
+    /// <summary>
+    /// The parent reports that the provider never showed up. Only allowed
+    /// 30+ minutes after the booking's scheduled start (409 NoShowTooEarly).
+    /// </summary>
+    private static Task<IResult> ReportProviderNoShow(
+        Guid petParentId, Guid bookingId, IBookingService s, CancellationToken ct)
+        => SetParentBookingStatusAsync(petParentId, bookingId, BookingStatuses.ProviderNoShow, s, ct);
 
     private static async Task<IResult> SetParentBookingStatusAsync(
         Guid petParentId, Guid bookingId, string status, IBookingService bookingService, CancellationToken cancellationToken)
@@ -423,6 +454,46 @@ internal static class PetParentEndpoints
         }
     }
 
+    /// <summary>
+    /// The provider's terms that changed since this booking was created — the
+    /// parent-host twin of the provider surface. Always 200; an unchanged booking
+    /// reports <c>hasChanges: false</c> with an empty list.
+    /// </summary>
+    private static async Task<IResult> GetServiceBookingTermsChanges(
+        Guid petParentId,
+        Guid bookingId,
+        IBookingService bookingService,
+        IBookingTermsChangeService termsChangeService,
+        CancellationToken cancellationToken)
+    {
+        // Confirm the booking is this parent's before diffing it (404 rather than
+        // leaking existence — or the provider's terms).
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.PetParentId != petParentId)
+        {
+            return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
+        }
+
+        var result = await termsChangeService.GetForBookingAsync(bookingId, cancellationToken);
+        return ApiResults.Ok(ToTermsChangesResponse(result));
+    }
+
+    // Shared with this host's NightStayBookingEndpoints (same assembly, same shape).
+    internal static BookingTermsChangesResponse ToTermsChangesResponse(BookingTermsChangeResult result) =>
+        new(result.BookingId,
+            result.HasChanges,
+            result.Changes
+                .Select(c => new BookingTermsChangeResponse(
+                    c.Field, c.ChangeType, c.BookedValue, c.CurrentValue, c.Message))
+                .ToList());
+
+    internal static AcknowledgedTermsResponse? ToAcknowledgedTermsResponse(BookingAcknowledgedTerms? terms) =>
+        terms is null
+            ? null
+            : new AcknowledgedTermsResponse(
+                terms.UnitPrice, terms.CancellationPolicyHours, terms.DropOffTime, terms.PickUpTime,
+                terms.AddressLine, terms.City, terms.ZipCode, terms.Latitude, terms.Longitude);
+
     private static async Task<IResult> RequestServiceBookingModification(
         Guid petParentId, Guid bookingId, RequestBookingModificationRequest request,
         IBookingService bookingService, CancellationToken cancellationToken)
@@ -437,7 +508,8 @@ internal static class PetParentEndpoints
             var result = await bookingService.RequestModificationAsync(
                 new RequestBookingModificationCommand(
                     bookingId, BookingStatusActor.Parent, petParentId,
-                    request.BookingDate, request.StartTime, request.EndTime, request.Note),
+                    request.BookingDate, request.StartTime, request.EndTime, request.Note,
+                    request.AcknowledgeTermsChanges),
                 cancellationToken);
             return ApiResults.Ok(ToBookingResponse(result));
         }
@@ -488,14 +560,19 @@ internal static class PetParentEndpoints
 
     private static bool IsBookingError(Exception ex) => ex is
         BookingNotFoundException or BookingStatusForbiddenException or BookingNotStartableException
+        or BookingJobInProgressException
         or InvalidStartOtpException or StartOtpExpiredException or BookingNotModifiableException
         or BookingModificationConflictException or NoPendingModificationException
-        or BookingModificationCapacityException or BookingServiceInvalidException
+        or BookingModificationCapacityException or BookingTermsChangedException
+        or BookingModificationWindowClosedException or BookingModificationExpiredException
+        or BookingServiceInvalidException
         or BookingOfferingNotConfiguredException or BookingGroomingItemCodeRequiredException
         or BookingGroomingItemNotOfferedException or BookingGroomingItemInactiveException
         or ProviderClosedOnDateException or InvalidBookingTimeException
+        or BookingLeadTimeTooShortException
         or BookingNightStayUseDedicatedEndpointException or BookingStatusNotAllowedException
         or BookingStatusTerminalException or BookingStatusUnchangedException
+        or BookingNoShowTooEarlyException or BookingExpiredException
         or UnsupportedBookingStatusException or ArgumentException;
 
     private static IResult MapBookingError(Exception ex) => ex switch
@@ -503,12 +580,16 @@ internal static class PetParentEndpoints
         BookingNotFoundException e => ApiResults.NotFound("BookingNotFound", e.Message),
         BookingStatusForbiddenException e => ApiResults.Forbidden("Forbidden", e.Message),
         BookingNotStartableException e => ApiResults.Conflict("BookingNotStartable", e.Message),
+        BookingJobInProgressException e => ApiResults.Conflict("BookingInProgress", e.Message),
         InvalidStartOtpException e => ApiResults.BadRequest("InvalidStartOtp", e.Message),
         StartOtpExpiredException e => ApiResults.Conflict("StartOtpExpired", e.Message),
         BookingNotModifiableException e => ApiResults.Conflict("BookingNotModifiable", e.Message),
         BookingModificationConflictException e => ApiResults.Conflict("ModificationAlreadyPending", e.Message),
         NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
         BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
+        BookingTermsChangedException e => ApiResults.Conflict("BookingTermsChanged", e.Message),
+        BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
+        BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         BookingServiceInvalidException e => ApiResults.BadRequest("InvalidServiceId", e.Message),
         BookingOfferingNotConfiguredException e => ApiResults.BadRequest("OfferingNotConfigured", e.Message),
         BookingGroomingItemCodeRequiredException e => ApiResults.BadRequest("ServiceItemCodeRequired", e.Message),
@@ -516,10 +597,13 @@ internal static class PetParentEndpoints
         BookingGroomingItemInactiveException e => ApiResults.Conflict("ServiceItemInactive", e.Message),
         ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
         InvalidBookingTimeException e => ApiResults.BadRequest("InvalidBookingTime", e.Message),
+        BookingLeadTimeTooShortException e => ApiResults.Conflict("BookingLeadTimeTooShort", e.Message),
         BookingNightStayUseDedicatedEndpointException e => ApiResults.BadRequest("UseNightStayEndpoint", e.Message),
         BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),
         BookingStatusTerminalException e => ApiResults.Conflict("BookingStatusTerminal", e.Message),
         BookingStatusUnchangedException e => ApiResults.Conflict("BookingStatusUnchanged", e.Message),
+        BookingNoShowTooEarlyException e => ApiResults.Conflict("NoShowTooEarly", e.Message),
+        BookingExpiredException e => ApiResults.Conflict("BookingExpired", e.Message),
         UnsupportedBookingStatusException e => ApiResults.BadRequest("UnsupportedBookingStatus", e.Message),
         _ => ApiResults.BadRequest("InvalidRequest", ex.Message)
     };
@@ -600,7 +684,12 @@ internal static class PetParentEndpoints
                 row.CustomerMobileCountryCode ?? row.ParentMobileCountryCode,
                 row.CustomerMobile ?? row.ParentMobileNumber,
                 row.ParentGender,
-                row.ParentPhotoUrl),
+                row.ParentPhotoUrl,
+                row.ParentAddressLine,
+                row.ParentCity,
+                row.ParentZipCode,
+                row.ParentLatitude,
+                row.ParentLongitude),
             new PetDetailsSection(
                 row.PetId,
                 row.PetProfileName ?? row.PetName,
@@ -611,14 +700,20 @@ internal static class PetParentEndpoints
                 row.PetVaccinationStatus,
                 row.PetVaccinationType,
                 row.PetVaccinationDose,
-                row.PetPrescription),
+                row.PetPrescription,
+                row.PetSterilizationStatus,
+                row.PetMedicalHistory,
+                row.PetTemperament),
             new ProviderDetailsSection(
                 row.ProviderId,
                 CombineName(row.ProviderFirstName, row.ProviderLastName),
                 row.ProviderMobileCountryCode,
                 row.ProviderMobileNumber,
                 row.ProviderGender,
-                ProviderPhotoUrl: null),
+                ProviderPhotoUrl: null,
+                detail.ProviderAddress,
+                detail.ProviderCity,
+                detail.ProviderZip),
             new PaymentDetailsSection(
                 detail.PricePerHour,
                 detail.TotalAmount,
@@ -627,9 +722,29 @@ internal static class PetParentEndpoints
                 row.PayoutStatus,
                 row.PayoutId),
             new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
+            ToLocationSection(detail.Location),
             startOtp,
-            pendingModification);
+            pendingModification,
+            ToPrescriptionSection(row));
     }
+
+    /// <summary>Builds the detail read's prescription block — null until a vet records one.</summary>
+    private static PrescriptionDetailsSection? ToPrescriptionSection(BookingDetailRow row) =>
+        row.HasPrescription
+            ? new PrescriptionDetailsSection(
+                row.PrescriptionText,
+                row.IsPetVaccinated ?? false,
+                row.PrescriptionVaccinations ?? Array.Empty<string>(),
+                row.NextConsultationDate)
+            : null;
+
+    internal static BookingLocationDetailsSection ToLocationSection(BookingLocationResult location) =>
+        new(location.LocationType,
+            location.AddressLine,
+            location.City,
+            location.ZipCode,
+            location.Latitude,
+            location.Longitude);
 
     private static string? CombineName(string? first, string? last)
     {
@@ -668,6 +783,10 @@ internal static class PetParentEndpoints
         {
             return ApiResults.NotFound("PetParentNotFound", exception.Message);
         }
+        catch (PetParentAccountDeletedException exception)
+        {
+            return ApiResults.Conflict("ParentAccountDeleted", exception.Message);
+        }
         catch (UnsupportedPetParentGenderException exception)
         {
             return ApiResults.BadRequest("UnsupportedGender", exception.Message);
@@ -675,6 +794,29 @@ internal static class PetParentEndpoints
         catch (ArgumentException exception)
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    /// <summary>
+    /// "Delete account": anonymises the parent and their pets, severs the
+    /// Firebase login (freeing the uid AND the mobile number for a fresh
+    /// sign-up), and removes the operational data + stored media. Bookings,
+    /// events, tickets and the payment ledger are retained — deleting them would
+    /// destroy the provider's history too. Idempotent.
+    /// </summary>
+    private static async Task<IResult> DeleteAccount(
+        Guid petParentId,
+        IParentAccountService accountService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await accountService.DeleteAsync(petParentId, cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (PetParentNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetParentNotFound", exception.Message);
         }
     }
 

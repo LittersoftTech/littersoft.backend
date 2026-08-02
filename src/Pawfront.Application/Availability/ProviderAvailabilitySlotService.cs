@@ -9,10 +9,15 @@ internal sealed class ProviderAvailabilitySlotService(
     IProviderOfferingResolver offeringResolver,
     IProviderAvailabilityService availabilityService,
     IDailyBookingReader bookingReader,
+    INightStayOccupancyReader nightStayOccupancyReader,
     IProviderClosureReader closureReader) : IProviderAvailabilitySlotService
 {
     private const int MinGranularityMinutes = 1;
     private const int MaxGranularityMinutes = 240;
+
+    // A night-availability query can span at most this many nights (matches the
+    // 30-night stay cap, +1 headroom for a checkout-day-inclusive calendar).
+    private const int MaxNightRangeNights = 31;
 
     public async Task<AvailableSlotsResult> GetAvailableSlotsAsync(
         Guid providerId,
@@ -21,7 +26,8 @@ internal sealed class ProviderAvailabilitySlotService(
         decimal durationHours,
         int granularityMinutes,
         string? serviceItemCode,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        DateOnly? endDate = null)
     {
         if (granularityMinutes is < MinGranularityMinutes or > MaxGranularityMinutes)
         {
@@ -42,6 +48,17 @@ internal sealed class ProviderAvailabilitySlotService(
             OfferingResolution.Resolved r => r,
             _ => throw new InvalidOperationException("Unknown offering resolution.")
         };
+
+        // 1a. NightStay is DATE-granular, not hourly: a stay occupies whole
+        // nights and capacity (maxPetsAtOneTime) is per night. Instead of the
+        // hourly slot walk the result carries per-night remaining capacity —
+        // durationHours / granularity / the weekly time grid don't apply
+        // (mirrors the create path, which checks closures + per-night capacity
+        // but never working hours).
+        if (offering.ServiceType == ProviderServiceTypes.NightStay)
+        {
+            return await GetNightAvailabilityAsync(providerId, serviceId, offering, date, endDate, cancellationToken);
+        }
 
         // 1b. PetGroomer: ignore the request's durationHours; resolve the menu
         // item's duration server-side. The code is REQUIRED for this category.
@@ -114,9 +131,18 @@ internal sealed class ProviderAvailabilitySlotService(
         // 5. Read confirmed bookings for this service+date so we can subtract overlapping slots.
         var existingBookings = await bookingReader.GetBookingsForDateAsync(serviceId, date, cancellationToken);
 
-        // 6. Walk each window, emit slots whose overlap count is below capacity.
+        // 6. Walk each window, emit every slot with its remaining capacity
+        //    (fully-booked slots included, at remainingCapacity 0).
         var durationSpan = TimeSpan.FromHours((double)durationHours);
         var step = TimeSpan.FromMinutes(granularityMinutes);
+
+        // A booking needs a minimum lead time, so a slot starting sooner than
+        // that isn't bookable and is left out entirely — browsing at 11:00 makes
+        // 13:00 the first slot offered. Dropping (rather than zeroing) these is
+        // deliberate: remainingCapacity 0 means "full, try another day", which is
+        // the wrong thing to tell someone about a slot that simply came too soon.
+        // This is also what keeps today's ALREADY-ELAPSED slots out of the list.
+        var earliestStart = BookingLeadTime.EarliestBookableStart(DateTimeOffset.UtcNow);
 
         var slots = new List<TimeSlot>();
         foreach (var (windowStart, windowEnd) in windows)
@@ -129,10 +155,14 @@ internal sealed class ProviderAvailabilitySlotService(
                 var slotStart = new TimeOnly(cursorTicks);
                 var slotEnd = slotStart.Add(durationSpan);
 
-                var overlap = CountOverlaps(existingBookings, slotStart, slotEnd);
-                if (overlap < offering.Capacity)
+                if (BookingLeadTime.ServiceStartUtc(date, slotStart) >= earliestStart)
                 {
-                    slots.Add(new TimeSlot(slotStart, slotEnd));
+                    // Same overlap count the race-safe create sproc uses, so the
+                    // remaining capacity shown here is exactly what create will admit.
+                    // Fully-booked slots are still emitted with remainingCapacity 0
+                    // so the client can render them as unavailable.
+                    var overlap = CountOverlaps(existingBookings, slotStart, slotEnd);
+                    slots.Add(new TimeSlot(slotStart, slotEnd, Math.Max(0, offering.Capacity - overlap)));
                 }
 
                 cursorTicks += step.Ticks;
@@ -150,6 +180,78 @@ internal sealed class ProviderAvailabilitySlotService(
             offering.Capacity,
             granularityMinutes,
             slots);
+    }
+
+    /// <summary>
+    /// Date-granular NightStay availability: one entry per night in
+    /// [<paramref name="fromNight"/>, <paramref name="toNight"/>] with the
+    /// night's active-stay count and remaining capacity. A night is unavailable
+    /// when a full-day closure covers it, occupancy has reached the offering's
+    /// per-night capacity, or the stay would begin inside the booking lead-time
+    /// window — exactly the gates the create path enforces (partial-day closures
+    /// and the weekly time grid don't apply to an overnight stay).
+    /// </summary>
+    private async Task<AvailableSlotsResult> GetNightAvailabilityAsync(
+        Guid providerId,
+        Guid serviceId,
+        OfferingResolution.Resolved offering,
+        DateOnly fromNight,
+        DateOnly? toNight,
+        CancellationToken cancellationToken)
+    {
+        var lastNight = toNight ?? fromNight;
+        if (lastNight < fromNight)
+        {
+            throw new ArgumentException("endDate must be on or after date.", nameof(toNight));
+        }
+        if (lastNight.DayNumber - fromNight.DayNumber + 1 > MaxNightRangeNights)
+        {
+            throw new ArgumentException(
+                $"A night-availability query can span at most {MaxNightRangeNights} nights.",
+                nameof(toNight));
+        }
+
+        var occupancy = await nightStayOccupancyReader.GetNightlyOccupancyAsync(
+            serviceId, fromNight, lastNight, cancellationToken);
+
+        // A stay begins at drop-off on its check-in night, so the same lead-time
+        // rule the hourly walk applies gates the earliest bookable night. The
+        // night is still RETURNED (its occupancy is real information for a
+        // calendar) — it just isn't available. A pre-2026-08 offering with no
+        // drop-off time recorded falls back to the start of the night.
+        var earliestStart = BookingLeadTime.EarliestBookableStart(DateTimeOffset.UtcNow);
+        var dropOff = offering.DropOffTime ?? TimeOnly.MinValue;
+
+        var nights = new List<NightAvailability>();
+        for (var night = fromNight; night <= lastNight; night = night.AddDays(1))
+        {
+            var closures = await closureReader.GetActiveClosuresForDateAsync(serviceId, night, cancellationToken);
+            var isClosed = closures.Any(c => c.IsFullDay);
+            var isTooSoon = BookingLeadTime.ServiceStartUtc(night, dropOff) < earliestStart;
+
+            var activeStays = occupancy.TryGetValue(night, out var count) ? count : 0;
+            var remaining = isClosed ? 0 : Math.Max(0, offering.Capacity - activeStays);
+
+            nights.Add(new NightAvailability(
+                night,
+                activeStays,
+                remaining,
+                isClosed,
+                IsAvailable: remaining > 0 && !isTooSoon));
+        }
+
+        return new AvailableSlotsResult(
+            providerId,
+            serviceId,
+            fromNight,
+            offering.ServiceCategory,
+            offering.SubCategory,
+            offering.ServiceType,
+            DurationHours: 0m,
+            offering.Capacity,
+            GranularityMinutes: 0,
+            Slots: Array.Empty<TimeSlot>(),
+            Nights: nights);
     }
 
     private static AvailableSlotsResult EmptySlots(

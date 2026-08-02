@@ -72,7 +72,11 @@ erDiagram
         NVARCHAR         MobileNumber
         DATE             DateOfBirth
         DATETIME2        MobileVerifiedAtUtc       "nullable"
+        NVARCHAR         BannerImageUrl            "nullable; provider-level search-card banner"
         NVARCHAR         OnboardingStatus          "MobileVerificationPending|MobileVerified"
+        BIT              IsActive                  "master switch; 0 blocks new bookings"
+        BIT              IsDeleted                 "account deleted: row anonymised, permanently disabled"
+        DATETIME2        DeletedAtUtc              "nullable"
     }
 
     PROVIDER_DEVICE_TOKENS {
@@ -188,6 +192,8 @@ erDiagram
         NVARCHAR         Description               "free-text profile blurb"
         NVARCHAR         ProfilePhotoUrl           "nullable; blob URL"
         DATETIME2        MobileVerifiedAtUtc       "nullable; reserved for OTP flow"
+        BIT              IsDeleted                 "account deleted: row anonymised, permanently disabled"
+        DATETIME2        DeletedAtUtc              "nullable"
     }
 
     PETS {
@@ -323,6 +329,16 @@ throughout the application.
 - `DateOfBirth`.
 - `MobileVerifiedAtUtc` — populated after OTP validation.
 - `OnboardingStatus` — `MobileVerificationPending` → `MobileVerified`.
+- `BannerImageUrl` — nullable; the provider-level search-card banner.
+- `IsActive` — master Active/Inactive switch. When 0, `Booking.CreateBooking`
+  rejects every new booking on any of this provider's services.
+- `IsDeleted`, `DeletedAtUtc` — set by `Provider.DeleteProvider`, which
+  implements "Delete account" as an **anonymise + permanently disable** rather
+  than a row delete, so bookings, events and the payment ledger keep their
+  meaning. When `IsDeleted = 1` the personal fields hold placeholders (the name
+  is `Deleted Provider`), `IsActive` is forced to 0, and both reactivation and
+  profile edits are refused (THROW 51115). Distinct from a plain `IsActive = 0`
+  toggle, which is reversible.
 
 ### `Provider.ProviderPhotos`
 General provider photo gallery (not tied to a service). One row per uploaded
@@ -483,6 +499,17 @@ this table, so a profile must exist before any booking can be placed.
   `Parent.UpdatePetParentProfilePhoto`. The blob itself lives under
   `pet-parent-profile-photos/<petParentId>/<guid>.<ext>` in the shared
   `provider-images` container.
+- `IsDeleted`, `DeletedAtUtc` — set by `Parent.DeletePetParent`, which
+  implements "delete account" as an **anonymise + permanently disable**, never a
+  row delete: the `PetParentId` has to keep its meaning for the bookings, events
+  and payments that reference it — and those belong to the **provider** as much
+  as to the parent. When `IsDeleted = 1` the personal fields hold placeholders
+  (name `Deleted User`, a mobile derived from the `PetParentId`, address
+  `Deleted`), the parent's pets are anonymised alongside, and the Firebase link
+  on `Parent.ParentAuthIdentities` is scrubbed — which frees the real uid AND
+  the real mobile number, so the person can sign up again and gets a brand-new
+  `PetParentId`. `IsDeleted` also blocks profile edits (THROW `51224`), since an
+  edit would undo the anonymisation.
 - Timestamps.
 
 > Legacy `Parent.PetParents` rows (predating the profile schema) survive
@@ -640,7 +667,11 @@ per row here — if 4 tickets were bought, 4 rows come back.
 ### `Booking.Bookings`
 Confirmed booking records, scoped by `ServiceId`. Capacity check + insert
 is race-safe inside `Booking.CreateBooking` (UPDLOCK + HOLDLOCK on the
-overlap-count query).
+overlap-count query). The same locked range also rejects a **duplicate booking
+for the same pet** — an active booking on this service overlapping the requested
+window (same `PetId`) → `51069` (409 `PetAlreadyBooked`). Only fires when the
+create names a `PetId`; Custom walk-ins are unaffected. The night-stay twin uses
+`51239` (overlapping date range).
 
 - `BookingId` — PK.
 - `JobNumber` — `INT IDENTITY`, UNIQUE. Short sequential number rendered as the
@@ -655,13 +686,71 @@ overlap-count query).
   bookings remain meaningful even if the provider deregisters or changes
   sub-category.
 - `BookingDate`, `StartTime`, `EndTime` — `StartTime < EndTime` (CHECK).
-- `Status` — 6-state lifecycle: `CREATED` → `CONFIRMED` → `COMPLETED`, with
-  `APPROVAL_NEEDED` (schedule change pending) and the two terminal cancel
+- `Status` — expanded "job" lifecycle: `CREATED` → `CONFIRMED` →
+  `START_JOB` → `IN_PROGRESS` → `COMPLETED` → `PAID` (the provider taps "Start Job" →
+  `START_JOB` (start-OTP issued to the parent), enters the parent's start-code →
+  `IN_PROGRESS`, marks the job done → `COMPLETED` (no OTP), then records the parent's
+  payment → `PAID` (writes a `Booking.BookingPayments` row; App bookings only);
+  `JOB_STARTED` (the single direct-start state) and `ENDING` (the retired "End Job"
+  end-OTP state) are kept in the CHECK list for legacy rows), plus the modification statuses,
+  `APPROVAL_NEEDED` (deprecated, legacy rows), the two terminal cancel
   states `PROVIDER_CANCELLED` / `PARENT_CANCELLED` (which require
-  `CancelledAtUtc`, CHECK). New app bookings default to `CREATED`; custom
-  walk-ins start `CONFIRMED`. **A booking holds its capacity slot in every
-  status except the two cancelled ones** — that's the predicate every
-  capacity / closure-conflict / active-status / slot query uses.
+  `CancelledAtUtc`, CHECK), the two terminal no-show states
+  `PARENT_NO_SHOW` / `PROVIDER_NO_SHOW` (the named party failed to appear;
+  reportable by the counterparty 30+ minutes after the scheduled start —
+  **night stays use 2+ hours after `CheckInDate + DropOffTime` instead. Both
+  kinds also settle automatically once the job's moment has passed with it still
+  unstarted — single-day at the end of the PROVIDER'S WORKING DAY on the booking
+  date (their closing time from `Provider.ProviderWeeklyAvailability`, or the
+  booking's own `EndTime` if that falls later; midnight UTC when no hours are
+  saved), night stays at midnight UTC on the check-in day:
+  `START_JOB` → `PARENT_NO_SHOW`, confirmed-equivalent → `PROVIDER_NO_SHOW`**),
+  the
+  terminal `EXPIRED` state (sat in `CREATED` for 24+ hours without the
+  provider accepting — written by the scheduled external job; never by a client),
+  the terminal
+  `JOB_EXPIRED` state (**legacy as of 2026-07-29, no longer produced** — the
+  provider accepted but the job never reached `IN_PROGRESS` and the scheduled
+  window fully elapsed; that now settles as a no-show above, so the status
+  survives only on existing rows; distinct from `EXPIRED`), and the terminal
+  `OTP_MAX_ATTEMPTS_EXCEEDED` state (the provider
+  entered the wrong start-code 6 times, cancelling the job; set by
+  `Booking.VerifyBookingStartOtp` + night-stay mirror; never by a client — a
+  status of its own, rather than a plain cancellation, so both apps can label it
+  "OTP Max Attempts Exceeded". Renamed 2026-07-25 from `OTP_ATTEMPTS_EXCEEDED`;
+  `DeployAll.sql` migrates existing rows and audit entries).
+  New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
+  **Time-driven settlement lives OUTSIDE this database (2026-08-02).** `EXPIRED`,
+  the two auto-settled no-shows, and the expired-parent-modification revert are
+  written by a **scheduled external job**; the `Booking.ExpireStaleBookings`
+  sproc that used to do it every 10 minutes (via an in-process hosted service in
+  both API hosts) is **dropped** by `DeployAll.sql`. No sproc here changes a
+  booking's status on the basis of elapsed time any more. The time checks that
+  remain — `UpdateBookingStatus` / `UpdateNightStayBookingStatus` (THROW 51129 /
+  51249) and `RespondBookingModification` / `RespondNightStayBookingModification`
+  (THROW 51152 / 51272) — **reject a late transition without writing anything**,
+  so between job runs a row can legitimately still read `CREATED` (or sit in
+  `MODIFICATION_REQUEST_BY_PARENT`) while the API already refuses to act on it.
+  **A booking holds its capacity slot in every status except the two
+  cancelled ones, `PROVIDER_DECLINED`, the two no-show statuses, `EXPIRED`,
+  `JOB_EXPIRED`, and `OTP_MAX_ATTEMPTS_EXCEEDED`** — that's the predicate every
+  capacity / closure-conflict / active-status / slot query uses. (`PAID` and
+  `COMPLETED` both **hold** the slot and both count as a completed booking.)
+- `PricePerHour` — snapshot of the offering's unit rate captured at booking
+  time (price-lock). Populated for App bookings now (previously Custom-only — the
+  `CK_Bookings_SourceShape` App-must-be-NULL clause was relaxed to allow it); the
+  booking-detail read prices off it so a later rate change never re-prices an
+  existing booking. NULL only for legacy rows (detail falls back to the live rate).
+- `CancellationPolicyHours` — snapshot of the provider's advertised cancellation
+  policy at booking time (`NULL | 24 | 48 | 72 | 96`; CHECK). Frozen so a later
+  policy change never re-rules an existing booking; resolved in the create sproc
+  from `Provider.ProviderCancellationPolicies`. NULL legitimately = "no restriction".
+- `Snapshot{AddressLine, City, ZipCode, Latitude, Longitude}` — snapshot of the
+  **selected** service-location address at booking time (`LocationType`-driven:
+  the parent's profile address for `ParentLocation`, the provider's business
+  address for `ProviderLocation`). Frozen so a later address edit never moves an
+  existing booking; the detail read prefers these and falls back to live resolution
+  only for legacy rows (all-NULL). NULL for Custom walk-ins.
 - `PayoutStatus` — `Pending` / `Processing` / `Paid` / `Failed` (CHECK),
   default `Pending`. Capture-only for now — the actual provider-payout
   execution leg is not built yet.
@@ -692,11 +781,13 @@ The expanded "job" lifecycle adds three child tables per booking entity
 (`Booking.Bookings` and `Booking.NightStayBookings`), each `ON DELETE CASCADE`
 from its parent. The night-stay twin names are prefixed `NightStay…`.
 
-- **`Booking.BookingStartOtps`** — telemetry of every start-job OTP issued for a
-  booking. `{ OtpCode NVARCHAR(6) (plaintext low-secrecy share code),
-  Status (Pending|Consumed|Expired), FailedAttemptCount, IssuedAtUtc,
-  ExpiresAtUtc, ConsumedAtUtc }`. Issued/reused by `IssueBookingStartOtp`,
-  consumed by `StartBookingWithOtp`.
+- **`Booking.BookingStartOtps`** — telemetry of every start-OTP issued for a
+  booking: the code is issued at `START_JOB` and consumed by
+  `VerifyBookingStartOtp` → `IN_PROGRESS` (completion needs no OTP).
+  `{ OtpCode NVARCHAR(6) (plaintext low-secrecy share code),
+  Status (Pending|Consumed|Expired), FailedAttemptCount, IssuedAtUtc, ExpiresAtUtc,
+  ConsumedAtUtc }`. Issued/reused by `IssueBookingStartOtp` (reuse-while-valid);
+  also issued inline by `StartBooking`.
 - **`Booking.BookingEvidence`** — one row per job-completion photo
   (`PhotoUrl`, `CreatedAtUtc`); optional — `COMPLETED` no longer requires
   evidence. Same shape as `Provider.ProviderPhotos`.
@@ -708,10 +799,44 @@ from its parent. The night-stay twin names are prefixed `NightStay…`.
   copies the staged values onto the booking row first ("staging → main"), decline
   just discards. Driven by `RequestBookingModification` /
   `RespondBookingModification`; read via `GetPendingBookingModification`.
+  A proposal from **either party** is time-boxed (2026-07-31; widened to the
+  provider side 2026-08-02 — previously parent-only): it can only be opened up to
+  2 hours before the service starts (`BookingDate + StartTime`, or
+  `CheckInDate + DropOffTime` for a stay — THROW 51151 / 51271), and one still
+  unanswered at that cutoff expires — the staging row is discarded and the booking
+  **reverts to `CONFIRMED`**, done by the scheduled external job
+  (`Booking.RevertExpiredModificationRequests`, which captures each row's actual
+  prior status since it can now be either `MODIFICATION_REQUEST_BY_PARENT` or
+  `..._BY_PROVIDER`). The respond sprocs only **reject** a response that arrives
+  past the cutoff (THROW 51152 / 51272); they no longer perform the revert
+  themselves, so until that job runs the booking stays parked in whichever
+  `MODIFICATION_REQUEST_BY_*` status it was in.
+  It also stages the **acknowledged terms** (2026-07-27):
+  `{ HasAcknowledgedTerms, AcknowledgedPricePerHour (single-day) |
+  AcknowledgedPricePerNight + AcknowledgedDropOffTime/PickUpTime (night-stay),
+  AcknowledgedCancellationPolicyHours,
+  AcknowledgedAddressLine/City/ZipCode/Latitude/Longitude }`. A booking freezes
+  the provider's terms at creation; when the provider has since changed them, the
+  requester confirms the new ones and they are staged here, then re-frozen onto
+  the booking by the **same accept** that applies the schedule. `HasAcknowledgedTerms`
+  is the discriminator — 0 means "nothing staged, leave the booking's frozen terms
+  alone", which is NOT the same as staging NULLs (a NULL cancellation policy
+  legitimately means "no restriction"). A decline applies none of it.
+
+`Booking.BookingPayments` is a **single shared ledger** for both booking entities
+(not a per-entity twin): one row per paid booking, written when the provider marks
+a `COMPLETED` booking `PAID`. `{ BookingPaymentId, BookingType ('SingleDay' |
+'NightStay' — discriminates which booking table `BookingId` references), BookingId,
+ProviderId, PetParentId, Amount, PawfrontFee, PaymentMethod ('Cash' | 'Digital'),
+PaidAtUtc }`, UNIQUE `(BookingType, BookingId)`. Deliberately **NO FK** to the
+booking tables — a payments ledger should outlive booking deletion. Indexed on
+`ProviderId` (`IX_BookingPayments_Provider`) for the per-provider "total received"
+report. Written by `MarkBookingPaid` / `MarkNightStayBookingPaid`.
 
 `Booking.Bookings.Status`, `NightStayBookings.Status`, and the two history
 tables' `From/ToStatus` columns are `NVARCHAR(48)` and accept the expanded status
-set (decline, `JOB_STARTED`, six modification states; `APPROVAL_NEEDED` retained
+set (decline, the job states `START_JOB` / `IN_PROGRESS`, `PAID`, the retired
+`JOB_STARTED` and `ENDING`, six modification states; `APPROVAL_NEEDED` retained
 for legacy rows).
 
 ## User-defined types
@@ -737,6 +862,8 @@ so the deploy script always reflects the latest version.
 | `Provider.SaveProviderAuthIdentity` | Step 1: upsert Firebase identity + optional device token. |
 | `Provider.CompleteProviderProfile`  | Step 2: create `Providers` row, link back, promote `SignUpStatus`. |
 | `Provider.GetProviderProfile`       | Read-back of the persisted personal info. |
+| `Provider.UpdateProviderProfile`    | Edit first/last name, gender, date of birth. Mobile number is not editable here (re-verification via OTP). Throws `51113` if the provider is missing, `51115` if the account has been deleted (an edit would undo the anonymisation). |
+| `Provider.DeleteProvider`           | Account delete = **anonymise + permanently disable**, NOT a row delete. Scrubs the personal fields, sets `IsActive = 0` + `IsDeleted = 1` + `DeletedAtUtc`, severs the auth identity (freeing the real Firebase uid + phone number for a fresh sign-up), deactivates the `ProviderServices` rows, and deletes only operational config + media. **Retains** bookings, night-stay bookings, organised events and `Booking.BookingPayments` — the `ProviderId` stays valid so neither party loses history. Idempotent. Returns 3 result sets (summary + Cosmos listing keys + blob URLs). Throws `51114` if the provider is missing. |
 | `Provider.CreateMobileVerificationOtp` | Generate a hashed OTP and persist with expiry. |
 | `Provider.VerifyMobileVerificationOtp` | Validate OTP; flip `MobileVerifiedAtUtc` + `OnboardingStatus`. |
 | `Provider.SaveProviderServiceRegistration` | Insert/update the one-per-provider category registration. Throws `51011` on category conflict. |
@@ -764,6 +891,7 @@ so the deploy script always reflects the latest version.
 | `Booking.ListBookingsByProvider`    | Optional `@ServiceId` + `@BookingDate` filters. |
 | `Booking.ListBookingsByPetParent`   | Full history for a pet parent. |
 | `Booking.GetBookingsForDate`        | Used by the slot service to subtract overlaps per service. |
+| `Booking.GetAgendaForDate`          | The same occupied windows as `GetBookingsForDate` (identical status predicate — keep the two in step) plus `BookingId` / `JobNumber` / `PetParentId` / `Status`. Backs the parent-facing daily agenda; `PetParentId` is what lets the API mask other parents' jobs. |
 | `Booking.UpdateBookingStatus`       | Role-guarded status change + audit insert in one transaction. Throws `51120`–`51125`. |
 | `Booking.ListBookingStatusHistory`  | Full status audit trail for a booking, oldest-first. |
 | `Event.CreateEvent`                 | Inserts the SQL row + amenities junction (Cosmos write happens in the API layer for physical events). |
@@ -778,9 +906,11 @@ so the deploy script always reflects the latest version.
 | `Provider.AddProviderPhoto`         | Insert one general provider gallery photo row. Throws `51110` if the provider is missing. |
 | `Provider.ListProviderPhotos`       | List the provider's gallery photos, oldest-first. |
 | `Provider.DeleteProviderPhoto`      | Delete one photo scoped by `ProviderId` + `ProviderPhotoId`; returns the URL for blob cleanup. Throws `51111` if missing. |
+| `Provider.UpdateProviderBannerImage`| Overwrite the provider-level banner (`Providers.BannerImageUrl`). Throws `51112` if the provider is missing. |
 | `Parent.AddPetParentPhoto`          | Insert one general pet-parent gallery photo row. Throws `51212` if the parent is missing. |
 | `Parent.ListPetParentPhotos`        | List the parent's gallery photos, oldest-first. |
 | `Parent.DeletePetParentPhoto`       | Delete one photo scoped by `PetParentId` + `PetParentPhotoId`; returns the URL for blob cleanup. Throws `51213` if missing. |
+| `Parent.DeletePetParent`            | Account delete = **anonymise + permanently disable**, NOT a row delete. Scrubs the personal fields, sets `IsDeleted = 1` + `DeletedAtUtc`, severs the auth identity (freeing the real Firebase uid + mobile number for a fresh sign-up), anonymises the parent's `Pets` in place, and deletes only operational data + media (device tokens, OTPs, identity doc, photo galleries, next-consultations). **Retains** bookings, night-stay bookings, organised events, event tickets and `Booking.BookingPayments` — the `PetParentId` stays valid so neither party loses history. Idempotent. Returns 2 result sets (summary + blob URLs). Throws `51223` if the parent is missing. |
 
 Custom THROW codes used by sprocs:
 
@@ -797,6 +927,7 @@ Custom THROW codes used by sprocs:
 | 51060 | Pet parent not found (booking create). |
 | 51061 | Provider not found (booking create). |
 | 51062 | No remaining capacity for slot (scoped by ServiceId). |
+| 51069 | Pet already has an overlapping booking on this service → API `409 PetAlreadyBooked` (night-stay twin: 51239). |
 | 51063 | Booking not found (cancel). |
 | 51064 | Only the booker can cancel. |
 | 51065 | Booking already cancelled. |
@@ -816,14 +947,20 @@ Custom THROW codes used by sprocs:
 | 51097 | Invalid counter type (must be `View`, `Share`, or `Inquiry`). |
 | 51110 | Provider not found (provider photo add). |
 | 51111 | Provider photo not found (provider photo delete). |
+| 51112 | Provider not found (provider banner-image upload). |
 | 51120 | Booking not found (status update). |
 | 51121 | Caller is not a party to the booking → API `403 Forbidden`. |
 | 51122 | Status not permitted for this actor → API `400 BookingStatusNotAllowed`. |
 | 51123 | Booking is terminal, no further changes → API `409 BookingStatusTerminal`. |
 | 51124 | Booking already in the requested status → API `409 BookingStatusUnchanged`. |
 | 51125 | Invalid actor or status value (status update). |
+| 51137 | Start-job attempted outside the provider's weekly working hours → API `409 OutsideWorkingHours` (night-stay twin: 51257). |
+| 51144 | Start-job attempted on a day other than the booking's service date → API `409 BookingNotOnServiceDate` (night-stay twin: 51264, gated on `CheckInDate`). |
 | 51212 | Pet parent not found (parent photo add). |
 | 51213 | Pet parent photo not found (parent photo delete). |
+| 51222 | Mobile number already registered to another pet parent (profile complete) → API `409 MobileNumberAlreadyExists`. |
+| 51223 | Pet parent not found (account delete). |
+| 51224 | Pet parent account has been deleted (anonymised + permanently disabled) — thrown by the profile-update sproc, since an edit would undo the anonymisation → API `409 ParentAccountDeleted`. |
 
 ## Deployment
 
