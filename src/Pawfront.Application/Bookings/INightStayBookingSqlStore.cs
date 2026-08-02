@@ -128,6 +128,11 @@ public interface INightStayBookingSqlStore
         string paymentMethod,
         CancellationToken cancellationToken);
 
+    /// <param name="acknowledgedTerms">
+    /// The provider's current terms, staged alongside the proposal when they had
+    /// drifted and the requester confirmed them. Null leaves the stay's frozen
+    /// terms alone on accept.
+    /// </param>
     Task<NightStayBookingResult> RequestModificationAsync(
         Guid bookingId,
         BookingStatusActor actor,
@@ -135,6 +140,7 @@ public interface INightStayBookingSqlStore
         DateOnly checkInDate,
         DateOnly checkOutDate,
         string? note,
+        BookingAcknowledgedTerms? acknowledgedTerms,
         CancellationToken cancellationToken);
 
     Task<NightStayBookingModificationResult?> GetPendingModificationAsync(

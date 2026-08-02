@@ -45,12 +45,22 @@ public sealed record NightStayBookingResponse(
 /// check-in / check-out range. Accept/decline reuses
 /// <see cref="RespondBookingModificationRequest"/>.
 /// </summary>
+/// <param name="AcknowledgeTermsChanges">
+/// Set when the user has confirmed the provider's current terms — see
+/// <see cref="RequestBookingModificationRequest.AcknowledgeTermsChanges"/>. Read
+/// the drift from <c>GET .../night-stay-bookings/{bookingId}/terms-changes</c>.
+/// </param>
 public sealed record RequestNightStayBookingModificationRequest(
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    string? Note);
+    string? Note,
+    bool AcknowledgeTermsChanges = false);
 
 /// <summary>The staged (pending) check-in/check-out change proposal on a night-stay booking.</summary>
+/// <param name="AcknowledgedTerms">
+/// The terms the requester confirmed when proposing, staged because they had
+/// drifted from what the stay froze. Null in the ordinary case.
+/// </param>
 public sealed record NightStayBookingModificationResponse(
     Guid NightStayBookingModificationId,
     Guid NightStayBookingId,
@@ -59,7 +69,8 @@ public sealed record NightStayBookingModificationResponse(
     DateOnly ProposedCheckInDate,
     DateOnly ProposedCheckOutDate,
     string? Note,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    AcknowledgedTermsResponse? AcknowledgedTerms = null);
 
 /// <summary>
 /// Night-stay single booking read, grouped into the same sections as the single-day

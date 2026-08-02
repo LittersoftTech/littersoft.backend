@@ -66,6 +66,7 @@ public static class SqlServiceRegistration
             services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
             services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
             services.AddSingleton<IProviderNameReader, NullProviderNameReader>();
+            services.AddSingleton<IProviderContactReader, NullProviderContactReader>();
         }
         else
         {
@@ -115,14 +116,14 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
-            // Expires bookings still CREATED 24h after creation (sproc
-            // Booking.ExpireStaleBookings, both booking tables). Safe to run
-            // in both hosts — the sproc is idempotent and race-safe.
-            services.AddHostedService(provider =>
-                new BookingExpirySweeper(
-                    sqlConnectionString,
-                    provider.GetService<IPawfrontSecretProvider>(),
-                    provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<BookingExpirySweeper>>()));
+            // NOTE (2026-08-02): the BookingExpirySweeper hosted service used to
+            // be registered here, running Booking.ExpireStaleBookings every 10
+            // minutes in BOTH hosts. Time-driven booking settlement (stale
+            // CREATED -> EXPIRED, expired parent modification requests,
+            // unstarted-job no-shows) has moved out of the API hosts and out of
+            // the database into a scheduled external job. Nothing in-process
+            // settles bookings on a clock any more — do not re-add a sweeper
+            // here without retiring that job first, or the two will race.
 
             services.AddScoped<IProviderClosureSqlStore>(provider =>
                 new SqlProviderClosureStore(
@@ -187,6 +188,11 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderNameReader>(provider =>
                 new SqlProviderNameReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderContactReader>(provider =>
+                new SqlProviderContactReader(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
         }

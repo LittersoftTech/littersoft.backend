@@ -8,12 +8,12 @@
 --   * the booking is not already terminal            (THROW 51243)
 --   * the status actually changes                    (THROW 51244)
 --   * the transition is allowed from the current state (THROW 51246)
---   * a no-show is only reportable 30+ minutes after check-in + drop-off (THROW 51248)
---   * a booking left in CREATED for 24+ hours is flipped to EXPIRED (with a
---     System audit row) and the attempted transition is rejected (THROW 51249)
---     — the provider can no longer accept it. The periodic sweeper
---     ([Booking].[ExpireStaleBookings]) normally expires these first; this
---     in-line guard closes the race between sweeps.
+--   * a no-show is only reportable 2+ HOURS after check-in + drop-off (THROW 51248)
+--   * a booking left in CREATED for 24+ hours has expired, so the attempted
+--     transition is rejected (THROW 51249) — the provider can no longer accept
+--     it. This guard REJECTS ONLY; it does not write the EXPIRED status. Settling
+--     abandoned bookings on a clock is the scheduled external job's job, and this
+--     sproc no longer changes status on the basis of elapsed time.
 -- Other THROWs: 51240 booking not found, 51245 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
@@ -21,9 +21,9 @@
 --               COMPLETED (legacy /status shim, from IN_PROGRESS — ENDING
 --               tolerated for legacy rows),
 --               PROVIDER_CANCELLED, PARENT_NO_SHOW (from confirmed-equivalent or
---               START_JOB, 30 min after drop-off)
+--               START_JOB, 2 h after check-in)
 --   Parent   -> PARENT_CANCELLED,
---               PROVIDER_NO_SHOW (from confirmed-equivalent or START_JOB, 30 min after drop-off)
+--               PROVIDER_NO_SHOW (from confirmed-equivalent or START_JOB, 2 h after check-in)
 -- A cancel is blocked once the job is underway (IN_PROGRESS; the retired ENDING
 -- kept for legacy rows) → THROW 51269.
 -- Terminal states: COMPLETED, PROVIDER_DECLINED, PROVIDER_CANCELLED, PARENT_CANCELLED,
@@ -81,24 +81,15 @@ BEGIN
         THROW 51241, 'You are not a party to this booking.', 1;
     END
 
-    -- A booking left pending (CREATED) for 24+ hours has expired: persist the
-    -- EXPIRED flip (with a System audit row) and reject the attempted
-    -- transition — the provider can no longer accept it. The periodic sweeper
-    -- normally expires these first; this guard closes the race between sweeps.
+    -- A booking left pending (CREATED) for 24+ hours has expired: reject the
+    -- attempted transition — the provider can no longer accept it.
+    -- REJECT ONLY: the EXPIRED status is deliberately NOT written here. Status
+    -- changes driven by elapsed time belong to the scheduled external job, which
+    -- is the single writer for them; this guard just stops a late accept from
+    -- slipping through before that job runs. The row therefore stays in CREATED
+    -- until the job settles it.
     IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
     BEGIN
-        UPDATE [Booking].[NightStayBookings]
-        SET [Status] = N'EXPIRED',
-            [UpdatedAtUtc] = @Now
-        WHERE [NightStayBookingId] = @NightStayBookingId;
-
-        INSERT INTO [Booking].[NightStayBookingStatusHistory]
-            ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-        VALUES
-            (@NightStayBookingId, N'CREATED', N'EXPIRED', N'System', NULL,
-             N'Automatically expired after 24 hours awaiting provider acceptance.');
-
-        COMMIT TRANSACTION;
         THROW 51249, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
     END
 
@@ -113,7 +104,7 @@ BEGIN
     END
 
     IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
-                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51243, 'Booking is in a terminal state and cannot change.', 1;
     END
@@ -145,16 +136,24 @@ BEGIN
     END
 
     -- A no-show can only be reported once the counterparty is actually late:
-    -- 30 minutes past the stay's scheduled start (check-in date + drop-off
-    -- time; all times are UTC).
+    -- 2 HOURS past the stay's scheduled check-in (check-in date + drop-off
+    -- time; all times are UTC). A boarding hand-over is a slower affair than a
+    -- single-day appointment, whose gate stays at 30 minutes — so a 09:00
+    -- check-in is reportable from 11:00.
+    --
+    -- Neither party has to wait it out: if the stay is still unstarted when the
+    -- check-in day ends, the scheduled external job settles it automatically at
+    -- midnight UTC (START_JOB -> PARENT_NO_SHOW, since the provider was there
+    -- and issued the code; anything else -> PROVIDER_NO_SHOW, since they never
+    -- even tapped Start). That settlement no longer happens in this database.
     IF @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
     BEGIN
         DECLARE @StartsAtUtc DATETIME2(7) =
             DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
                     CAST(@CheckInDate AS DATETIME2(7)));
-        IF @Now < DATEADD(MINUTE, 30, @StartsAtUtc)
+        IF @Now < DATEADD(HOUR, 2, @StartsAtUtc)
         BEGIN
-            THROW 51248, 'A no-show can only be reported 30 minutes after the stay''s scheduled drop-off.', 1;
+            THROW 51248, 'A no-show can only be reported 2 hours after the stay''s scheduled check-in.', 1;
         END
     END
 

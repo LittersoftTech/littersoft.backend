@@ -58,6 +58,7 @@ appsettings.Development.json
 
 # Others
 /local.settings.json
+local.settings.json
 
 # JetBrains Rider caches
 .idea/

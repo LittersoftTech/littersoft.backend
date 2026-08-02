@@ -15,9 +15,12 @@ namespace Pawfront.Application.Providers;
 /// category offering, weekly availability, and future closures.
 ///
 /// Exactly one of the per-category fields is non-null, matching
-/// <see cref="ServiceCategory"/>. Provider personal info (name, mobile,
-/// DOB) is intentionally NOT included — parents see business-facing data,
-/// not provider PII.
+/// <see cref="ServiceCategory"/>. Provider personal info (name, DOB) is
+/// intentionally NOT included — parents see business-facing data, not provider
+/// PII. The exception is <see cref="Email"/> / <see cref="MobileNumber"/>, which
+/// are how a parent contacts the provider: for a business those come from the
+/// offering, and for a freelancer — who registers no separate business e-mail or
+/// telephone — from their own account.
 /// </summary>
 public sealed record ProviderPublicProfile(
     Guid ProviderId,
@@ -43,6 +46,22 @@ public sealed record ProviderPublicProfile(
     // The business branch's description (shop/hotel/clinic/school/shelter/
     // pet-shop) — what services the business offers. Null for freelancers.
     string? ServicesDescription,
+    // What the provider says about the bookable SERVICE itself (as opposed to
+    // who they are / what the business is). PetTrainer only — its offering's
+    // PrivateTrainingDescription, lifted here for both sub-categories so mobile
+    // doesn't dig into the category branch. Null elsewhere: a groomer's blurbs
+    // are per menu item (PetGroomer...offering.session.services[].description),
+    // and the remaining categories have no per-service text.
+    string? ServiceDescription,
+    // Contact details, lifted to the top level so mobile doesn't have to dig into
+    // the nested category branch (and finds nothing there for a freelancer).
+    // Business sub-categories report the e-mail/telephone captured at
+    // registration; freelancers — and businesses that left the optional telephone
+    // blank — fall back to the provider's own account contact. Null when neither
+    // source has a value.
+    string? Email,
+    string? MobileCountryCode,
+    string? MobileNumber,
     // The provider's profile/business photo — the image they uploaded for their
     // offering. Null when none set.
     string? ProfilePhotoUrl,

@@ -98,6 +98,16 @@ public interface IBookingSqlStore
         CancellationToken cancellationToken);
 
     /// <summary>
+    /// The same occupied windows as <see cref="GetBookingsForDateAsync"/>, but
+    /// carrying booking id / job number / owning parent / status
+    /// (<c>Booking.GetAgendaForDate</c>). Backs the parent-facing daily agenda.
+    /// </summary>
+    Task<IReadOnlyList<AgendaBookingRow>> GetAgendaForDateAsync(
+        Guid serviceId,
+        DateOnly bookingDate,
+        CancellationToken cancellationToken);
+
+    /// <summary>
     /// Race-safe status change + audit insert in one transaction. Maps the
     /// sproc's typed THROWs (51120 not found, 51121 forbidden, 51122 not allowed
     /// for actor, 51123 terminal, 51124 unchanged) to the matching exceptions.
@@ -124,9 +134,10 @@ public interface IBookingSqlStore
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Provider taps "Start Job": moves confirmed-equivalent → START_JOB (15-minute
-    /// gate) and issues the start-OTP, atomically. Maps 51132 forbidden, 51133
-    /// not startable, 51137 too early.
+    /// Provider taps "Start Job": moves confirmed-equivalent → START_JOB (gated on
+    /// the booking's service date and the provider's weekly working hours) and
+    /// issues the start-OTP, atomically. Maps 51132 forbidden, 51133 not startable,
+    /// 51144 not the service date, 51137 outside working hours.
     /// </summary>
     Task<BookingResult> StartJobAsync(
         Guid bookingId,
@@ -168,6 +179,11 @@ public interface IBookingSqlStore
         CancellationToken cancellationToken);
 
     /// <summary>Stages a date/time-change proposal and flips the booking status.</summary>
+    /// <param name="acknowledgedTerms">
+    /// The provider's current terms, staged alongside the proposal when they had
+    /// drifted from the booking's frozen ones and the requester confirmed them.
+    /// Null leaves the booking's frozen terms alone on accept.
+    /// </param>
     Task<BookingResult> RequestModificationAsync(
         Guid bookingId,
         BookingStatusActor actor,
@@ -176,6 +192,7 @@ public interface IBookingSqlStore
         TimeOnly startTime,
         TimeOnly endTime,
         string? note,
+        BookingAcknowledgedTerms? acknowledgedTerms,
         CancellationToken cancellationToken);
 
     /// <summary>Reads the staged (pending) proposal, or null when none.</summary>

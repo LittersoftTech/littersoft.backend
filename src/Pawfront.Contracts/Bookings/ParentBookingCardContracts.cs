@@ -58,12 +58,18 @@ public sealed record BookingProviderDetailsSection(
 /// is the unit rate frozen onto the booking at creation (price-lock; the menu-item
 /// price for PetGroomer), falling back to the live offering rate only for legacy
 /// rows without a snapshot; null when neither can be resolved.
+/// <see cref="Description"/> is what the provider says about the booked service —
+/// the menu item's blurb for a groomer, the session description for a trainer.
+/// Unlike the price it is read LIVE (cosmetic copy, deliberately not frozen onto
+/// the booking), so a later edit by the provider shows through. Null for the
+/// other categories and when the offering can't be resolved.
 /// </summary>
 public sealed record BookingServiceDetailsSection(
     Guid ServiceId,
     string? ServiceType,
     string? ServiceItemCode,
-    decimal? PricePerHour);
+    decimal? PricePerHour,
+    string? Description);
 
 /// <summary>
 /// The booked service's details for a night-stay booking. <see cref="PricePerNight"/>

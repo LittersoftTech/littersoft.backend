@@ -87,19 +87,33 @@ CREATE TABLE [Booking].[Bookings]
     -- are "live" resting states the job can still be started from).
     -- PROVIDER_CANCELLED / PARENT_CANCELLED are the cancellation states.
     -- PARENT_NO_SHOW / PROVIDER_NO_SHOW record the counterparty failing to
-    -- appear (reportable 30+ minutes after the scheduled start; terminal).
+    -- appear (reportable 30+ minutes after the scheduled start; terminal). The
+    -- scheduled external job also sets them on its own when the PROVIDER'S
+    -- WORKING DAY ends with the accepted job still unstarted (their closing time
+    -- for that weekday, or the booking's own EndTime if that is later): from
+    -- START_JOB -> PARENT_NO_SHOW (the start code was issued but never handed
+    -- back), from a confirmed-equivalent state -> PROVIDER_NO_SHOW (Start was
+    -- never tapped).
     -- EXPIRED = the booking sat in CREATED for 24+ hours without the provider
-    -- accepting; set by the expiry sweeper or lazily by the status engine
-    -- (terminal, frees capacity — the provider can no longer accept).
-    -- JOB_EXPIRED = the provider accepted but never started the job and the
-    -- scheduled window fully elapsed (still confirmed-equivalent, never
-    -- JOB_STARTED); set by the expiry sweeper (terminal, frees capacity).
-    -- OTP_ATTEMPTS_EXCEEDED = the provider entered the wrong start-OTP 6 times,
+    -- accepting (terminal, frees capacity — the provider can no longer accept).
+    -- JOB_EXPIRED = LEGACY (2026-07-29), no longer produced: the provider
+    -- accepted but never started the job and the scheduled window fully
+    -- elapsed. That is now a no-show (above); the value stays allowed for
+    -- existing rows (terminal, frees capacity).
+    --
+    -- NOTE (2026-08-02): the time-driven statuses above (EXPIRED, the two
+    -- no-shows, and legacy JOB_EXPIRED) are written by a SCHEDULED EXTERNAL JOB.
+    -- No sproc in this database changes a booking's status on the basis of
+    -- elapsed time; the time checks that remain reject a late transition without
+    -- writing. A row can therefore sit in CREATED past 24 hours (or in an
+    -- unstarted accepted state past its window) until that job runs — reads show
+    -- the stored status, while the API still refuses the transition.
+    -- OTP_MAX_ATTEMPTS_EXCEEDED = the provider entered the wrong start-OTP 6 times,
     -- cancelling the job; set by the start-with-OTP sproc (terminal, frees
     -- capacity). APPROVAL_NEEDED is deprecated (superseded by the modification
     -- flow) but kept allowed so legacy rows stay valid. Capacity-freeing
     -- statuses are the two cancelled ones PLUS PROVIDER_DECLINED, the two
-    -- no-show statuses, EXPIRED, JOB_EXPIRED, and OTP_ATTEMPTS_EXCEEDED; every
+    -- no-show statuses, EXPIRED, JOB_EXPIRED, and OTP_MAX_ATTEMPTS_EXCEEDED; every
     -- other status still holds the booking's capacity slot.
     [Status] NVARCHAR(48) NOT NULL
         CONSTRAINT [DF_Bookings_Status] DEFAULT N'CREATED',
@@ -128,7 +142,7 @@ CREATE TABLE [Booking].[Bookings]
                             N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                             N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                             N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                            N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')),
+                            N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
     CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))

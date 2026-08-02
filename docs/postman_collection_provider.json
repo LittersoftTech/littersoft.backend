@@ -112,6 +112,19 @@
           }
         },
         {
+          "name": "PATCH provider profile (edit name / gender / DOB)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/profile", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","profile"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Ayur\",\n  \"lastName\": \"Shitarale\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"1995-08-22\"\n}"
+            },
+            "description": "Edits the provider's personal details (the app's \"Edit Profile\" screen): firstName, lastName, gender, dateOfBirth. Returns the same shape as GET profile, so the client can rebind straight from the response. Deliberately NOT editable here: mobileCountryCode / mobileNumber (a change must go back through OTP verification, and the pair is UNIQUE), bannerImageUrl (own endpoint), onboardingStatus / isActive (own flows). gender ∈ { Male, Female, NonBinary, Other, PreferNotToSay }. 404 ProviderProfileNotFound; 409 ProviderAccountDeleted (the account was deleted — editing would undo the anonymisation); 400 UnsupportedGender | InvalidRequest."
+          }
+        },
+        {
           "name": "GET /provider-onboarding/me",
           "event": [
             {
@@ -134,6 +147,14 @@
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/provider-onboarding/me", "host": ["{{baseUrl}}"], "path": ["api","v1","provider-onboarding","me"] },
             "description": "Resolves the caller's Firebase uid → { providerAuthIdentityId, providerId?, hasProfile, onboardingStatus?, isActive? }. Used by mobile after reinstall to recover the ProviderId. Re-captures providerAuthIdentityId / providerId."
+          }
+        },
+        {
+          "name": "DELETE provider account (anonymise + disable — irreversible)",
+          "request": {
+            "method": "DELETE",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}"] },
+            "description": "The app's \"Delete account\" action. IRREVERSIBLE — it disables the account you are signed in as. This is an ANONYMISE + DISABLE, not a row delete: the ProviderId stays valid so nothing that references it loses meaning.\n\nRETAINED untouched: single-day and night-stay bookings with all their audit / evidence / OTP / modification / prescription children, the events you organised plus their ticket bookings, and the Booking.BookingPayments ledger. Deleting those would destroy the pet parents' history too, since their bookings reference you.\n\nANONYMISED: the Providers row — name becomes \"Deleted Provider\", gender/DOB/mobile are replaced, banner + mobileVerifiedAtUtc cleared, IsActive → 0 and IsDeleted → 1. IsActive = 0 blocks new bookings (409 ProviderInactive); IsDeleted = 1 is permanent and also blocks reactivation and profile edits (409 ProviderAccountDeleted). The Firebase auth identity is scrubbed too, which severs the login AND frees the real Firebase uid + phone number — so you can sign up again and get a brand-new ProviderId.\n\nDELETED: operational config + media only — device tokens, mobile OTPs, gallery photos, per-service banners, weekly availability, closures, cancellation policy, payout methods, service registration. Bookable services are DEACTIVATED (their rows must stay: bookings FK to ServiceId). The provider's Cosmos offering document (the public listing) is removed, so you drop out of parent-facing discovery, and GET /providers/{providerId} then returns 404 ProviderNotRegistered.\n\nIdempotent: a second call returns the original deletedAtUtc with wasAlreadyDeleted = true. Response carries retained* counts so you can confirm history survived.\n\nThe caller's ProviderId is taken from the JWT and must match the route → 403 Forbidden otherwise. 404 ProviderProfileNotFound when the provider row is missing."
           }
         }
       ]
@@ -1046,7 +1067,7 @@
           "request": {
             "method": "POST",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/start-job", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","start-job"] },
-            "description": "Provider taps \"Start Job\" (no body): the booking moves to START_JOB and the parent's start-OTP is issued (the parent reads it from GET .../bookings/{id} on the parent host). Only allowed from 15 minutes before the scheduled start (BookingDate + StartTime, UTC). 409 StartJobTooEarly | BookingNotStartable."
+            "description": "Provider taps \"Start Job\" (no body): the booking moves to START_JOB and the parent's start-OTP is issued (the parent reads it from GET .../bookings/{id} on the parent host). Two gates: today must BE the booking's service date (bookingDate), and the provider must be inside their own weekly working hours (Provider.ProviderWeeklyAvailability for today, UTC). The scheduled start TIME does not gate it. 409 BookingNotOnServiceDate | OutsideWorkingHours | BookingNotStartable."
           }
         },
         {
@@ -1219,7 +1240,7 @@
           "request": {
             "method": "POST",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/start-job", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","start-job"] },
-            "description": "No body. Only from 15 minutes before CheckInDate + DropOffTime (UTC). 409 StartJobTooEarly | BookingNotStartable."
+            "description": "No body. Only on the stay's check-in (drop-off) day, and only while the provider is inside their own weekly working hours (today, UTC). 409 BookingNotOnServiceDate | OutsideWorkingHours | BookingNotStartable."
           }
         },
         {

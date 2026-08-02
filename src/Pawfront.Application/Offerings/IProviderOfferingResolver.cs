@@ -31,10 +31,15 @@ public abstract record GroomingItemResolution
 
     public sealed record Inactive(string Code) : GroomingItemResolution;
 
+    /// <param name="Description">
+    /// The groomer's own blurb for this menu item, shown to the parent. Null
+    /// when they left it blank.
+    /// </param>
     public sealed record Resolved(
         string Code,
         int DurationMinutes,
-        decimal Price) : GroomingItemResolution;
+        decimal Price,
+        string? Description = null) : GroomingItemResolution;
 }
 
 public abstract record OfferingResolution
@@ -63,6 +68,21 @@ public abstract record OfferingResolution
     /// app booking shows where the service happens (the Custom-walk-in analog of
     /// the booking row's own ServiceLocation).
     /// </param>
+    /// <param name="Description">
+    /// What the provider says about the service itself, shown to the parent
+    /// when booking. Only PetTrainer has one today (the offering's
+    /// PrivateTrainingDescription). Null for GroomingSession, where the blurb is
+    /// per menu item — use <see cref="IProviderOfferingResolver.ResolveGroomingItemAsync"/>
+    /// — and for DayCare/NightStay/VetAppointment, whose offerings have no
+    /// per-service text.
+    /// </param>
+    /// <param name="DropOffTime">
+    /// When the stay begins on its check-in day. Populated for
+    /// <c>NightStay</c> ONLY — the other service types take their start time from
+    /// the requested slot, not the offering. Together with the check-in date it
+    /// gives a stay's service-start instant, which is what the booking lead-time
+    /// rule measures against (see <see cref="Bookings.BookingLeadTime"/>).
+    /// </param>
     public sealed record Resolved(
         Guid ServiceId,
         Guid ProviderId,
@@ -73,5 +93,7 @@ public abstract record OfferingResolution
         decimal DurationHours,
         bool IsDurationFixed,
         decimal? Price,
-        string? ServiceLocation = null) : OfferingResolution;
+        string? ServiceLocation = null,
+        string? Description = null,
+        TimeOnly? DropOffTime = null) : OfferingResolution;
 }

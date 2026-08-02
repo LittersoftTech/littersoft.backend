@@ -43,6 +43,9 @@ internal static class PetParentEndpoints
         var group = builder.MapGroup("/pet-parents/{petParentId:guid}").RequireOwnedPetParent();
         group.MapGet("/profile", GetProfile);
         group.MapPatch("/profile", UpdateProfile);
+        // "Delete account" — anonymise + permanently disable. The ownership
+        // filter on this group is what restricts it to the caller's own account.
+        group.MapDelete("/", DeleteAccount);
         group.MapPost("/profile-image", UploadProfilePhoto).DisableAntiforgery();
         group.MapPost("/pets", AddPet);
         group.MapGet("/pets", ListPets);
@@ -64,6 +67,9 @@ internal static class PetParentEndpoints
         // Per-transition endpoints (parent actor).
         group.MapPost("/bookings/{bookingId:guid}/cancel", ParentCancelServiceBooking);
         group.MapPost("/bookings/{bookingId:guid}/no-show", ReportProviderNoShow);
+        // What the provider has changed since the booking was made — read this
+        // before opening the edit screen so the app can confirm the new terms.
+        group.MapGet("/bookings/{bookingId:guid}/terms-changes", GetServiceBookingTermsChanges);
         group.MapPost("/bookings/{bookingId:guid}/modifications", RequestServiceBookingModification);
         group.MapPost("/bookings/{bookingId:guid}/modifications/accept", AcceptServiceBookingModification);
         group.MapPost("/bookings/{bookingId:guid}/modifications/decline", DeclineServiceBookingModification);
@@ -185,7 +191,8 @@ internal static class PetParentEndpoints
                 b.ServiceId,
                 card.ServiceType,
                 b.ServiceItemCode,
-                card.PricePerHour),
+                card.PricePerHour,
+                card.ServiceDescription),
             new CancellationPolicyDetailsSection(card.CancellationPolicyHours),
             new BookingLocationDetailsSection(
                 card.Location.LocationType,
@@ -313,6 +320,10 @@ internal static class PetParentEndpoints
         {
             return ApiResults.BadRequest("InvalidBookingTime", exception.Message);
         }
+        catch (BookingLeadTimeTooShortException exception)
+        {
+            return ApiResults.Conflict("BookingLeadTimeTooShort", exception.Message);
+        }
         catch (BookingNightStayUseDedicatedEndpointException exception)
         {
             return ApiResults.BadRequest("UseNightStayEndpoint", exception.Message);
@@ -408,7 +419,8 @@ internal static class PetParentEndpoints
                 ? null
                 : new BookingModificationResponse(
                     mod.BookingModificationId, mod.BookingId, mod.RequestedByActor, mod.RequestedByActorId,
-                    mod.ProposedBookingDate, mod.ProposedStartTime, mod.ProposedEndTime, mod.Note, mod.CreatedAtUtc);
+                    mod.ProposedBookingDate, mod.ProposedStartTime, mod.ProposedEndTime, mod.Note, mod.CreatedAtUtc,
+                    ToAcknowledgedTermsResponse(mod.AcknowledgedTerms));
         }
 
         return ApiResults.Ok(ToBookingDetailResponse(detail, startOtp, pending));
@@ -442,6 +454,46 @@ internal static class PetParentEndpoints
         }
     }
 
+    /// <summary>
+    /// The provider's terms that changed since this booking was created — the
+    /// parent-host twin of the provider surface. Always 200; an unchanged booking
+    /// reports <c>hasChanges: false</c> with an empty list.
+    /// </summary>
+    private static async Task<IResult> GetServiceBookingTermsChanges(
+        Guid petParentId,
+        Guid bookingId,
+        IBookingService bookingService,
+        IBookingTermsChangeService termsChangeService,
+        CancellationToken cancellationToken)
+    {
+        // Confirm the booking is this parent's before diffing it (404 rather than
+        // leaking existence — or the provider's terms).
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.PetParentId != petParentId)
+        {
+            return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
+        }
+
+        var result = await termsChangeService.GetForBookingAsync(bookingId, cancellationToken);
+        return ApiResults.Ok(ToTermsChangesResponse(result));
+    }
+
+    // Shared with this host's NightStayBookingEndpoints (same assembly, same shape).
+    internal static BookingTermsChangesResponse ToTermsChangesResponse(BookingTermsChangeResult result) =>
+        new(result.BookingId,
+            result.HasChanges,
+            result.Changes
+                .Select(c => new BookingTermsChangeResponse(
+                    c.Field, c.ChangeType, c.BookedValue, c.CurrentValue, c.Message))
+                .ToList());
+
+    internal static AcknowledgedTermsResponse? ToAcknowledgedTermsResponse(BookingAcknowledgedTerms? terms) =>
+        terms is null
+            ? null
+            : new AcknowledgedTermsResponse(
+                terms.UnitPrice, terms.CancellationPolicyHours, terms.DropOffTime, terms.PickUpTime,
+                terms.AddressLine, terms.City, terms.ZipCode, terms.Latitude, terms.Longitude);
+
     private static async Task<IResult> RequestServiceBookingModification(
         Guid petParentId, Guid bookingId, RequestBookingModificationRequest request,
         IBookingService bookingService, CancellationToken cancellationToken)
@@ -456,7 +508,8 @@ internal static class PetParentEndpoints
             var result = await bookingService.RequestModificationAsync(
                 new RequestBookingModificationCommand(
                     bookingId, BookingStatusActor.Parent, petParentId,
-                    request.BookingDate, request.StartTime, request.EndTime, request.Note),
+                    request.BookingDate, request.StartTime, request.EndTime, request.Note,
+                    request.AcknowledgeTermsChanges),
                 cancellationToken);
             return ApiResults.Ok(ToBookingResponse(result));
         }
@@ -510,10 +563,13 @@ internal static class PetParentEndpoints
         or BookingJobInProgressException
         or InvalidStartOtpException or StartOtpExpiredException or BookingNotModifiableException
         or BookingModificationConflictException or NoPendingModificationException
-        or BookingModificationCapacityException or BookingServiceInvalidException
+        or BookingModificationCapacityException or BookingTermsChangedException
+        or BookingModificationWindowClosedException or BookingModificationExpiredException
+        or BookingServiceInvalidException
         or BookingOfferingNotConfiguredException or BookingGroomingItemCodeRequiredException
         or BookingGroomingItemNotOfferedException or BookingGroomingItemInactiveException
         or ProviderClosedOnDateException or InvalidBookingTimeException
+        or BookingLeadTimeTooShortException
         or BookingNightStayUseDedicatedEndpointException or BookingStatusNotAllowedException
         or BookingStatusTerminalException or BookingStatusUnchangedException
         or BookingNoShowTooEarlyException or BookingExpiredException
@@ -531,6 +587,9 @@ internal static class PetParentEndpoints
         BookingModificationConflictException e => ApiResults.Conflict("ModificationAlreadyPending", e.Message),
         NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
         BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
+        BookingTermsChangedException e => ApiResults.Conflict("BookingTermsChanged", e.Message),
+        BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
+        BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         BookingServiceInvalidException e => ApiResults.BadRequest("InvalidServiceId", e.Message),
         BookingOfferingNotConfiguredException e => ApiResults.BadRequest("OfferingNotConfigured", e.Message),
         BookingGroomingItemCodeRequiredException e => ApiResults.BadRequest("ServiceItemCodeRequired", e.Message),
@@ -538,6 +597,7 @@ internal static class PetParentEndpoints
         BookingGroomingItemInactiveException e => ApiResults.Conflict("ServiceItemInactive", e.Message),
         ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
         InvalidBookingTimeException e => ApiResults.BadRequest("InvalidBookingTime", e.Message),
+        BookingLeadTimeTooShortException e => ApiResults.Conflict("BookingLeadTimeTooShort", e.Message),
         BookingNightStayUseDedicatedEndpointException e => ApiResults.BadRequest("UseNightStayEndpoint", e.Message),
         BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),
         BookingStatusTerminalException e => ApiResults.Conflict("BookingStatusTerminal", e.Message),
@@ -723,6 +783,10 @@ internal static class PetParentEndpoints
         {
             return ApiResults.NotFound("PetParentNotFound", exception.Message);
         }
+        catch (PetParentAccountDeletedException exception)
+        {
+            return ApiResults.Conflict("ParentAccountDeleted", exception.Message);
+        }
         catch (UnsupportedPetParentGenderException exception)
         {
             return ApiResults.BadRequest("UnsupportedGender", exception.Message);
@@ -730,6 +794,29 @@ internal static class PetParentEndpoints
         catch (ArgumentException exception)
         {
             return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    /// <summary>
+    /// "Delete account": anonymises the parent and their pets, severs the
+    /// Firebase login (freeing the uid AND the mobile number for a fresh
+    /// sign-up), and removes the operational data + stored media. Bookings,
+    /// events, tickets and the payment ledger are retained — deleting them would
+    /// destroy the provider's history too. Idempotent.
+    /// </summary>
+    private static async Task<IResult> DeleteAccount(
+        Guid petParentId,
+        IParentAccountService accountService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await accountService.DeleteAsync(petParentId, cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (PetParentNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetParentNotFound", exception.Message);
         }
     }
 

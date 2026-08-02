@@ -13,6 +13,12 @@ internal sealed class SqlParentOnboardingService(
     IPawfrontSecretProvider? secretProvider,
     IPetParentMobileOtpSender otpSender) : IParentOnboardingService
 {
+    // UNIQUE index on (MobileCountryCode, MobileNumber) — the race-safe backstop
+    // behind the sproc's explicit duplicate check. Named here so a collision on a
+    // different unique index isn't misreported as a duplicate mobile number.
+    private const string MobileNumberIndexName = "UX_PetParents_MobileNumber";
+
+
     public async Task<ParentFirebaseAuthResponse> SaveFirebaseAuthAsync(
         SaveParentFirebaseAuthCommand commandInput,
         CancellationToken cancellationToken)
@@ -109,7 +115,19 @@ internal sealed class SqlParentOnboardingService(
         {
             throw new ParentAuthIdentityNotFoundException(normalisedFirebaseUserId);
         }
-        catch (SqlException exception) when (exception.Number is 2601 or 2627)
+        // The sproc's own duplicate-mobile check — the ordinary path when the
+        // number is already registered to another account.
+        catch (SqlException exception) when (exception.Number == 51222)
+        {
+            throw new PetParentMobileNumberAlreadyExistsException(mobileCountryCode, mobileNumber);
+        }
+        // Backstop: two registrations for the same number racing past the
+        // pre-check collide on the UNIQUE index instead. Matching the index name
+        // keeps an unrelated unique violation (e.g. the one-profile-per-auth-identity
+        // index) from being reported to the caller as a duplicate mobile number.
+        catch (SqlException exception)
+            when (exception.Number is 2601 or 2627
+                  && exception.Message.Contains(MobileNumberIndexName, StringComparison.Ordinal))
         {
             throw new PetParentMobileNumberAlreadyExistsException(mobileCountryCode, mobileNumber);
         }
@@ -223,6 +241,61 @@ internal sealed class SqlParentOnboardingService(
         {
             throw new PetParentNotFoundException(petParentId);
         }
+        catch (SqlException exception) when (exception.Number == 51224)
+        {
+            throw new PetParentAccountDeletedException(petParentId);
+        }
+    }
+
+    public async Task<PetParentAccountDeletionResult> DeletePetParentAccountAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = CreateStoredProcedureCommand(
+            connection,
+            "Parent.DeletePetParent");
+
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
+
+        try
+        {
+            // Two result sets: summary, then the blob URLs to clean up. See the
+            // sproc's header for what is retained vs cleared.
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Pet parent delete summary was not returned.");
+            }
+
+            var summary = new DeletePetParentAccountResponse(
+                reader.GetGuid(0),
+                new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
+                reader.GetBoolean(2),
+                reader.GetInt32(3),
+                reader.GetInt32(4),
+                reader.GetInt32(5),
+                reader.GetInt32(6),
+                reader.GetInt32(7));
+
+            var blobUrls = new List<string>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    blobUrls.Add(reader.GetString(0));
+                }
+            }
+
+            return new PetParentAccountDeletionResult(summary, blobUrls);
+        }
+        catch (SqlException exception) when (exception.Number == 51223)
+        {
+            throw new PetParentNotFoundException(petParentId);
+        }
     }
 
     private static PetParentProfileDetailsResponse ReadPetParentProfileDetails(SqlDataReader reader)
@@ -272,16 +345,28 @@ internal sealed class SqlParentOnboardingService(
             new DateTimeOffset(reader.GetDateTime(17), TimeSpan.Zero));
     }
 
+    /// <summary>
+    /// Maps what the app's gender picker sends (Male / Female / Others /
+    /// Non Binary) onto the canonical values stored in
+    /// <c>Parent.PetParents.Gender</c> — Male, Female, NonBinary, Other,
+    /// PreferNotToSay, the set <c>CK_PetParents_Gender</c> allows and the one
+    /// the provider host shares. Spacing, hyphens, and casing are normalised
+    /// away first, so "Non Binary", "non-binary" and "NonBinary" all land on the
+    /// same stored value, and the picker's plural "Others" stores as "Other".
+    /// </summary>
     private static string NormalizeGender(string? value)
     {
-        return Required(value, nameof(value)) switch
+        var supplied = Required(value, nameof(value));
+        var compact = supplied.Replace(" ", string.Empty).Replace("-", string.Empty);
+
+        return compact.ToLowerInvariant() switch
         {
-            "Male" => "Male",
-            "Female" => "Female",
-            "NonBinary" => "NonBinary",
-            "Other" => "Other",
-            "PreferNotToSay" => "PreferNotToSay",
-            var unsupported => throw new UnsupportedPetParentGenderException(unsupported)
+            "male" => "Male",
+            "female" => "Female",
+            "nonbinary" => "NonBinary",
+            "other" or "others" => "Other",
+            "prefernottosay" => "PreferNotToSay",
+            _ => throw new UnsupportedPetParentGenderException(supplied)
         };
     }
 

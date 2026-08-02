@@ -319,8 +319,10 @@ internal sealed class SqlNightStayBookingStore(
         }
         catch (SqlException exception) when (exception.Number == 51249)
         {
-            // The sproc flipped the stale CREATED booking to EXPIRED before
-            // throwing — the attempted transition (e.g. accept) is rejected.
+            // The booking has sat in CREATED for 24+ hours, so the attempted
+            // transition (e.g. accept) is rejected. The sproc rejects only — the
+            // stored status is still CREATED until the scheduled external job
+            // settles it to EXPIRED.
             throw new BookingExpiredException(bookingId);
         }
         catch (SqlException exception) when (exception.Number == 51269)
@@ -423,9 +425,13 @@ internal sealed class SqlNightStayBookingStore(
         {
             throw new BookingNotStartableException(bookingId);
         }
+        catch (SqlException exception) when (exception.Number == 51264)
+        {
+            throw new BookingStartNotOnServiceDateException(bookingId);
+        }
         catch (SqlException exception) when (exception.Number == 51257)
         {
-            throw new BookingStartJobTooEarlyException(bookingId);
+            throw new BookingStartOutsideWorkingHoursException(bookingId);
         }
     }
 
@@ -557,7 +563,8 @@ internal sealed class SqlNightStayBookingStore(
 
     public async Task<NightStayBookingResult> RequestModificationAsync(
         Guid bookingId, BookingStatusActor actor, Guid actorId,
-        DateOnly checkInDate, DateOnly checkOutDate, string? note, CancellationToken cancellationToken)
+        DateOnly checkInDate, DateOnly checkOutDate, string? note,
+        BookingAcknowledgedTerms? acknowledgedTerms, CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -571,6 +578,8 @@ internal sealed class SqlNightStayBookingStore(
         command.Parameters.AddWithValue("@ProposedCheckInDate", checkInDate.ToDateTime(TimeOnly.MinValue));
         command.Parameters.AddWithValue("@ProposedCheckOutDate", checkOutDate.ToDateTime(TimeOnly.MinValue));
         command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
+        SqlBookingStore.AddAcknowledgedTermsParameters(
+            command, acknowledgedTerms, "@AcknowledgedPricePerNight", includeStayTimes: true);
 
         try
         {
@@ -596,6 +605,10 @@ internal sealed class SqlNightStayBookingStore(
         catch (SqlException exception) when (exception.Number == 51263)
         {
             throw new BookingModificationConflictException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51271)
+        {
+            throw new BookingModificationWindowClosedException(bookingId);
         }
     }
 
@@ -623,7 +636,9 @@ internal sealed class SqlNightStayBookingStore(
             ProposedCheckInDate: DateOnly.FromDateTime(reader.GetDateTime(4)),
             ProposedCheckOutDate: DateOnly.FromDateTime(reader.GetDateTime(5)),
             Note: reader.IsDBNull(6) ? null : reader.GetString(6),
-            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(7), TimeSpan.Zero));
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(7), TimeSpan.Zero),
+            AcknowledgedTerms: SqlBookingStore.ReadAcknowledgedTerms(
+                reader, offset: 8, includeStayTimes: true));
     }
 
     public async Task<NightStayBookingResult> RespondModificationAsync(
@@ -667,6 +682,14 @@ internal sealed class SqlNightStayBookingStore(
         catch (SqlException exception) when (exception.Number == 51268)
         {
             throw new BookingModificationCapacityException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51272)
+        {
+            // The proposal — from either party — passed its 2-hour cutoff, so the
+            // response is rejected. The sproc rejects only — the stay is still
+            // parked in whichever MODIFICATION_REQUEST_BY_* status it was in
+            // until the scheduled external job reverts it to CONFIRMED.
+            throw new BookingModificationExpiredException(bookingId);
         }
     }
 

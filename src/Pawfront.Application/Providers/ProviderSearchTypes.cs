@@ -97,6 +97,12 @@ public sealed record TrainerProviderSearchCriteria(
 /// (Provider.ProviderServiceBanners, keyed by ServiceId). Distinct from
 /// ImageUrl (the offering/discovery photo). Null when no banner is set.
 /// </param>
+/// <param name="Description">
+/// What the provider says about the service being searched: the menu item's
+/// blurb for a grooming search with a ServiceItemCode, the session description
+/// for trainers. Null for the other searches (no per-service text), and for a
+/// grooming search without a code — no single item is being described.
+/// </param>
 public sealed record ProviderSearchResult(
     Guid ProviderId,
     Guid ServiceId,
@@ -107,6 +113,7 @@ public sealed record ProviderSearchResult(
     string ChargesUnit,
     string? ServiceItemCode,
     string? ImageUrl,
+    string? Description = null,
     string? BannerImageUrl = null);
 
 public static class ProviderSearchChargesUnits

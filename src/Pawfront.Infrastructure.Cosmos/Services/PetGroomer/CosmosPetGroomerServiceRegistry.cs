@@ -29,6 +29,10 @@ internal sealed class CosmosPetGroomerServiceRegistry(
         "GroomerShop", "CustomerPlace", "Both"
     };
 
+    // Per-menu-item blurb the parent reads when picking a service. Free text,
+    // capped so a runaway paste can't bloat the offering document.
+    private const int MaxServiceDescriptionLength = 500;
+
     public async Task<PetGroomerServiceResult> RegisterGroomerShopAsync(
         RegisterGroomerShopCommand command,
         CancellationToken cancellationToken)
@@ -302,9 +306,20 @@ internal sealed class CosmosPetGroomerServiceRegistry(
                     $"{fieldName}: durationMinutes for '{code}' must be between 5 and 480.", fieldName);
             }
 
+            var description = item.Description?.Trim();
+            if (description?.Length > MaxServiceDescriptionLength)
+            {
+                throw new ArgumentException(
+                    $"{fieldName}: description for '{code}' must be {MaxServiceDescriptionLength} characters or fewer.",
+                    fieldName);
+            }
+
             result.Add(new GroomingServiceItem
             {
                 Code = code,
+                // Optional — a blank description is stored as absent, so it
+                // reads back as null rather than an empty string.
+                Description = string.IsNullOrEmpty(description) ? null : description,
                 Price = item.Price,
                 DurationMinutes = item.DurationMinutes,
                 IsActive = item.IsActive
@@ -457,7 +472,8 @@ internal sealed class CosmosPetGroomerServiceRegistry(
             ? null
             : new GroomingOfferingResult(
                 offering.Services
-                    .Select(s => new GroomingServiceItemResult(s.Code, s.Price, s.DurationMinutes, s.IsActive))
+                    .Select(s => new GroomingServiceItemResult(
+                        s.Code, s.Description, s.Price, s.DurationMinutes, s.IsActive))
                     .ToArray(),
                 offering.AddOns.ToArray(),
                 offering.LatePickupCharges,

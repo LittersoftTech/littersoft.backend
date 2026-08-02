@@ -1,4 +1,4 @@
-/*
+﻿/*
 ================================================================================
   Pawfront — full database deployment script
 --------------------------------------------------------------------------------
@@ -203,6 +203,13 @@ BEGIN
         -- the toggle if future confirmed bookings still exist.
         [IsActive] BIT NOT NULL
             CONSTRAINT [DF_Providers_IsActive] DEFAULT 1,
+        -- Account-deleted marker. "Delete account" anonymises this row rather
+        -- than removing it ([Provider].[DeleteProvider]) so bookings, events and
+        -- the payment ledger keep their meaning. Permanent: blocks reactivation
+        -- and profile edits (THROW 51115).
+        [IsDeleted] BIT NOT NULL
+            CONSTRAINT [DF_Providers_IsDeleted] DEFAULT 0,
+        [DeletedAtUtc] DATETIME2(7) NULL,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_Providers_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         [UpdatedAtUtc] DATETIME2(7) NOT NULL
@@ -303,6 +310,30 @@ BEGIN
         ADD [IsActive] BIT NOT NULL
             CONSTRAINT [DF_Providers_IsActive] DEFAULT 1;
     PRINT 'Added column [Provider].[Providers].[IsActive].';
+END
+GO
+
+-- Retrofit (2026-07-25): [IsDeleted] + [DeletedAtUtc] for the account-delete
+-- flow, which anonymises the provider row instead of removing it.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'IsDeleted'
+      AND [object_id] = OBJECT_ID(N'[Provider].[Providers]'))
+BEGIN
+    ALTER TABLE [Provider].[Providers]
+        ADD [IsDeleted] BIT NOT NULL
+            CONSTRAINT [DF_Providers_IsDeleted] DEFAULT 0;
+    PRINT 'Added column [Provider].[Providers].[IsDeleted].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'DeletedAtUtc'
+      AND [object_id] = OBJECT_ID(N'[Provider].[Providers]'))
+BEGIN
+    ALTER TABLE [Provider].[Providers] ADD [DeletedAtUtc] DATETIME2(7) NULL;
+    PRINT 'Added column [Provider].[Providers].[DeletedAtUtc].';
 END
 GO
 
@@ -1010,6 +1041,11 @@ BEGIN
         [Description] NVARCHAR(2000) NOT NULL,
         [ProfilePhotoUrl] NVARCHAR(1000) NULL,
         [MobileVerifiedAtUtc] DATETIME2(7) NULL,
+        -- Account delete = anonymise + permanently disable, never a row delete
+        -- (see [Parent].[DeletePetParent]).
+        [IsDeleted] BIT NOT NULL
+            CONSTRAINT [DF_PetParents_IsDeleted] DEFAULT 0,
+        [DeletedAtUtc] DATETIME2(7) NULL,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_PetParents_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         [UpdatedAtUtc] DATETIME2(7) NOT NULL
@@ -1088,6 +1124,30 @@ BEGIN
 END
 GO
 
+-- Retrofit (2026-07-27): [IsDeleted] + [DeletedAtUtc] for the account-delete
+-- flow, which anonymises the pet-parent row instead of removing it.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'IsDeleted'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+BEGIN
+    ALTER TABLE [Parent].[PetParents]
+        ADD [IsDeleted] BIT NOT NULL
+            CONSTRAINT [DF_PetParents_IsDeleted] DEFAULT 0;
+    PRINT 'Added column [Parent].[PetParents].[IsDeleted].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'DeletedAtUtc'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+BEGIN
+    ALTER TABLE [Parent].[PetParents] ADD [DeletedAtUtc] DATETIME2(7) NULL;
+    PRINT 'Added column [Parent].[PetParents].[DeletedAtUtc].';
+END
+GO
+
 -- Idempotent: add [ProfilePhotoUrl] to legacy PetParents rows that pre-date
 -- the profile-photo upload endpoint. Nullable — populated only after the
 -- parent uploads a photo.
@@ -1122,6 +1182,40 @@ BEGIN
 END
 GO
 
+-- One account per mobile number. [Parent].[CompletePetParentProfile] pre-checks
+-- explicitly (THROW 51222), but this index is what makes the rule race-safe, so
+-- it must actually be present and keyed on the composite (a number is the country
+-- code AND the digits: +41 791234567 and +49 791234567 are two real numbers).
+-- The IF NOT EXISTS guard below matches on name only and so can never repair an
+-- index built on the wrong columns — hence this explicit rebuild. Widening a
+-- UNIQUE key only ever admits more rows, so the recreate cannot fail on existing
+-- data; a NARROWER mis-keyed index would already have rejected such rows.
+IF EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'UX_PetParents_MobileNumber'
+      AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
+AND NOT EXISTS (
+    SELECT 1
+    FROM sys.indexes i
+    WHERE i.[name] = N'UX_PetParents_MobileNumber'
+      AND i.[object_id] = OBJECT_ID(N'[Parent].[PetParents]')
+      AND (
+            SELECT STRING_AGG(CONVERT(NVARCHAR(MAX), c.[name]), N',')
+                       WITHIN GROUP (ORDER BY ic.[key_ordinal])
+            FROM sys.index_columns ic
+            INNER JOIN sys.columns c
+                ON c.[object_id] = ic.[object_id]
+               AND c.[column_id] = ic.[column_id]
+            WHERE ic.[object_id] = i.[object_id]
+              AND ic.[index_id] = i.[index_id]
+              AND ic.[is_included_column] = 0
+          ) = N'MobileCountryCode,MobileNumber')
+BEGIN
+    DROP INDEX [UX_PetParents_MobileNumber] ON [Parent].[PetParents];
+    PRINT 'Dropped mis-keyed index [UX_PetParents_MobileNumber]; recreating on (MobileCountryCode, MobileNumber).';
+END
+GO
+
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes
     WHERE [name] = N'UX_PetParents_MobileNumber'
@@ -1130,9 +1224,37 @@ AND EXISTS (
     SELECT 1 FROM sys.columns
     WHERE [name] = N'MobileNumber'
       AND [object_id] = OBJECT_ID(N'[Parent].[PetParents]'))
-    CREATE UNIQUE INDEX [UX_PetParents_MobileNumber]
-        ON [Parent].[PetParents] ([MobileCountryCode], [MobileNumber])
-        WHERE [MobileNumber] IS NOT NULL;
+BEGIN
+    -- A database that ran without the index could already hold duplicates, and
+    -- CREATE UNIQUE INDEX would then fail and abort the whole deployment. Report
+    -- them instead and leave the index off: new duplicates are still refused by
+    -- [Parent].[CompletePetParentProfile]'s own check, and the index goes on
+    -- automatically once the listed rows have been reconciled.
+    IF EXISTS (
+        SELECT 1
+        FROM [Parent].[PetParents]
+        WHERE [MobileNumber] IS NOT NULL
+        GROUP BY [MobileCountryCode], [MobileNumber]
+        HAVING COUNT(*) > 1)
+    BEGIN
+        PRINT 'WARNING: [Parent].[PetParents] holds duplicate (MobileCountryCode, MobileNumber) rows; '
+            + 'skipping [UX_PetParents_MobileNumber]. Resolve the duplicates listed below and re-run.';
+        SELECT [MobileCountryCode], [MobileNumber], COUNT(*) AS [AccountCount]
+        FROM [Parent].[PetParents]
+        WHERE [MobileNumber] IS NOT NULL
+        GROUP BY [MobileCountryCode], [MobileNumber]
+        HAVING COUNT(*) > 1;
+    END
+    ELSE
+    BEGIN
+        -- Filtered so legacy rows migrated without a number don't collide; inert
+        -- on fresh installs, where the column is NOT NULL.
+        CREATE UNIQUE INDEX [UX_PetParents_MobileNumber]
+            ON [Parent].[PetParents] ([MobileCountryCode], [MobileNumber])
+            WHERE [MobileNumber] IS NOT NULL;
+        PRINT 'Created unique index [UX_PetParents_MobileNumber].';
+    END
+END
 GO
 
 -- Deferred FK from ParentAuthIdentities back to PetParents (created now that
@@ -1199,7 +1321,9 @@ BEGIN
         CONSTRAINT [CK_Pets_SterilizationStatus]
             CHECK ([SterilizationStatus] IS NULL OR [SterilizationStatus] IN (N'Sterilized', N'Intact')),
         CONSTRAINT [CK_Pets_Temperament]
-            CHECK ([Temperament] IS NULL OR [Temperament] IN (N'Anxious', N'Friendly', N'Aggressive', N'HyperActive'))
+            CHECK ([Temperament] IS NULL OR [Temperament] IN (
+                N'Anxious', N'Friendly', N'Aggressive', N'HyperActive', N'Shy',
+                N'Calm', N'Playful', N'Independent', N'Protective'))
     );
     PRINT 'Created table [Parent].[Pets].';
 END
@@ -1390,6 +1514,25 @@ BEGIN
 END
 GO
 
+-- The allowed temperaments are the [Pawfront.Domain.Vocabularies.Behaviour] enum,
+-- which has grown past the original Anxious/Friendly/Aggressive trio. The CREATE
+-- TABLE above is skipped once the table exists, and the add-if-missing block
+-- below can only ever CREATE the constraint — never widen one that is already
+-- there — so a database carrying an older definition kept rejecting values the
+-- API happily validates (e.g. HyperActive → Msg 547 on
+-- [Parent].[UpdatePetMedicalInfo], surfacing as a 500). Rebuild it whenever the
+-- definition is out of date. Widening a CHECK cannot fail on existing rows.
+IF EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Pets_Temperament'
+      AND [parent_object_id] = OBJECT_ID(N'[Parent].[Pets]')
+      AND [definition] NOT LIKE N'%Protective%')
+BEGIN
+    ALTER TABLE [Parent].[Pets] DROP CONSTRAINT [CK_Pets_Temperament];
+    PRINT 'Dropped outdated constraint [CK_Pets_Temperament]; recreating with the full Behaviour set.';
+END
+GO
+
 IF NOT EXISTS (
     SELECT 1 FROM sys.check_constraints
     WHERE [name] = N'CK_Pets_Temperament'
@@ -1401,7 +1544,10 @@ AND EXISTS (
 BEGIN
     ALTER TABLE [Parent].[Pets] WITH NOCHECK
         ADD CONSTRAINT [CK_Pets_Temperament]
-            CHECK ([Temperament] IS NULL OR [Temperament] IN (N'Anxious', N'Friendly', N'Aggressive', N'HyperActive'));
+            CHECK ([Temperament] IS NULL OR [Temperament] IN (
+                N'Anxious', N'Friendly', N'Aggressive', N'HyperActive', N'Shy',
+                N'Calm', N'Playful', N'Independent', N'Protective'));
+    PRINT 'Created constraint [CK_Pets_Temperament].';
 END
 GO
 
@@ -2083,7 +2229,7 @@ BEGIN
                                 N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                                 N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                 N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')),
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
         CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
             ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
             OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
@@ -2654,7 +2800,7 @@ BEGIN
                                 N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                                 N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                 N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')),
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
         CONSTRAINT [CK_NightStayBookings_CancelledRequiresTimestamp] CHECK (
             ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
             OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
@@ -2946,8 +3092,93 @@ BEGIN
 END
 GO
 
+-- Retrofit (2026-07-25): rename the OTP-cancellation status
+-- OTP_ATTEMPTS_EXCEEDED -> OTP_MAX_ATTEMPTS_EXCEEDED so both apps can label it
+-- "OTP Max Attempts Exceeded" instead of showing a generic cancellation. Fires
+-- once per booking table when the CHECK doesn't yet mention the new value, and
+-- jumps straight to the final status list — so the older JOB_EXPIRED / START_JOB
+-- / PAID retrofit blocks below then find their tokens present and no-op.
+-- Order inside the block matters: the CHECK must be dropped BEFORE the data
+-- UPDATE (the old CHECK forbids the new value, the new CHECK forbids the old
+-- one), so drop -> migrate rows -> re-add.
+IF EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Bookings_Status'
+      AND [parent_object_id] = OBJECT_ID(N'[Booking].[Bookings]')
+      AND [definition] NOT LIKE N'%OTP_MAX_ATTEMPTS_EXCEEDED%')
+BEGIN
+    PRINT 'Renaming OTP_ATTEMPTS_EXCEEDED -> OTP_MAX_ATTEMPTS_EXCEEDED on [Booking].[Bookings].';
+    ALTER TABLE [Booking].[Bookings] DROP CONSTRAINT [CK_Bookings_Status];
+
+    UPDATE [Booking].[Bookings]
+    SET [Status] = N'OTP_MAX_ATTEMPTS_EXCEEDED'
+    WHERE [Status] = N'OTP_ATTEMPTS_EXCEEDED';
+
+    ALTER TABLE [Booking].[Bookings]
+        ADD CONSTRAINT [CK_Bookings_Status]
+            CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED',
+                                N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED',
+                                N'COMPLETED', N'PAID', N'APPROVAL_NEEDED',
+                                N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER',
+                                N'PROVIDER_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
+                                N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
+                                N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+                                N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED'));
+END
+GO
+
+IF EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_NightStayBookings_Status'
+      AND [parent_object_id] = OBJECT_ID(N'[Booking].[NightStayBookings]')
+      AND [definition] NOT LIKE N'%OTP_MAX_ATTEMPTS_EXCEEDED%')
+BEGIN
+    PRINT 'Renaming OTP_ATTEMPTS_EXCEEDED -> OTP_MAX_ATTEMPTS_EXCEEDED on [Booking].[NightStayBookings].';
+    ALTER TABLE [Booking].[NightStayBookings] DROP CONSTRAINT [CK_NightStayBookings_Status];
+
+    UPDATE [Booking].[NightStayBookings]
+    SET [Status] = N'OTP_MAX_ATTEMPTS_EXCEEDED'
+    WHERE [Status] = N'OTP_ATTEMPTS_EXCEEDED';
+
+    ALTER TABLE [Booking].[NightStayBookings]
+        ADD CONSTRAINT [CK_NightStayBookings_Status]
+            CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED',
+                                N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED',
+                                N'COMPLETED', N'PAID', N'APPROVAL_NEEDED',
+                                N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER',
+                                N'PROVIDER_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
+                                N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
+                                N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+                                N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED'));
+END
+GO
+
+-- The audit trails carry the status as free text (no CHECK), so their rename is
+-- an unconditional idempotent UPDATE.
+UPDATE [Booking].[BookingStatusHistory]
+SET [ToStatus] = N'OTP_MAX_ATTEMPTS_EXCEEDED'
+WHERE [ToStatus] = N'OTP_ATTEMPTS_EXCEEDED';
+GO
+
+UPDATE [Booking].[BookingStatusHistory]
+SET [FromStatus] = N'OTP_MAX_ATTEMPTS_EXCEEDED'
+WHERE [FromStatus] = N'OTP_ATTEMPTS_EXCEEDED';
+GO
+
+UPDATE [Booking].[NightStayBookingStatusHistory]
+SET [ToStatus] = N'OTP_MAX_ATTEMPTS_EXCEEDED'
+WHERE [ToStatus] = N'OTP_ATTEMPTS_EXCEEDED';
+GO
+
+UPDATE [Booking].[NightStayBookingStatusHistory]
+SET [FromStatus] = N'OTP_MAX_ATTEMPTS_EXCEEDED'
+WHERE [FromStatus] = N'OTP_ATTEMPTS_EXCEEDED';
+GO
+
 -- Retrofit: add the JOB_EXPIRED (provider accepted but never started the job
--- and the scheduled window elapsed) and OTP_ATTEMPTS_EXCEEDED (the 6th wrong
+-- and the scheduled window elapsed) and OTP_MAX_ATTEMPTS_EXCEEDED (the 6th wrong
 -- start-OTP attempt cancelled the job) statuses to both booking status CHECK
 -- lists. Both are terminal and free capacity. Detected by the CHECK not yet
 -- mentioning 'JOB_EXPIRED', so it fires once per booking table and never on
@@ -2958,7 +3189,7 @@ IF EXISTS (
       AND [parent_object_id] = OBJECT_ID(N'[Booking].[Bookings]')
       AND [definition] NOT LIKE N'%JOB_EXPIRED%')
 BEGIN
-    PRINT 'Adding the JOB_EXPIRED + OTP_ATTEMPTS_EXCEEDED statuses to [Booking].[Bookings].';
+    PRINT 'Adding the JOB_EXPIRED + OTP_MAX_ATTEMPTS_EXCEEDED statuses to [Booking].[Bookings].';
     ALTER TABLE [Booking].[Bookings] DROP CONSTRAINT [CK_Bookings_Status];
     ALTER TABLE [Booking].[Bookings]
         ADD CONSTRAINT [CK_Bookings_Status]
@@ -2969,7 +3200,7 @@ BEGIN
                                 N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                                 N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                 N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED'));
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED'));
 END
 GO
 
@@ -2979,7 +3210,7 @@ IF EXISTS (
       AND [parent_object_id] = OBJECT_ID(N'[Booking].[NightStayBookings]')
       AND [definition] NOT LIKE N'%JOB_EXPIRED%')
 BEGIN
-    PRINT 'Adding the JOB_EXPIRED + OTP_ATTEMPTS_EXCEEDED statuses to [Booking].[NightStayBookings].';
+    PRINT 'Adding the JOB_EXPIRED + OTP_MAX_ATTEMPTS_EXCEEDED statuses to [Booking].[NightStayBookings].';
     ALTER TABLE [Booking].[NightStayBookings] DROP CONSTRAINT [CK_NightStayBookings_Status];
     ALTER TABLE [Booking].[NightStayBookings]
         ADD CONSTRAINT [CK_NightStayBookings_Status]
@@ -2990,7 +3221,7 @@ BEGIN
                                 N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                                 N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                 N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED'));
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED'));
 END
 GO
 
@@ -3018,7 +3249,7 @@ BEGIN
                                 N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                                 N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                 N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED'));
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED'));
 END
 GO
 
@@ -3040,7 +3271,7 @@ BEGIN
                                 N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                                 N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                 N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED'));
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED'));
 END
 GO
 
@@ -3066,7 +3297,7 @@ BEGIN
                                 N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                                 N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                 N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED'));
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED'));
 END
 GO
 
@@ -3088,7 +3319,74 @@ BEGIN
                                 N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                                 N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                 N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED'));
+                                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED'));
+END
+GO
+
+-- Backfill (2026-07-29): an accepted job whose scheduled window elapsed without
+-- ever getting underway is a NO-SHOW, not a neutral expiry. The old sweep wrote
+-- JOB_EXPIRED for that case until the no-show arm superseded it, so relabel the
+-- rows it already produced — otherwise the same situation reads two different
+-- ways depending on when it happened.
+--
+-- Who was absent is NOT guessed. It is read back from the audit trail: the
+-- JOB_EXPIRED history row records the status the booking held when it was swept,
+-- which is exactly the evidence the live arm branches on — START_JOB (the
+-- provider was there and the start code was issued, but the parent never handed
+-- it back) -> PARENT_NO_SHOW; any confirmed-equivalent state (the provider never
+-- so much as tapped Start) -> PROVIDER_NO_SHOW.
+--
+-- A row with no JOB_EXPIRED audit entry is LEFT ALONE — there is no evidence to
+-- attribute it, and JOB_EXPIRED remains a valid terminal status. Capacity is
+-- unaffected either way: all three statuses are in the capacity-freeing set.
+-- Idempotent — once converted, no JOB_EXPIRED rows remain for a re-run to find.
+-- Runs after the status CHECK retrofits above, so the no-show values are already
+-- permitted. Single-day only, by decision; night-stay JOB_EXPIRED rows are left
+-- as they are.
+DECLARE @BackfilledNoShows TABLE (
+    [BookingId] UNIQUEIDENTIFIER NOT NULL,
+    [ToStatus]  NVARCHAR(48)     NOT NULL);
+DECLARE @NoShowBackfillNote NVARCHAR(500) =
+    N'Relabelled from JOB_EXPIRED: an accepted job whose scheduled window elapsed unstarted is recorded as a no-show. '
+    + N'Attribution taken from the status the booking held when it was swept.';
+
+IF EXISTS (SELECT 1 FROM [Booking].[Bookings] WHERE [Status] = N'JOB_EXPIRED')
+BEGIN
+    ;WITH [SweptFrom] AS (
+        SELECT h.[BookingId],
+               h.[FromStatus],
+               ROW_NUMBER() OVER (PARTITION BY h.[BookingId] ORDER BY h.[ChangedAtUtc] DESC) AS [Rn]
+        FROM [Booking].[BookingStatusHistory] h
+        WHERE h.[ToStatus] = N'JOB_EXPIRED'
+    )
+    UPDATE b
+    SET [Status] = CASE WHEN s.[FromStatus] = N'START_JOB' THEN N'PARENT_NO_SHOW'
+                        ELSE N'PROVIDER_NO_SHOW' END,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    OUTPUT inserted.[BookingId], inserted.[Status] INTO @BackfilledNoShows
+    FROM [Booking].[Bookings] b
+    INNER JOIN [SweptFrom] s ON s.[BookingId] = b.[BookingId] AND s.[Rn] = 1
+    WHERE b.[Status] = N'JOB_EXPIRED';
+
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    SELECT [BookingId], N'JOB_EXPIRED', [ToStatus], N'System', NULL, @NoShowBackfillNote
+    FROM @BackfilledNoShows;
+
+    -- PRINT takes a scalar expression only — a subquery inline here is a parse
+    -- error (Msg 1046), so the counts are materialised into variables first.
+    DECLARE @ProviderNoShowBackfilled INT, @ParentNoShowBackfilled INT;
+    SELECT @ProviderNoShowBackfilled = COUNT(*) FROM @BackfilledNoShows WHERE [ToStatus] = N'PROVIDER_NO_SHOW';
+    SELECT @ParentNoShowBackfilled = COUNT(*) FROM @BackfilledNoShows WHERE [ToStatus] = N'PARENT_NO_SHOW';
+
+    PRINT 'Backfilled '
+        + CAST(@ProviderNoShowBackfilled AS NVARCHAR(16))
+        + ' booking(s) to PROVIDER_NO_SHOW and '
+        + CAST(@ParentNoShowBackfilled AS NVARCHAR(16))
+        + ' to PARENT_NO_SHOW (was JOB_EXPIRED).';
+
+    IF EXISTS (SELECT 1 FROM [Booking].[Bookings] WHERE [Status] = N'JOB_EXPIRED')
+        PRINT 'NOTE: some JOB_EXPIRED booking(s) have no JOB_EXPIRED audit row and were left unchanged.';
 END
 GO
 
@@ -3281,6 +3579,15 @@ BEGIN
         [ProposedStartTime] TIME(0) NOT NULL,
         [ProposedEndTime] TIME(0) NOT NULL,
         [RequestNote] NVARCHAR(500) NULL,
+        [HasAcknowledgedTerms] BIT NOT NULL
+            CONSTRAINT [DF_BookingModifications_HasAcknowledgedTerms] DEFAULT 0,
+        [AcknowledgedPricePerHour] DECIMAL(10, 2) NULL,
+        [AcknowledgedCancellationPolicyHours] INT NULL,
+        [AcknowledgedAddressLine] NVARCHAR(500) NULL,
+        [AcknowledgedCity] NVARCHAR(200) NULL,
+        [AcknowledgedZipCode] NVARCHAR(32) NULL,
+        [AcknowledgedLatitude] DECIMAL(9, 6) NULL,
+        [AcknowledgedLongitude] DECIMAL(9, 6) NULL,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_BookingModifications_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         CONSTRAINT [PK_BookingModifications] PRIMARY KEY CLUSTERED ([BookingModificationId] ASC),
@@ -3288,9 +3595,58 @@ BEGIN
         CONSTRAINT [FK_BookingModifications_Bookings_BookingId]
             FOREIGN KEY ([BookingId]) REFERENCES [Booking].[Bookings] ([BookingId]) ON DELETE CASCADE,
         CONSTRAINT [CK_BookingModifications_RequestedByActor] CHECK ([RequestedByActor] IN (N'Provider', N'Parent')),
-        CONSTRAINT [CK_BookingModifications_TimeOrder] CHECK ([ProposedStartTime] < [ProposedEndTime])
+        CONSTRAINT [CK_BookingModifications_TimeOrder] CHECK ([ProposedStartTime] < [ProposedEndTime]),
+        CONSTRAINT [CK_BookingModifications_AcknowledgedPrice]
+            CHECK ([AcknowledgedPricePerHour] IS NULL OR [AcknowledgedPricePerHour] >= 0),
+        CONSTRAINT [CK_BookingModifications_AcknowledgedCancellationPolicy]
+            CHECK ([AcknowledgedCancellationPolicyHours] IS NULL
+                   OR [AcknowledgedCancellationPolicyHours] IN (24, 48, 72, 96))
     );
     PRINT 'Created table [Booking].[BookingModifications].';
+END
+GO
+
+-- Terms-drift acknowledgement (2026-07-27): the requester's confirmation of the
+-- provider's CURRENT terms is staged next to the proposed schedule, so the
+-- counterparty's accept applies exactly the values the requester was shown.
+-- Added to an already-created staging table.
+IF COL_LENGTH(N'[Booking].[BookingModifications]', N'HasAcknowledgedTerms') IS NULL
+BEGIN
+    ALTER TABLE [Booking].[BookingModifications]
+        ADD [HasAcknowledgedTerms] BIT NOT NULL
+                CONSTRAINT [DF_BookingModifications_HasAcknowledgedTerms] DEFAULT 0,
+            [AcknowledgedPricePerHour] DECIMAL(10, 2) NULL,
+            [AcknowledgedCancellationPolicyHours] INT NULL,
+            [AcknowledgedAddressLine] NVARCHAR(500) NULL,
+            [AcknowledgedCity] NVARCHAR(200) NULL,
+            [AcknowledgedZipCode] NVARCHAR(32) NULL,
+            [AcknowledgedLatitude] DECIMAL(9, 6) NULL,
+            [AcknowledgedLongitude] DECIMAL(9, 6) NULL;
+    PRINT 'Added acknowledged-terms columns to [Booking].[BookingModifications].';
+END
+GO
+-- NB: the guard must be schema-qualified. A bare OBJECT_ID(N'[CK_...]', N'C')
+-- resolves against the CALLER's default schema (dbo), never [Booking], so it
+-- returned NULL even when the constraint existed and the ADD then failed 2714.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_BookingModifications_AcknowledgedPrice'
+      AND [parent_object_id] = OBJECT_ID(N'[Booking].[BookingModifications]'))
+BEGIN
+    ALTER TABLE [Booking].[BookingModifications] WITH CHECK
+        ADD CONSTRAINT [CK_BookingModifications_AcknowledgedPrice]
+            CHECK ([AcknowledgedPricePerHour] IS NULL OR [AcknowledgedPricePerHour] >= 0);
+END
+GO
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_BookingModifications_AcknowledgedCancellationPolicy'
+      AND [parent_object_id] = OBJECT_ID(N'[Booking].[BookingModifications]'))
+BEGIN
+    ALTER TABLE [Booking].[BookingModifications] WITH CHECK
+        ADD CONSTRAINT [CK_BookingModifications_AcknowledgedCancellationPolicy]
+            CHECK ([AcknowledgedCancellationPolicyHours] IS NULL
+                   OR [AcknowledgedCancellationPolicyHours] IN (24, 48, 72, 96));
 END
 GO
 
@@ -3443,6 +3799,17 @@ BEGIN
         [ProposedCheckInDate] DATE NOT NULL,
         [ProposedCheckOutDate] DATE NOT NULL,
         [RequestNote] NVARCHAR(500) NULL,
+        [HasAcknowledgedTerms] BIT NOT NULL
+            CONSTRAINT [DF_NightStayBookingModifications_HasAcknowledgedTerms] DEFAULT 0,
+        [AcknowledgedPricePerNight] DECIMAL(10, 2) NULL,
+        [AcknowledgedCancellationPolicyHours] INT NULL,
+        [AcknowledgedDropOffTime] TIME(0) NULL,
+        [AcknowledgedPickUpTime] TIME(0) NULL,
+        [AcknowledgedAddressLine] NVARCHAR(500) NULL,
+        [AcknowledgedCity] NVARCHAR(200) NULL,
+        [AcknowledgedZipCode] NVARCHAR(32) NULL,
+        [AcknowledgedLatitude] DECIMAL(9, 6) NULL,
+        [AcknowledgedLongitude] DECIMAL(9, 6) NULL,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_NightStayBookingModifications_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         CONSTRAINT [PK_NightStayBookingModifications] PRIMARY KEY CLUSTERED ([NightStayBookingModificationId] ASC),
@@ -3450,9 +3817,57 @@ BEGIN
         CONSTRAINT [FK_NightStayBookingModifications_NightStayBookings]
             FOREIGN KEY ([NightStayBookingId]) REFERENCES [Booking].[NightStayBookings] ([NightStayBookingId]) ON DELETE CASCADE,
         CONSTRAINT [CK_NightStayBookingModifications_RequestedByActor] CHECK ([RequestedByActor] IN (N'Provider', N'Parent')),
-        CONSTRAINT [CK_NightStayBookingModifications_DateOrder] CHECK ([ProposedCheckOutDate] > [ProposedCheckInDate])
+        CONSTRAINT [CK_NightStayBookingModifications_DateOrder] CHECK ([ProposedCheckOutDate] > [ProposedCheckInDate]),
+        CONSTRAINT [CK_NightStayBookingModifications_AcknowledgedPrice]
+            CHECK ([AcknowledgedPricePerNight] IS NULL OR [AcknowledgedPricePerNight] >= 0),
+        CONSTRAINT [CK_NightStayBookingModifications_AcknowledgedCancellationPolicy]
+            CHECK ([AcknowledgedCancellationPolicyHours] IS NULL
+                   OR [AcknowledgedCancellationPolicyHours] IN (24, 48, 72, 96))
     );
     PRINT 'Created table [Booking].[NightStayBookingModifications].';
+END
+GO
+
+-- Terms-drift acknowledgement (2026-07-27) — night-stay mirror. Adds the
+-- offering's drop-off / pick-up times to the acknowledged set, since a stay
+-- freezes those at creation too.
+IF COL_LENGTH(N'[Booking].[NightStayBookingModifications]', N'HasAcknowledgedTerms') IS NULL
+BEGIN
+    ALTER TABLE [Booking].[NightStayBookingModifications]
+        ADD [HasAcknowledgedTerms] BIT NOT NULL
+                CONSTRAINT [DF_NightStayBookingModifications_HasAcknowledgedTerms] DEFAULT 0,
+            [AcknowledgedPricePerNight] DECIMAL(10, 2) NULL,
+            [AcknowledgedCancellationPolicyHours] INT NULL,
+            [AcknowledgedDropOffTime] TIME(0) NULL,
+            [AcknowledgedPickUpTime] TIME(0) NULL,
+            [AcknowledgedAddressLine] NVARCHAR(500) NULL,
+            [AcknowledgedCity] NVARCHAR(200) NULL,
+            [AcknowledgedZipCode] NVARCHAR(32) NULL,
+            [AcknowledgedLatitude] DECIMAL(9, 6) NULL,
+            [AcknowledgedLongitude] DECIMAL(9, 6) NULL;
+    PRINT 'Added acknowledged-terms columns to [Booking].[NightStayBookingModifications].';
+END
+GO
+-- Schema-qualified for the same reason as the single-day guard above.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_NightStayBookingModifications_AcknowledgedPrice'
+      AND [parent_object_id] = OBJECT_ID(N'[Booking].[NightStayBookingModifications]'))
+BEGIN
+    ALTER TABLE [Booking].[NightStayBookingModifications] WITH CHECK
+        ADD CONSTRAINT [CK_NightStayBookingModifications_AcknowledgedPrice]
+            CHECK ([AcknowledgedPricePerNight] IS NULL OR [AcknowledgedPricePerNight] >= 0);
+END
+GO
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_NightStayBookingModifications_AcknowledgedCancellationPolicy'
+      AND [parent_object_id] = OBJECT_ID(N'[Booking].[NightStayBookingModifications]'))
+BEGIN
+    ALTER TABLE [Booking].[NightStayBookingModifications] WITH CHECK
+        ADD CONSTRAINT [CK_NightStayBookingModifications_AcknowledgedCancellationPolicy]
+            CHECK ([AcknowledgedCancellationPolicyHours] IS NULL
+                   OR [AcknowledgedCancellationPolicyHours] IN (24, 48, 72, 96));
 END
 GO
 
@@ -3926,6 +4341,10 @@ GO
 -- user id (sub/user_id claim) rather than trusted from the request body.
 -- This closes the gap where a malicious caller could complete a different
 -- user's profile by guessing the auth identity id.
+--
+-- A mobile number can back only ONE account: the explicit pre-check below
+-- (THROW 51222 -> 409 MobileNumberAlreadyExists) is the deterministic error the
+-- caller sees, and UX_PetParents_MobileNumber is the race-safe backstop.
 CREATE OR ALTER PROCEDURE [Parent].[CompletePetParentProfile]
     @FirebaseUserId NVARCHAR(128),
     @FirstName NVARCHAR(100),
@@ -3962,6 +4381,18 @@ BEGIN
 
     IF @PetParentId IS NULL
     BEGIN
+        -- UPDLOCK + HOLDLOCK range-locks the (MobileCountryCode, MobileNumber)
+        -- key so a concurrent completion of the same number waits here rather
+        -- than reading "free" at the same instant.
+        IF EXISTS (
+            SELECT 1
+            FROM [Parent].[PetParents] WITH (UPDLOCK, HOLDLOCK)
+            WHERE [MobileCountryCode] = @MobileCountryCode
+              AND [MobileNumber] = @MobileNumber)
+        BEGIN
+            THROW 51222, 'Mobile number is already registered to another account.', 1;
+        END
+
         INSERT INTO [Parent].[PetParents]
         (
             [ParentAuthIdentityId],
@@ -4146,6 +4577,8 @@ GO
 -- through OTP verification), latitude/longitude (no coordinates accompany
 -- an address edit today), profile photo (own endpoint).
 -- THROW 51208 = pet parent not found (profile update).
+-- THROW 51224 = the account has been deleted; an edit would undo the
+--               anonymisation [Parent].[DeletePetParent] applied.
 CREATE OR ALTER PROCEDURE [Parent].[UpdatePetParentProfile]
     @PetParentId UNIQUEIDENTIFIER,
     @FirstName NVARCHAR(100),
@@ -4159,6 +4592,11 @@ CREATE OR ALTER PROCEDURE [Parent].[UpdatePetParentProfile]
 AS
 BEGIN
     SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1 FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId AND [IsDeleted] = 1)
+        THROW 51224, 'This account has been deleted and can no longer be edited.', 1;
 
     UPDATE [Parent].[PetParents]
     SET [FirstName] = @FirstName,
@@ -5209,6 +5647,165 @@ PRINT 'Created/updated [Parent].[DeletePetParentPhoto].';
 GO
 
 
+-- 3.1q2 Parent.DeletePetParent -------------------------------------------------
+-- "Delete account" as an ANONYMISE + DISABLE, not a row delete. Mirror of
+-- [Provider].[DeleteProvider]. The PetParentId is kept so everything referencing
+-- it keeps its meaning: service + night-stay bookings with all their children,
+-- the events the parent organised, their event tickets, and the
+-- [Booking].[BookingPayments] ledger are ALL retained — deleting them would
+-- destroy the PROVIDER's history too.
+--   1. Scrubs [Parent].[PetParents] (name -> 'Deleted User', gender/DOB/mobile/
+--      address/about replaced or cleared) + IsDeleted = 1 + DeletedAtUtc.
+--      IsDeleted is permanent and blocks profile edits (THROW 51224).
+--   2. Scrubs [Parent].[ParentAuthIdentities], severing the login. FirebaseUserId
+--      is UNIQUE, so this frees the real uid; the mobile placeholder frees the
+--      real number under UX_PetParents_MobileNumber. A fresh sign-up therefore
+--      gets a brand-new identity and PetParentId.
+--   3. Anonymises the parent's PETS in place — bookings FK to PetId and read the
+--      pet through that join, so deleting them would blank out the provider's own
+--      booking history. Identity goes (name, microchip, photo, notes); the animal
+--      facts that give a past booking meaning stay.
+--   4. Deletes operational data + media only: device tokens, mobile OTPs, the
+--      identity document, the parent gallery, the pets' galleries, and the pets'
+--      next-consultation reminders.
+-- Placeholders are derived from @PetParentId, so a second call is a no-op that
+-- returns the original DeletedAtUtc (@WasAlreadyDeleted = 1).
+-- Result sets: (1) summary + retained counts, (2) blob URLs to delete
+-- best-effort out of SQL. THROW 51223 = pet parent not found.
+CREATE OR ALTER PROCEDURE [Parent].[DeletePetParent]
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @ParentAuthIdentityId UNIQUEIDENTIFIER;
+    DECLARE @Exists BIT = 0, @IsDeleted BIT, @DeletedAtUtc DATETIME2(7);
+    DECLARE @WasAlreadyDeleted BIT = 0, @AnonymisedPetCount INT = 0;
+    DECLARE @BlobUrls TABLE ([BlobUrl] NVARCHAR(1000) NOT NULL, [Kind] NVARCHAR(32) NOT NULL);
+
+    BEGIN TRANSACTION;
+
+    -- UPDLOCK + HOLDLOCK: serialise against a concurrent booking create or
+    -- profile edit on this parent.
+    SELECT @Exists = 1,
+           @ParentAuthIdentityId = [ParentAuthIdentityId],
+           @IsDeleted = [IsDeleted],
+           @DeletedAtUtc = [DeletedAtUtc]
+    FROM [Parent].[PetParents] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [PetParentId] = @PetParentId;
+
+    IF @Exists = 0 THROW 51223, 'Pet parent was not found.', 1;
+
+    IF @IsDeleted = 1
+    BEGIN
+        SET @WasAlreadyDeleted = 1;
+        SET @Now = ISNULL(@DeletedAtUtc, @Now);
+    END
+    ELSE
+    BEGIN
+        INSERT INTO @BlobUrls ([BlobUrl], [Kind])
+        SELECT [ProfilePhotoUrl], N'ParentProfilePhoto'
+        FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId AND [ProfilePhotoUrl] IS NOT NULL
+        UNION ALL
+        SELECT [PhotoUrl], N'ParentPhoto'
+        FROM [Parent].[PetParentPhotos] WHERE [PetParentId] = @PetParentId
+        UNION ALL
+        SELECT [IdentityPhotoUrl], N'ParentIdentity'
+        FROM [Parent].[ParentIdentities] WHERE [PetParentId] = @PetParentId
+        UNION ALL
+        SELECT p.[ProfilePhotoUrl], N'PetProfilePhoto'
+        FROM [Parent].[Pets] p
+        WHERE p.[PetParentId] = @PetParentId AND p.[ProfilePhotoUrl] IS NOT NULL
+        UNION ALL
+        SELECT ph.[PhotoUrl], N'PetPhoto'
+        FROM [Parent].[PetPhotos] ph
+        INNER JOIN [Parent].[Pets] p ON p.[PetId] = ph.[PetId]
+        WHERE p.[PetParentId] = @PetParentId;
+
+        UPDATE [Parent].[PetParents]
+        SET [FirstName] = N'Deleted',
+            [LastName] = N'User',
+            [Gender] = N'PreferNotToSay',
+            [DateOfBirth] = '1900-01-01',
+            [MobileCountryCode] = N'+00',
+            [MobileNumber] = N'DEL' + LEFT(REPLACE(CONVERT(NVARCHAR(36), @PetParentId), N'-', N''), 29),
+            [MobileVerifiedAtUtc] = NULL,
+            [AddressLine] = N'Deleted',
+            [Latitude] = 0,
+            [Longitude] = 0,
+            [ZipCode] = N'00000',
+            [City] = N'Deleted',
+            [Description] = N'',
+            [ProfilePhotoUrl] = NULL,
+            [IsDeleted] = 1,
+            [DeletedAtUtc] = @Now,
+            [UpdatedAtUtc] = @Now
+        WHERE [PetParentId] = @PetParentId;
+
+        UPDATE [Parent].[ParentAuthIdentities]
+        SET [FirebaseUserId] = N'deleted:' + CONVERT(NVARCHAR(36), @PetParentId),
+            [FirebaseTenantId] = NULL,
+            [Email] = N'deleted+' + CONVERT(NVARCHAR(36), @PetParentId) + N'@deleted.invalid',
+            [IsEmailVerified] = 0,
+            [DisplayName] = NULL,
+            [FirebasePhoneNumber] = NULL,
+            [PhotoUrl] = NULL,
+            [UpdatedAtUtc] = @Now
+        WHERE [ParentAuthIdentityId] = @ParentAuthIdentityId;
+
+        UPDATE [Parent].[Pets]
+        SET [PetName] = N'Deleted Pet',
+            [MicrochipId] = NULL,
+            [Description] = NULL,
+            [MedicalHistory] = NULL,
+            [VaccinationType] = NULL,
+            [VaccinationDose] = NULL,
+            [Prescription] = NULL,
+            [ProfilePhotoUrl] = NULL,
+            [UpdatedAtUtc] = @Now
+        WHERE [PetParentId] = @PetParentId;
+        SET @AnonymisedPetCount = @@ROWCOUNT;
+
+        DELETE FROM [Parent].[ParentDeviceTokens]
+        WHERE [PetParentId] = @PetParentId OR [ParentAuthIdentityId] = @ParentAuthIdentityId;
+        DELETE FROM [Parent].[ParentMobileOtps] WHERE [PetParentId] = @PetParentId;
+        DELETE FROM [Parent].[ParentIdentities] WHERE [PetParentId] = @PetParentId;
+        DELETE FROM [Parent].[PetParentPhotos] WHERE [PetParentId] = @PetParentId;
+
+        DELETE ph FROM [Parent].[PetPhotos] ph
+        INNER JOIN [Parent].[Pets] p ON p.[PetId] = ph.[PetId]
+        WHERE p.[PetParentId] = @PetParentId;
+
+        DELETE nc FROM [Parent].[PetNextConsultations] nc
+        INNER JOIN [Parent].[Pets] p ON p.[PetId] = nc.[PetId]
+        WHERE p.[PetParentId] = @PetParentId;
+    END
+
+    SELECT @PetParentId AS [PetParentId],
+           @Now AS [DeletedAtUtc],
+           @WasAlreadyDeleted AS [WasAlreadyDeleted],
+           @AnonymisedPetCount AS [AnonymisedPetCount],
+           (SELECT COUNT(*) FROM [Booking].[Bookings] WHERE [PetParentId] = @PetParentId)
+               AS [RetainedBookingCount],
+           (SELECT COUNT(*) FROM [Booking].[NightStayBookings] WHERE [PetParentId] = @PetParentId)
+               AS [RetainedNightStayBookingCount],
+           (SELECT COUNT(*) FROM [Event].[Events] WHERE [PetParentId] = @PetParentId)
+               AS [RetainedEventCount],
+           (SELECT COUNT(*) FROM [Booking].[BookingPayments] WHERE [PetParentId] = @PetParentId)
+               AS [RetainedPaymentCount];
+
+    SELECT [BlobUrl], [Kind] FROM @BlobUrls;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Parent].[DeletePetParent].';
+GO
+
+
 -- 3.1r Provider.AddProviderPhoto ---------------------------------------------
 -- Inserts one row into [Provider].[ProviderPhotos] for a freshly-uploaded photo.
 -- THROW 51110 = provider not found (provider photo add).
@@ -5488,6 +6085,278 @@ PRINT 'Created/updated [Provider].[GetProviderProfile].';
 GO
 
 
+-- 3.2b-ii UpdateProviderProfile -----------------------------------------------
+-- Edits the provider's personal details (first name, last name, gender, date of
+-- birth). Mobile number + country code are deliberately not editable here — a
+-- change must go back through OTP verification, and the pair is UNIQUE.
+-- Mirror of [Parent].[UpdatePetParentProfile]. THROW 51113 = provider not found;
+-- THROW 51115 = the account has been deleted (an edit would undo the
+-- anonymisation done by [Provider].[DeleteProvider]).
+CREATE OR ALTER PROCEDURE [Provider].[UpdateProviderProfile]
+    @ProviderId UNIQUEIDENTIFIER,
+    @FirstName NVARCHAR(100),
+    @LastName NVARCHAR(100),
+    @Gender NVARCHAR(32),
+    @DateOfBirth DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (SELECT 1 FROM [Provider].[Providers]
+               WHERE [ProviderId] = @ProviderId AND [IsDeleted] = 1)
+    BEGIN
+        THROW 51115, 'This provider account has been deleted.', 1;
+    END
+
+    UPDATE [Provider].[Providers]
+    SET [FirstName] = @FirstName,
+        [LastName] = @LastName,
+        [Gender] = @Gender,
+        [DateOfBirth] = @DateOfBirth,
+        [UpdatedAtUtc] = SYSUTCDATETIME()
+    WHERE [ProviderId] = @ProviderId;
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        THROW 51113, 'Provider profile was not found.', 1;
+    END
+
+    SELECT [ProviderId],
+           [ProviderAuthIdentityId],
+           [FirstName],
+           [LastName],
+           [Gender],
+           [MobileCountryCode],
+           [MobileNumber],
+           [DateOfBirth],
+           [MobileVerifiedAtUtc],
+           [OnboardingStatus],
+           [IsActive],
+           [CreatedAtUtc],
+           [UpdatedAtUtc],
+           [BannerImageUrl]
+    FROM [Provider].[Providers]
+    WHERE [ProviderId] = @ProviderId;
+END;
+GO
+PRINT 'Created/updated [Provider].[UpdateProviderProfile].';
+GO
+
+
+-- 3.2b-iii DeleteProvider -----------------------------------------------------
+-- Backs the provider app's "Delete account" action as an ANONYMISE + DISABLE,
+-- not a row delete. The ProviderId is deliberately kept so everything that
+-- references it keeps its meaning: bookings, night-stay bookings, their audit /
+-- evidence / OTP / modification / prescription children, the events the provider
+-- organised with their ticket bookings, and the [Booking].[BookingPayments]
+-- ledger are ALL retained untouched. Deleting them would destroy both parties'
+-- history — a pet parent's past bookings reference this provider too.
+--
+-- What the sproc does, in one transaction:
+--   1. Scrubs the personal fields on [Provider].[Providers] — name becomes
+--      'Deleted Provider', gender/DOB/mobile/banner are replaced or cleared —
+--      and sets IsActive = 0 + IsDeleted = 1 + DeletedAtUtc. IsActive = 0 is
+--      what stops new bookings ([Booking].[CreateBooking] THROWs 51067 ->
+--      409 ProviderInactive); IsDeleted = 1 is permanent and additionally blocks
+--      reactivation and profile edits (THROW 51115).
+--   2. Scrubs the Firebase link on [Provider].[ProviderAuthIdentities] so the
+--      account can never be signed into again. FirebaseUserId is UNIQUE, so
+--      replacing it also FREES the real Firebase uid — signing up again creates a
+--      brand-new identity and a brand-new ProviderId. The mobile number is
+--      replaced for the same reason: (MobileCountryCode, MobileNumber) is UNIQUE,
+--      so the real number becomes available for re-registration.
+--   3. Deactivates the provider's [Provider].[ProviderServices] rows. The rows
+--      themselves must stay (bookings FK to ServiceId), but IsActive = 0 removes
+--      them from the catalog and therefore from all five parent-facing booking
+--      searches, which require an ACTIVE service row.
+--   4. Deletes only what is operational or pure PII and carries no history:
+--      device tokens (stop push), mobile OTPs, gallery photos, per-service
+--      banners, weekly availability, closures, cancellation policy, payout
+--      methods, and the service registration (the "I offer this" declaration,
+--      and the row that makes the provider readable at
+--      GET /providers/{providerId}). The booking-level cancellation policy is
+--      unaffected — it was snapshotted onto each booking at creation.
+--
+-- All the placeholder values are derived from @ProviderId, so they are stable:
+-- re-running on an already-deleted provider is a no-op that returns the original
+-- DeletedAtUtc (@WasAlreadyDeleted = 1) instead of churning new placeholders.
+--
+-- Returns three result sets, since SQL cannot reach Cosmos or Blob Storage:
+--   1. summary — ProviderId, DeletedAtUtc, WasAlreadyDeleted + deactivated /
+--                retained counts (the retained counts document, in the response,
+--                that history survived)
+--   2. service categories — partition key(s) of the Cosmos [ProviderServices]
+--      offering doc to remove. That document is the provider's public service
+--      LISTING (business name, prices, photos, address) and is what makes them
+--      appear in Cosmos-backed discovery, so it must not outlive the account.
+--      The Cosmos [Events] docs are NOT returned — the events are retained, so
+--      their venue/capacity extension docs stay.
+--   3. blob URLs — provider banner, gallery photos, per-service banners. Event
+--      banners and booking evidence are NOT returned: those belong to records
+--      that are being kept.
+--
+-- THROW 51114 = provider profile not found (account delete).
+CREATE OR ALTER PROCEDURE [Provider].[DeleteProvider]
+    @ProviderId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @ProviderAuthIdentityId UNIQUEIDENTIFIER;
+    DECLARE @IsDeleted BIT;
+    DECLARE @DeletedAtUtc DATETIME2(7);
+    DECLARE @WasAlreadyDeleted BIT = 0;
+
+    -- Captured before the scrub so the caller can clean the other stores.
+    DECLARE @ServiceCategories TABLE ([ServiceCategory] NVARCHAR(64) NOT NULL);
+    DECLARE @BlobUrls TABLE
+    (
+        [BlobUrl] NVARCHAR(1000) NOT NULL,
+        [Kind] NVARCHAR(32) NOT NULL
+    );
+
+    DECLARE @DeactivatedServiceCount INT = 0;
+
+    BEGIN TRANSACTION;
+
+    -- UPDLOCK + HOLDLOCK: serialise against a concurrent booking create or
+    -- active-status toggle on this provider.
+    SELECT @ProviderAuthIdentityId = [ProviderAuthIdentityId],
+           @IsDeleted = [IsDeleted],
+           @DeletedAtUtc = [DeletedAtUtc]
+    FROM [Provider].[Providers] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [ProviderId] = @ProviderId;
+
+    -- XACT_ABORT ON rolls the transaction back on THROW.
+    IF @ProviderAuthIdentityId IS NULL
+    BEGIN
+        THROW 51114, 'Provider profile was not found.', 1;
+    END
+
+    IF @IsDeleted = 1
+    BEGIN
+        -- Idempotent: already anonymised. Report the original timestamp and skip
+        -- straight to the result sets (nothing left to clean up out of SQL).
+        SET @WasAlreadyDeleted = 1;
+        SET @Now = ISNULL(@DeletedAtUtc, @Now);
+    END
+    ELSE
+    BEGIN
+        INSERT INTO @ServiceCategories ([ServiceCategory])
+        SELECT [ServiceCategory]
+        FROM [Provider].[ProviderServiceRegistrations]
+        WHERE [ProviderId] = @ProviderId;
+
+        INSERT INTO @BlobUrls ([BlobUrl], [Kind])
+        SELECT [BannerImageUrl], N'ProviderBanner'
+        FROM [Provider].[Providers]
+        WHERE [ProviderId] = @ProviderId AND [BannerImageUrl] IS NOT NULL
+        UNION ALL
+        SELECT [PhotoUrl], N'ProviderPhoto'
+        FROM [Provider].[ProviderPhotos]
+        WHERE [ProviderId] = @ProviderId
+        UNION ALL
+        SELECT [BannerImageUrl], N'ServiceBanner'
+        FROM [Provider].[ProviderServiceBanners]
+        WHERE [ProviderId] = @ProviderId;
+
+        ------------------------------------------------------------------
+        -- 1. Anonymise the profile row and disable the account.
+        --    The mobile placeholder is derived from the ProviderId so it stays
+        --    unique under UX_Providers_MobileNumber, and frees the real number.
+        ------------------------------------------------------------------
+        UPDATE [Provider].[Providers]
+        SET [FirstName] = N'Deleted',
+            [LastName] = N'Provider',
+            [Gender] = N'PreferNotToSay',
+            [DateOfBirth] = '1900-01-01',
+            [MobileCountryCode] = N'+00',
+            [MobileNumber] = N'DEL' + LEFT(REPLACE(CONVERT(NVARCHAR(36), @ProviderId), N'-', N''), 29),
+            [MobileVerifiedAtUtc] = NULL,
+            [BannerImageUrl] = NULL,
+            [IsActive] = 0,
+            [IsDeleted] = 1,
+            [DeletedAtUtc] = @Now,
+            [UpdatedAtUtc] = @Now
+        WHERE [ProviderId] = @ProviderId;
+
+        ------------------------------------------------------------------
+        -- 2. Sever the Firebase login. FirebaseUserId is UNIQUE, so replacing it
+        --    frees the real uid for a fresh sign-up. The ProviderId link is kept
+        --    for audit — the row is unreachable by any real Firebase user now.
+        ------------------------------------------------------------------
+        UPDATE [Provider].[ProviderAuthIdentities]
+        SET [FirebaseUserId] = N'deleted:' + CONVERT(NVARCHAR(36), @ProviderId),
+            [FirebaseTenantId] = NULL,
+            [Email] = N'deleted+' + CONVERT(NVARCHAR(36), @ProviderId) + N'@deleted.invalid',
+            [IsEmailVerified] = 0,
+            [DisplayName] = NULL,
+            [FirebasePhoneNumber] = NULL,
+            [PhotoUrl] = NULL,
+            [UpdatedAtUtc] = @Now
+        WHERE [ProviderAuthIdentityId] = @ProviderAuthIdentityId;
+
+        ------------------------------------------------------------------
+        -- 3. Deactivate the bookable services. The rows stay — bookings FK to
+        --    ServiceId — but an inactive service is out of the catalog and out
+        --    of all five parent-facing searches.
+        ------------------------------------------------------------------
+        UPDATE [Provider].[ProviderServices]
+        SET [IsActive] = 0,
+            [UpdatedAtUtc] = @Now
+        WHERE [ProviderId] = @ProviderId
+          AND [IsActive] = 1;
+        SET @DeactivatedServiceCount = @@ROWCOUNT;
+
+        ------------------------------------------------------------------
+        -- 4. Remove operational config + media only. Nothing here carries
+        --    historical meaning: each booking already froze the cancellation
+        --    policy it was created under.
+        ------------------------------------------------------------------
+        DELETE FROM [Provider].[ProviderDeviceTokens]
+        WHERE [ProviderId] = @ProviderId
+           OR [ProviderAuthIdentityId] = @ProviderAuthIdentityId;
+
+        DELETE FROM [Provider].[ProviderMobileOtps] WHERE [ProviderId] = @ProviderId;
+        DELETE FROM [Provider].[ProviderPhotos] WHERE [ProviderId] = @ProviderId;
+        DELETE FROM [Provider].[ProviderServiceBanners] WHERE [ProviderId] = @ProviderId;
+        DELETE FROM [Provider].[ProviderWeeklyAvailability] WHERE [ProviderId] = @ProviderId;
+        DELETE FROM [Provider].[ProviderClosures] WHERE [ProviderId] = @ProviderId;
+        DELETE FROM [Provider].[ProviderCancellationPolicies] WHERE [ProviderId] = @ProviderId;
+        DELETE FROM [Provider].[ProviderPayoutMethods] WHERE [ProviderId] = @ProviderId;
+        DELETE FROM [Provider].[ProviderServiceRegistrations] WHERE [ProviderId] = @ProviderId;
+    END
+
+    -- Result set 1: summary. The retained counts are reported so the caller can
+    -- see that history survived the delete.
+    SELECT @ProviderId AS [ProviderId],
+           @Now AS [DeletedAtUtc],
+           @WasAlreadyDeleted AS [WasAlreadyDeleted],
+           @DeactivatedServiceCount AS [DeactivatedServiceCount],
+           (SELECT COUNT(*) FROM [Booking].[Bookings] WHERE [ProviderId] = @ProviderId)
+               AS [RetainedBookingCount],
+           (SELECT COUNT(*) FROM [Booking].[NightStayBookings] WHERE [ProviderId] = @ProviderId)
+               AS [RetainedNightStayBookingCount],
+           (SELECT COUNT(*) FROM [Event].[Events] WHERE [ProviderId] = @ProviderId)
+               AS [RetainedEventCount],
+           (SELECT COUNT(*) FROM [Booking].[BookingPayments] WHERE [ProviderId] = @ProviderId)
+               AS [RetainedPaymentCount];
+
+    -- Result set 2: Cosmos [ProviderServices] partition keys (the public listing).
+    SELECT [ServiceCategory] FROM @ServiceCategories;
+
+    -- Result set 3: blob URLs to delete best-effort.
+    SELECT [BlobUrl], [Kind] FROM @BlobUrls;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Provider].[DeleteProvider].';
+GO
+
+
 -- 3.2b-i UpdateProviderBannerImage --------------------------------------------
 CREATE OR ALTER PROCEDURE [Provider].[UpdateProviderBannerImage]
     @ProviderId UNIQUEIDENTIFIER,
@@ -5577,6 +6446,14 @@ BEGIN
         THROW 51100, 'Provider profile was not found.', 1;
     END
 
+    -- A deleted account stays disabled permanently — reactivating it would make
+    -- an anonymised provider bookable again.
+    IF EXISTS (SELECT 1 FROM [Provider].[Providers]
+               WHERE [ProviderId] = @ProviderId AND [IsDeleted] = 1)
+    BEGIN
+        THROW 51115, 'This provider account has been deleted.', 1;
+    END
+
     -- When DEACTIVATING, check whether any future confirmed bookings exist
     -- across ALL of this provider's services. A confirmed booking is "in the
     -- future" when its date is strictly after today, OR it's today but hasn't
@@ -5608,7 +6485,7 @@ BEGIN
                b.[BookingDate], b.[StartTime], b.[EndTime]
         FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
         WHERE b.[ProviderId] = @ProviderId
-          AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+          AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND (
               b.[BookingDate] > @Today
               OR (b.[BookingDate] = @Today AND b.[EndTime] > @NowTime)
@@ -6180,7 +7057,7 @@ BEGIN
         WHERE [ServiceId] = @ServiceId
           AND [PetId] = @PetId
           AND [BookingDate] = @BookingDate
-          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [StartTime] < @EndTime
           AND [EndTime] > @StartTime
     )
@@ -6192,7 +7069,7 @@ BEGIN
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
       AND [StartTime] < @EndTime
       AND [EndTime] > @StartTime;
 
@@ -6483,7 +7360,7 @@ BEGIN
     IF @CurrentParent <> @PetParentId
         THROW 51064, 'Only the original booker can cancel this booking.', 1;
 
-    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
         THROW 51065, 'Booking is already cancelled.', 1;
 
     UPDATE [Booking].[Bookings]
@@ -6584,7 +7461,7 @@ BEGIN
     FROM [Booking].[Bookings]
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
 
     UNION ALL
 
@@ -6592,7 +7469,7 @@ BEGIN
            CAST(N'23:59:59' AS TIME(0)) AS [EndTime]
     FROM [Booking].[NightStayBookings]
     WHERE [ServiceId] = @ServiceId
-      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
       AND [CheckInDate] <= @BookingDate
       AND [CheckOutDate] > @BookingDate
 
@@ -6601,6 +7478,57 @@ END;
 GO
 PRINT 'Created/updated [Booking].[GetBookingsForDate].';
 GO
+
+-- 3.20a Booking.GetAgendaForDate ---------------------------------------------
+-- Backs the parent-facing daily-agenda surface. Same rows (and the same
+-- occupied-slot predicate) as [Booking].[GetBookingsForDate] above, but carries
+-- the identity the agenda needs: who booked it, its job number, and its status.
+-- The agenda MUST agree with the slot grid on what is occupied, so the two
+-- predicates are kept identical; change one, change the other.
+--
+-- [PetParentId] is what lets the caller's OWN jobs be told apart from everyone
+-- else's: the API masks the status + job id of rows belonging to a different
+-- parent. NULL for Custom walk-ins, which therefore always mask.
+CREATE OR ALTER PROCEDURE [Booking].[GetAgendaForDate]
+    @ServiceId   UNIQUEIDENTIFIER,
+    @BookingDate DATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT N'SingleDay' AS [BookingType],
+           [BookingId],
+           [JobNumber],
+           [PetParentId],
+           [StartTime],
+           [EndTime],
+           [Status]
+    FROM [Booking].[Bookings]
+    WHERE [ServiceId] = @ServiceId
+      AND [BookingDate] = @BookingDate
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+
+    UNION ALL
+
+    SELECT N'NightStay' AS [BookingType],
+           [NightStayBookingId] AS [BookingId],
+           [JobNumber],
+           [PetParentId],
+           CAST(N'00:00:00' AS TIME(0)) AS [StartTime],
+           CAST(N'23:59:59' AS TIME(0)) AS [EndTime],
+           [Status]
+    FROM [Booking].[NightStayBookings]
+    WHERE [ServiceId] = @ServiceId
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+      AND [CheckInDate] <= @BookingDate
+      AND [CheckOutDate] > @BookingDate
+
+    ORDER BY [StartTime], [EndTime];
+END;
+GO
+PRINT 'Created/updated [Booking].[GetAgendaForDate].';
+GO
+
 
 -- 3.20b Booking.GetNightStayOccupancy ----------------------------------------
 -- Per-night occupancy for a NightStay service: how many active stays (not
@@ -6629,7 +7557,7 @@ BEGIN
     FROM [Nights] n
     LEFT JOIN [Booking].[NightStayBookings] b
         ON b.[ServiceId] = @ServiceId
-       AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+       AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
        AND b.[CheckInDate] <= n.[Night]
        AND b.[CheckOutDate] > n.[Night]
     GROUP BY n.[Night]
@@ -6697,7 +7625,7 @@ BEGIN
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [ServiceId] = @ServiceId
       AND [BookingDate] = @BookingDate
-      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+      AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
       AND [StartTime] < @EndTime
       AND [EndTime] > @StartTime;
 
@@ -6758,8 +7686,9 @@ GO
 -- 51123 terminal, 51124 unchanged, 51125 invalid actor/status value,
 -- 51126 transition not allowed from the current status,
 -- 51128 no-show reported earlier than 30 minutes after the scheduled start,
--- 51129 booking expired (CREATED for 24+ hours; flipped to EXPIRED here or by
---        the [Booking].[ExpireStaleBookings] sweeper - no longer acceptable).
+-- 51129 booking expired (CREATED for 24+ hours - no longer acceptable). REJECT
+--        ONLY: the EXPIRED status is written by the scheduled external job, not
+--        here; this sproc never changes status on the basis of elapsed time.
 CREATE OR ALTER PROCEDURE [Booking].[UpdateBookingStatus]
     @BookingId UNIQUEIDENTIFIER,
     @NewStatus NVARCHAR(48),
@@ -6810,24 +7739,15 @@ BEGIN
        OR (@Actor = N'Parent' AND (@PetParentId IS NULL OR @ActorId <> @PetParentId))
         THROW 51121, 'You are not a party to this booking.', 1;
 
-    -- A booking left pending (CREATED) for 24+ hours has expired: persist the
-    -- EXPIRED flip (with a System audit row) and reject the attempted
-    -- transition -- the provider can no longer accept it. The periodic sweeper
-    -- normally expires these first; this guard closes the race between sweeps.
+    -- A booking left pending (CREATED) for 24+ hours has expired: reject the
+    -- attempted transition -- the provider can no longer accept it.
+    -- REJECT ONLY: the EXPIRED status is deliberately NOT written here. Status
+    -- changes driven by elapsed time belong to the scheduled external job, which
+    -- is the single writer for them; this guard just stops a late accept from
+    -- slipping through before that job runs. The row therefore stays in CREATED
+    -- until the job settles it.
     IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
     BEGIN
-        UPDATE [Booking].[Bookings]
-        SET [Status] = N'EXPIRED',
-            [UpdatedAtUtc] = @Now
-        WHERE [BookingId] = @BookingId;
-
-        INSERT INTO [Booking].[BookingStatusHistory]
-            ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-        VALUES
-            (@BookingId, N'CREATED', N'EXPIRED', N'System', NULL,
-             N'Automatically expired after 24 hours awaiting provider acceptance.');
-
-        COMMIT TRANSACTION;
         THROW 51129, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
     END
 
@@ -6840,7 +7760,7 @@ BEGIN
         THROW 51122, 'This status is not permitted for this actor.', 1;
 
     IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
-                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
         THROW 51123, 'Booking is in a terminal state and cannot change.', 1;
 
     IF @CurrentStatus = @NewStatus
@@ -7018,7 +7938,7 @@ BEGIN
         FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
         WHERE [ServiceId] = @ServiceId
           AND [PetId] = @PetId
-          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [CheckInDate] < @CheckOutDate
           AND [CheckOutDate] > @CheckInDate
     )
@@ -7042,7 +7962,7 @@ BEGIN
     FROM [Nights] n
     LEFT JOIN [Booking].[NightStayBookings] b WITH (UPDLOCK, HOLDLOCK)
         ON b.[ServiceId] = @ServiceId
-       AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+       AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
        AND b.[CheckInDate] <= n.[Night]
        AND b.[CheckOutDate] > n.[Night]
     GROUP BY n.[Night]
@@ -7246,7 +8166,7 @@ BEGIN
         THROW 51237, 'Only the original booker can cancel this booking.', 1;
     END
 
-    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+    IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51238, 'Night stay booking is already cancelled.', 1;
     END
@@ -7281,8 +8201,9 @@ GO
 -- 51243 terminal, 51244 unchanged, 51245 invalid actor/status value,
 -- 51246 transition not allowed from the current status,
 -- 51248 no-show reported earlier than 30 minutes after check-in + drop-off,
--- 51249 booking expired (CREATED for 24+ hours; flipped to EXPIRED here or by
---        the [Booking].[ExpireStaleBookings] sweeper - no longer acceptable).
+-- 51249 booking expired (CREATED for 24+ hours - no longer acceptable). REJECT
+--        ONLY: the EXPIRED status is written by the scheduled external job, not
+--        here; this sproc never changes status on the basis of elapsed time.
 CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
     @NightStayBookingId UNIQUEIDENTIFIER,
     @NewStatus NVARCHAR(48),
@@ -7340,24 +8261,15 @@ BEGIN
         THROW 51241, 'You are not a party to this booking.', 1;
     END
 
-    -- A booking left pending (CREATED) for 24+ hours has expired: persist the
-    -- EXPIRED flip (with a System audit row) and reject the attempted
-    -- transition -- the provider can no longer accept it. The periodic sweeper
-    -- normally expires these first; this guard closes the race between sweeps.
+    -- A booking left pending (CREATED) for 24+ hours has expired: reject the
+    -- attempted transition -- the provider can no longer accept it.
+    -- REJECT ONLY: the EXPIRED status is deliberately NOT written here. Status
+    -- changes driven by elapsed time belong to the scheduled external job, which
+    -- is the single writer for them; this guard just stops a late accept from
+    -- slipping through before that job runs. The row therefore stays in CREATED
+    -- until the job settles it.
     IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
     BEGIN
-        UPDATE [Booking].[NightStayBookings]
-        SET [Status] = N'EXPIRED',
-            [UpdatedAtUtc] = @Now
-        WHERE [NightStayBookingId] = @NightStayBookingId;
-
-        INSERT INTO [Booking].[NightStayBookingStatusHistory]
-            ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-        VALUES
-            (@NightStayBookingId, N'CREATED', N'EXPIRED', N'System', NULL,
-             N'Automatically expired after 24 hours awaiting provider acceptance.');
-
-        COMMIT TRANSACTION;
         THROW 51249, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
     END
 
@@ -7372,7 +8284,7 @@ BEGIN
     END
 
     IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
-                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51243, 'Booking is in a terminal state and cannot change.', 1;
     END
@@ -7402,16 +8314,24 @@ BEGIN
     END
 
     -- A no-show can only be reported once the counterparty is actually late:
-    -- 30 minutes past the stay's scheduled start (check-in date + drop-off
-    -- time; all times are UTC).
+    -- 2 HOURS past the stay's scheduled check-in (check-in date + drop-off
+    -- time; all times are UTC). A boarding hand-over is a slower affair than a
+    -- single-day appointment, whose gate stays at 30 minutes — so a 09:00
+    -- check-in is reportable from 11:00.
+    --
+    -- Neither party has to wait it out: if the stay is still unstarted when the
+    -- check-in day ends, the scheduled external job settles it automatically at
+    -- midnight UTC (START_JOB -> PARENT_NO_SHOW, since the provider was there
+    -- and issued the code; anything else -> PROVIDER_NO_SHOW, since they never
+    -- even tapped Start). That settlement no longer happens in this database.
     IF @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
     BEGIN
         DECLARE @StartsAtUtc DATETIME2(7) =
             DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
                     CAST(@CheckInDate AS DATETIME2(7)));
-        IF @Now < DATEADD(MINUTE, 30, @StartsAtUtc)
+        IF @Now < DATEADD(HOUR, 2, @StartsAtUtc)
         BEGIN
-            THROW 51248, 'A no-show can only be reported 30 minutes after the stay''s scheduled drop-off.', 1;
+            THROW 51248, 'A no-show can only be reported 2 hours after the stay''s scheduled check-in.', 1;
         END
     END
 
@@ -7442,32 +8362,49 @@ PRINT 'Created/updated [Booking].[UpdateNightStayBookingStatus].';
 GO
 
 
--- Periodic booking expiry sweep (single-day + night-stay). Two independent
--- kinds of expiry, both terminal states that free the slot capacity and get a
--- 'System' audit row per booking:
+-- Retired (2026-08-02): the periodic booking expiry sweep used to live here as
+-- ONE sproc, [Booking].[ExpireStaleBookings], run every 10 minutes by an
+-- in-process hosted service in BOTH API hosts (a real bug -- two uncoordinated
+-- instances sweeping the same rows). It has been replaced by THREE separate
+-- sprocs below (Booking.ExpireStaleCreatedBookings / RevertExpiredParent-
+-- ModificationRequests / SettleUnstartedJobsAsNoShow -- see docs/booking-rules.md
+-- BR-17/BR-30/BR-38), called in that order every 5 minutes by a single Azure
+-- Functions timer trigger (src/Pawfront.Functions) -- one dedicated app, so the
+-- Functions runtime's own distributed timer lock rules out the double-sweep bug
+-- without any extra code here.
 --
---   1. EXPIRED     — the booking sat in CREATED @PendingHours (default 24)
---                    after it was created: the provider never accepted. The
---                    status-engine sprocs also apply this flip lazily (THROW
---                    51129 / 51249) so an accept that lands between sweeps is
---                    still rejected.
---   2. JOB_EXPIRED — the provider accepted but never started the job: the
---                    booking is still in a confirmed-equivalent (never
---                    JOB_STARTED) state and its whole scheduled window has
---                    elapsed (single-day: BookingDate+EndTime is past;
---                    night-stay: CheckOutDate < today — the checkout day is
---                    the pickup day, not a stayed night). Once JOB_STARTED, a
---                    booking is out of the confirmed-equivalent set so it is
---                    never touched here.
+-- Nothing in this script changes a booking's status on the basis of elapsed time
+-- any more. The remaining time checks, in the status-engine and
+-- modification-respond sprocs, REJECT a late transition (THROW 51129 / 51249 /
+-- 51152 / 51272) without writing anything; the three sprocs below are the only
+-- writers of time-driven status changes.
 --
--- Run periodically by the BookingExpirySweeper hosted service in both API
--- hosts. Idempotent and race-safe: the UPDATEs only touch rows in the matching
--- source state, and a concurrent engine transition on the same row serialises
--- on the row lock (e.g. a party reporting a no-show before the window ends
--- moves the row out of the confirmed-equivalent set first).
--- Returns one row: (ExpiredBookings, ExpiredNightStayBookings,
---                   JobExpiredBookings, JobExpiredNightStayBookings).
-CREATE OR ALTER PROCEDURE [Booking].[ExpireStaleBookings]
+-- The old sproc is DROPPED rather than left in place so a stray caller -- an
+-- older host build still running the retired hosted service, a leftover Agent /
+-- Elastic Job step -- cannot keep flipping statuses behind the new job's back.
+--
+-- Statuses the sweep used to produce (EXPIRED, JOB_EXPIRED, PARENT_NO_SHOW,
+-- PROVIDER_NO_SHOW) remain valid and stay in every CHECK constraint and
+-- capacity-freeing predicate below: existing rows still carry them, and the
+-- three sprocs below write the same values.
+IF OBJECT_ID(N'[Booking].[ExpireStaleBookings]', N'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE [Booking].[ExpireStaleBookings];
+    PRINT 'Dropped [Booking].[ExpireStaleBookings]; booking expiry now runs outside the database.';
+END
+GO
+
+-- BR-17: a booking left sitting in CREATED for @PendingHours (default 24) without
+-- the provider accepting has expired. Run periodically by the scheduled external
+-- job (Azure Function, timer-triggered, replaces the retired in-database
+-- Booking.ExpireStaleBookings sweep -- see docs/booking-rules.md). Idempotent and
+-- race-safe: the UPDATE only touches rows still in CREATED, so a concurrent
+-- accept on the same row serialises on the row lock and one of the two loses.
+-- The status-engine sprocs (UpdateBookingStatus / UpdateNightStayBookingStatus)
+-- REJECT an accept attempted on a stale CREATED booking (THROW 51129 / 51249)
+-- without writing anything -- this sproc is the only writer of EXPIRED.
+-- Returns one row: (ExpiredBookings, ExpiredNightStayBookings).
+CREATE OR ALTER PROCEDURE [Booking].[ExpireStaleCreatedBookings]
     @PendingHours INT = 24
 AS
 BEGIN
@@ -7475,23 +8412,16 @@ BEGIN
     SET XACT_ABORT ON;
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
-    DECLARE @Today DATE = CONVERT(date, @Now);
-    DECLARE @NowTime TIME(0) = CONVERT(time(0), @Now);
     DECLARE @Cutoff DATETIME2(7) = DATEADD(HOUR, -@PendingHours, @Now);
-    DECLARE @PendingNote NVARCHAR(500) =
+    DECLARE @Note NVARCHAR(500) =
         N'Automatically expired after ' + CAST(@PendingHours AS NVARCHAR(8))
         + N' hours awaiting provider acceptance.';
-    DECLARE @JobNote NVARCHAR(500) =
-        N'Automatically expired: accepted but never started before the scheduled window elapsed.';
 
     DECLARE @ExpiredBookings TABLE ([BookingId] UNIQUEIDENTIFIER NOT NULL);
     DECLARE @ExpiredNightStays TABLE ([NightStayBookingId] UNIQUEIDENTIFIER NOT NULL);
-    DECLARE @JobExpiredBookings TABLE ([BookingId] UNIQUEIDENTIFIER NOT NULL, [FromStatus] NVARCHAR(48) NOT NULL);
-    DECLARE @JobExpiredNightStays TABLE ([NightStayBookingId] UNIQUEIDENTIFIER NOT NULL, [FromStatus] NVARCHAR(48) NOT NULL);
 
     BEGIN TRANSACTION;
 
-    -- 1. Stale CREATED -> EXPIRED (provider never accepted). ------------------
     UPDATE [Booking].[Bookings]
     SET [Status] = N'EXPIRED',
         [UpdatedAtUtc] = @Now
@@ -7501,7 +8431,7 @@ BEGIN
 
     INSERT INTO [Booking].[BookingStatusHistory]
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-    SELECT [BookingId], N'CREATED', N'EXPIRED', N'System', NULL, @PendingNote
+    SELECT [BookingId], N'CREATED', N'EXPIRED', N'System', NULL, @Note
     FROM @ExpiredBookings;
 
     UPDATE [Booking].[NightStayBookings]
@@ -7513,46 +8443,253 @@ BEGIN
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-    SELECT [NightStayBookingId], N'CREATED', N'EXPIRED', N'System', NULL, @PendingNote
+    SELECT [NightStayBookingId], N'CREATED', N'EXPIRED', N'System', NULL, @Note
     FROM @ExpiredNightStays;
-
-    -- 2. Accepted-but-never-started, window elapsed -> JOB_EXPIRED. -----------
-    UPDATE [Booking].[Bookings]
-    SET [Status] = N'JOB_EXPIRED',
-        [UpdatedAtUtc] = @Now
-    OUTPUT inserted.[BookingId], deleted.[Status] INTO @JobExpiredBookings
-    WHERE [Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
-                       N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION', N'START_JOB')
-      AND ([BookingDate] < @Today OR ([BookingDate] = @Today AND [EndTime] <= @NowTime));
-
-    INSERT INTO [Booking].[BookingStatusHistory]
-        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-    SELECT [BookingId], [FromStatus], N'JOB_EXPIRED', N'System', NULL, @JobNote
-    FROM @JobExpiredBookings;
-
-    UPDATE [Booking].[NightStayBookings]
-    SET [Status] = N'JOB_EXPIRED',
-        [UpdatedAtUtc] = @Now
-    OUTPUT inserted.[NightStayBookingId], deleted.[Status] INTO @JobExpiredNightStays
-    WHERE [Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
-                       N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION', N'START_JOB')
-      AND [CheckOutDate] < @Today;
-
-    INSERT INTO [Booking].[NightStayBookingStatusHistory]
-        ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-    SELECT [NightStayBookingId], [FromStatus], N'JOB_EXPIRED', N'System', NULL, @JobNote
-    FROM @JobExpiredNightStays;
 
     COMMIT TRANSACTION;
 
     SELECT
         (SELECT COUNT(*) FROM @ExpiredBookings) AS [ExpiredBookings],
-        (SELECT COUNT(*) FROM @ExpiredNightStays) AS [ExpiredNightStayBookings],
-        (SELECT COUNT(*) FROM @JobExpiredBookings) AS [JobExpiredBookings],
-        (SELECT COUNT(*) FROM @JobExpiredNightStays) AS [JobExpiredNightStayBookings];
+        (SELECT COUNT(*) FROM @ExpiredNightStays) AS [ExpiredNightStayBookings];
 END;
 GO
-PRINT 'Created/updated [Booking].[ExpireStaleBookings].';
+PRINT 'Created/updated [Booking].[ExpireStaleCreatedBookings].';
+GO
+
+-- Retired (2026-08-02): [Booking].[RevertExpiredParentModificationRequests] is
+-- replaced by [Booking].[RevertExpiredModificationRequests] below, now that the
+-- rule covers BOTH proposal directions -- the old name's "Parent" would have
+-- been misleading once MODIFICATION_REQUEST_BY_PROVIDER rows are reverted here
+-- too. Dropped rather than left in place so a stray caller can't keep acting on
+-- the old parent-only behavior.
+IF OBJECT_ID(N'[Booking].[RevertExpiredParentModificationRequests]', N'P') IS NOT NULL
+BEGIN
+    DROP PROCEDURE [Booking].[RevertExpiredParentModificationRequests];
+    PRINT 'Dropped [Booking].[RevertExpiredParentModificationRequests]; replaced by RevertExpiredModificationRequests.';
+END
+GO
+
+-- BR-30 (widened 2026-08-02 to cover BOTH proposal directions -- previously
+-- PARENT-only, see the retired BR-31 note in docs/booking-rules.md): an
+-- unanswered modification proposal, from EITHER party, expires 2 hours before
+-- the service starts (BookingDate + StartTime for a single-day booking,
+-- CheckInDate + DropOffTime for a stay; all UTC) -- the staging row is discarded
+-- and the booking REVERTS to CONFIRMED (NOT terminal: it goes back into a
+-- startable state so neither party is left blocked by a stale proposal).
+--
+-- Run periodically by the scheduled external job, BEFORE
+-- Booking.SettleUnstartedJobsAsNoShow in the same tick -- a booking whose
+-- proposal expires AND whose provider's working day has also ended should
+-- settle as a no-show in that same pass rather than waiting for the next one.
+--
+-- The status-engine's respond sprocs (RespondBookingModification /
+-- RespondNightStayBookingModification) REJECT a response landing after the
+-- cutoff (THROW 51152 / 51272) without performing the revert -- this sproc is
+-- the only writer of the CONFIRMED revert + the staging-row delete.
+-- Returns one row: (RevertedBookings, RevertedNightStayBookings).
+CREATE OR ALTER PROCEDURE [Booking].[RevertExpiredModificationRequests]
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @Note NVARCHAR(500) =
+        N'Modification request expired unanswered 2 hours before the service start time.';
+
+    -- FromStatus is captured per row (not a hardcoded literal) since a reverted
+    -- booking may have come from either MODIFICATION_REQUEST_BY_PARENT or
+    -- MODIFICATION_REQUEST_BY_PROVIDER.
+    DECLARE @RevertedBookings TABLE (
+        [BookingId] UNIQUEIDENTIFIER NOT NULL,
+        [FromStatus] NVARCHAR(48) NOT NULL);
+    DECLARE @RevertedNightStays TABLE (
+        [NightStayBookingId] UNIQUEIDENTIFIER NOT NULL,
+        [FromStatus] NVARCHAR(48) NOT NULL);
+
+    BEGIN TRANSACTION;
+
+    -- Single-day: cutoff = BookingDate + StartTime, minus 2 hours.
+    UPDATE [Booking].[Bookings]
+    SET [Status] = N'CONFIRMED',
+        [UpdatedAtUtc] = @Now
+    OUTPUT inserted.[BookingId], deleted.[Status] INTO @RevertedBookings
+    WHERE [Status] IN (N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER')
+      AND @Now >= DATEADD(HOUR, -2,
+              DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), [StartTime]),
+                      CAST([BookingDate] AS DATETIME2(7))));
+
+    DELETE m
+    FROM [Booking].[BookingModifications] m
+    INNER JOIN @RevertedBookings r ON r.[BookingId] = m.[BookingId];
+
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    SELECT [BookingId], [FromStatus], N'CONFIRMED', N'System', NULL, @Note
+    FROM @RevertedBookings;
+
+    -- Night stay: cutoff = CheckInDate + DropOffTime, minus 2 hours.
+    UPDATE [Booking].[NightStayBookings]
+    SET [Status] = N'CONFIRMED',
+        [UpdatedAtUtc] = @Now
+    OUTPUT inserted.[NightStayBookingId], deleted.[Status] INTO @RevertedNightStays
+    WHERE [Status] IN (N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER')
+      AND @Now >= DATEADD(HOUR, -2,
+              DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), [DropOffTime]),
+                      CAST([CheckInDate] AS DATETIME2(7))));
+
+    DELETE m
+    FROM [Booking].[NightStayBookingModifications] m
+    INNER JOIN @RevertedNightStays r ON r.[NightStayBookingId] = m.[NightStayBookingId];
+
+    INSERT INTO [Booking].[NightStayBookingStatusHistory]
+        ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    SELECT [NightStayBookingId], [FromStatus], N'CONFIRMED', N'System', NULL, @Note
+    FROM @RevertedNightStays;
+
+    COMMIT TRANSACTION;
+
+    SELECT
+        (SELECT COUNT(*) FROM @RevertedBookings) AS [RevertedBookings],
+        (SELECT COUNT(*) FROM @RevertedNightStays) AS [RevertedNightStayBookings];
+END;
+GO
+PRINT 'Created/updated [Booking].[RevertExpiredModificationRequests].';
+GO
+
+-- BR-38 (revised 2026-08-02): an accepted job that is still unstarted once the
+-- PROVIDER'S WORKING DAY ends settles itself as a no-show. Blame is read from
+-- the only evidence the system has, not guessed:
+--   * sitting in START_JOB      -> PARENT_NO_SHOW  (the provider was there and
+--     had the start code issued to the parent, who never handed it back)
+--   * still confirmed-equivalent -> PROVIDER_NO_SHOW (the provider never so
+--     much as tapped Start)
+--
+-- Single-day cutoff = the LATER of (a) the provider's closing time on the
+-- booking date, from Provider.ProviderWeeklyAvailability for that weekday, and
+-- (b) the booking's own EndTime. Keying off closing time (not the booking's own
+-- end) is the point: a provider running badly late has not no-showed just
+-- because a slot came and went -- they still have the rest of their day to serve
+-- it. Taking the LATER of the two guards against a provider who has narrowed
+-- their hours since the booking was made: a booking is never settled while its
+-- own window is still running. No weekly-availability row for that weekday, or
+-- one marked closed, falls back to midnight UTC at the end of the booking date
+-- (the calendar day is the only "day" there is to know about). The break window
+-- is not consulted, matching the working-hours gate on /start-job.
+--
+-- Night-stay cutoff is UNCHANGED: the check-in day ends (midnight UTC). A stay
+-- is date-granular (BR-06) and the weekly time grid never governs it, so there
+-- is no "working day" to key off -- midnight already is the end of the day.
+--
+-- 1970-01-04 was a Sunday, so DATEDIFF(DAY, '19700104', <date>) % 7 gives
+-- 0 = Sunday, matching System.DayOfWeek / the [DayOfWeek] column, independently
+-- of the server's DATEFIRST setting (same trick used in StartBooking.sql /
+-- StartNightStayBooking.sql).
+--
+-- Run periodically by the scheduled external job, AFTER
+-- Booking.RevertExpiredModificationRequests in the same tick, so a
+-- booking whose proposal expires AND whose provider's working day has also
+-- ended settles as a no-show in the same pass. No no-show equivalent of the
+-- 51128/51248 grace-window guard exists in the status engine for this
+-- auto-settlement path -- reporting manually stays the fast path (30+ minutes /
+-- 2+ hours after the scheduled start); this sproc is purely the backstop for
+-- when neither party bothers.
+-- Returns one row: (ProviderNoShowBookings, ParentNoShowBookings,
+--                   ProviderNoShowNightStayBookings, ParentNoShowNightStayBookings).
+CREATE OR ALTER PROCEDURE [Booking].[SettleUnstartedJobsAsNoShow]
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @Today DATE = CAST(@Now AS DATE);
+    DECLARE @ProviderNoShowJobNote NVARCHAR(500) =
+        N'Automatically marked: the provider never started the job before their working day ended.';
+    DECLARE @ParentNoShowJobNote NVARCHAR(500) =
+        N'Automatically marked: the start code was issued but never verified before the provider''s working day ended.';
+    DECLARE @ProviderNoShowStayNote NVARCHAR(500) =
+        N'Automatically marked: the provider never started the stay on the check-in day.';
+    DECLARE @ParentNoShowStayNote NVARCHAR(500) =
+        N'Automatically marked: the start code was issued on the check-in day but never verified.';
+
+    DECLARE @NoShowBookings TABLE (
+        [BookingId] UNIQUEIDENTIFIER NOT NULL,
+        [FromStatus] NVARCHAR(48) NOT NULL,
+        [ToStatus] NVARCHAR(48) NOT NULL);
+    DECLARE @NoShowNightStays TABLE (
+        [NightStayBookingId] UNIQUEIDENTIFIER NOT NULL,
+        [FromStatus] NVARCHAR(48) NOT NULL,
+        [ToStatus] NVARCHAR(48) NOT NULL);
+
+    BEGIN TRANSACTION;
+
+    -- Single-day: cutoff = the later of the provider's closing time on
+    -- BookingDate and the booking's own EndTime.
+    UPDATE b
+    SET [Status] = CASE WHEN b.[Status] = N'START_JOB' THEN N'PARENT_NO_SHOW' ELSE N'PROVIDER_NO_SHOW' END,
+        [UpdatedAtUtc] = @Now
+    OUTPUT inserted.[BookingId], deleted.[Status], inserted.[Status] INTO @NoShowBookings
+    FROM [Booking].[Bookings] b
+    LEFT JOIN [Provider].[ProviderWeeklyAvailability] wa
+        ON wa.[ProviderId] = b.[ProviderId]
+       AND wa.[DayOfWeek] = CAST(DATEDIFF(DAY, '19700104', b.[BookingDate]) % 7 AS TINYINT)
+    CROSS APPLY (
+        SELECT
+            [BookingEndsAtUtc] =
+                DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[EndTime]),
+                        CAST(b.[BookingDate] AS DATETIME2(7))),
+            [ProviderClosesAtUtc] = CASE
+                WHEN wa.[IsOpen] = 1
+                    THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), wa.[EndTime]),
+                                 CAST(b.[BookingDate] AS DATETIME2(7)))
+                ELSE DATEADD(DAY, 1, CAST(b.[BookingDate] AS DATETIME2(7)))
+            END
+    ) AS [Cutoffs]
+    WHERE b.[Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
+                         N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION', N'START_JOB')
+      AND @Now >= (CASE WHEN [Cutoffs].[BookingEndsAtUtc] >= [Cutoffs].[ProviderClosesAtUtc]
+                        THEN [Cutoffs].[BookingEndsAtUtc] ELSE [Cutoffs].[ProviderClosesAtUtc] END);
+
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    SELECT [BookingId], [FromStatus], [ToStatus], N'System', NULL,
+           CASE WHEN [ToStatus] = N'PARENT_NO_SHOW' THEN @ParentNoShowJobNote ELSE @ProviderNoShowJobNote END
+    FROM @NoShowBookings;
+
+    -- Night stay: unchanged -- check-in day ended (midnight UTC), no working-
+    -- hours join, mirroring the retired sweep exactly.
+    UPDATE [Booking].[NightStayBookings]
+    SET [Status] = CASE
+            WHEN [Status] = N'START_JOB' THEN N'PARENT_NO_SHOW'
+            ELSE N'PROVIDER_NO_SHOW'
+        END,
+        [UpdatedAtUtc] = @Now
+    OUTPUT inserted.[NightStayBookingId], deleted.[Status], inserted.[Status] INTO @NoShowNightStays
+    WHERE [Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
+                       N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION', N'START_JOB')
+      AND [CheckInDate] < @Today;
+
+    INSERT INTO [Booking].[NightStayBookingStatusHistory]
+        ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    SELECT [NightStayBookingId], [FromStatus], [ToStatus], N'System', NULL,
+           CASE WHEN [ToStatus] = N'PARENT_NO_SHOW' THEN @ParentNoShowStayNote ELSE @ProviderNoShowStayNote END
+    FROM @NoShowNightStays;
+
+    COMMIT TRANSACTION;
+
+    SELECT
+        (SELECT COUNT(*) FROM @NoShowBookings WHERE [ToStatus] = N'PROVIDER_NO_SHOW')
+            AS [ProviderNoShowBookings],
+        (SELECT COUNT(*) FROM @NoShowBookings WHERE [ToStatus] = N'PARENT_NO_SHOW')
+            AS [ParentNoShowBookings],
+        (SELECT COUNT(*) FROM @NoShowNightStays WHERE [ToStatus] = N'PROVIDER_NO_SHOW')
+            AS [ProviderNoShowNightStayBookings],
+        (SELECT COUNT(*) FROM @NoShowNightStays WHERE [ToStatus] = N'PARENT_NO_SHOW')
+            AS [ParentNoShowNightStayBookings];
+END;
+GO
+PRINT 'Created/updated [Booking].[SettleUnstartedJobsAsNoShow].';
 GO
 
 CREATE OR ALTER PROCEDURE [Booking].[ListNightStayBookingsByProvider]
@@ -7625,7 +8762,7 @@ GO
 
 -- 3.9z Booking start-OTP / evidence / modification sprocs (job lifecycle) --
 -- Job flow: StartBooking (confirmed-equivalent -> START_JOB, issues the
--- parent-facing start-OTP, 15-min gate) -> VerifyBookingStartOtp (START_JOB ->
+-- parent-facing start-OTP, working-hours gate) -> VerifyBookingStartOtp (START_JOB ->
 -- IN_PROGRESS) -> CompleteBooking (IN_PROGRESS -> COMPLETED, no OTP). The
 -- start-OTP lives in [Booking].[BookingStartOtps].
 CREATE OR ALTER PROCEDURE [Booking].[IssueBookingStartOtp]
@@ -7662,9 +8799,11 @@ END;
 GO
 
 -- StartBooking: provider taps "Start Job" — confirmed-equivalent -> START_JOB and
--- issues the parent-facing start-OTP. Only from 15 minutes before the
--- scheduled start (BookingDate + StartTime, UTC). THROWs: 51131 not found, 51132
--- forbidden, 51133 not startable, 51137 too early.
+-- issues the parent-facing start-OTP. Two gates against "now" (UTC): the booking's
+-- [BookingDate] must be today, and the provider must be inside their own weekly
+-- working hours ([Provider].[ProviderWeeklyAvailability]). The scheduled start TIME
+-- does not gate it. THROWs: 51131 not found, 51132 forbidden, 51133 not startable,
+-- 51144 not the service date, 51137 outside the provider's working hours.
 DROP PROCEDURE IF EXISTS [Booking].[StartBookingWithOtp];
 GO
 CREATE OR ALTER PROCEDURE [Booking].[StartBooking]
@@ -7677,19 +8816,30 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
-    DECLARE @CurrentStatus NVARCHAR(48), @RowProvider UNIQUEIDENTIFIER, @BookingDate DATE, @StartTime TIME(0);
+    DECLARE @CurrentStatus NVARCHAR(48), @RowProvider UNIQUEIDENTIFIER, @BookingDate DATE;
     BEGIN TRANSACTION;
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @BookingDate = [BookingDate], @StartTime = [StartTime]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @BookingDate = [BookingDate]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK) WHERE [BookingId] = @BookingId;
     IF @CurrentStatus IS NULL THROW 51131, 'Booking was not found.', 1;
     IF @RowProvider <> @ProviderId THROW 51132, 'You are not the provider on this booking.', 1;
     IF @CurrentStatus NOT IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
                               N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION')
         THROW 51133, 'Booking is not in a state the job can be started from.', 1;
-    DECLARE @StartsAtUtc DATETIME2(7) =
-        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime), CAST(@BookingDate AS DATETIME2(7)));
-    IF @Now < DATEADD(MINUTE, -15, @StartsAtUtc)
-        THROW 51137, 'The job can only be started 15 minutes before its scheduled start.', 1;
+    -- Only on the day the booking is scheduled for; checked before the
+    -- working-hours gate so the wrong-day case gets the more specific error.
+    IF @BookingDate <> CAST(@Now AS DATE)
+        THROW 51144, 'The job can only be started on the day the booking is scheduled for.', 1;
+    -- 1970-01-04 was a Sunday, so the modulo yields 0 = Sunday (matching the
+    -- [DayOfWeek] column / System.DayOfWeek) independently of DATEFIRST.
+    DECLARE @DayOfWeek TINYINT = CAST(DATEDIFF(DAY, '19700104', CAST(@Now AS DATE)) % 7 AS TINYINT);
+    DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
+    DECLARE @IsOpen BIT, @OpensAt TIME(0), @ClosesAt TIME(0);
+    SELECT @IsOpen = [IsOpen], @OpensAt = [StartTime], @ClosesAt = [EndTime]
+    FROM [Provider].[ProviderWeeklyAvailability]
+    WHERE [ProviderId] = @ProviderId AND [DayOfWeek] = @DayOfWeek;
+    -- A provider who has never saved their weekly hours is not gated.
+    IF @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @NowTime < @OpensAt OR @NowTime > @ClosesAt)
+        THROW 51137, 'The job can only be started during your working hours.', 1;
     UPDATE [Booking].[Bookings] SET [Status] = N'START_JOB', [UpdatedAtUtc] = @Now WHERE [BookingId] = @BookingId;
     INSERT INTO [Booking].[BookingStatusHistory]
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
@@ -7750,10 +8900,10 @@ BEGIN
         WHERE [BookingStartOtpId] = @OtpId;
         IF @NewFailedCount >= 6
         BEGIN
-            UPDATE [Booking].[Bookings] SET [Status] = N'OTP_ATTEMPTS_EXCEEDED', [UpdatedAtUtc] = @Now WHERE [BookingId] = @BookingId;
+            UPDATE [Booking].[Bookings] SET [Status] = N'OTP_MAX_ATTEMPTS_EXCEEDED', [UpdatedAtUtc] = @Now WHERE [BookingId] = @BookingId;
             INSERT INTO [Booking].[BookingStatusHistory]
                 ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-            VALUES (@BookingId, @CurrentStatus, N'OTP_ATTEMPTS_EXCEEDED', N'System', NULL, N'Job cancelled after 6 incorrect start-code attempts.');
+            VALUES (@BookingId, @CurrentStatus, N'OTP_MAX_ATTEMPTS_EXCEEDED', N'System', NULL, N'Job cancelled after 6 incorrect start-code attempts.');
             COMMIT TRANSACTION;
             THROW 51136, 'Too many incorrect start-code attempts; the job has been cancelled.', 1;
         END
@@ -7815,15 +8965,28 @@ GO
 CREATE OR ALTER PROCEDURE [Booking].[RequestBookingModification]
     @BookingId UNIQUEIDENTIFIER, @Actor NVARCHAR(16), @ActorId UNIQUEIDENTIFIER,
     @ProposedBookingDate DATE, @ProposedStartTime TIME(0), @ProposedEndTime TIME(0),
-    @Note NVARCHAR(500) = NULL
+    @Note NVARCHAR(500) = NULL,
+    -- The provider's CURRENT terms as shown to and confirmed by the requester when
+    -- they had drifted since the booking was created. Staged here, applied on
+    -- accept only (see [Booking].[RespondBookingModification]).
+    @HasAcknowledgedTerms BIT = 0,
+    @AcknowledgedPricePerHour DECIMAL(10, 2) = NULL,
+    @AcknowledgedCancellationPolicyHours INT = NULL,
+    @AcknowledgedAddressLine NVARCHAR(500) = NULL,
+    @AcknowledgedCity NVARCHAR(200) = NULL,
+    @AcknowledgedZipCode NVARCHAR(32) = NULL,
+    @AcknowledgedLatitude DECIMAL(9, 6) = NULL,
+    @AcknowledgedLongitude DECIMAL(9, 6) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48), @ProviderId UNIQUEIDENTIFIER, @PetParentId UNIQUEIDENTIFIER;
+    DECLARE @BookingDate DATE, @StartTime TIME(0);
     BEGIN TRANSACTION;
-    SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId]
+    SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId],
+           @BookingDate = [BookingDate], @StartTime = [StartTime]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK) WHERE [BookingId] = @BookingId;
     IF @CurrentStatus IS NULL THROW 51140, 'Booking was not found.', 1;
     IF (@Actor = N'Provider' AND @ActorId <> @ProviderId)
@@ -7832,12 +8995,25 @@ BEGIN
     IF @CurrentStatus NOT IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
                               N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION')
         THROW 51142, 'A modification can only be requested on a confirmed booking.', 1;
+    -- The modification window closes 2 hours before the service starts (UTC),
+    -- for either party's proposal (widened 2026-08-02 -- previously parent-only).
+    DECLARE @StartsAtUtc DATETIME2(7) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
+                CAST(@BookingDate AS DATETIME2(7)));
+    IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
+        THROW 51151, 'A booking can no longer be modified within 2 hours of the service start time.', 1;
     IF EXISTS (SELECT 1 FROM [Booking].[BookingModifications] WHERE [BookingId] = @BookingId)
         THROW 51143, 'A modification request is already awaiting a response.', 1;
     INSERT INTO [Booking].[BookingModifications]
         ([BookingId], [RequestedByActor], [RequestedByActorId], [ProposedBookingDate],
-         [ProposedStartTime], [ProposedEndTime], [RequestNote])
-    VALUES (@BookingId, @Actor, @ActorId, @ProposedBookingDate, @ProposedStartTime, @ProposedEndTime, @Note);
+         [ProposedStartTime], [ProposedEndTime], [RequestNote],
+         [HasAcknowledgedTerms], [AcknowledgedPricePerHour], [AcknowledgedCancellationPolicyHours],
+         [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
+         [AcknowledgedLatitude], [AcknowledgedLongitude])
+    VALUES (@BookingId, @Actor, @ActorId, @ProposedBookingDate, @ProposedStartTime, @ProposedEndTime, @Note,
+            ISNULL(@HasAcknowledgedTerms, 0), @AcknowledgedPricePerHour, @AcknowledgedCancellationPolicyHours,
+            @AcknowledgedAddressLine, @AcknowledgedCity, @AcknowledgedZipCode,
+            @AcknowledgedLatitude, @AcknowledgedLongitude);
     DECLARE @NewStatus NVARCHAR(48) = CASE WHEN @Actor = N'Provider' THEN N'MODIFICATION_REQUEST_BY_PROVIDER'
                                            ELSE N'MODIFICATION_REQUEST_BY_PARENT' END;
     UPDATE [Booking].[Bookings] SET [Status] = @NewStatus, [UpdatedAtUtc] = @Now WHERE [BookingId] = @BookingId;
@@ -7859,7 +9035,10 @@ AS
 BEGIN
     SET NOCOUNT ON;
     SELECT [BookingModificationId], [BookingId], [RequestedByActor], [RequestedByActorId],
-           [ProposedBookingDate], [ProposedStartTime], [ProposedEndTime], [RequestNote], [CreatedAtUtc]
+           [ProposedBookingDate], [ProposedStartTime], [ProposedEndTime], [RequestNote], [CreatedAtUtc],
+           [HasAcknowledgedTerms], [AcknowledgedPricePerHour], [AcknowledgedCancellationPolicyHours],
+           [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
+           [AcknowledgedLatitude], [AcknowledgedLongitude]
     FROM [Booking].[BookingModifications] WHERE [BookingId] = @BookingId;
 END;
 GO
@@ -7873,19 +9052,44 @@ BEGIN
     SET XACT_ABORT ON;
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48), @ProviderId UNIQUEIDENTIFIER, @PetParentId UNIQUEIDENTIFIER, @ServiceId UNIQUEIDENTIFIER;
+    DECLARE @BookingDate DATE, @StartTime TIME(0);
     BEGIN TRANSACTION;
-    SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId], @ServiceId = [ServiceId]
+    SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId], @ServiceId = [ServiceId],
+           @BookingDate = [BookingDate], @StartTime = [StartTime]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK) WHERE [BookingId] = @BookingId;
     IF @CurrentStatus IS NULL THROW 51145, 'Booking was not found.', 1;
     IF (@Actor = N'Provider' AND @ActorId <> @ProviderId)
        OR (@Actor = N'Parent' AND (@PetParentId IS NULL OR @ActorId <> @PetParentId))
         THROW 51146, 'You are not a party to this booking.', 1;
+    -- An unanswered proposal -- from either party (widened 2026-08-02) -- dies
+    -- 2 hours before the service starts: reject the attempted response.
+    -- REJECT ONLY -- the revert to CONFIRMED and the discard of the staging row
+    -- are left to the scheduled external job, the single writer for time-driven
+    -- status changes.
+    IF @CurrentStatus IN (N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER')
+    BEGIN
+        DECLARE @StartsAtUtc DATETIME2(7) =
+            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
+                    CAST(@BookingDate AS DATETIME2(7)));
+        IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
+        BEGIN
+            THROW 51152, 'The modification request expired 2 hours before the service start time and can no longer be answered.', 1;
+        END
+    END
     DECLARE @ExpectedStatus NVARCHAR(48) = CASE WHEN @Actor = N'Provider' THEN N'MODIFICATION_REQUEST_BY_PARENT'
                                                 ELSE N'MODIFICATION_REQUEST_BY_PROVIDER' END;
     IF @CurrentStatus <> @ExpectedStatus THROW 51147, 'There is no modification request awaiting your response.', 1;
     DECLARE @ModId UNIQUEIDENTIFIER, @PDate DATE, @PStart TIME(0), @PEnd TIME(0);
+    DECLARE @HasTerms BIT, @TPrice DECIMAL(10, 2), @TPolicyHours INT,
+            @TAddressLine NVARCHAR(500), @TCity NVARCHAR(200), @TZipCode NVARCHAR(32),
+            @TLatitude DECIMAL(9, 6), @TLongitude DECIMAL(9, 6);
     SELECT @ModId = [BookingModificationId], @PDate = [ProposedBookingDate],
-           @PStart = [ProposedStartTime], @PEnd = [ProposedEndTime]
+           @PStart = [ProposedStartTime], @PEnd = [ProposedEndTime],
+           @HasTerms = [HasAcknowledgedTerms], @TPrice = [AcknowledgedPricePerHour],
+           @TPolicyHours = [AcknowledgedCancellationPolicyHours],
+           @TAddressLine = [AcknowledgedAddressLine], @TCity = [AcknowledgedCity],
+           @TZipCode = [AcknowledgedZipCode], @TLatitude = [AcknowledgedLatitude],
+           @TLongitude = [AcknowledgedLongitude]
     FROM [Booking].[BookingModifications] WITH (UPDLOCK, HOLDLOCK) WHERE [BookingId] = @BookingId;
     IF @ModId IS NULL THROW 51147, 'There is no modification request awaiting your response.', 1;
     DECLARE @NewStatus NVARCHAR(48);
@@ -7894,12 +9098,22 @@ BEGIN
         DECLARE @Concurrent INT;
         SELECT @Concurrent = COUNT(*) FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
         WHERE [ServiceId] = @ServiceId AND [BookingDate] = @PDate AND [BookingId] <> @BookingId
-          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [StartTime] < @PEnd AND [EndTime] > @PStart;
         IF @Concurrent >= @Capacity THROW 51148, 'No remaining capacity for the proposed time.', 1;
         SET @NewStatus = CASE WHEN @Actor = N'Provider' THEN N'PROVIDER_ACCEPTED_MODIFICATION' ELSE N'PARENT_ACCEPTED_MODIFICATION' END;
+        -- Staging -> main: the proposed schedule, plus the acknowledged terms when
+        -- the requester confirmed a drift. The Application layer stages a COMPLETE
+        -- term set (frozen value as the fallback), so these apply verbatim.
         UPDATE [Booking].[Bookings]
         SET [BookingDate] = @PDate, [StartTime] = @PStart, [EndTime] = @PEnd,
+            [PricePerHour] = CASE WHEN @HasTerms = 1 THEN @TPrice ELSE [PricePerHour] END,
+            [CancellationPolicyHours] = CASE WHEN @HasTerms = 1 THEN @TPolicyHours ELSE [CancellationPolicyHours] END,
+            [SnapshotAddressLine] = CASE WHEN @HasTerms = 1 THEN @TAddressLine ELSE [SnapshotAddressLine] END,
+            [SnapshotCity] = CASE WHEN @HasTerms = 1 THEN @TCity ELSE [SnapshotCity] END,
+            [SnapshotZipCode] = CASE WHEN @HasTerms = 1 THEN @TZipCode ELSE [SnapshotZipCode] END,
+            [SnapshotLatitude] = CASE WHEN @HasTerms = 1 THEN @TLatitude ELSE [SnapshotLatitude] END,
+            [SnapshotLongitude] = CASE WHEN @HasTerms = 1 THEN @TLongitude ELSE [SnapshotLongitude] END,
             [Status] = @NewStatus, [UpdatedAtUtc] = @Now
         WHERE [BookingId] = @BookingId;
     END
@@ -7980,9 +9194,11 @@ END;
 GO
 
 -- StartNightStayBooking: provider taps "Start Job" — confirmed-equivalent ->
--- START_JOB, issuing the parent-facing start-OTP (15-min gate on CheckInDate
--- + DropOffTime). Mirror of [Booking].[StartBooking]. THROWs: 51251 not found,
--- 51252 forbidden, 51253 not startable, 51257 too early.
+-- START_JOB, issuing the parent-facing start-OTP. Gated on the stay's
+-- [CheckInDate] (the drop-off day) being today and on the provider's own weekly
+-- working hours (UTC) — not on the drop-off TIME. Mirror of
+-- [Booking].[StartBooking]. THROWs: 51251 not found, 51252 forbidden,
+-- 51253 not startable, 51264 not the check-in date, 51257 outside working hours.
 DROP PROCEDURE IF EXISTS [Booking].[StartNightStayBookingWithOtp];
 GO
 CREATE OR ALTER PROCEDURE [Booking].[StartNightStayBooking]
@@ -7992,19 +9208,30 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
-    DECLARE @CurrentStatus NVARCHAR(48), @RowProvider UNIQUEIDENTIFIER, @CheckInDate DATE, @DropOffTime TIME(0);
+    DECLARE @CurrentStatus NVARCHAR(48), @RowProvider UNIQUEIDENTIFIER, @CheckInDate DATE;
     BEGIN TRANSACTION;
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @CheckInDate = [CheckInDate]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK) WHERE [NightStayBookingId] = @NightStayBookingId;
     IF @CurrentStatus IS NULL THROW 51251, 'Night stay booking was not found.', 1;
     IF @RowProvider <> @ProviderId THROW 51252, 'You are not the provider on this booking.', 1;
     IF @CurrentStatus NOT IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
                               N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION')
         THROW 51253, 'Booking is not in a state the job can be started from.', 1;
-    DECLARE @StartsAtUtc DATETIME2(7) =
-        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime), CAST(@CheckInDate AS DATETIME2(7)));
-    IF @Now < DATEADD(MINUTE, -15, @StartsAtUtc)
-        THROW 51257, 'The job can only be started 15 minutes before its scheduled drop-off.', 1;
+    -- Only on the stay's drop-off day; checked before the working-hours gate so
+    -- the wrong-day case gets the more specific error.
+    IF @CheckInDate <> CAST(@Now AS DATE)
+        THROW 51264, 'The job can only be started on the day the booking is scheduled for.', 1;
+    -- 1970-01-04 was a Sunday, so the modulo yields 0 = Sunday (matching the
+    -- [DayOfWeek] column / System.DayOfWeek) independently of DATEFIRST.
+    DECLARE @DayOfWeek TINYINT = CAST(DATEDIFF(DAY, '19700104', CAST(@Now AS DATE)) % 7 AS TINYINT);
+    DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
+    DECLARE @IsOpen BIT, @OpensAt TIME(0), @ClosesAt TIME(0);
+    SELECT @IsOpen = [IsOpen], @OpensAt = [StartTime], @ClosesAt = [EndTime]
+    FROM [Provider].[ProviderWeeklyAvailability]
+    WHERE [ProviderId] = @ProviderId AND [DayOfWeek] = @DayOfWeek;
+    -- A provider who has never saved their weekly hours is not gated.
+    IF @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @NowTime < @OpensAt OR @NowTime > @ClosesAt)
+        THROW 51257, 'The job can only be started during your working hours.', 1;
     UPDATE [Booking].[NightStayBookings] SET [Status] = N'START_JOB', [UpdatedAtUtc] = @Now WHERE [NightStayBookingId] = @NightStayBookingId;
     INSERT INTO [Booking].[NightStayBookingStatusHistory]
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
@@ -8061,10 +9288,10 @@ BEGIN
         WHERE [NightStayBookingStartOtpId] = @OtpId;
         IF @NewFailedCount >= 6
         BEGIN
-            UPDATE [Booking].[NightStayBookings] SET [Status] = N'OTP_ATTEMPTS_EXCEEDED', [UpdatedAtUtc] = @Now WHERE [NightStayBookingId] = @NightStayBookingId;
+            UPDATE [Booking].[NightStayBookings] SET [Status] = N'OTP_MAX_ATTEMPTS_EXCEEDED', [UpdatedAtUtc] = @Now WHERE [NightStayBookingId] = @NightStayBookingId;
             INSERT INTO [Booking].[NightStayBookingStatusHistory]
                 ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-            VALUES (@NightStayBookingId, @CurrentStatus, N'OTP_ATTEMPTS_EXCEEDED', N'System', NULL, N'Job cancelled after 6 incorrect start-code attempts.');
+            VALUES (@NightStayBookingId, @CurrentStatus, N'OTP_MAX_ATTEMPTS_EXCEEDED', N'System', NULL, N'Job cancelled after 6 incorrect start-code attempts.');
             COMMIT TRANSACTION;
             THROW 51256, 'Too many incorrect start-code attempts; the job has been cancelled.', 1;
         END
@@ -8197,15 +9424,28 @@ GO
 
 CREATE OR ALTER PROCEDURE [Booking].[RequestNightStayBookingModification]
     @NightStayBookingId UNIQUEIDENTIFIER, @Actor NVARCHAR(16), @ActorId UNIQUEIDENTIFIER,
-    @ProposedCheckInDate DATE, @ProposedCheckOutDate DATE, @Note NVARCHAR(500) = NULL
+    @ProposedCheckInDate DATE, @ProposedCheckOutDate DATE, @Note NVARCHAR(500) = NULL,
+    -- Acknowledged drifted terms, staged here and applied on accept only.
+    @HasAcknowledgedTerms BIT = 0,
+    @AcknowledgedPricePerNight DECIMAL(10, 2) = NULL,
+    @AcknowledgedCancellationPolicyHours INT = NULL,
+    @AcknowledgedDropOffTime TIME(0) = NULL,
+    @AcknowledgedPickUpTime TIME(0) = NULL,
+    @AcknowledgedAddressLine NVARCHAR(500) = NULL,
+    @AcknowledgedCity NVARCHAR(200) = NULL,
+    @AcknowledgedZipCode NVARCHAR(32) = NULL,
+    @AcknowledgedLatitude DECIMAL(9, 6) = NULL,
+    @AcknowledgedLongitude DECIMAL(9, 6) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48), @ProviderId UNIQUEIDENTIFIER, @PetParentId UNIQUEIDENTIFIER;
+    DECLARE @CheckInDate DATE, @DropOffTime TIME(0);
     BEGIN TRANSACTION;
-    SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId]
+    SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId],
+           @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK) WHERE [NightStayBookingId] = @NightStayBookingId;
     IF @CurrentStatus IS NULL THROW 51260, 'Night stay booking was not found.', 1;
     IF (@Actor = N'Provider' AND @ActorId <> @ProviderId)
@@ -8214,11 +9454,26 @@ BEGIN
     IF @CurrentStatus NOT IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
                               N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION')
         THROW 51262, 'A modification can only be requested on a confirmed booking.', 1;
+    -- The modification window closes 2 hours before drop-off on the check-in day
+    -- (UTC), for either party's proposal (widened 2026-08-02). Mirror of 51151.
+    DECLARE @StartsAtUtc DATETIME2(7) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+                CAST(@CheckInDate AS DATETIME2(7)));
+    IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
+        THROW 51271, 'A booking can no longer be modified within 2 hours of the service start time.', 1;
     IF EXISTS (SELECT 1 FROM [Booking].[NightStayBookingModifications] WHERE [NightStayBookingId] = @NightStayBookingId)
         THROW 51263, 'A modification request is already awaiting a response.', 1;
     INSERT INTO [Booking].[NightStayBookingModifications]
-        ([NightStayBookingId], [RequestedByActor], [RequestedByActorId], [ProposedCheckInDate], [ProposedCheckOutDate], [RequestNote])
-    VALUES (@NightStayBookingId, @Actor, @ActorId, @ProposedCheckInDate, @ProposedCheckOutDate, @Note);
+        ([NightStayBookingId], [RequestedByActor], [RequestedByActorId], [ProposedCheckInDate], [ProposedCheckOutDate], [RequestNote],
+         [HasAcknowledgedTerms], [AcknowledgedPricePerNight], [AcknowledgedCancellationPolicyHours],
+         [AcknowledgedDropOffTime], [AcknowledgedPickUpTime],
+         [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
+         [AcknowledgedLatitude], [AcknowledgedLongitude])
+    VALUES (@NightStayBookingId, @Actor, @ActorId, @ProposedCheckInDate, @ProposedCheckOutDate, @Note,
+            ISNULL(@HasAcknowledgedTerms, 0), @AcknowledgedPricePerNight, @AcknowledgedCancellationPolicyHours,
+            @AcknowledgedDropOffTime, @AcknowledgedPickUpTime,
+            @AcknowledgedAddressLine, @AcknowledgedCity, @AcknowledgedZipCode,
+            @AcknowledgedLatitude, @AcknowledgedLongitude);
     DECLARE @NewStatus NVARCHAR(48) = CASE WHEN @Actor = N'Provider' THEN N'MODIFICATION_REQUEST_BY_PROVIDER'
                                            ELSE N'MODIFICATION_REQUEST_BY_PARENT' END;
     UPDATE [Booking].[NightStayBookings] SET [Status] = @NewStatus, [UpdatedAtUtc] = @Now WHERE [NightStayBookingId] = @NightStayBookingId;
@@ -8241,18 +9496,45 @@ BEGIN
     SET XACT_ABORT ON;
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48), @ProviderId UNIQUEIDENTIFIER, @PetParentId UNIQUEIDENTIFIER, @ServiceId UNIQUEIDENTIFIER;
+    DECLARE @CheckInDate DATE, @DropOffTime TIME(0);
     BEGIN TRANSACTION;
-    SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId], @ServiceId = [ServiceId]
+    SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId], @ServiceId = [ServiceId],
+           @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK) WHERE [NightStayBookingId] = @NightStayBookingId;
     IF @CurrentStatus IS NULL THROW 51265, 'Night stay booking was not found.', 1;
     IF (@Actor = N'Provider' AND @ActorId <> @ProviderId)
        OR (@Actor = N'Parent' AND (@PetParentId IS NULL OR @ActorId <> @PetParentId))
         THROW 51266, 'You are not a party to this booking.', 1;
+    -- An unanswered proposal -- from either party (widened 2026-08-02) -- dies
+    -- 2 hours before drop-off on the check-in day: reject the attempted response.
+    -- REJECT ONLY -- the revert to CONFIRMED and the discard of the staging row
+    -- are left to the scheduled external job, the single writer for time-driven
+    -- status changes.
+    IF @CurrentStatus IN (N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER')
+    BEGIN
+        DECLARE @StartsAtUtc DATETIME2(7) =
+            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+                    CAST(@CheckInDate AS DATETIME2(7)));
+        IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
+        BEGIN
+            THROW 51272, 'The modification request expired 2 hours before the service start time and can no longer be answered.', 1;
+        END
+    END
     DECLARE @ExpectedStatus NVARCHAR(48) = CASE WHEN @Actor = N'Provider' THEN N'MODIFICATION_REQUEST_BY_PARENT'
                                                 ELSE N'MODIFICATION_REQUEST_BY_PROVIDER' END;
     IF @CurrentStatus <> @ExpectedStatus THROW 51267, 'There is no modification request awaiting your response.', 1;
     DECLARE @ModId UNIQUEIDENTIFIER, @PIn DATE, @POut DATE;
-    SELECT @ModId = [NightStayBookingModificationId], @PIn = [ProposedCheckInDate], @POut = [ProposedCheckOutDate]
+    DECLARE @HasTerms BIT, @TPrice DECIMAL(10, 2), @TPolicyHours INT,
+            @TDropOff TIME(0), @TPickUp TIME(0),
+            @TAddressLine NVARCHAR(500), @TCity NVARCHAR(200), @TZipCode NVARCHAR(32),
+            @TLatitude DECIMAL(9, 6), @TLongitude DECIMAL(9, 6);
+    SELECT @ModId = [NightStayBookingModificationId], @PIn = [ProposedCheckInDate], @POut = [ProposedCheckOutDate],
+           @HasTerms = [HasAcknowledgedTerms], @TPrice = [AcknowledgedPricePerNight],
+           @TPolicyHours = [AcknowledgedCancellationPolicyHours],
+           @TDropOff = [AcknowledgedDropOffTime], @TPickUp = [AcknowledgedPickUpTime],
+           @TAddressLine = [AcknowledgedAddressLine], @TCity = [AcknowledgedCity],
+           @TZipCode = [AcknowledgedZipCode], @TLatitude = [AcknowledgedLatitude],
+           @TLongitude = [AcknowledgedLongitude]
     FROM [Booking].[NightStayBookingModifications] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
     IF @ModId IS NULL THROW 51267, 'There is no modification request awaiting your response.', 1;
@@ -8266,13 +9548,25 @@ BEGIN
         SELECT TOP (1) @FullNight = n.[Night] FROM [Nights] n
         LEFT JOIN [Booking].[NightStayBookings] b WITH (UPDLOCK, HOLDLOCK)
             ON b.[ServiceId] = @ServiceId AND b.[NightStayBookingId] <> @NightStayBookingId
-           AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+           AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
            AND b.[CheckInDate] <= n.[Night] AND b.[CheckOutDate] > n.[Night]
         GROUP BY n.[Night] HAVING COUNT(b.[NightStayBookingId]) >= @Capacity OPTION (MAXRECURSION 366);
         IF @FullNight IS NOT NULL THROW 51268, 'No remaining capacity for one or more proposed nights.', 1;
         SET @NewStatus = CASE WHEN @Actor = N'Provider' THEN N'PROVIDER_ACCEPTED_MODIFICATION' ELSE N'PARENT_ACCEPTED_MODIFICATION' END;
+        -- Staging -> main: the proposed range, plus the acknowledged terms. Drop-off
+        -- / pick-up are NOT NULL, so a staged NULL keeps the frozen value.
         UPDATE [Booking].[NightStayBookings]
-        SET [CheckInDate] = @PIn, [CheckOutDate] = @POut, [Status] = @NewStatus, [UpdatedAtUtc] = @Now
+        SET [CheckInDate] = @PIn, [CheckOutDate] = @POut,
+            [PricePerNight] = CASE WHEN @HasTerms = 1 THEN @TPrice ELSE [PricePerNight] END,
+            [CancellationPolicyHours] = CASE WHEN @HasTerms = 1 THEN @TPolicyHours ELSE [CancellationPolicyHours] END,
+            [DropOffTime] = CASE WHEN @HasTerms = 1 AND @TDropOff IS NOT NULL THEN @TDropOff ELSE [DropOffTime] END,
+            [PickUpTime] = CASE WHEN @HasTerms = 1 AND @TPickUp IS NOT NULL THEN @TPickUp ELSE [PickUpTime] END,
+            [SnapshotAddressLine] = CASE WHEN @HasTerms = 1 THEN @TAddressLine ELSE [SnapshotAddressLine] END,
+            [SnapshotCity] = CASE WHEN @HasTerms = 1 THEN @TCity ELSE [SnapshotCity] END,
+            [SnapshotZipCode] = CASE WHEN @HasTerms = 1 THEN @TZipCode ELSE [SnapshotZipCode] END,
+            [SnapshotLatitude] = CASE WHEN @HasTerms = 1 THEN @TLatitude ELSE [SnapshotLatitude] END,
+            [SnapshotLongitude] = CASE WHEN @HasTerms = 1 THEN @TLongitude ELSE [SnapshotLongitude] END,
+            [Status] = @NewStatus, [UpdatedAtUtc] = @Now
         WHERE [NightStayBookingId] = @NightStayBookingId;
     END
     ELSE
@@ -8298,7 +9592,11 @@ BEGIN
     SET NOCOUNT ON;
     SELECT [NightStayBookingModificationId] AS [BookingModificationId], [NightStayBookingId] AS [BookingId],
            [RequestedByActor], [RequestedByActorId],
-           [ProposedCheckInDate], [ProposedCheckOutDate], [RequestNote], [CreatedAtUtc]
+           [ProposedCheckInDate], [ProposedCheckOutDate], [RequestNote], [CreatedAtUtc],
+           [HasAcknowledgedTerms], [AcknowledgedPricePerNight], [AcknowledgedCancellationPolicyHours],
+           [AcknowledgedDropOffTime], [AcknowledgedPickUpTime],
+           [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
+           [AcknowledgedLatitude], [AcknowledgedLongitude]
     FROM [Booking].[NightStayBookingModifications] WHERE [NightStayBookingId] = @NightStayBookingId;
 END;
 GO
@@ -9075,7 +10373,7 @@ BEGIN
            b.[BookingDate], b.[StartTime], b.[EndTime]
     FROM [Booking].[Bookings] AS b WITH (UPDLOCK, HOLDLOCK)
     INNER JOIN @ServiceIds AS s ON s.[ServiceId] = b.[ServiceId]
-    WHERE b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+    WHERE b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
       AND b.[BookingDate] BETWEEN @StartDate AND @EndDate
       AND (
           @StartTime IS NULL

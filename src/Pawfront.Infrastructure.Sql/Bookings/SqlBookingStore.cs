@@ -253,6 +253,37 @@ internal sealed class SqlBookingStore(
         return windows;
     }
 
+    public async Task<IReadOnlyList<AgendaBookingRow>> GetAgendaForDateAsync(
+        Guid serviceId,
+        DateOnly bookingDate,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Booking.GetAgendaForDate", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@ServiceId", serviceId);
+        command.Parameters.AddWithValue("@BookingDate", bookingDate.ToDateTime(TimeOnly.MinValue));
+
+        var rows = new List<AgendaBookingRow>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new AgendaBookingRow(
+                reader.GetString(0),
+                reader.GetGuid(1),
+                reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetGuid(3),
+                TimeOnly.FromTimeSpan(reader.GetTimeSpan(4)),
+                TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
+                reader.GetString(6)));
+        }
+        return rows;
+    }
+
     private static async Task<IReadOnlyList<BookingResult>> ReadAllAsync(
         SqlCommand command,
         CancellationToken cancellationToken)
@@ -408,8 +439,10 @@ internal sealed class SqlBookingStore(
         }
         catch (SqlException exception) when (exception.Number == 51129)
         {
-            // The sproc flipped the stale CREATED booking to EXPIRED before
-            // throwing — the attempted transition (e.g. accept) is rejected.
+            // The booking has sat in CREATED for 24+ hours, so the attempted
+            // transition (e.g. accept) is rejected. The sproc rejects only — the
+            // stored status is still CREATED until the scheduled external job
+            // settles it to EXPIRED.
             throw new BookingExpiredException(bookingId);
         }
         catch (SqlException exception) when (exception.Number == 51149)
@@ -512,9 +545,13 @@ internal sealed class SqlBookingStore(
         {
             throw new BookingNotStartableException(bookingId);
         }
+        catch (SqlException exception) when (exception.Number == 51144)
+        {
+            throw new BookingStartNotOnServiceDateException(bookingId);
+        }
         catch (SqlException exception) when (exception.Number == 51137)
         {
-            throw new BookingStartJobTooEarlyException(bookingId);
+            throw new BookingStartOutsideWorkingHoursException(bookingId);
         }
     }
 
@@ -652,7 +689,7 @@ internal sealed class SqlBookingStore(
     public async Task<BookingResult> RequestModificationAsync(
         Guid bookingId, BookingStatusActor actor, Guid actorId,
         DateOnly bookingDate, TimeOnly startTime, TimeOnly endTime,
-        string? note, CancellationToken cancellationToken)
+        string? note, BookingAcknowledgedTerms? acknowledgedTerms, CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -667,6 +704,8 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@ProposedStartTime", startTime.ToTimeSpan());
         command.Parameters.AddWithValue("@ProposedEndTime", endTime.ToTimeSpan());
         command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
+        AddAcknowledgedTermsParameters(
+            command, acknowledgedTerms, "@AcknowledgedPricePerHour", includeStayTimes: false);
 
         try
         {
@@ -692,6 +731,10 @@ internal sealed class SqlBookingStore(
         catch (SqlException exception) when (exception.Number == 51143)
         {
             throw new BookingModificationConflictException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51151)
+        {
+            throw new BookingModificationWindowClosedException(bookingId);
         }
     }
 
@@ -736,6 +779,14 @@ internal sealed class SqlBookingStore(
         catch (SqlException exception) when (exception.Number == 51148)
         {
             throw new BookingModificationCapacityException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51152)
+        {
+            // The proposal — from either party — passed its 2-hour cutoff, so the
+            // response is rejected. The sproc rejects only — the booking is still
+            // parked in whichever MODIFICATION_REQUEST_BY_* status it was in
+            // until the scheduled external job reverts it to CONFIRMED.
+            throw new BookingModificationExpiredException(bookingId);
         }
     }
 
@@ -862,7 +913,8 @@ internal sealed class SqlBookingStore(
             ProposedStartTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
             ProposedEndTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(6)),
             Note: reader.IsDBNull(7) ? null : reader.GetString(7),
-            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(8), TimeSpan.Zero));
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(8), TimeSpan.Zero),
+            AcknowledgedTerms: ReadAcknowledgedTerms(reader, offset: 9, includeStayTimes: false));
     }
 
     internal static StartOtpResult ReadStartOtp(SqlDataReader reader) =>
@@ -895,6 +947,78 @@ internal sealed class SqlBookingStore(
             providerAddress?.Latitude is { } lat ? (object)lat : DBNull.Value);
         command.Parameters.AddWithValue("@SnapshotProviderLongitude",
             providerAddress?.Longitude is { } lng ? (object)lng : DBNull.Value);
+    }
+
+    // Binds the @Acknowledged* modification-request params. @HasAcknowledgedTerms
+    // is the discriminator the accept-side sproc keys off — a null term set means
+    // "nothing staged, leave the booking's frozen terms alone", which is NOT the
+    // same as staging NULLs (a null cancellation policy means "no restriction").
+    // The price parameter is named per booking kind (per hour vs per night), and
+    // only a stay carries drop-off / pick-up times.
+    internal static void AddAcknowledgedTermsParameters(
+        SqlCommand command,
+        BookingAcknowledgedTerms? terms,
+        string priceParameterName,
+        bool includeStayTimes)
+    {
+        command.Parameters.AddWithValue("@HasAcknowledgedTerms", terms is not null);
+        command.Parameters.AddWithValue(priceParameterName,
+            terms?.UnitPrice is { } price ? (object)price : DBNull.Value);
+        command.Parameters.AddWithValue("@AcknowledgedCancellationPolicyHours",
+            terms?.CancellationPolicyHours is { } hours ? (object)hours : DBNull.Value);
+        if (includeStayTimes)
+        {
+            command.Parameters.AddWithValue("@AcknowledgedDropOffTime",
+                terms?.DropOffTime is { } dropOff ? (object)dropOff.ToTimeSpan() : DBNull.Value);
+            command.Parameters.AddWithValue("@AcknowledgedPickUpTime",
+                terms?.PickUpTime is { } pickUp ? (object)pickUp.ToTimeSpan() : DBNull.Value);
+        }
+
+        command.Parameters.AddWithValue("@AcknowledgedAddressLine",
+            terms?.AddressLine is { } line ? (object)line : DBNull.Value);
+        command.Parameters.AddWithValue("@AcknowledgedCity",
+            terms?.City is { } city ? (object)city : DBNull.Value);
+        command.Parameters.AddWithValue("@AcknowledgedZipCode",
+            terms?.ZipCode is { } zip ? (object)zip : DBNull.Value);
+        command.Parameters.AddWithValue("@AcknowledgedLatitude",
+            terms?.Latitude is { } lat ? (object)lat : DBNull.Value);
+        command.Parameters.AddWithValue("@AcknowledgedLongitude",
+            terms?.Longitude is { } lng ? (object)lng : DBNull.Value);
+    }
+
+    // Reads the acknowledged-terms tail of a GetPending*Modification result set.
+    // Returns null when nothing was staged. Column indexes are 0-based from the
+    // HasAcknowledgedTerms column; a stay's set includes drop-off / pick-up.
+    internal static BookingAcknowledgedTerms? ReadAcknowledgedTerms(
+        SqlDataReader reader, int offset, bool includeStayTimes)
+    {
+        if (reader.IsDBNull(offset) || !reader.GetBoolean(offset))
+        {
+            return null;
+        }
+
+        var priceIndex = offset + 1;
+        var policyIndex = offset + 2;
+        var next = offset + 3;
+        TimeOnly? dropOff = null;
+        TimeOnly? pickUp = null;
+        if (includeStayTimes)
+        {
+            dropOff = reader.IsDBNull(next) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(next));
+            pickUp = reader.IsDBNull(next + 1) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(next + 1));
+            next += 2;
+        }
+
+        return new BookingAcknowledgedTerms(
+            UnitPrice: reader.IsDBNull(priceIndex) ? null : reader.GetDecimal(priceIndex),
+            CancellationPolicyHours: reader.IsDBNull(policyIndex) ? null : reader.GetInt32(policyIndex),
+            DropOffTime: dropOff,
+            PickUpTime: pickUp,
+            AddressLine: reader.IsDBNull(next) ? null : reader.GetString(next),
+            City: reader.IsDBNull(next + 1) ? null : reader.GetString(next + 1),
+            ZipCode: reader.IsDBNull(next + 2) ? null : reader.GetString(next + 2),
+            Latitude: reader.IsDBNull(next + 3) ? null : reader.GetDecimal(next + 3),
+            Longitude: reader.IsDBNull(next + 4) ? null : reader.GetDecimal(next + 4));
     }
 
     private static BookingResult ReadBookingRow(SqlDataReader reader)

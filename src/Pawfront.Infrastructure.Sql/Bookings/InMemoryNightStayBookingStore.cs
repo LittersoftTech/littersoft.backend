@@ -31,6 +31,29 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             && b.CheckInDate <= night
             && b.CheckOutDate > night);
 
+    /// <summary>
+    /// The identified form of <see cref="CountActiveStaysCoveringNight"/>, read by
+    /// <see cref="InMemoryBookingStore.GetAgendaForDateAsync"/> — the in-memory
+    /// mirror of the NightStayBookings branch in [Booking].[GetAgendaForDate].
+    /// The dev store has no JobNumber IDENTITY, so job numbers come back as 0.
+    /// </summary>
+    internal IReadOnlyList<AgendaBookingRow> ListActiveStaysCoveringNight(Guid serviceId, DateOnly night) =>
+        bookings.Values
+            .Where(b =>
+                b.ServiceId == serviceId
+                && IsActive(b)
+                && b.CheckInDate <= night
+                && b.CheckOutDate > night)
+            .Select(b => new AgendaBookingRow(
+                "NightStay",
+                b.NightStayBookingId,
+                JobNumber: 0,
+                b.PetParentId,
+                TimeOnly.MinValue,
+                new TimeOnly(23, 59, 59),
+                b.Status))
+            .ToArray();
+
     public Task<IReadOnlyDictionary<DateOnly, int>> GetNightlyOccupancyAsync(
         Guid serviceId,
         DateOnly fromNight,
@@ -223,17 +246,14 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             throw new BookingStatusForbiddenException(bookingId);
         }
 
-        // A booking left pending (CREATED) for 24+ hours has expired: persist
-        // the EXPIRED flip and reject the attempted transition — mirror of the
-        // SQL sproc's lazy guard (THROW 51249).
+        // A booking left pending (CREATED) for 24+ hours has expired: reject the
+        // attempted transition — mirror of the SQL sproc's guard (THROW 51249).
+        // Reject only; the EXPIRED status is written by the scheduled external
+        // job, which this dev fallback has no equivalent of, so the row simply
+        // stays in CREATED.
         if (row.Status == BookingStatuses.Created
             && DateTimeOffset.UtcNow >= row.CreatedAtUtc.AddHours(24))
         {
-            var expiredFrom = row.Status;
-            row.Status = BookingStatuses.Expired;
-            row.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            AppendHistory(bookingId, expiredFrom, BookingStatuses.Expired, "System", null,
-                "Automatically expired after 24 hours awaiting provider acceptance.");
             throw new BookingExpiredException(bookingId);
         }
 
@@ -373,7 +393,8 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         => throw NotInMemory();
 
     public Task<NightStayBookingResult> RequestModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
-        DateOnly checkInDate, DateOnly checkOutDate, string? note, CancellationToken cancellationToken)
+        DateOnly checkInDate, DateOnly checkOutDate, string? note,
+        BookingAcknowledgedTerms? acknowledgedTerms, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<NightStayBookingResult> RespondModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,

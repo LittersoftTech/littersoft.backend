@@ -346,17 +346,14 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
             throw new BookingStatusForbiddenException(bookingId);
         }
 
-        // A booking left pending (CREATED) for 24+ hours has expired: persist
-        // the EXPIRED flip and reject the attempted transition — mirror of the
-        // SQL sproc's lazy guard (THROW 51129).
+        // A booking left pending (CREATED) for 24+ hours has expired: reject the
+        // attempted transition — mirror of the SQL sproc's guard (THROW 51129).
+        // Reject only; the EXPIRED status is written by the scheduled external
+        // job, which this dev fallback has no equivalent of, so the row simply
+        // stays in CREATED.
         if (row.Status == BookingStatuses.Created
             && DateTimeOffset.UtcNow >= row.CreatedAtUtc.AddHours(24))
         {
-            var expiredFrom = row.Status;
-            row.Status = BookingStatuses.Expired;
-            row.UpdatedAtUtc = DateTimeOffset.UtcNow;
-            AppendHistory(bookingId, expiredFrom, BookingStatuses.Expired, "System", null,
-                "Automatically expired after 24 hours awaiting provider acceptance.");
             throw new BookingExpiredException(bookingId);
         }
 
@@ -480,6 +477,33 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         return Task.FromResult(list);
     }
 
+    public Task<IReadOnlyList<AgendaBookingRow>> GetAgendaForDateAsync(
+        Guid serviceId,
+        DateOnly bookingDate,
+        CancellationToken cancellationToken)
+    {
+        // Same rows as GetBookingsForDateAsync above, carrying the identity the
+        // daily agenda needs — mirrors [Booking].[GetAgendaForDate].
+        IReadOnlyList<AgendaBookingRow> list = bookings.Values
+            .Where(b =>
+                b.ServiceId == serviceId
+                && b.BookingDate == bookingDate
+                && IsActive(b))
+            .Select(b => new AgendaBookingRow(
+                "SingleDay",
+                b.BookingId,
+                b.JobNumber,
+                b.PetParentId,
+                b.StartTime,
+                b.EndTime,
+                b.Status))
+            .Concat(nightStayStore.ListActiveStaysCoveringNight(serviceId, bookingDate))
+            .OrderBy(r => r.StartTime)
+            .ThenBy(r => r.EndTime)
+            .ToArray();
+        return Task.FromResult(list);
+    }
+
     // The job lifecycle (start/end OTP, evidence, modifications) is not implemented
     // in the in-memory dev fallback — it requires the SQL-backed path.
     private static NotSupportedException NotInMemory()
@@ -501,7 +525,8 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         => throw NotInMemory();
 
     public Task<BookingResult> RequestModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
-        DateOnly bookingDate, TimeOnly startTime, TimeOnly endTime, string? note, CancellationToken cancellationToken)
+        DateOnly bookingDate, TimeOnly startTime, TimeOnly endTime, string? note,
+        BookingAcknowledgedTerms? acknowledgedTerms, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<BookingResult> RespondModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,

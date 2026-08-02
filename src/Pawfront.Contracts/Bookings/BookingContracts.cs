@@ -140,11 +140,53 @@ public sealed record VerifyStartOtpRequest(string OtpCode);
 /// (<c>POST .../bookings/{bookingId}/modifications</c>). Editing is limited to the
 /// schedule — date + time window only.
 /// </summary>
+/// <param name="AcknowledgeTermsChanges">
+/// Set when the user has confirmed the provider's terms as they stand now. Only
+/// needed if those terms have drifted from what the booking froze at creation —
+/// read the drift from <c>GET .../bookings/{bookingId}/terms-changes</c>, show the
+/// confirmation sheet, and resubmit with this set. Submitting without it against a
+/// drifted booking returns <c>409 BookingTermsChanged</c>. Accepting the proposal
+/// then re-freezes the confirmed terms onto the booking.
+/// </param>
 public sealed record RequestBookingModificationRequest(
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime,
-    string? Note);
+    string? Note,
+    bool AcknowledgeTermsChanges = false);
+
+/// <summary>
+/// The provider's terms that have changed since a booking was created, so the app
+/// can show the "these changed — still want to reschedule?" sheet before the user
+/// commits. <see cref="HasChanges"/> false (and an empty
+/// <see cref="Changes"/> list) is the ordinary case — no sheet.
+/// </summary>
+public sealed record BookingTermsChangesResponse(
+    Guid BookingId,
+    bool HasChanges,
+    IReadOnlyList<BookingTermsChangeResponse> Changes);
+
+/// <summary>
+/// One changed term. <see cref="BookedValue"/> / <see cref="CurrentValue"/> are
+/// ready-to-display strings, since the fields range over money, hours, clock
+/// times, and a postal address.
+/// </summary>
+/// <param name="Field">
+/// Stable key: <c>Price</c>, <c>CancellationPolicy</c>, <c>DropOffTime</c>,
+/// <c>PickUpTime</c>, <c>Location</c>, <c>Duration</c>, <c>MinimumDuration</c>,
+/// <c>MinimumNights</c>.
+/// </param>
+/// <param name="ChangeType">
+/// <c>ValueChanged</c> — the new value is adopted when the modification is
+/// accepted. <c>RuleViolation</c> — the booked window no longer satisfies a
+/// changed duration/nights rule, so the user has to pick a conforming one.
+/// </param>
+public sealed record BookingTermsChangeResponse(
+    string Field,
+    string ChangeType,
+    string? BookedValue,
+    string? CurrentValue,
+    string Message);
 
 /// <summary>
 /// Body for accepting/declining a modification
@@ -157,6 +199,12 @@ public sealed record RespondBookingModificationRequest(string? Note);
 /// The staged (pending) date/time-change proposal on a single-day booking, so the
 /// counterparty can see what's proposed before accepting/declining.
 /// </summary>
+/// <param name="AcknowledgedTerms">
+/// The provider's terms the requester confirmed when proposing, staged because
+/// they had drifted from what the booking froze. Null in the ordinary case.
+/// Non-null tells the responder that accepting also re-prices / re-rules the
+/// booking, not just its schedule.
+/// </param>
 public sealed record BookingModificationResponse(
     Guid BookingModificationId,
     Guid BookingId,
@@ -166,7 +214,24 @@ public sealed record BookingModificationResponse(
     TimeOnly ProposedStartTime,
     TimeOnly ProposedEndTime,
     string? Note,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    AcknowledgedTermsResponse? AcknowledgedTerms = null);
+
+/// <summary>
+/// The terms a modification proposal will apply to the booking if accepted.
+/// <see cref="PricePerUnit"/> is per hour on a single-day booking, per night on a
+/// stay; drop-off / pick-up are night-stay only.
+/// </summary>
+public sealed record AcknowledgedTermsResponse(
+    decimal? PricePerUnit,
+    int? MinimumHoursBeforeCancellation,
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
+    string? AddressLine,
+    string? City,
+    string? ZipCode,
+    decimal? Latitude,
+    decimal? Longitude);
 
 /// <summary>One job-completion evidence photo.</summary>
 public sealed record BookingEvidenceResponse(

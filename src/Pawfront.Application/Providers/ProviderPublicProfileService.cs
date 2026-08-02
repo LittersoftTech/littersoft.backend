@@ -26,7 +26,8 @@ internal sealed class ProviderPublicProfileService(
     IProviderPolicyService policyService,
     IProviderPhotoService photoService,
     IProviderBannerImageService bannerImageService,
-    IProviderBookingStatsReader bookingStatsReader) : IProviderPublicProfileService
+    IProviderBookingStatsReader bookingStatsReader,
+    IProviderContactReader contactReader) : IProviderPublicProfileService
 {
     // 10-year window for "future time off" — closures rarely run beyond this,
     // and the closure list endpoint requires a bounded range. Trimmed in the
@@ -109,6 +110,25 @@ internal sealed class ProviderPublicProfileService(
             petSitterResult, petGroomerResult, petTrainerResult, petAdoptionSaleResult, vetResult);
         var (description, servicesDescription) = ResolveDescriptions(
             petSitterResult, petGroomerResult, petTrainerResult, petAdoptionSaleResult, vetResult);
+        var serviceDescription = ResolveServiceDescription(petTrainerResult);
+
+        // How to reach the provider. A business registers its own e-mail +
+        // telephone; a freelancer registers neither (they ARE the business), so
+        // their account contact is used instead. The account is also the fallback
+        // for a business that skipped the now-optional telephone.
+        var businessContact = ResolveBusinessContact(
+            petSitterResult, petGroomerResult, petTrainerResult, petAdoptionSaleResult, vetResult);
+        // Skipped entirely for a business that registered both — only a
+        // freelancer (or a blank field) needs the account read.
+        var accountContact = IsBlank(businessContact.Email) || IsBlank(businessContact.TelephoneNumber)
+            ? await contactReader.GetAsync(providerId, cancellationToken)
+            : null;
+        var email = FirstNonBlank(businessContact.Email, accountContact?.Email);
+        var (mobileCountryCode, mobileNumber) =
+            IsBlank(businessContact.TelephoneNumber)
+                ? (Trimmed(accountContact?.MobileCountryCode), Trimmed(accountContact?.MobileNumber))
+                : (Trimmed(businessContact.TelephoneCountryCode), Trimmed(businessContact.TelephoneNumber));
+
         var gallery = await photoService.ListAsync(providerId, cancellationToken);
         var galleryImages = gallery.Select(p => p.PhotoUrl).ToList();
 
@@ -135,6 +155,10 @@ internal sealed class ProviderPublicProfileService(
             completedBookings,
             description,
             servicesDescription,
+            serviceDescription,
+            email,
+            mobileCountryCode,
+            mobileNumber,
             profilePhotoUrl,
             bannerImageUrl,
             galleryImages,
@@ -220,4 +244,69 @@ internal sealed class ProviderPublicProfileService(
         }
         return (null, null);
     }
+
+    /// <summary>
+    /// The description of the bookable SERVICE, lifted to the top level next to
+    /// the two texts above. Only PetTrainer has one — its offering's
+    /// PrivateTrainingDescription, read from whichever sub-category branch is
+    /// populated. A groomer's blurbs are per menu item and stay on the items;
+    /// the other categories have no per-service text.
+    /// </summary>
+    private static string? ResolveServiceDescription(PetTrainerServiceResult? petTrainer)
+    {
+        var offering = petTrainer?.TrainingSchool?.Offering ?? petTrainer?.Freelance?.Offering;
+        return string.IsNullOrWhiteSpace(offering?.PrivateTrainingDescription)
+            ? null
+            : offering.PrivateTrainingDescription.Trim();
+    }
+
+    /// <summary>
+    /// The contact captured on the BUSINESS branch of whichever category offering
+    /// is populated (shop / hotel / clinic / school / shelter). Every field comes
+    /// back null for a freelance sub-category — freelance registration asks for
+    /// no business e-mail or telephone — which is what makes the caller fall back
+    /// to the provider's account contact.
+    /// </summary>
+    private static (string? Email, string? TelephoneCountryCode, string? TelephoneNumber) ResolveBusinessContact(
+        PetSitterServiceResult? petSitter,
+        PetGroomerServiceResult? petGroomer,
+        PetTrainerServiceResult? petTrainer,
+        PetAdoptionSaleServiceResult? petAdoptionSale,
+        VetServiceResult? vet)
+    {
+        if (petSitter?.PetHotel is { } hotel)
+        {
+            return (hotel.Email, hotel.TelephoneCountryCode, hotel.TelephoneNumber);
+        }
+        if (petGroomer?.GroomerShop is { } shop)
+        {
+            return (shop.Email, shop.TelephoneCountryCode, shop.TelephoneNumber);
+        }
+        if (petTrainer?.TrainingSchool is { } school)
+        {
+            return (school.Email, school.TelephoneCountryCode, school.TelephoneNumber);
+        }
+        if (petAdoptionSale?.PetShelter is { } shelter)
+        {
+            return (shelter.Email, shelter.TelephoneCountryCode, shelter.TelephoneNumber);
+        }
+        if (petAdoptionSale?.PetShop is { } petShop)
+        {
+            return (petShop.Email, petShop.TelephoneCountryCode, petShop.TelephoneNumber);
+        }
+        if (vet?.VetClinic is { } clinic)
+        {
+            return (clinic.Email, clinic.TelephoneCountryCode, clinic.TelephoneNumber);
+        }
+        return (null, null, null);
+    }
+
+    // Omitted optional registration fields read back as "" rather than null, so
+    // blank has to count as "not supplied" for the fallback to kick in.
+    private static bool IsBlank(string? value) => string.IsNullOrWhiteSpace(value);
+
+    private static string? Trimmed(string? value) => IsBlank(value) ? null : value!.Trim();
+
+    private static string? FirstNonBlank(string? preferred, string? fallback) =>
+        Trimmed(preferred) ?? Trimmed(fallback);
 }

@@ -51,8 +51,13 @@ public sealed record GroomingOfferingInput(
     TimeOnly DropOffTime,
     TimeOnly PickUpTime);
 
+/// <param name="Description">
+/// Optional per-item blurb the groomer writes about this service; shown to the
+/// parent when they pick it. Blank/omitted is stored as absent.
+/// </param>
 public sealed record GroomingServiceItemInput(
     string Code,
+    string? Description,
     decimal Price,
     int DurationMinutes,
     bool IsActive);
@@ -106,6 +111,7 @@ public sealed record GroomingOfferingResult(
 
 public sealed record GroomingServiceItemResult(
     string Code,
+    string? Description,
     decimal Price,
     int DurationMinutes,
     bool IsActive);

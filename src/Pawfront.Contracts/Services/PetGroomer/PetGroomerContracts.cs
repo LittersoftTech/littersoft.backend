@@ -51,11 +51,20 @@ public sealed record GroomingOfferingRequest(
     TimeOnly DropOffTime,
     TimeOnly PickUpTime);
 
+/// <param name="Description">
+/// Optional — the groomer's own words about this menu item, shown to the parent
+/// when they pick a service to book. Max 500 characters; blank/omitted stores as
+/// absent and reads back null. The offering save replaces the whole services
+/// array, so resend it with every save (same as price and duration).
+/// </param>
 public sealed record GroomingServiceItemRequest(
     string Code,
     decimal Price,
     int DurationMinutes,
-    bool IsActive);
+    bool IsActive,
+    // Last + defaulted on purpose: it keeps the field out of the OpenAPI
+    // `required` list, so existing clients that omit it stay valid.
+    string? Description = null);
 
 public sealed record PetGroomerServiceResponse(
     Guid ProviderId,
@@ -111,6 +120,7 @@ public sealed record GroomingOfferingResponse(
 
 public sealed record GroomingServiceItemResponse(
     string Code,
+    string? Description,
     decimal Price,
     int DurationMinutes,
     bool IsActive);

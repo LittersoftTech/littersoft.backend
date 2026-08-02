@@ -18,7 +18,8 @@ internal sealed class BookingService(
     IPetNextConsultationStore nextConsultationStore,
     IProviderDiscoveryService providerDiscovery,
     IProviderServiceLocationRegistry providerLocationRegistry,
-    IOptions<PawfrontFeeOptions> feeOptions) : IBookingService, IDailyBookingReader
+    IBookingTermsChangeService termsChangeService,
+    IOptions<PawfrontFeeOptions> feeOptions) : IBookingService, IDailyBookingReader, IDailyAgendaReader
 {
     public async Task<BookingResult> CreateAsync(
         CreateBookingCommand command,
@@ -95,6 +96,11 @@ internal sealed class BookingService(
         var bookingDurationSpan = command.EndTime - command.StartTime;
         var bookingDurationHours = (decimal)bookingDurationSpan.TotalHours;
         ValidateDuration(bookingDurationHours, offering);
+
+        // 2b. The service must start at least the minimum lead time from now. The
+        // slot surfaces already hide these windows, so reaching here means a stale
+        // slot list or a hand-rolled request.
+        BookingLeadTime.EnsureFarEnoughAhead(command.BookingDate, command.StartTime, DateTimeOffset.UtcNow);
 
         // 3. Validate the requested window fits inside the provider's weekly availability.
         await ValidateAgainstAvailabilityAsync(
@@ -237,7 +243,10 @@ internal sealed class BookingService(
         }
 
         // 2. Scheduling: working hours, break, closure. Same gates as the app
-        // booking path so the provider's calendar stays consistent.
+        // booking path so the provider's calendar stays consistent — EXCEPT the
+        // booking lead time, which deliberately does not apply here. A custom
+        // booking records a walk-in the provider is serving now; requiring it to
+        // be entered two hours ahead would make the feature unusable.
         await ValidateAgainstAvailabilityAsync(
             command.ProviderId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
@@ -658,6 +667,12 @@ internal sealed class BookingService(
         CancellationToken cancellationToken)
         => sqlStore.GetBookingsForDateAsync(serviceId, date, cancellationToken);
 
+    public Task<IReadOnlyList<AgendaBookingRow>> GetAgendaForDateAsync(
+        Guid serviceId,
+        DateOnly date,
+        CancellationToken cancellationToken)
+        => sqlStore.GetAgendaForDateAsync(serviceId, date, cancellationToken);
+
     // --- Job lifecycle: start-OTP, evidence, modifications ------------------
 
     private const int StartOtpTtlMinutes = 10;
@@ -732,10 +747,27 @@ internal sealed class BookingService(
         await ValidateAgainstClosuresAsync(
             booking.ServiceId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
+        // The booking froze the provider's terms at creation. If they have drifted
+        // since, the requester must have seen and confirmed the new ones — the app
+        // shows them from the terms-changes endpoint. An un-acknowledged request
+        // against a drifted booking is rejected rather than silently proposing a
+        // schedule under terms the requester never saw.
+        var drift = await termsChangeService.GetForBookingAsync(command.BookingId, cancellationToken);
+        BookingAcknowledgedTerms? acknowledgedTerms = null;
+        if (drift.HasChanges)
+        {
+            if (!command.AcknowledgeTermsChanges)
+            {
+                throw new BookingTermsChangedException(command.BookingId);
+            }
+
+            acknowledgedTerms = drift.AcknowledgedTerms;
+        }
+
         return await sqlStore.RequestModificationAsync(
             command.BookingId, command.Actor, command.ActorId,
             command.BookingDate, command.StartTime, command.EndTime,
-            command.Note, cancellationToken);
+            command.Note, acknowledgedTerms, cancellationToken);
     }
 
     public Task<BookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)

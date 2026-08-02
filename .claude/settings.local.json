@@ -16,7 +16,10 @@
       "Bash(sqlcmd -S littersoftdb.database.windows.net -d littersoft-dev -U littersoftadmin -P '$NewProject@12$' -b -i parse_deployall.sql)",
       "Bash(echo \"exit=$?\")",
       "PowerShell(if \\($?\\) { \"PARENT collection: valid JSON\" })",
-      "PowerShell(if \\($?\\) { \"PROVIDER collection: valid JSON\" })"
+      "PowerShell(if \\($?\\) { \"PROVIDER collection: valid JSON\" })",
+      "PowerShell(dotnet build .\\\\Pawfront.slnx --configfile .\\\\NuGet.Config --nologo -v q 2>&1)",
+      "Bash(grep -n \"Modifications\\\\*\\\\* \\(\\\\`Booking.BookingModifications\\\\`\\\\|51145/51146/51147/51148\\\\|modifications/{accept|decline}\\\\|/modifications\\\\`\" CLAUDE.md)",
+      "Bash(grep -n \"bookings/{bookingId}/status-history\\\\|/modifications\\\\`, \\\\`/modifications\" CLAUDE.md)"
     ]
   }
 }

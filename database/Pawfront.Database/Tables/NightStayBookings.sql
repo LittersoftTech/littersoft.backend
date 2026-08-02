@@ -62,10 +62,10 @@ CREATE TABLE [Booking].[NightStayBookings]
     [PayoutId] NVARCHAR(64) NULL,
     -- Same expanded "job" lifecycle as [Booking].[Bookings] (accept/decline,
     -- start-with-OTP, complete, PAID, parent/provider modification proposals,
-    -- PARENT/PROVIDER_NO_SHOW, EXPIRED, JOB_EXPIRED, OTP_ATTEMPTS_EXCEEDED).
+    -- PARENT/PROVIDER_NO_SHOW, EXPIRED, JOB_EXPIRED, OTP_MAX_ATTEMPTS_EXCEEDED).
     -- Capacity-freeing statuses are the two cancelled ones PLUS
     -- PROVIDER_DECLINED, the two no-show statuses, EXPIRED, JOB_EXPIRED, and
-    -- OTP_ATTEMPTS_EXCEEDED; every other status still holds the stay's per-night
+    -- OTP_MAX_ATTEMPTS_EXCEEDED; every other status still holds the stay's per-night
     -- capacity. APPROVAL_NEEDED is deprecated but kept allowed for legacy rows.
     [Status] NVARCHAR(48) NOT NULL
         CONSTRAINT [DF_NightStayBookings_Status] DEFAULT N'CREATED',
@@ -94,7 +94,7 @@ CREATE TABLE [Booking].[NightStayBookings]
                             N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                             N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                             N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                            N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')),
+                            N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
     CONSTRAINT [CK_NightStayBookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))

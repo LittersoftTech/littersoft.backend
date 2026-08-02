@@ -88,7 +88,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "parent-onboarding", "profile"]
             },
-            "description": "Creates Parent.PetParents and links to the auth identity (resolved from JWT sub/user_id — NOT from the body). `description` (\"About Me\") is OPTIONAL — omit or send blank to store none. Captures `petParentId`. 404 ParentAuthIdentityNotFound if `firebase-auth` was never called; 409 MobileNumberAlreadyExists; 400 UnsupportedGender."
+            "description": "Creates Parent.PetParents and links to the auth identity (resolved from JWT sub/user_id — NOT from the body). `description` (\"About Me\") is OPTIONAL — omit or send blank to store none. `gender` accepts Male / Female / Others / Non Binary (also NonBinary / Other / PreferNotToSay); spacing, hyphens and casing are ignored, and \"Others\" is stored as \"Other\". One account per mobile number — a number already registered to another parent is rejected with 409 MobileNumberAlreadyExists (checked explicitly in the sproc, with the UNIQUE index as the race-safe backstop). Captures `petParentId`. 404 ParentAuthIdentityNotFound if `firebase-auth` was never called; 400 UnsupportedGender."
           }
         },
         {
@@ -150,7 +150,20 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "profile"]
             },
-            "description": "Edits the basic-profile subset. NOT editable here: mobile number (re-verify via OTP), latitude/longitude, profile photo (own endpoint). Returns the full read-back shape. 404 PetParentNotFound; 400 UnsupportedGender / InvalidRequest."
+            "description": "Edits the basic-profile subset. `description` is optional; `gender` accepts Male / Female / Others / Non Binary (case- and spacing-insensitive). NOT editable here: mobile number (re-verify via OTP), latitude/longitude, profile photo (own endpoint). Returns the full read-back shape. 404 PetParentNotFound; 409 ParentAccountDeleted; 400 UnsupportedGender / InvalidRequest."
+          }
+        },
+        {
+          "name": "DELETE /pet-parents/{petParentId} (delete account)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}"]
+            },
+            "description": "\"Delete account\" = ANONYMISE + permanently DISABLE, NOT a row delete. Scrubs the personal fields (name → \"Deleted User\", mobile/address/DOB replaced, about + profile photo cleared), severs the Firebase login (freeing the real uid AND mobile number for a fresh sign-up), anonymises the parent's pets in place (name → \"Deleted Pet\"), and deletes device tokens, OTPs, the identity document and every photo gallery.\n\nRETAINED: bookings, night-stay bookings, organised events, event tickets and the payment ledger — that history belongs to the PROVIDER too.\n\nIdempotent. Returns { petParentId, deletedAtUtc, wasAlreadyDeleted, anonymisedPetCount, retainedBookingCount, retainedNightStayBookingCount, retainedEventCount, retainedPaymentCount }. 404 PetParentNotFound.\n\nAfter this runs the caller's token no longer resolves, so every /pet-parents/* route answers 403 ParentProfileNotCompleted."
           }
         },
         {
@@ -743,7 +756,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "providers", "{{providerId}}"]
             },
-            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff, minimumHoursBeforeCancellation (null|24|48|72|96), acceptedPaymentMethods ([\"Cash\"|\"Digital\"], [] when unset), `completedBookings` (bookings explicitly COMPLETED or already served — window ended, not cancelled/no-show/expired — across all the provider's services, spanning both single-day and multi-night boarding stays; same figure as the search cards), top-level `description` (the freelancer's about-you text; null for business sub-categories) + `servicesDescription` (the business branch's description; null for freelancers), `profilePhotoUrl` (the provider's profile/business image; null when none), `galleryImages` ([] the provider's gallery photos), and reviews (always [] for now — review feature not built yet). 404 ProviderNotRegistered."
+            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff, minimumHoursBeforeCancellation (null|24|48|72|96), acceptedPaymentMethods ([\"Cash\"|\"Digital\"], [] when unset), `completedBookings` (bookings explicitly COMPLETED or already served — window ended, not cancelled/no-show/expired — across all the provider's services, spanning both single-day and multi-night boarding stays; same figure as the search cards), top-level `description` (the freelancer's about-you text; null for business sub-categories) + `servicesDescription` (the business branch's description; null for freelancers), `profilePhotoUrl` (the provider's profile/business image; null when none), `galleryImages` ([] the provider's gallery photos), top-level `email` + `mobileCountryCode` + `mobileNumber` (a business reports the contact it registered; a FREELANCER registers none, so theirs falls back to their account e-mail + verified mobile — same fallback when a business left the optional telephone blank), and reviews (always [] for now — review feature not built yet). 404 ProviderNotRegistered."
           }
         },
         {

@@ -4,7 +4,7 @@
 -- here. On success the OTP is consumed and the job is underway. Failed attempts
 -- bump the OTP's FailedAttemptCount (committed even though the call then THROWs);
 -- the 6th wrong attempt cancels the job — the booking is flipped to the terminal
--- OTP_ATTEMPTS_EXCEEDED status (freeing capacity, with a System audit row) and the
+-- OTP_MAX_ATTEMPTS_EXCEEDED status (freeing capacity, with a System audit row) and the
 -- call THROWs 51136. THROWs: 51131 not found, 51132 forbidden, 51138 not START_JOB
 -- (can't verify the start code), 51134 invalid/missing OTP, 51135 OTP expired,
 -- 51136 too many wrong attempts (job cancelled).
@@ -74,13 +74,13 @@ BEGIN
         IF @NewFailedCount >= 6
         BEGIN
             UPDATE [Booking].[Bookings]
-            SET [Status] = N'OTP_ATTEMPTS_EXCEEDED', [UpdatedAtUtc] = @Now
+            SET [Status] = N'OTP_MAX_ATTEMPTS_EXCEEDED', [UpdatedAtUtc] = @Now
             WHERE [BookingId] = @BookingId;
 
             INSERT INTO [Booking].[BookingStatusHistory]
                 ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
             VALUES
-                (@BookingId, @CurrentStatus, N'OTP_ATTEMPTS_EXCEEDED', N'System', NULL,
+                (@BookingId, @CurrentStatus, N'OTP_MAX_ATTEMPTS_EXCEEDED', N'System', NULL,
                  N'Job cancelled after 6 incorrect start-code attempts.');
 
             COMMIT TRANSACTION;

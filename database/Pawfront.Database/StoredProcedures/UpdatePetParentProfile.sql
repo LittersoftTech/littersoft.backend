@@ -3,6 +3,8 @@
 -- through OTP verification), latitude/longitude (no coordinates accompany
 -- an address edit today), profile photo (own endpoint).
 -- THROW 51208 = pet parent not found (profile update).
+-- THROW 51224 = the account has been deleted; editing it would undo the
+--               anonymisation [Parent].[DeletePetParent] applied.
 CREATE OR ALTER PROCEDURE [Parent].[UpdatePetParentProfile]
     @PetParentId UNIQUEIDENTIFIER,
     @FirstName NVARCHAR(100),
@@ -16,6 +18,13 @@ CREATE OR ALTER PROCEDURE [Parent].[UpdatePetParentProfile]
 AS
 BEGIN
     SET NOCOUNT ON;
+
+    IF EXISTS (
+        SELECT 1 FROM [Parent].[PetParents]
+        WHERE [PetParentId] = @PetParentId AND [IsDeleted] = 1)
+    BEGIN
+        THROW 51224, 'This account has been deleted and can no longer be edited.', 1;
+    END
 
     UPDATE [Parent].[PetParents]
     SET [FirstName] = @FirstName,

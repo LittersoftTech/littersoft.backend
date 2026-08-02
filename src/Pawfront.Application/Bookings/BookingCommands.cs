@@ -158,6 +158,29 @@ public sealed record BookingListItemResult(
 public sealed record BookingWindow(TimeOnly StartTime, TimeOnly EndTime);
 
 /// <summary>
+/// One occupied window on a service's day, with the identity the daily agenda
+/// needs (<c>Booking.GetAgendaForDate</c>). Same rows the slot service counts
+/// as overlaps, plus who booked it and what state the job is in.
+/// <para>
+/// <see cref="PetParentId"/> is what lets the agenda tell the caller's own jobs
+/// apart from everyone else's — the API reveals <see cref="JobNumber"/> and
+/// <see cref="Status"/> only on the caller's own rows. It is null for Custom
+/// walk-ins (provider-entered private jobs), which therefore always mask.
+/// </para>
+/// A night stay occupies its bucket for the whole night, so it arrives as a
+/// full-day window (00:00–23:59:59) with <see cref="BookingType"/> =
+/// <c>NightStay</c>.
+/// </summary>
+public sealed record AgendaBookingRow(
+    string BookingType,
+    Guid BookingId,
+    int JobNumber,
+    Guid? PetParentId,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    string Status);
+
+/// <summary>
 /// Raw enriched booking row backing the booking-detail read (<c>Booking.GetBookingDetail</c>).
 /// Carries the base booking columns plus the sequential <see cref="JobNumber"/>,
 /// the capture-only payout fields, and the LEFT-JOINed pet-parent / pet records.
@@ -431,6 +454,22 @@ public sealed class BookingAlreadyCancelledException(Guid bookingId)
 
 public sealed class InvalidBookingTimeException(string message) : Exception(message);
 
+/// <summary>
+/// The requested service starts inside the <see cref="BookingLeadTime.Minimum"/>
+/// window — a booking has to be made at least that far ahead (see
+/// <see cref="BookingLeadTime"/>). Raised by the App-booking create paths on both
+/// hosts, single-day and night-stay. A Custom walk-in is exempt: the provider is
+/// recording a job that is happening now, not booking one in advance.
+/// </summary>
+public sealed class BookingLeadTimeTooShortException(DateTimeOffset earliestStartUtc)
+    : Exception(
+        $"A booking must start at least {BookingLeadTime.Minimum.TotalHours:0.#} hours from now. "
+        + $"The earliest available start is {earliestStartUtc:yyyy-MM-dd HH:mm} UTC.")
+{
+    /// <summary>The earliest service start the caller may request right now (UTC).</summary>
+    public DateTimeOffset EarliestStartUtc { get; } = earliestStartUtc;
+}
+
 public sealed class BookingProviderInactiveException(Guid providerId)
     : Exception($"Provider '{providerId}' is currently inactive and is not accepting new bookings.");
 
@@ -503,9 +542,9 @@ public sealed record BookingEvidenceResult(
 
 /// <summary>
 /// Provider taps "Start Job": moves a confirmed-equivalent booking to START_JOB and
-/// issues the parent-facing start-OTP. Allowed only from 15 minutes before the
-/// scheduled start onward. The provider then enters the code the parent shows to
-/// move the job to IN_PROGRESS.
+/// issues the parent-facing start-OTP. Allowed only while the provider is inside
+/// their own weekly working hours. The provider then enters the code the parent
+/// shows to move the job to IN_PROGRESS.
 /// </summary>
 public sealed record StartBookingCommand(Guid BookingId, Guid ProviderId);
 
@@ -515,6 +554,14 @@ public sealed record StartBookingCommand(Guid BookingId, Guid ProviderId);
 /// closures, duration) before the proposal is staged; on accept capacity is
 /// re-checked race-safely.
 /// </summary>
+/// <param name="AcknowledgeTermsChanges">
+/// The requester has seen and accepted the provider's terms as they stand now.
+/// Required only when those terms have drifted from what the booking froze at
+/// creation (price, cancellation policy, the selected-location address) — an
+/// un-acknowledged request against a drifted booking is rejected with
+/// <see cref="BookingTermsChangedException"/>. When set, the current terms are
+/// staged with the proposal and applied if the counterparty accepts.
+/// </param>
 public sealed record RequestBookingModificationCommand(
     Guid BookingId,
     BookingStatusActor Actor,
@@ -522,7 +569,8 @@ public sealed record RequestBookingModificationCommand(
     DateOnly BookingDate,
     TimeOnly StartTime,
     TimeOnly EndTime,
-    string? Note);
+    string? Note,
+    bool AcknowledgeTermsChanges = false);
 
 /// <summary>The counterparty accepts or declines the staged modification proposal.</summary>
 public sealed record RespondBookingModificationCommand(
@@ -537,6 +585,12 @@ public sealed record RespondBookingModificationCommand(
 /// read back so the counterparty can see what's proposed. Removed from staging
 /// once accepted (applied to the booking) or declined.
 /// </summary>
+/// <param name="AcknowledgedTerms">
+/// The provider's terms as confirmed by the requester, staged with the proposal
+/// because they had drifted from what the booking froze. Null when they hadn't —
+/// the ordinary case. Accepting the proposal re-freezes exactly these onto the
+/// booking; declining discards them.
+/// </param>
 public sealed record BookingModificationResult(
     Guid BookingModificationId,
     Guid BookingId,
@@ -546,7 +600,8 @@ public sealed record BookingModificationResult(
     TimeOnly ProposedStartTime,
     TimeOnly ProposedEndTime,
     string? Note,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    BookingAcknowledgedTerms? AcknowledgedTerms = null);
 
 /// <summary>
 /// The provider completes the job (IN_PROGRESS → COMPLETED; no OTP), optionally
@@ -627,11 +682,23 @@ public sealed class BookingNotStartableException(Guid bookingId)
     : Exception($"Booking '{bookingId}' is not in a state the job can be started from.");
 
 /// <summary>
-/// The provider tapped "Start Job" too early — a job can only be started from
-/// 15 minutes before its scheduled start onward.
+/// The provider tapped "Start Job" outside their own weekly working hours — a job
+/// can only be started while the provider is open (their saved availability for
+/// today, UTC). The time of day the booking itself is scheduled for does not gate
+/// the action; only the working-hours window and the service DATE do (see
+/// <see cref="BookingStartNotOnServiceDateException"/>).
 /// </summary>
-public sealed class BookingStartJobTooEarlyException(Guid bookingId)
-    : Exception($"The job on booking '{bookingId}' can only be started 15 minutes before its scheduled start.");
+public sealed class BookingStartOutsideWorkingHoursException(Guid bookingId)
+    : Exception($"The job on booking '{bookingId}' can only be started during your working hours.");
+
+/// <summary>
+/// The provider tapped "Start Job" on a day other than the one the booking is
+/// scheduled for (single-day: BookingDate; night-stay: CheckInDate, the drop-off
+/// day) — both compared against today in UTC. The time of day within the booked
+/// window is not checked, so a provider who runs early or late can still start.
+/// </summary>
+public sealed class BookingStartNotOnServiceDateException(Guid bookingId)
+    : Exception($"The job on booking '{bookingId}' can only be started on the day it is scheduled for.");
 
 /// <summary>
 /// The job is already underway (IN_PROGRESS), so it can no longer be
@@ -651,7 +718,7 @@ public sealed class StartOtpExpiredException(Guid bookingId)
 /// <summary>
 /// The provider entered the wrong start-OTP too many times (the 6th failed
 /// attempt), so the job has been cancelled with the terminal
-/// OTP_ATTEMPTS_EXCEEDED status — no further status change is possible.
+/// OTP_MAX_ATTEMPTS_EXCEEDED status — no further status change is possible.
 /// </summary>
 public sealed class OtpAttemptsExceededException(Guid bookingId)
     : Exception($"The verification code for booking '{bookingId}' was entered incorrectly too many times; the job has been cancelled.");
@@ -678,3 +745,25 @@ public sealed class NoPendingModificationException(Guid bookingId)
 /// <summary>The proposed modification window has no remaining capacity.</summary>
 public sealed class BookingModificationCapacityException(Guid bookingId)
     : Exception($"The proposed time for booking '{bookingId}' has no remaining capacity.");
+
+/// <summary>
+/// Either party tried to modify a booking less than 2 hours before the service
+/// starts (BookingDate + StartTime; CheckInDate + DropOffTime for a stay). Past
+/// that point the schedule needs to be settled so the job can start — the app
+/// hides "Modify Job" from the same cutoff. Widened 2026-08-02 to gate the
+/// provider identically; previously only the parent was gated.
+/// </summary>
+public sealed class BookingModificationWindowClosedException(Guid bookingId)
+    : Exception($"Booking '{bookingId}' can no longer be modified within 2 hours of the service start time.");
+
+/// <summary>
+/// The proposal — from either party (widened 2026-08-02; previously
+/// parent-only) — was still unanswered 2 hours before the service starts, so it
+/// can no longer be answered. Raised when the counterparty responds after that
+/// cutoff. The sproc REJECTS ONLY — the revert to CONFIRMED and the discard of
+/// the staging row are the scheduled external job's, so the booking may still be
+/// sitting in whichever MODIFICATION_REQUEST_BY_* status it was in when the
+/// caller sees this.
+/// </summary>
+public sealed class BookingModificationExpiredException(Guid bookingId)
+    : Exception($"The modification request for booking '{bookingId}' expired before it was answered; the booking has reverted to CONFIRMED.");

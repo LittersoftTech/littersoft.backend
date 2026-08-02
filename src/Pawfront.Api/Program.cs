@@ -63,6 +63,7 @@ api.MapProviderNightStayBookingEndpoints();
 api.MapBlobImageEndpoints();
 api.MapProviderClosureEndpoints();
 api.MapProviderActiveStatusEndpoints();
+api.MapProviderAccountEndpoints();
 api.MapProviderPhotoEndpoints();
 api.MapProviderServiceBannerEndpoints();
 api.MapProviderBannerImageEndpoints();

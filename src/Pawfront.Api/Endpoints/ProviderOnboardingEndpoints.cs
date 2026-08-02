@@ -20,6 +20,7 @@ internal static class ProviderOnboardingEndpoints
         mobileVerification.MapPost("/otp/{providerMobileOtpId:guid}/verify", VerifyOtp);
 
         builder.MapGet("/providers/{providerId:guid}/profile", GetProviderProfile);
+        builder.MapPatch("/providers/{providerId:guid}/profile", UpdateProviderProfile);
         builder.MapGet("/providers/{providerId:guid}/onboarding-status", GetOnboardingStatus);
 
         return builder;
@@ -38,6 +39,43 @@ internal static class ProviderOnboardingEndpoints
         catch (ProviderProfileNotFoundException exception)
         {
             return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> UpdateProviderProfile(
+        Guid providerId,
+        UpdateProviderProfileRequest request,
+        IProviderOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            return ApiResults.BadRequest("InvalidRequest", "Request body is required.");
+        }
+
+        try
+        {
+            var response = await onboardingService.UpdateProviderProfileAsync(
+                providerId,
+                request,
+                cancellationToken);
+            return ApiResults.Ok(response);
+        }
+        catch (ProviderProfileNotFoundException exception)
+        {
+            return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
+        }
+        catch (ProviderAccountDeletedException exception)
+        {
+            return ApiResults.Conflict("ProviderAccountDeleted", exception.Message);
+        }
+        catch (UnsupportedGenderException exception)
+        {
+            return ApiResults.BadRequest("UnsupportedGender", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
         }
     }
 

@@ -1,6 +1,6 @@
 -- Verifies the provider-entered START-code and moves a multi-night booking
 -- START_JOB -> IN_PROGRESS. Mirror of [Booking].[VerifyBookingStartOtp]. The 6th
--- wrong attempt cancels the job (flips to OTP_ATTEMPTS_EXCEEDED, THROW 51256).
+-- wrong attempt cancels the job (flips to OTP_MAX_ATTEMPTS_EXCEEDED, THROW 51256).
 -- THROWs: 51251 not found, 51252 forbidden, 51258 not START_JOB, 51254
 -- invalid/missing OTP, 51255 expired, 51256 too many wrong attempts.
 CREATE OR ALTER PROCEDURE [Booking].[VerifyNightStayBookingStartOtp]
@@ -69,13 +69,13 @@ BEGIN
         IF @NewFailedCount >= 6
         BEGIN
             UPDATE [Booking].[NightStayBookings]
-            SET [Status] = N'OTP_ATTEMPTS_EXCEEDED', [UpdatedAtUtc] = @Now
+            SET [Status] = N'OTP_MAX_ATTEMPTS_EXCEEDED', [UpdatedAtUtc] = @Now
             WHERE [NightStayBookingId] = @NightStayBookingId;
 
             INSERT INTO [Booking].[NightStayBookingStatusHistory]
                 ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
             VALUES
-                (@NightStayBookingId, @CurrentStatus, N'OTP_ATTEMPTS_EXCEEDED', N'System', NULL,
+                (@NightStayBookingId, @CurrentStatus, N'OTP_MAX_ATTEMPTS_EXCEEDED', N'System', NULL,
                  N'Job cancelled after 6 incorrect start-code attempts.');
 
             COMMIT TRANSACTION;

@@ -7,6 +7,7 @@ using Pawfront.Application.Events;
 using Pawfront.Application.Offerings;
 using Pawfront.Application.Onboarding;
 using Pawfront.Application.ParentOnboarding;
+using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.Providers;
 
 namespace Pawfront.Application;
@@ -18,10 +19,16 @@ public static class ApplicationServiceRegistration
         services.TryAddScoped<IProviderOnboardingStatusService, ProviderOnboardingStatusService>();
         services.TryAddScoped<IPetParentOnboardingStatusService, PetParentOnboardingStatusService>();
         services.TryAddScoped<IProviderPublicProfileService, ProviderPublicProfileService>();
+
+        // Account delete spans SQL + Cosmos + Blob, so it is orchestrated here.
+        services.TryAddScoped<IProviderAccountService, ProviderAccountService>();
+        // The pet-parent twin — SQL + Blob only (a parent owns no Cosmos doc).
+        services.TryAddScoped<IParentAccountService, ParentAccountService>();
         services.TryAddScoped<IEventService, EventService>();
         services.TryAddScoped<IEventBookingService, EventBookingService>();
         services.TryAddScoped<IProviderOfferingResolver, ProviderOfferingResolver>();
         services.TryAddScoped<IProviderAvailabilitySlotService, ProviderAvailabilitySlotService>();
+        services.TryAddScoped<IProviderDailyAgendaService, ProviderDailyAgendaService>();
         services.TryAddScoped<IProviderWindowAvailabilityChecker, ProviderWindowAvailabilityChecker>();
         services.TryAddScoped<IProviderSearchService, ProviderSearchService>();
 
@@ -29,6 +36,7 @@ public static class ApplicationServiceRegistration
         services.TryAddScoped<BookingService>();
         services.TryAddScoped<IBookingService>(sp => sp.GetRequiredService<BookingService>());
         services.TryAddScoped<IDailyBookingReader>(sp => sp.GetRequiredService<BookingService>());
+        services.TryAddScoped<IDailyAgendaReader>(sp => sp.GetRequiredService<BookingService>());
 
         // Multi-night boarding (PetSitter NightStay) — separate from the
         // single-day BookingService because a stay is a check-in/check-out date
@@ -40,6 +48,10 @@ public static class ApplicationServiceRegistration
 
         // Enriches a parent's "my bookings" cards with provider + service details.
         services.TryAddScoped<IParentBookingEnrichmentService, ParentBookingEnrichmentService>();
+
+        // Diffs a booking's frozen-at-creation terms against the provider's current
+        // ones, for the "these changed since you booked" confirmation sheet.
+        services.TryAddScoped<IBookingTermsChangeService, BookingTermsChangeService>();
 
         // ProviderClosureService also implements two interfaces (service + narrow reader).
         services.TryAddScoped<ProviderClosureService>();

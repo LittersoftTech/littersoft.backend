@@ -20,3 +20,12 @@ public sealed class ProviderMobileOtpNotFoundException(Guid providerMobileOtpId)
 
 public sealed class ProviderAuthIdentityForFirebaseUserNotFoundException(string firebaseUserId)
     : Exception($"No provider auth identity is registered for Firebase user '{firebaseUserId}'.");
+
+/// <summary>
+/// The provider account has been deleted (anonymised + permanently disabled by
+/// <c>Provider.DeleteProvider</c>). Editing the profile would undo the
+/// anonymisation and reactivating would make the account bookable again, so both
+/// are refused. SQL THROW 51115.
+/// </summary>
+public sealed class ProviderAccountDeletedException(Guid providerId)
+    : Exception($"Provider account '{providerId}' has been deleted.");

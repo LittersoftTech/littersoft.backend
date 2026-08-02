@@ -16,6 +16,7 @@ internal sealed class NightStayBookingService(
     IProviderClosureReader closureReader,
     IProviderDiscoveryService providerDiscovery,
     IProviderServiceLocationRegistry providerLocationRegistry,
+    IBookingTermsChangeService termsChangeService,
     IOptions<PawfrontFeeOptions> feeOptions) : INightStayBookingService, INightStayOccupancyReader
 {
     // A stay can span at most this many nights. Matches the cap the night-stay
@@ -69,6 +70,12 @@ internal sealed class NightStayBookingService(
         {
             throw new BookingOfferingNotConfiguredException(command.ProviderId, service.ServiceCategory);
         }
+
+        // 3b. The stay must begin at least the minimum lead time from now, measured
+        // from drop-off on the check-in day — the same service-start instant the
+        // single-day rule uses, and the one the night-availability surface gates on.
+        BookingLeadTime.EnsureFarEnoughAhead(
+            command.CheckInDate, nightStay.DropOffTime, DateTimeOffset.UtcNow);
 
         // 4. Per-night closure check. A full-day closure on this service on any
         // stayed night blocks the booking. (Partial-day closures don't apply to an
@@ -309,9 +316,27 @@ internal sealed class NightStayBookingService(
             }
         }
 
+        // Mirror of the single-day path: a stay that froze the provider's terms at
+        // creation can only be rescheduled once the requester has confirmed any
+        // drift in them (price per night, cancellation policy, drop-off / pick-up
+        // times, the selected-location address).
+        var drift = await termsChangeService.GetForNightStayBookingAsync(
+            command.NightStayBookingId, cancellationToken);
+        BookingAcknowledgedTerms? acknowledgedTerms = null;
+        if (drift.HasChanges)
+        {
+            if (!command.AcknowledgeTermsChanges)
+            {
+                throw new BookingTermsChangedException(command.NightStayBookingId);
+            }
+
+            acknowledgedTerms = drift.AcknowledgedTerms;
+        }
+
         return await sqlStore.RequestModificationAsync(
             command.NightStayBookingId, command.Actor, command.ActorId,
-            command.CheckInDate, command.CheckOutDate, command.Note, cancellationToken);
+            command.CheckInDate, command.CheckOutDate, command.Note,
+            acknowledgedTerms, cancellationToken);
     }
 
     public async Task<NightStayBookingResult> RespondModificationAsync(

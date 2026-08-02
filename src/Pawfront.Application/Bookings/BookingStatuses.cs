@@ -23,7 +23,7 @@ public static class BookingStatuses
     /// Provider tapped "Start Job" (customer arrived): a start-OTP has been issued
     /// to the parent and the provider must enter it to move the job to
     /// <see cref="InProgress"/>. Reachable only from a confirmed-equivalent state,
-    /// and only from 15 minutes before the scheduled start onward.
+    /// and only while the provider is inside their own weekly working hours.
     /// </summary>
     public const string StartJob = "START_JOB";
 
@@ -89,38 +89,55 @@ public static class BookingStatuses
     /// <summary>
     /// The parent (pet) failed to appear — reported by the PROVIDER, at least
     /// 30 minutes after the booking's scheduled start (terminal, frees capacity).
+    /// Also set automatically by the scheduled external job when the provider's
+    /// WORKING DAY ends while the booking still sits in <see cref="StartJob"/>:
+    /// the provider was there and had the start code issued, but the parent never
+    /// handed it back.
     /// </summary>
     public const string ParentNoShow = "PARENT_NO_SHOW";
 
     /// <summary>
     /// The provider failed to appear — reported by the PARENT, at least
     /// 30 minutes after the booking's scheduled start (terminal, frees capacity).
+    /// Also set automatically by the scheduled external job when the provider's
+    /// WORKING DAY ends while the booking is still confirmed-equivalent: they
+    /// never so much as tapped Start. Keyed off closing time rather than the
+    /// booking's own end time, so a provider running late still has their day.
     /// </summary>
     public const string ProviderNoShow = "PROVIDER_NO_SHOW";
 
     /// <summary>
     /// The booking sat in CREATED for 24+ hours without the provider
-    /// accepting. Set by the expiry sweeper (or lazily by the status-engine
-    /// sprocs when a transition is attempted on a stale CREATED booking) —
-    /// never settable by a client. Terminal, frees capacity.
+    /// accepting. Written ONLY by the scheduled external job — never settable by
+    /// a client, and (since 2026-08-02) never written by a sproc: the status
+    /// engine rejects a transition attempted on a stale CREATED booking without
+    /// flipping it, so a row can still read CREATED while the API already treats
+    /// it as expired. Terminal, frees capacity.
     /// </summary>
     public const string Expired = "EXPIRED";
 
     /// <summary>
-    /// The provider accepted the booking but the job never got underway — its
-    /// scheduled window fully elapsed while the booking was still confirmed-equivalent
-    /// or sitting in START_JOB (never reached <see cref="InProgress"/>). Set by the
-    /// expiry sweeper, never by a client. Distinct from <see cref="Expired"/>, which
-    /// is a CREATED booking the provider never accepted. Terminal, frees capacity.
+    /// <b>Legacy.</b> The provider accepted the booking but the job never got
+    /// underway — its scheduled window fully elapsed while the booking was still
+    /// confirmed-equivalent or sitting in START_JOB (never reached
+    /// <see cref="InProgress"/>). That situation is now settled as a no-show
+    /// instead (<see cref="ProviderNoShow"/> / <see cref="ParentNoShow"/>,
+    /// depending on whether the provider ever tapped Start). Nothing produces
+    /// this value any more for either booking kind.
+    /// Kept because existing rows carry it, and it stays terminal + capacity-freeing.
+    /// Distinct from <see cref="Expired"/>, which is a CREATED booking the provider
+    /// never accepted.
     /// </summary>
     public const string JobExpired = "JOB_EXPIRED";
 
     /// <summary>
     /// The provider entered the wrong start-OTP too many times (the 6th failed
     /// attempt) — the job is cancelled. Set by the verify sprocs, never by a
-    /// client. Terminal, frees capacity.
+    /// client. Terminal, frees capacity. A dedicated status rather than a plain
+    /// cancellation so both apps can label it "OTP Max Attempts Exceeded"
+    /// instead of guessing at the reason.
     /// </summary>
-    public const string OtpAttemptsExceeded = "OTP_ATTEMPTS_EXCEEDED";
+    public const string OtpMaxAttemptsExceeded = "OTP_MAX_ATTEMPTS_EXCEEDED";
 
     /// <summary>Every valid status value (APPROVAL_NEEDED + JOB_STARTED kept for legacy rows).</summary>
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
@@ -131,7 +148,7 @@ public static class BookingStatuses
         ProviderAcceptedModification, ProviderDeclinedModification,
         ParentAcceptedModification, ParentDeclinedModification,
         ProviderCancelled, ParentCancelled,
-        ParentNoShow, ProviderNoShow, Expired, JobExpired, OtpAttemptsExceeded
+        ParentNoShow, ProviderNoShow, Expired, JobExpired, OtpMaxAttemptsExceeded
     };
 
     /// <summary>
@@ -210,7 +227,7 @@ public static class BookingStatuses
     public static readonly IReadOnlySet<string> Terminal = new HashSet<string>(StringComparer.Ordinal)
     {
         Completed, Paid, ProviderDeclined, ProviderCancelled, ParentCancelled,
-        ParentNoShow, ProviderNoShow, Expired, JobExpired, OtpAttemptsExceeded
+        ParentNoShow, ProviderNoShow, Expired, JobExpired, OtpMaxAttemptsExceeded
     };
 
     /// <summary>
@@ -231,7 +248,7 @@ public static class BookingStatuses
     public static readonly IReadOnlySet<string> Cancelled = new HashSet<string>(StringComparer.Ordinal)
     {
         ProviderCancelled, ParentCancelled, ProviderDeclined,
-        ParentNoShow, ProviderNoShow, Expired, JobExpired, OtpAttemptsExceeded
+        ParentNoShow, ProviderNoShow, Expired, JobExpired, OtpMaxAttemptsExceeded
     };
 
     /// <summary>

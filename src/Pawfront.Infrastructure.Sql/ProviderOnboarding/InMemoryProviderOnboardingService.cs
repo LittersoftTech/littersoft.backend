@@ -145,6 +145,125 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
         }
     }
 
+    public Task<ProviderProfileResponse> UpdateProviderProfileAsync(
+        Guid providerId,
+        UpdateProviderProfileRequest request,
+        CancellationToken cancellationToken)
+    {
+        var firstName = Required(request.FirstName, nameof(request.FirstName));
+        var lastName = Required(request.LastName, nameof(request.LastName));
+        var gender = NormalizeGender(request.Gender);
+
+        lock (syncRoot)
+        {
+            if (!profilesByProviderId.TryGetValue(providerId, out var profile))
+            {
+                throw new ProviderProfileNotFoundException(providerId);
+            }
+
+            profile.FirstName = firstName;
+            profile.LastName = lastName;
+            profile.Gender = gender;
+            profile.DateOfBirth = request.DateOfBirth;
+            profile.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+            return Task.FromResult(ToResponse(profile));
+        }
+    }
+
+    public Task<ProviderAccountDeletionResult> DeleteProviderAccountAsync(
+        Guid providerId,
+        CancellationToken cancellationToken)
+    {
+        // Dev fallback only. Mirrors the SQL anonymise + disable for the state this
+        // service owns; bookings, events, services and policies live in their own
+        // in-memory stores it can't reach, so the retained counts are reported as 0.
+        // Production uses Provider.DeleteProvider.
+        lock (syncRoot)
+        {
+            if (!profilesByProviderId.TryGetValue(providerId, out var profile))
+            {
+                throw new ProviderProfileNotFoundException(providerId);
+            }
+
+            var identity = authIdentities[profile.ProviderAuthIdentityId];
+
+            if (profile.IsDeleted)
+            {
+                return Task.FromResult(new ProviderAccountDeletionResult(
+                    BuildDeleteSummary(providerId, profile.DeletedAtUtc ?? DateTimeOffset.UtcNow, wasAlreadyDeleted: true),
+                    ServiceCategories: [],
+                    BlobUrls: []));
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var bannerImageUrl = profile.BannerImageUrl;
+
+            // Free the real number + Firebase uid so the person can register again.
+            providerIdsByMobileNumber.Remove($"{profile.MobileCountryCode}:{profile.MobileNumber}");
+            authIdentityIdsByFirebaseUserId.Remove(identity.FirebaseUserId);
+
+            profile.FirstName = "Deleted";
+            profile.LastName = "Provider";
+            profile.Gender = "PreferNotToSay";
+            profile.DateOfBirth = new DateOnly(1900, 1, 1);
+            profile.MobileVerifiedAtUtc = null;
+            profile.BannerImageUrl = null;
+            profile.IsActive = false;
+            profile.IsDeleted = true;
+            profile.DeletedAtUtc = now;
+            profile.UpdatedAtUtc = now;
+
+            identity.FirebaseUserId = $"deleted:{providerId}";
+            identity.Email = $"deleted+{providerId}@deleted.invalid";
+            identity.IsEmailVerified = false;
+            identity.DisplayName = null;
+            identity.FirebasePhoneNumber = null;
+            identity.PhotoUrl = null;
+            identity.FirebaseTenantId = null;
+            identity.UpdatedAtUtc = now;
+            authIdentityIdsByFirebaseUserId[identity.FirebaseUserId] = identity.ProviderAuthIdentityId;
+
+            foreach (var otpId in mobileOtpsById
+                         .Where(entry => entry.Value.ProviderId == providerId)
+                         .Select(entry => entry.Key)
+                         .ToList())
+            {
+                mobileOtpsById.Remove(otpId);
+            }
+
+            foreach (var fcmToken in deviceTokensByFcmToken
+                         .Where(entry => entry.Value.ProviderId == providerId
+                                         || entry.Value.ProviderAuthIdentityId == identity.ProviderAuthIdentityId)
+                         .Select(entry => entry.Key)
+                         .ToList())
+            {
+                deviceTokensByFcmToken.Remove(fcmToken);
+            }
+
+            return Task.FromResult(new ProviderAccountDeletionResult(
+                BuildDeleteSummary(providerId, now, wasAlreadyDeleted: false),
+                ServiceCategories: [],
+                BlobUrls: bannerImageUrl is null ? [] : [bannerImageUrl]));
+        }
+    }
+
+    private static DeleteProviderAccountResponse BuildDeleteSummary(
+        Guid providerId,
+        DateTimeOffset deletedAtUtc,
+        bool wasAlreadyDeleted)
+    {
+        return new DeleteProviderAccountResponse(
+            providerId,
+            deletedAtUtc,
+            wasAlreadyDeleted,
+            DeactivatedServiceCount: 0,
+            RetainedBookingCount: 0,
+            RetainedNightStayBookingCount: 0,
+            RetainedEventCount: 0,
+            RetainedPaymentCount: 0);
+    }
+
     public Task<ResolveProviderByFirebaseUidResponse> ResolveProviderByFirebaseUidAsync(
         string firebaseUserId,
         CancellationToken cancellationToken)
@@ -462,7 +581,9 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
     {
         public Guid ProviderAuthIdentityId { get; init; }
         public Guid? ProviderId { get; set; }
-        public required string FirebaseUserId { get; init; }
+        // Settable: the account delete replaces it with a placeholder so the real
+        // Firebase uid is free for a fresh sign-up.
+        public required string FirebaseUserId { get; set; }
         public string? FirebaseTenantId { get; set; }
         public required string AuthProvider { get; set; }
         public string? FirebaseProviderId { get; set; }
@@ -481,15 +602,18 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
     {
         public Guid ProviderId { get; init; }
         public Guid ProviderAuthIdentityId { get; init; }
-        public required string FirstName { get; init; }
-        public required string LastName { get; init; }
-        public required string Gender { get; init; }
+        // Editable via UpdateProviderProfileAsync.
+        public required string FirstName { get; set; }
+        public required string LastName { get; set; }
+        public required string Gender { get; set; }
         public required string MobileCountryCode { get; init; }
         public required string MobileNumber { get; init; }
-        public DateOnly DateOfBirth { get; init; }
+        public DateOnly DateOfBirth { get; set; }
         public DateTimeOffset? MobileVerifiedAtUtc { get; set; }
         public required string OnboardingStatus { get; set; }
         public bool IsActive { get; set; } = true;
+        public bool IsDeleted { get; set; }
+        public DateTimeOffset? DeletedAtUtc { get; set; }
         public string? BannerImageUrl { get; set; }
         public DateTimeOffset CreatedAtUtc { get; init; }
         public DateTimeOffset UpdatedAtUtc { get; set; }

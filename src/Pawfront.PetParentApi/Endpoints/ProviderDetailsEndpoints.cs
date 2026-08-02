@@ -256,6 +256,10 @@ internal static class ProviderDetailsEndpoints
             profile.CompletedBookings,
             profile.Description,
             profile.ServicesDescription,
+            profile.ServiceDescription,
+            profile.Email,
+            profile.MobileCountryCode,
+            profile.MobileNumber,
             profile.ProfilePhotoUrl,
             profile.BannerImageUrl,
             profile.GalleryImages,
@@ -382,7 +386,8 @@ internal static class ProviderDetailsEndpoints
                     ? null
                     : new GroomingOfferingResponse(
                         offering.Session.Services
-                            .Select(s => new GroomingServiceItemResponse(s.Code, s.Price, s.DurationMinutes, s.IsActive))
+                            .Select(s => new GroomingServiceItemResponse(
+                                s.Code, s.Description, s.Price, s.DurationMinutes, s.IsActive))
                             .ToArray(),
                         offering.Session.AddOns,
                         offering.Session.LatePickupCharges,

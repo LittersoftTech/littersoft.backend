@@ -47,7 +47,7 @@ public interface INightStayBookingService
 
     Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken);
 
-    /// <summary>Provider taps "Start Job": confirmed-equivalent → START_JOB (15-min gate) + start-OTP.</summary>
+    /// <summary>Provider taps "Start Job": confirmed-equivalent → START_JOB (working-hours gate) + start-OTP.</summary>
     Task<NightStayBookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken);
 
     /// <summary>Provider enters the parent's start-OTP: START_JOB → IN_PROGRESS.</summary>

@@ -34,6 +34,9 @@ internal static class NightStayBookingEndpoints
         // Per-transition endpoints (parent actor).
         group.MapPost("/{bookingId:guid}/cancel", ParentCancel);
         group.MapPost("/{bookingId:guid}/no-show", ReportProviderNoShow);
+        // What the provider has changed since the stay was booked — read this
+        // before opening the edit screen so the app can confirm the new terms.
+        group.MapGet("/{bookingId:guid}/terms-changes", GetTermsChanges);
         group.MapPost("/{bookingId:guid}/modifications", RequestModification);
         group.MapPost("/{bookingId:guid}/modifications/accept", AcceptModification);
         group.MapPost("/{bookingId:guid}/modifications/decline", DeclineModification);
@@ -147,6 +150,10 @@ internal static class NightStayBookingEndpoints
         catch (InvalidNightStayDatesException exception)
         {
             return ApiResults.BadRequest("InvalidNightStayDates", exception.Message);
+        }
+        catch (BookingLeadTimeTooShortException exception)
+        {
+            return ApiResults.Conflict("BookingLeadTimeTooShort", exception.Message);
         }
         catch (UnsupportedBookingLocationTypeException exception)
         {
@@ -332,7 +339,8 @@ internal static class NightStayBookingEndpoints
             ? null
             : new NightStayBookingModificationResponse(
                 mod.NightStayBookingModificationId, mod.NightStayBookingId, mod.RequestedByActor, mod.RequestedByActorId,
-                mod.ProposedCheckInDate, mod.ProposedCheckOutDate, mod.Note, mod.CreatedAtUtc);
+                mod.ProposedCheckInDate, mod.ProposedCheckOutDate, mod.Note, mod.CreatedAtUtc,
+                PetParentEndpoints.ToAcknowledgedTermsResponse(mod.AcknowledgedTerms));
     }
 
     private static async Task<IResult> ParentCancel(
@@ -371,6 +379,27 @@ internal static class NightStayBookingEndpoints
         }
     }
 
+    /// <summary>
+    /// The provider's terms that changed since this stay was booked. Always 200 —
+    /// an unchanged stay reports <c>hasChanges: false</c> with an empty list.
+    /// </summary>
+    private static async Task<IResult> GetTermsChanges(
+        Guid petParentId,
+        Guid bookingId,
+        INightStayBookingService bookingService,
+        IBookingTermsChangeService termsChangeService,
+        CancellationToken cancellationToken)
+    {
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.PetParentId != petParentId)
+        {
+            return ApiResults.NotFound("NightStayBookingNotFound", $"Night stay booking '{bookingId}' was not found.");
+        }
+
+        var result = await termsChangeService.GetForNightStayBookingAsync(bookingId, cancellationToken);
+        return ApiResults.Ok(PetParentEndpoints.ToTermsChangesResponse(result));
+    }
+
     private static async Task<IResult> RequestModification(
         Guid petParentId, Guid bookingId, RequestNightStayBookingModificationRequest request,
         INightStayBookingService bookingService, CancellationToken cancellationToken)
@@ -384,7 +413,8 @@ internal static class NightStayBookingEndpoints
         {
             var result = await bookingService.RequestModificationAsync(
                 new RequestNightStayBookingModificationCommand(
-                    bookingId, BookingStatusActor.Parent, petParentId, request.CheckInDate, request.CheckOutDate, request.Note),
+                    bookingId, BookingStatusActor.Parent, petParentId, request.CheckInDate, request.CheckOutDate,
+                    request.Note, request.AcknowledgeTermsChanges),
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
@@ -438,7 +468,9 @@ internal static class NightStayBookingEndpoints
         or BookingJobInProgressException
         or InvalidStartOtpException or StartOtpExpiredException or BookingNotModifiableException
         or BookingModificationConflictException or NoPendingModificationException
-        or BookingModificationCapacityException or InvalidNightStayDatesException
+        or BookingModificationCapacityException or BookingTermsChangedException
+        or BookingModificationWindowClosedException or BookingModificationExpiredException
+        or InvalidNightStayDatesException or BookingLeadTimeTooShortException
         or ProviderClosedOnDateException or BookingOfferingNotConfiguredException
         or BookingStatusNotAllowedException or BookingStatusTerminalException
         or BookingStatusUnchangedException or BookingNoShowTooEarlyException or BookingExpiredException
@@ -456,7 +488,11 @@ internal static class NightStayBookingEndpoints
         BookingModificationConflictException e => ApiResults.Conflict("ModificationAlreadyPending", e.Message),
         NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
         BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
+        BookingTermsChangedException e => ApiResults.Conflict("BookingTermsChanged", e.Message),
+        BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
+        BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         InvalidNightStayDatesException e => ApiResults.BadRequest("InvalidNightStayDates", e.Message),
+        BookingLeadTimeTooShortException e => ApiResults.Conflict("BookingLeadTimeTooShort", e.Message),
         ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
         BookingOfferingNotConfiguredException e => ApiResults.BadRequest("OfferingNotConfigured", e.Message),
         BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),

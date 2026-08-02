@@ -115,6 +115,9 @@ internal sealed class ProviderSearchService(
             {
                 decimal? charges = null;
                 string? probeCode;
+                // Only a code-scoped search describes one item; a browse across
+                // the whole menu has no single blurb to show.
+                string? description = null;
 
                 if (criteria.ServiceItemCode is not null)
                 {
@@ -128,6 +131,7 @@ internal sealed class ProviderSearchService(
                     }
                     charges = item.Price;
                     probeCode = item.Code;
+                    description = item.Description;
                 }
                 else
                 {
@@ -162,7 +166,7 @@ internal sealed class ProviderSearchService(
                 return new ProviderSearchResult(
                     summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
                     CompletedBookings: 0, charges, ProviderSearchChargesUnits.PerService,
-                    criteria.ServiceItemCode, summary.ImageUrl);
+                    criteria.ServiceItemCode, summary.ImageUrl, description);
             },
             cancellationToken);
 
@@ -220,7 +224,7 @@ internal sealed class ProviderSearchService(
                 return new ProviderSearchResult(
                     summary.ProviderId, service.ServiceId, service.SubCategory, summary.DisplayName,
                     CompletedBookings: 0, resolved.Price, ProviderSearchChargesUnits.PerSession,
-                    ServiceItemCode: null, summary.ImageUrl);
+                    ServiceItemCode: null, summary.ImageUrl, resolved.Description);
             },
             cancellationToken);
 

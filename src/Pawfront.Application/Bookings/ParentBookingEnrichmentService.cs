@@ -31,13 +31,20 @@ public interface IParentBookingEnrichmentService
 /// (snapshot-preferred), and the frozen cancellation-policy + selected-location
 /// blocks carried through from the list row.
 /// </summary>
+/// <param name="ServiceDescription">
+/// What the provider says about the booked service — the menu item's blurb for
+/// a groomer, the session description for a trainer. Read LIVE (it is cosmetic
+/// copy, deliberately not price-locked onto the booking), so a later edit by the
+/// provider shows through. Null for the other categories and when unresolvable.
+/// </param>
 public sealed record EnrichedBookingCard(
     BookingResult Booking,
     ProviderSummary? Provider,
     string? ServiceType,
     decimal? PricePerHour,
     int? CancellationPolicyHours,
-    BookingLocationResult Location);
+    BookingLocationResult Location,
+    string? ServiceDescription = null);
 
 /// <summary>
 /// A night-stay booking plus its provider summary, per-night price
@@ -70,12 +77,13 @@ internal sealed class ParentBookingEnrichmentService(
             // The live resolver still supplies the ServiceType label, but the price
             // prefers the rate frozen onto the booking at creation (price-lock) —
             // live is only the legacy-row fallback.
-            var (serviceType, livePrice) = await ResolvePriceAsync(
+            var (serviceType, livePrice, description) = await ResolvePriceAsync(
                 booking.ProviderId, booking.ServiceId, booking.ServiceItemCode, cancellationToken);
             cards.Add(new EnrichedBookingCard(
                 booking, provider, serviceType,
                 booking.PricePerHour ?? livePrice,
-                item.CancellationPolicyHours, item.Location));
+                item.CancellationPolicyHours, item.Location,
+                description));
         }
 
         var names = await ResolveFreelancerNamesAsync(
@@ -102,7 +110,7 @@ internal sealed class ParentBookingEnrichmentService(
             var pricePerNight = item.PricePerNight;
             if (pricePerNight is null)
             {
-                (_, pricePerNight) = await ResolvePriceAsync(
+                (_, pricePerNight, _) = await ResolvePriceAsync(
                     booking.ProviderId, booking.ServiceId, serviceItemCode: null, cancellationToken);
             }
             cards.Add(new EnrichedNightStayBookingCard(
@@ -193,7 +201,7 @@ internal sealed class ParentBookingEnrichmentService(
         return summary;
     }
 
-    private async Task<(string? ServiceType, decimal? Price)> ResolvePriceAsync(
+    private async Task<(string? ServiceType, decimal? Price, string? Description)> ResolvePriceAsync(
         Guid providerId,
         Guid serviceId,
         string? serviceItemCode,
@@ -204,29 +212,31 @@ internal sealed class ParentBookingEnrichmentService(
             var resolution = await offeringResolver.ResolveAsync(serviceId, cancellationToken);
             if (resolution is not OfferingResolution.Resolved offering)
             {
-                return (null, null);
+                return (null, null, null);
             }
 
-            // PetGroomer: price is per menu item — resolve from the booking's code.
+            // PetGroomer: price AND description are per menu item — resolve from
+            // the booking's code.
             if (offering.ServiceType == ProviderServiceTypes.GroomingSession)
             {
                 if (string.IsNullOrWhiteSpace(serviceItemCode))
                 {
-                    return (offering.ServiceType, null);
+                    return (offering.ServiceType, null, null);
                 }
 
                 var item = await offeringResolver.ResolveGroomingItemAsync(
                     providerId, serviceItemCode!, cancellationToken);
-                return (offering.ServiceType,
-                    item is GroomingItemResolution.Resolved resolved ? resolved.Price : null);
+                return item is GroomingItemResolution.Resolved resolved
+                    ? (offering.ServiceType, resolved.Price, resolved.Description)
+                    : (offering.ServiceType, null, null);
             }
 
-            return (offering.ServiceType, offering.Price);
+            return (offering.ServiceType, offering.Price, offering.Description);
         }
         catch
         {
             // Best-effort — leave price null if the offering can't be resolved.
-            return (null, null);
+            return (null, null, null);
         }
     }
 }

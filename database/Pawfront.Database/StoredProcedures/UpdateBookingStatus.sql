@@ -10,11 +10,11 @@
 --   * the status actually changes                    (THROW 51124)
 --   * the transition is allowed from the current state (THROW 51126)
 --   * a no-show is only reportable 30+ minutes after the scheduled start (THROW 51128)
---   * a booking left in CREATED for 24+ hours is flipped to EXPIRED (with a
---     System audit row) and the attempted transition is rejected (THROW 51129)
---     — the provider can no longer accept it. The periodic sweeper
---     ([Booking].[ExpireStaleBookings]) normally expires these first; this
---     in-line guard closes the race between sweeps.
+--   * a booking left in CREATED for 24+ hours has expired, so the attempted
+--     transition is rejected (THROW 51129) — the provider can no longer accept
+--     it. This guard REJECTS ONLY; it does not write the EXPIRED status. Settling
+--     abandoned bookings on a clock is the scheduled external job's job, and this
+--     sproc no longer changes status on the basis of elapsed time.
 -- Other THROWs: 51120 booking not found, 51125 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
@@ -84,24 +84,15 @@ BEGIN
         THROW 51121, 'You are not a party to this booking.', 1;
     END
 
-    -- A booking left pending (CREATED) for 24+ hours has expired: persist the
-    -- EXPIRED flip (with a System audit row) and reject the attempted
-    -- transition — the provider can no longer accept it. The periodic sweeper
-    -- normally expires these first; this guard closes the race between sweeps.
+    -- A booking left pending (CREATED) for 24+ hours has expired: reject the
+    -- attempted transition — the provider can no longer accept it.
+    -- REJECT ONLY: the EXPIRED status is deliberately NOT written here. Status
+    -- changes driven by elapsed time belong to the scheduled external job, which
+    -- is the single writer for them; this guard just stops a late accept from
+    -- slipping through before that job runs. The row therefore stays in CREATED
+    -- until the job settles it.
     IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
     BEGIN
-        UPDATE [Booking].[Bookings]
-        SET [Status] = N'EXPIRED',
-            [UpdatedAtUtc] = @Now
-        WHERE [BookingId] = @BookingId;
-
-        INSERT INTO [Booking].[BookingStatusHistory]
-            ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
-        VALUES
-            (@BookingId, N'CREATED', N'EXPIRED', N'System', NULL,
-             N'Automatically expired after 24 hours awaiting provider acceptance.');
-
-        COMMIT TRANSACTION;
         THROW 51129, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
     END
 
@@ -118,7 +109,7 @@ BEGIN
 
     -- A booking in a terminal state can't change further.
     IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
-                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_ATTEMPTS_EXCEEDED')
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51123, 'Booking is in a terminal state and cannot change.', 1;
     END

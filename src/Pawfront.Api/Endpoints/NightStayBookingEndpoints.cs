@@ -32,6 +32,9 @@ internal static class NightStayBookingEndpoints
         group.MapPost("/{bookingId:guid}/paid", MarkPaid);
         group.MapPost("/{bookingId:guid}/cancel", CancelBooking);
         group.MapPost("/{bookingId:guid}/no-show", MarkParentNoShow);
+        // What the provider has changed since the stay was booked — read this
+        // before opening the edit screen so the app can confirm the new terms.
+        group.MapGet("/{bookingId:guid}/terms-changes", GetTermsChanges);
         group.MapPost("/{bookingId:guid}/modifications", RequestModification);
         group.MapPost("/{bookingId:guid}/modifications/accept", AcceptModification);
         group.MapPost("/{bookingId:guid}/modifications/decline", DeclineModification);
@@ -67,7 +70,8 @@ internal static class NightStayBookingEndpoints
                 ? null
                 : new NightStayBookingModificationResponse(
                     mod.NightStayBookingModificationId, mod.NightStayBookingId, mod.RequestedByActor, mod.RequestedByActorId,
-                    mod.ProposedCheckInDate, mod.ProposedCheckOutDate, mod.Note, mod.CreatedAtUtc);
+                    mod.ProposedCheckInDate, mod.ProposedCheckOutDate, mod.Note, mod.CreatedAtUtc,
+                    BookingEndpoints.ToAcknowledgedTermsResponse(mod.AcknowledgedTerms));
         }
 
         return ApiResults.Ok(ToDetailResponse(detail, startOtp: null, pending));
@@ -202,7 +206,7 @@ internal static class NightStayBookingEndpoints
         }
     }
 
-    /// <summary>Provider taps "Start Job" for the stay → START_JOB + start-OTP (15-min gate).</summary>
+    /// <summary>Provider taps "Start Job" for the stay → START_JOB + start-OTP (check-in-date + working-hours gates).</summary>
     private static async Task<IResult> StartJob(
         Guid providerId, Guid bookingId, INightStayBookingService bookingService, CancellationToken cancellationToken)
     {
@@ -284,6 +288,27 @@ internal static class NightStayBookingEndpoints
         }
     }
 
+    /// <summary>
+    /// The provider's terms that changed since this stay was booked. Always 200 —
+    /// an unchanged stay reports <c>hasChanges: false</c> with an empty list.
+    /// </summary>
+    private static async Task<IResult> GetTermsChanges(
+        Guid providerId,
+        Guid bookingId,
+        INightStayBookingService bookingService,
+        IBookingTermsChangeService termsChangeService,
+        CancellationToken cancellationToken)
+    {
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.ProviderId != providerId)
+        {
+            return ApiResults.NotFound("NightStayBookingNotFound", $"Night stay booking '{bookingId}' was not found.");
+        }
+
+        var result = await termsChangeService.GetForNightStayBookingAsync(bookingId, cancellationToken);
+        return ApiResults.Ok(BookingEndpoints.ToTermsChangesResponse(result));
+    }
+
     private static async Task<IResult> RequestModification(
         Guid providerId, Guid bookingId, RequestNightStayBookingModificationRequest request,
         INightStayBookingService bookingService, CancellationToken cancellationToken)
@@ -297,7 +322,8 @@ internal static class NightStayBookingEndpoints
         {
             var result = await bookingService.RequestModificationAsync(
                 new RequestNightStayBookingModificationCommand(
-                    bookingId, BookingStatusActor.Provider, providerId, request.CheckInDate, request.CheckOutDate, request.Note),
+                    bookingId, BookingStatusActor.Provider, providerId, request.CheckInDate, request.CheckOutDate,
+                    request.Note, request.AcknowledgeTermsChanges),
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
@@ -402,11 +428,14 @@ internal static class NightStayBookingEndpoints
 
     private static bool IsBookingError(Exception ex) => ex is
         NightStayBookingNotFoundException or BookingStatusForbiddenException or BookingNotStartableException
-        or BookingStartJobTooEarlyException or BookingJobInProgressException
+        or BookingStartOutsideWorkingHoursException or BookingStartNotOnServiceDateException
+        or BookingJobInProgressException
         or InvalidStartOtpException or StartOtpExpiredException or OtpAttemptsExceededException
         or BookingNotCompletableException or BookingNotModifiableException
         or BookingModificationConflictException or NoPendingModificationException
-        or BookingModificationCapacityException or InvalidNightStayDatesException
+        or BookingModificationCapacityException or BookingTermsChangedException
+        or BookingModificationWindowClosedException or BookingModificationExpiredException
+        or InvalidNightStayDatesException
         or ProviderClosedOnDateException or BookingOfferingNotConfiguredException
         or BookingStatusNotAllowedException or BookingStatusTerminalException
         or BookingStatusUnchangedException or BookingNoShowTooEarlyException or BookingExpiredException
@@ -419,7 +448,8 @@ internal static class NightStayBookingEndpoints
         NightStayBookingNotFoundException e => ApiResults.NotFound("NightStayBookingNotFound", e.Message),
         BookingStatusForbiddenException e => ApiResults.Forbidden("Forbidden", e.Message),
         BookingNotStartableException e => ApiResults.Conflict("BookingNotStartable", e.Message),
-        BookingStartJobTooEarlyException e => ApiResults.Conflict("StartJobTooEarly", e.Message),
+        BookingStartOutsideWorkingHoursException e => ApiResults.Conflict("OutsideWorkingHours", e.Message),
+        BookingStartNotOnServiceDateException e => ApiResults.Conflict("BookingNotOnServiceDate", e.Message),
         BookingJobInProgressException e => ApiResults.Conflict("BookingInProgress", e.Message),
         InvalidStartOtpException e => ApiResults.BadRequest("InvalidStartOtp", e.Message),
         StartOtpExpiredException e => ApiResults.Conflict("StartOtpExpired", e.Message),
@@ -429,6 +459,9 @@ internal static class NightStayBookingEndpoints
         BookingModificationConflictException e => ApiResults.Conflict("ModificationAlreadyPending", e.Message),
         NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
         BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
+        BookingTermsChangedException e => ApiResults.Conflict("BookingTermsChanged", e.Message),
+        BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
+        BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         InvalidNightStayDatesException e => ApiResults.BadRequest("InvalidNightStayDates", e.Message),
         ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
         BookingOfferingNotConfiguredException e => ApiResults.BadRequest("OfferingNotConfigured", e.Message),

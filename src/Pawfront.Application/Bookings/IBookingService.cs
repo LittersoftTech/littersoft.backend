@@ -108,9 +108,12 @@ public interface IBookingService
 
     /// <summary>
     /// Provider taps "Start Job": moves a confirmed-equivalent booking to START_JOB
-    /// and issues the parent-facing start-OTP. Allowed only from 15 minutes before
-    /// the scheduled start. Throws <see cref="BookingNotStartableException"/>
-    /// (wrong from-state) or <see cref="BookingStartJobTooEarlyException"/> (too early).
+    /// and issues the parent-facing start-OTP. Allowed only on the booking's own
+    /// service date and while the provider is inside their own weekly working hours.
+    /// Throws <see cref="BookingNotStartableException"/> (wrong from-state),
+    /// <see cref="BookingStartNotOnServiceDateException"/> (wrong day), or
+    /// <see cref="BookingStartOutsideWorkingHoursException"/> (provider is closed
+    /// right now).
     /// </summary>
     Task<BookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken);
 

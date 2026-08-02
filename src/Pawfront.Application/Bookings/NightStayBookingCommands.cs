@@ -179,13 +179,19 @@ public sealed record UpdateNightStayBookingStatusCommand(
 /// single-day flow — only the proposed fields differ, so the request has its own
 /// command.
 /// </summary>
+/// <param name="AcknowledgeTermsChanges">
+/// The requester has seen and accepted the provider's current terms — see
+/// <see cref="RequestBookingModificationCommand.AcknowledgeTermsChanges"/>. For a
+/// stay the drifting set also covers the offering's drop-off / pick-up times.
+/// </param>
 public sealed record RequestNightStayBookingModificationCommand(
     Guid NightStayBookingId,
     BookingStatusActor Actor,
     Guid ActorId,
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    string? Note);
+    string? Note,
+    bool AcknowledgeTermsChanges = false);
 
 /// <summary>
 /// The staged (pending) check-in/check-out change proposal for a night-stay
@@ -199,7 +205,10 @@ public sealed record NightStayBookingModificationResult(
     DateOnly ProposedCheckInDate,
     DateOnly ProposedCheckOutDate,
     string? Note,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    // The provider's terms as confirmed by the requester, staged because they had
+    // drifted from what the stay froze. Null when they hadn't.
+    BookingAcknowledgedTerms? AcknowledgedTerms = null);
 
 /// <summary>The requested service id is not a NightStay service of this provider.</summary>
 public sealed class BookingNotNightStayServiceException(Guid serviceId, Guid providerId)
