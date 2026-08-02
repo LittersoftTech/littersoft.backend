@@ -509,12 +509,30 @@ public sealed class BookingNoShowTooEarlyException(Guid bookingId)
     : Exception($"A no-show on booking '{bookingId}' can only be reported 30 minutes after its scheduled start.");
 
 /// <summary>
-/// The booking sat in CREATED for 24+ hours without the provider accepting,
-/// so it has been flipped to the terminal EXPIRED status — no further status
-/// change (including accept) is possible.
+/// The booking was never accepted in time, so it is expired — no further status
+/// change (including accept) is possible. Two triggers produce it, both meaning
+/// the provider ran out of time: sitting in CREATED for 24+ hours (BR-17), or
+/// still sitting in CREATED with under <see cref="BookingLeadTime.Minimum"/> to
+/// the service (BR-53). Both surface as 409 <c>BookingExpired</c>; only the
+/// message differs.
+/// <para>
+/// The stored status may still read CREATED when this is thrown: the sprocs
+/// reject the transition, and the scheduled external job is the only writer of
+/// EXPIRED.
+/// </para>
 /// </summary>
-public sealed class BookingExpiredException(Guid bookingId)
-    : Exception($"Booking '{bookingId}' has expired after 24 hours awaiting provider acceptance and can no longer change.");
+public sealed class BookingExpiredException(Guid bookingId, string reason)
+    : Exception($"Booking '{bookingId}' has expired {reason} and can no longer change.")
+{
+    /// <summary>BR-17 — 24+ hours in CREATED without the provider accepting.</summary>
+    public static BookingExpiredException NeverAccepted(Guid bookingId)
+        => new(bookingId, "after 24 hours awaiting provider acceptance");
+
+    /// <summary>BR-53 — still in CREATED with the service now too close to start.</summary>
+    public static BookingExpiredException ServiceTooClose(Guid bookingId)
+        => new(bookingId,
+            $"because it was never accepted and the service now starts in under {BookingLeadTime.Minimum.TotalHours:0.#} hours");
+}
 
 // --- Job lifecycle: start-OTP, evidence, modifications ----------------------
 

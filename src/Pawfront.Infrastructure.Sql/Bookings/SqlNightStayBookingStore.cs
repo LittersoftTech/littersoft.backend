@@ -323,7 +323,13 @@ internal sealed class SqlNightStayBookingStore(
             // transition (e.g. accept) is rejected. The sproc rejects only — the
             // stored status is still CREATED until the scheduled external job
             // settles it to EXPIRED.
-            throw new BookingExpiredException(bookingId);
+            throw BookingExpiredException.NeverAccepted(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51273)
+        {
+            // BR-53: still CREATED with under 2 hours to check-in + drop-off.
+            // Same reject-only posture as 51249 above.
+            throw BookingExpiredException.ServiceTooClose(bookingId);
         }
         catch (SqlException exception) when (exception.Number == 51269)
         {

@@ -15,6 +15,8 @@
 --     it. This guard REJECTS ONLY; it does not write the EXPIRED status. Settling
 --     abandoned bookings on a clock is the scheduled external job's job, and this
 --     sproc no longer changes status on the basis of elapsed time.
+--   * a booking still in CREATED with under 2 hours to the service has expired
+--     for the same reason (THROW 51153) — also REJECT ONLY.
 -- Other THROWs: 51120 booking not found, 51125 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
@@ -94,6 +96,21 @@ BEGIN
     IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
     BEGIN
         THROW 51129, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
+    END
+
+    -- BR-53: a booking still in CREATED with under 2 hours to the service has
+    -- expired too — the provider is out of time to accept it, and the same
+    -- cutoff (serviceStart - 2h) is the one BR-01 uses to refuse a fresh booking
+    -- for that slot. REJECT ONLY, for the same reason as the guard above: the
+    -- scheduled external job is the single writer of EXPIRED, so the row stays
+    -- in CREATED until it runs. Without this guard the rule would only hold to
+    -- the job's 5-minute granularity, and a provider could accept minutes before
+    -- the service starts.
+    IF @CurrentStatus = N'CREATED'
+       AND DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
+                   CAST(@BookingDate AS DATETIME2(7))) < DATEADD(HOUR, 2, @Now)
+    BEGIN
+        THROW 51153, 'Booking has expired: it was never accepted and the service now starts in under 2 hours.', 1;
     END
 
     -- The status must be one this actor is allowed to set via the engine.

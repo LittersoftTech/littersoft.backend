@@ -8,9 +8,9 @@ using Pawfront.Functions.Sweeps;
 namespace Pawfront.Functions.Functions;
 
 /// <summary>
-/// Runs the three time-triggered booking rules every 5 minutes, in order —
-/// replaces the retired in-database <c>Booking.ExpireStaleBookings</c> sweep
-/// (see docs/booking-rules.md BR-17 / BR-30 / BR-38). Unlike the retired
+/// Runs the time-triggered booking rules every 5 minutes, in order — replaces
+/// the retired in-database <c>Booking.ExpireStaleBookings</c> sweep
+/// (see docs/booking-rules.md BR-17 / BR-53 / BR-30 / BR-38). Unlike the retired
 /// in-process <c>BackgroundService</c> — which ran in BOTH API hosts with no
 /// coordination between them — a timer-triggered Function has its invocations
 /// serialised by the Functions host itself, so exactly one instance runs each
@@ -46,10 +46,11 @@ public sealed class BookingSweepFunction(
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
 
-        // BR-17 first (frees a stale CREATED booking outright), then BR-30
-        // BEFORE BR-38 — a booking whose modification proposal expires AND whose
-        // provider's working day has also ended settles as a no-show in this
-        // same tick rather than waiting for the next one.
+        // BR-17 + BR-53 first (they free an unaccepted CREATED booking
+        // outright), then BR-30 BEFORE BR-38 — a booking whose modification
+        // proposal expires AND whose provider's working day has also ended
+        // settles as a no-show in this same tick rather than waiting for the
+        // next one.
         var expired = await StaleCreatedBookingSweep.RunAsync(connection, cancellationToken);
         var reverted = await ExpiredModificationRequestSweep.RunAsync(connection, cancellationToken);
         var noShows = await UnstartedJobNoShowSweep.RunAsync(connection, cancellationToken);
@@ -57,8 +58,9 @@ public sealed class BookingSweepFunction(
         if (expired.ExpiredBookings > 0 || expired.ExpiredNightStayBookings > 0)
         {
             _logger.LogInformation(
-                "BR-17: expired {ExpiredBookings} booking(s) and {ExpiredNightStayBookings} night-stay " +
-                "booking(s) pending provider acceptance for 24+ hours.",
+                "BR-17/BR-53: expired {ExpiredBookings} booking(s) and {ExpiredNightStayBookings} night-stay " +
+                "booking(s) that were never accepted — pending for 24+ hours, or with under 2 hours left " +
+                "before the service starts.",
                 expired.ExpiredBookings, expired.ExpiredNightStayBookings);
         }
 

@@ -354,7 +354,15 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         if (row.Status == BookingStatuses.Created
             && DateTimeOffset.UtcNow >= row.CreatedAtUtc.AddHours(24))
         {
-            throw new BookingExpiredException(bookingId);
+            throw BookingExpiredException.NeverAccepted(bookingId);
+        }
+
+        // BR-53: still CREATED with under 2 hours to the service — mirror of the
+        // sproc's THROW 51153, and reject-only for the same reason.
+        if (row.Status == BookingStatuses.Created
+            && BookingLeadTime.IsTooSoon(row.BookingDate, row.StartTime, DateTimeOffset.UtcNow))
+        {
+            throw BookingExpiredException.ServiceTooClose(bookingId);
         }
 
         var allowed = actor == BookingStatusActor.Provider

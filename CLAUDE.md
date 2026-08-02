@@ -267,6 +267,14 @@ Custom `THROW` codes used for typed errors:
   attempted transition → API maps to **409 BookingExpired**. **Reject-only
   (2026-08-02)** — the sproc no longer writes the `EXPIRED` flip; the scheduled
   external job does, so the row can still read `CREATED` when this fires.
+- `51153` booking expired (2026-08-02, BR-53): the booking is **still `CREATED`
+  with under 2 hours to `BookingDate + StartTime`** — the provider is out of time
+  to accept, so the status engine rejects the attempted transition → API maps to
+  the same **409 BookingExpired** (only the message differs). Independent of
+  51129: a booking made 90 minutes before the service hits this hours short of
+  24. Same cutoff as the **booking lead time** (`BookingLeadTime.Minimum`), so an
+  unaccepted booking dies exactly when a fresh one for that slot could no longer
+  be created. **Reject-only**, same as 51129.
 - **Job-lifecycle sprocs (single-day `Booking.Bookings`) — start-OTP flow:**
   - `51130` booking not found (issue start-OTP)
   - **`Booking.StartBooking`** (→ `START_JOB` + start-OTP): `51131/51132/51133` =
@@ -321,7 +329,9 @@ Custom `THROW` codes used for typed errors:
   night-stay has its **own** rule, no longer a mirror of 51128: gated on
   `CheckInDate + DropOffTime` + **2 HOURS** (single-day stays at 30 min), → **409
   NoShowTooEarly**); `51249` (booking expired, mirror of 51129 → **409
-  BookingExpired**); `51269` (cancel while underway, mirror of 51149 → **409
+  BookingExpired**); `51273` (still `CREATED` with under 2 hours to
+  `CheckInDate + DropOffTime`, mirror of 51153 → **409 BookingExpired**);
+  `51269` (cancel while underway, mirror of 51149 → **409
   BookingInProgress**); `51250` (issue OTP not found);
   `51251-51253` + `51264` + `51257` (`StartNightStayBooking` → `START_JOB` +
   start-OTP, mirror of 51131-51133 + 51144 wrong-day, gated on `CheckInDate`, +
@@ -965,7 +975,8 @@ to the same cutoff.
 > 2026-08-02) are now written by a **scheduled external
 > job** — `BookingSweepFunction` in the `Pawfront.Functions` Azure Functions app
 > (isolated worker, timer-triggered every 5 minutes; see `src/Pawfront.Functions`).
-> It calls three new sprocs in order — `Booking.ExpireStaleCreatedBookings` (BR-17),
+> It calls three new sprocs in order — `Booking.ExpireStaleCreatedBookings`
+> (**BR-17 + BR-53**),
 > `Booking.RevertExpiredModificationRequests` (BR-30, before the next one so
 > a booking whose proposal expires AND whose provider's working day has also ended
 > settles in one pass), `Booking.SettleUnstartedJobsAsNoShow` (BR-38) — replacing
@@ -977,13 +988,14 @@ to the same cutoff.
 > trigger's invocations across however many instances **one** Function App scales
 > to (this guarantee needs exactly one Function App deployed for this trigger).
 > **No sproc changes a booking's status on the basis of elapsed time any
-> more.** The four in-sproc time checks that remain — `UpdateBookingStatus` /
-> `UpdateNightStayBookingStatus` (THROW 51129 / 51249) and
+> more.** The in-sproc time checks that remain — `UpdateBookingStatus` /
+> `UpdateNightStayBookingStatus` (THROW 51129 / 51249 **and 51153 / 51273**) and
 > `RespondBookingModification` / `RespondNightStayBookingModification` (THROW
 > 51152 / 51272) — **reject a late transition without writing anything**.
 >
 > **Consequence to keep in mind:** stored status and effective status can diverge
-> between ticks. A booking 25 hours old still reads `CREATED` while the API
+> between ticks. A booking 25 hours old — or one whose service is now 90 minutes
+> away — still reads `CREATED` while the API
 > refuses the accept with 409 `BookingExpired`; a lapsed parent proposal stays in
 > `MODIFICATION_REQUEST_BY_PARENT` — which is **not** startable — until the next
 > tick reverts it. The in-memory dev fallbacks mirror the reject-only behaviour and
@@ -1112,12 +1124,27 @@ to the same cutoff.
   report becomes legal (a 15-minute slot ends before the manual 30-minute grace
   elapses) — harmless, since its evidence is the stronger one: the whole window
   is gone.
-- `EXPIRED` (2026-07-17) — the booking sat in `CREATED` for **24+ hours**
-  without the provider accepting. Set automatically by the scheduled external
+- `EXPIRED` (2026-07-17) — nobody accepted the booking in time. **Two independent
+  triggers** produce it, both meaning the provider ran out of time, and either is
+  enough:
+  1. it sat in `CREATED` for **24+ hours** without the provider accepting (BR-17);
+  2. **(2026-08-02, BR-53)** it is still `CREATED` and the service now starts in
+     **under 2 hours** — `BookingDate + StartTime`, night-stay
+     `CheckInDate + DropOffTime`, UTC. This is the **same cutoff as the booking
+     lead time** (BR-01, `BookingLeadTime.Minimum`), so an unaccepted booking dies
+     exactly when a fresh booking for that slot could no longer be created; the
+     two rules bracket a booking's life the way the modification window does.
+     A booking made 90 minutes before the service therefore expires on the next
+     tick, hours short of 24, and a booking whose start has already passed is
+     caught by the same test.
+
+  Set automatically by the scheduled external
   job, never by a client. The two status-engine sprocs **reject** a transition
-  attempted on a stale `CREATED` booking — so a provider accept after 24 hours
-  gets **409 BookingExpired** (THROW 51129 / night-stay 51249) — but **do not
-  write the status**, so a row may still read `CREATED` until the job runs.
+  attempted on a `CREATED` booking either trigger has caught — so a late provider
+  accept gets **409 BookingExpired** (THROW 51129 / 51153, night-stay 51249 /
+  51273; same error code either way, only the message differs) — but **do not
+  write the status**, so a row may still read `CREATED` until the job runs. The
+  trigger that fired is recorded in the `BookingStatusHistory` note.
   **Terminal** and frees capacity.
 - `JOB_EXPIRED` (2026-07-21) — **legacy as of 2026-07-29; no longer produced.**
   It meant: the provider **accepted** the booking but the job never got underway,
@@ -1790,8 +1817,14 @@ coordination between them) is gone — deleted from the repo and dropped by
 
 It calls three new sprocs, sequentially over one `SqlConnection` per tick (see
 `src/Pawfront.Functions/Sweeps/`):
-1. `Booking.ExpireStaleCreatedBookings` (BR-17) — `CREATED` older than 24 h →
-   `EXPIRED`.
+1. `Booking.ExpireStaleCreatedBookings` (BR-17 **+ BR-53**) — a booking nobody
+   accepted → `EXPIRED`, on either trigger: `CREATED` older than 24 h, **or**
+   `CREATED` with under 2 h to `BookingDate+StartTime` /
+   `CheckInDate+DropOffTime` (**added 2026-08-02**; the same cutoff BR-01 uses to
+   refuse a new booking for that slot, so the unaccepted one dies when a
+   replacement could no longer be made). Matching reject-only guards were added
+   to both status-engine sprocs (THROW 51153 / 51273 → 409 `BookingExpired`),
+   without which the rule would only hold to the job's 5-minute granularity.
 2. `Booking.RevertExpiredModificationRequests` (BR-30, **widened 2026-08-02** to
    cover both proposal directions — previously parent-only) —
    `MODIFICATION_REQUEST_BY_PARENT` **or** `MODIFICATION_REQUEST_BY_PROVIDER`

@@ -34,6 +34,8 @@ the `/providers` window checker and all five `/providers/search/*` cards inherit
 it) plus every App-booking create path.
 *Violation:* 409 `BookingLeadTimeTooShort`.
 *Exempt:* Custom walk-ins (BR-09).
+*See also:* BR-53 applies the same cutoff to an already-created booking nobody
+accepted.
 
 **BR-02 — The booked window must fit inside the provider's weekly working hours,
 and must not overlap their break.**
@@ -115,6 +117,21 @@ sproc `Booking.ExpireStaleCreatedBookings`, called by `BookingSweepFunction`
 *Consequence:* between job runs a row can still read `CREATED` while the API
 already refuses to act on it. Stored status and effective status diverge here by
 design.
+
+**BR-53 — A booking still in `CREATED` when the service is less than 2 hours
+away expires, however recently it was made.**
+The provider has run out of time to accept it. Measured against `serviceStart`,
+so it is the **same cutoff as BR-01**: an unaccepted booking dies exactly when a
+fresh booking for that slot could no longer be created. A booking whose start has
+already passed is caught by the same test. Independent of BR-17 — a booking made
+90 minutes before the service expires on the next tick, hours short of 24.
+*Enforced:* SQL rejects the transition (THROW 51153, night stay 51273); **Job**
+writes the `EXPIRED` status — the same sproc and tick as BR-17, which is why the
+guard matters: without it the rule would only hold to the job's 5-minute
+granularity and a provider could still accept minutes before the service.
+*Violation:* 409 `BookingExpired` (same code as BR-17; the message says which
+trigger fired, and so does the status-history note).
+*Consequence:* same stored-vs-effective divergence as BR-17.
 
 ---
 

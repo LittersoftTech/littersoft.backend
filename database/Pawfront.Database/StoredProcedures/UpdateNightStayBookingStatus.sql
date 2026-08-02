@@ -14,6 +14,8 @@
 --     it. This guard REJECTS ONLY; it does not write the EXPIRED status. Settling
 --     abandoned bookings on a clock is the scheduled external job's job, and this
 --     sproc no longer changes status on the basis of elapsed time.
+--   * a stay still in CREATED with under 2 hours to check-in + drop-off has
+--     expired for the same reason (THROW 51273) — also REJECT ONLY.
 -- Other THROWs: 51240 booking not found, 51245 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
@@ -91,6 +93,18 @@ BEGIN
     IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
     BEGIN
         THROW 51249, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
+    END
+
+    -- BR-53 (mirror of the single-day 51153 guard): a stay still in CREATED with
+    -- under 2 hours to serviceStart — CheckInDate + DropOffTime for a stay — has
+    -- expired; the provider is out of time to accept it. REJECT ONLY: the
+    -- scheduled external job is the single writer of EXPIRED, so the row stays in
+    -- CREATED until it runs.
+    IF @CurrentStatus = N'CREATED'
+       AND DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+                   CAST(@CheckInDate AS DATETIME2(7))) < DATEADD(HOUR, 2, @Now)
+    BEGIN
+        THROW 51273, 'Booking has expired: it was never accepted and the stay now begins in under 2 hours.', 1;
     END
 
     -- A no-show always names the OTHER party: the provider reports the parent's
