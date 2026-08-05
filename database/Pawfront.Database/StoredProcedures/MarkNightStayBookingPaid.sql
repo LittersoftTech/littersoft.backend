@@ -61,6 +61,17 @@ BEGIN
     VALUES
         (N'NightStay', @NightStayBookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
 
+    -- The ledger's figure, not a re-derivation — the receipt must match the row.
+    DECLARE @AmountText NVARCHAR(64) =
+        N'CHF ' + CONVERT(NVARCHAR(32), CAST(@Amount AS DECIMAL(12, 2)));
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_PAID',
+        @Amount = @AmountText;
+
     SELECT [NightStayBookingId],
            [ProviderId],
            [PetParentId],

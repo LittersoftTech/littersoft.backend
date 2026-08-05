@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Pawfront.Application\Pawfront.Application.csproj" />
     <ProjectReference Include="..\Pawfront.Infrastructure.Azure\Pawfront.Infrastructure.Azure.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Firebase\Pawfront.Infrastructure.Firebase.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,6 +33,25 @@
          somewhere the published payload carries — same as the two API hosts. -->
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+
+    <!-- Local Firebase service-account JSONs, for development only. The folder is
+         gitignored (**/Secrets/*.json), and CredentialsFilePath resolves a
+         relative path against AppContext.BaseDirectory, so "Secrets/x.json" works.
+         DEPLOYED environments must use CredentialsSecretName + Key Vault instead:
+         anything copied to the output directory ships inside the zip payload, and
+         these files contain a private key. -->
+    <None Update="Secrets\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Secrets\littersoftprovider-firebase-adminsdk-fbsvc-54751b3ba7.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Secrets\pawfrontparent-89296-firebase-adminsdk-fbsvc-d667471948.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>
 

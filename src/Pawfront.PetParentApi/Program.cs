@@ -54,6 +54,9 @@ var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExte
 api.MapHealthEndpoints();
 api.MapMetadataEndpoints();
 api.MapParentOnboardingEndpoints();
+// FCM token register/refresh + sign-out. Not ownership-filtered — a token is
+// bound to the auth identity, which exists before the profile does.
+api.MapDeviceTokenEndpoints();
 api.MapPetParentEndpoints();
 api.MapEventEndpoints();
 api.MapEventBookingEndpoints();

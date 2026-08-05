@@ -11,6 +11,7 @@
     <Project Path="src/Pawfront.Domain/Pawfront.Domain.csproj" />
     <Project Path="src/Pawfront.Infrastructure.Azure/Pawfront.Infrastructure.Azure.csproj" />
     <Project Path="src/Pawfront.Infrastructure.Cosmos/Pawfront.Infrastructure.Cosmos.csproj" />
+    <Project Path="src/Pawfront.Infrastructure.Firebase/Pawfront.Infrastructure.Firebase.csproj" />
     <Project Path="src/Pawfront.Infrastructure.Sql/Pawfront.Infrastructure.Sql.csproj" />
   </Folder>
 </Solution>

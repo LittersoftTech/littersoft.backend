@@ -99,6 +99,16 @@ BEGIN
         VALUES (@BookingId, @NewCode, DATEADD(MINUTE, @TtlMinutes, @Now));
     END
 
+    -- Tell the parent to open their start code. The provider tapped Start, so
+    -- only the parent is notified. The code itself is deliberately NOT in the
+    -- payload — a push is readable from a locked screen, and the whole point of
+    -- the code is that the parent hands it over in person.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_START_OTP_ISSUED';
+
     SELECT [BookingId],
            [ProviderId],
            [PetParentId],

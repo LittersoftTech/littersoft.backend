@@ -481,12 +481,10 @@ internal sealed class CosmosPetGroomerServiceRegistry(
                 offering.PickUpTime);
     }
 
-    public IReadOnlyList<GroomingServiceCatalogEntry> GetServiceCatalog()
-    {
-        return GroomingServiceCatalog.Entries
-            .Select(e => new GroomingServiceCatalogEntry(e.Code, e.DisplayName))
-            .ToArray();
-    }
+    // The catalog now lives in Application (same assembly as the entry record it
+    // returns), so this is a straight pass-through rather than a projection.
+    public IReadOnlyList<GroomingServiceCatalogEntry> GetServiceCatalog() =>
+        GroomingServiceCatalog.Entries;
 
     private static string Required(string? value, string name)
     {

@@ -117,6 +117,50 @@ BEGIN
            CASE WHEN [ToStatus] = N'PARENT_NO_SHOW' THEN @ParentNoShowStayNote ELSE @ProviderNoShowStayNote END
     FROM @NoShowNightStays;
 
+    -- BOTH parties are told, because nobody reported it — the system derived it
+    -- from the job never starting (V3 cards P-S8/V-S9 and P-S12/V-S11). Contrast
+    -- Booking.UpdateBookingStatus, where a party REPORTS the no-show and only the
+    -- counterparty hears about it.
+    DECLARE @BookingId UNIQUEIDENTIFIER;
+    DECLARE @SettledStatus NVARCHAR(48);
+    DECLARE @IsNightStay BIT;
+    DECLARE @AbsentParty NVARCHAR(32);
+
+    DECLARE settled_no_shows CURSOR LOCAL FAST_FORWARD FOR
+        SELECT [BookingId], [ToStatus], 0 FROM @NoShowBookings
+        UNION ALL
+        SELECT [NightStayBookingId], [ToStatus], 1 FROM @NoShowNightStays;
+
+    OPEN settled_no_shows;
+    FETCH NEXT FROM settled_no_shows INTO @BookingId, @SettledStatus, @IsNightStay;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        -- Naming the absent party is what lets one template read correctly on
+        -- both apps and in either direction.
+        SET @AbsentParty = CASE WHEN @SettledStatus = N'PARENT_NO_SHOW'
+                                THEN N'the customer' ELSE N'the provider' END;
+
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @BookingId,
+            @IsNightStay = @IsNightStay,
+            @Audience = N'PetParent',
+            @NotificationType = N'BOOKING_NO_SHOW_AUTO_SETTLED',
+            @AbsentParty = @AbsentParty;
+
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @BookingId,
+            @IsNightStay = @IsNightStay,
+            @Audience = N'Provider',
+            @NotificationType = N'BOOKING_NO_SHOW_AUTO_SETTLED',
+            @AbsentParty = @AbsentParty;
+
+        FETCH NEXT FROM settled_no_shows INTO @BookingId, @SettledStatus, @IsNightStay;
+    END
+
+    CLOSE settled_no_shows;
+    DEALLOCATE settled_no_shows;
+
     COMMIT TRANSACTION;
 
     SELECT

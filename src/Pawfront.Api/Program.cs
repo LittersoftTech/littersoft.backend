@@ -45,6 +45,9 @@ var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExte
 api.MapHealthEndpoints();
 api.MapMetadataEndpoints();
 api.MapProviderOnboardingEndpoints();
+// FCM token register/refresh + sign-out. Not scoped under /providers/{id} — a
+// token is bound to the auth identity, which exists before the profile does.
+api.MapDeviceTokenEndpoints();
 api.MapProviderEndpoints();
 api.MapProviderServiceCatalogEndpoints();
 api.MapProviderPolicyEndpoints();

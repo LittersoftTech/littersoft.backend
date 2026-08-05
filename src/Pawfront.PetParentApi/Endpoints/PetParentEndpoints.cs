@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Events;
+using Pawfront.Application.Notifications;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
 using Pawfront.Application.ParentPhotos;
@@ -216,6 +217,7 @@ internal static class PetParentEndpoints
         IBookingService bookingService,
         IProviderServiceCatalog serviceCatalog,
         IPetParentOwnershipReader ownershipReader,
+        IBookingNotificationService bookingNotifications,
         CancellationToken cancellationToken)
     {
         // The parent must say where the service happens — the detail read
@@ -262,6 +264,13 @@ internal static class PetParentEndpoints
                     request.PetId,
                     request.LocationType),
                 cancellationToken);
+
+            // "New Service Booking" to the provider. Enqueued only — the
+            // publisher writes an outbox row and never throws, so a notification
+            // problem can't fail a booking that has already been created.
+            await bookingNotifications.NotifyBookingRequestedAsync(
+                result, service.ServiceType, pet.PetType, cancellationToken);
+
             return ApiResults.Ok(ToBookingResponse(result));
         }
         catch (BookingServiceInvalidException exception)

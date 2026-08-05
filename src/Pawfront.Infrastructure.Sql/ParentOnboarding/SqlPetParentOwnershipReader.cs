@@ -66,10 +66,12 @@ internal sealed class SqlPetParentOwnershipReader(
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
 
-        // Lookup hits PK_Pets. Owner + pet type in one point read so the
-        // discovery endpoint's petId filter pays a single round-trip.
+        // Lookup hits PK_Pets. Owner + pet type + name in one point read so the
+        // discovery endpoint's petId filter pays a single round-trip, and the
+        // booking creates get the pet name for the provider's notification
+        // without a second query.
         await using var command = new SqlCommand(
-            "SELECT [PetParentId], [PetType] " +
+            "SELECT [PetParentId], [PetType], [PetName] " +
             "FROM [Parent].[Pets] " +
             "WHERE [PetId] = @PetId;",
             connection);
@@ -83,7 +85,8 @@ internal sealed class SqlPetParentOwnershipReader(
 
         return new PetOwnershipLookup(
             reader.GetGuid(0),
-            reader.GetString(1));
+            reader.GetString(1),
+            reader.IsDBNull(2) ? string.Empty : reader.GetString(2));
     }
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)

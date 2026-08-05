@@ -96,6 +96,13 @@ BEGIN
         VALUES (@NightStayBookingId, @NewCode, DATEADD(MINUTE, @TtlMinutes, @Now));
     END
 
+    -- Mirror of Booking.StartBooking: the parent is told to open their code.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_START_OTP_ISSUED';
+
     SELECT [NightStayBookingId],
            [ProviderId],
            [PetParentId],

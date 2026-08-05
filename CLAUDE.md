@@ -187,6 +187,11 @@ Custom `THROW` codes used for typed errors:
 - `51001` provider auth identity not found
 - `51002` provider profile not found (OTP create)
 - `51003` provider mobile OTP not found
+- `51004` provider auth identity not found (device-token register) → API maps to
+  **404 ProviderAuthIdentityNotFound**
+- `51005` device token not found for this caller (device-token deactivate) → API
+  maps to **404 DeviceTokenNotFound**. "Unknown" and "not yours" are deliberately
+  the same case, so it can't probe whether a token is registered.
 - `51010` provider profile not found (service registration)
 - `51011` provider already registered under a different service category
   (one-service-per-provider rule) → API maps to **409 ServiceCategoryConflict**
@@ -384,6 +389,10 @@ Custom `THROW` codes used for typed errors:
 - `51224` pet parent account has been deleted (anonymised + permanently disabled) —
   thrown by `Parent.UpdatePetParentProfile`, since an edit would undo the
   anonymisation → API maps to **409 ParentAccountDeleted**
+- `51225` pet parent auth identity not found (device-token register) → API maps to
+  **404 ParentAuthIdentityNotFound**
+- `51226` device token not found for this caller (device-token deactivate) → API
+  maps to **404 DeviceTokenNotFound** (mirror of 51005)
 - **Night-stay booking sprocs** (multi-night boarding — `Booking.NightStayBookings`):
   - `51230` provider not found (night-stay create) → **404 ProviderNotFound**
   - `51231` provider inactive (night-stay create) → **409 ProviderInactive**
@@ -1805,6 +1814,195 @@ content (text, contact info, reply thread)" model is needed later, it
 would add an `Event.EventInquiries` table; the counter on `Event.Events`
 would then become a denormalised cache (or be replaced by a JOIN).
 
+### Push notifications — transactional outbox + FCM (2026-08-02, triggers wired 2026-08-04)
+
+**Engine built; every booking trigger in the Notifications V3 spec is wired.** The
+only unwired types are the four whose product modules don't exist here at all —
+messaging, invoicing, disputes, promotional — which carry copy + routes + payload
+contract but nothing enqueues them. See `docs/notifications.md` for the
+mobile-facing payload contract.
+
+**Booking notifications are enqueued in T-SQL, not C#.** The transition sprocs
+(`UpdateBookingStatus`, `StartBooking`, `VerifyBookingStartOtp`, `CompleteBooking`,
+`MarkBookingPaid`, `Request/RespondBookingModification` + night-stay mirrors) each
+`EXEC Notification.EnqueueBookingNotification` before returning their booking row.
+Three reasons this beat calling from the endpoint handlers: it's atomic with the
+status flip, both hosts get it from one place (no duplicated call sites), and the
+sproc already has `@Actor` — so the "notify the OTHER party" relevance rule is
+decided where the data is. The C# `IBookingNotificationService` remains ONLY for
+booking CREATE, where the sproc is shared by both hosts and a provider creating
+their own booking must not be notified.
+
+**`Notification.EnqueueBookingNotification` is the single place the booking `data`
+object is built** (canonical ids + template params, ~23 call sites). It
+deliberately does NOT build `serviceName`: the 18 grooming display names live in
+the C# `GroomingServiceCatalog`, so it emits raw `ServiceType` + `ServiceItemCode`
+and `NotificationRenderer` names it at render time — one naming rule for all
+producers instead of a T-SQL copy that drifts.
+
+**`EnqueueNotification` gained `@SuppressResultSet`** (default 0). A result set
+from a nested `EXEC` propagates to the client, so without it every transition
+sproc would return a phantom result set after its booking row and break the C#
+readers.
+
+```
+BookingService / EventBookingService / sweep sprocs
+        │  INotificationPublisher (or EXEC Notification.EnqueueNotification)
+        ▼  ── same transaction as the domain change ──
+ Notification.NotificationOutbox ──► NotificationDispatchFunction (timer, 1 min)
+                                          │ renders copy, reads tokens, sends
+                                          ▼
+                                  FirebaseAdmin → FCM HTTP v1
+                                          │ UNREGISTERED/INVALID → IsActive = 0
+```
+
+**Why an outbox rather than sending inline.** Booking statuses are changed by
+**three** processes — the provider API, the parent API, and the
+`Pawfront.Functions` sweep. `EXPIRED`, the auto-settled no-shows and the
+modification revert happen ONLY in the sweep, which has no request context and
+is pure T-SQL, so an inline send could never cover them. The outbox also keeps
+an external HTTP call off the request path and gives durable retry. Cost: up to
+~1 minute of dispatch latency.
+
+**One row is BOTH the delivery job and the in-app inbox entry** — a notification
+is stored exactly once. `Title`/`Body`/`Route` are **NULL at enqueue time** and
+rendered by the dispatcher from `NotificationType` + `DataJson`, so all
+user-facing copy lives in ONE C# file
+([`NotificationTemplateCatalog`](src/Pawfront.Application/Notifications/NotificationTemplateCatalog.cs))
+and a T-SQL sweep can enqueue nothing but a type + parameters yet produce the
+same wording as the API hosts. The inbox lists only rendered rows
+(`Title IS NOT NULL`).
+
+- **Table `Notification.NotificationOutbox`** — `Audience` (`Provider` |
+  `PetParent`) + `RecipientId` (polymorphic: ProviderId or PetParentId).
+  **No FK** to Providers/PetParents, same posture as `Booking.BookingPayments`:
+  an anonymised account keeps its notification history. `Status` is
+  `Pending → Sending → Sent | NoDevice | Failed`; **`NoDevice` is a success** —
+  the notification is real and belongs in the inbox, the recipient just has no
+  active token. Filtered UNIQUE `DedupeKey` (e.g. `BOOKING_ACCEPTED:<bookingId>`)
+  makes enqueue idempotent, which matters because the sweeps run every 5 minutes
+  and the inbox makes duplicates user-visible.
+- **Claim is lease-based.** `Notification.ClaimPendingNotifications` flips rows to
+  `Sending` and pushes `NextAttemptAtUtc` forward; a dispatcher that dies
+  mid-batch releases its rows automatically when the lease lapses. It returns
+  **two result sets** — the claimed rows, and their recipients' active FCM tokens
+  pre-joined — so dispatch never issues an N+1 token lookup.
+  `CompleteNotificationDelivery` writes the rendered copy + outcome via a TVP and
+  reschedules failures with exponential backoff (2/4/8/16/32 min, capped at 60)
+  until `MaxAttempts`.
+- **Two Firebase projects, two credentials.** The provider app is
+  `littersoftprovider`, the parent app `pawfrontparent-89296`. FCM HTTP v1 is
+  per-project — a token from one is rejected by the other with
+  `SENDER_ID_MISMATCH` — so `Audience` selects both the token table and the
+  credential. `FirebaseAppRegistry` caches one `FirebaseApp` per audience.
+  Credentials come from a gitignored file (dev) or `IPawfrontSecretProvider`
+  (Key Vault, prod); **never** from `appsettings.json`.
+- **`Pawfront.Infrastructure.Firebase` is the ONLY project referencing Firebase**
+  — neither API host does. That falls out of the outbox design and is worth
+  preserving.
+- **Read and write sides live in different projects.** The API hosts get
+  `SqlNotificationPublisher` (write-only) from `Pawfront.Infrastructure.Sql`; the
+  dispatcher's `SqlNotificationOutboxStore` (claim/complete/prune) lives in
+  `Pawfront.Functions/Notifications/` and talks to SQL directly, exactly as the
+  three booking sweeps do. `Pawfront.Functions` therefore does **not** reference
+  `Pawfront.Infrastructure.Sql` at all.
+- **Hybrid `notification` + `data` payload.** The `notification` block makes the
+  OS display it even when the app is killed; `data` carries the routing contract
+  (`v`, `type`, `route`, `entityType`, `entityId`, `notificationId`, `sentAtUtc`
+  + template params). **Every FCM data value must be a string** — there is no
+  nested-object support — hence the flat shape.
+- **Android specifics that silently break delivery:** `channel_id` must match a
+  channel the app already created (Android 8+ *drops* notifications naming an
+  unknown channel), and the icon is a **drawable resource name bundled in the
+  app**, not a URL. A rich `ImageUrl` *is* a URL, but the OS fetches it
+  anonymously — a bare private-container blob URL will not render.
+- **Dead-token hygiene:** only `UNREGISTERED` / `INVALID_ARGUMENT` /
+  `SENDER_ID_MISMATCH` deactivate a token. Transient codes (`UNAVAILABLE`,
+  `INTERNAL`, quota) deliberately do **not** — deactivating on those would
+  permanently silence a live device.
+- **Routes in
+  [`NotificationRoutes`](src/Pawfront.Application/Notifications/NotificationRoutes.cs)
+  are PROVISIONAL placeholders** awaiting the mobile team's route table. They are
+  isolated in that one file so adopting the real ones is a single-file change.
+- In-memory dev fallback is `NullNotificationPublisher` (logs and drops) — a
+  developer on the in-memory store gets no notifications, same posture as the
+  booking sweeps.
+
+**The `data` object (2026-08-04).** Every notification carries a canonical id
+block — `category` (`BOOKING`/`EVENT`/`MESSAGING`/`PROMOTIONAL`), `bookingId`,
+`eventId`, `parentId`, `providerId`, `petId`, `isNightStay`, `payoutId` — filled by
+`NotificationPayloadBuilder.ApplyCanonicalFields`. **A field that doesn't apply is
+sent as an EMPTY STRING, not omitted:** a client can't tell "this type has no pet"
+from "the server forgot to set it", so omission would push that ambiguity into
+every tap handler. `isNightStay` exists because the two booking tables share no id
+space, so `bookingId` alone can't say which detail screen to open. `category` is
+written from the TEMPLATE, never the row, so it can't disagree with `type`.
+
+**Copy varies by audience; the wire `type` does not.** Mirrored cards (reminders,
+no-shows, modification expiry) are ONE event rendered per app —
+`NotificationTemplateCatalog.AudienceOverrides` keyed by `(type, audience)`, with
+fallback to the shared entry. Duplicating the type would force the apps to handle
+two keys for one thing and let the halves drift.
+
+**Timer-driven notifications live in `Booking.SendBookingReminders`**, run by the
+new **`BookingReminderFunction` every 1 minute** — separate from the 5-minute
+`BookingSweepFunction` because it changes NO status (pure enqueue, no lifecycle
+risk) and because `BOOKING_REMINDER_STARTING_SOON` would otherwise land anywhere
+from 0–5 minutes out. **Re-firing is prevented by the outbox's filtered UNIQUE
+`DedupeKey`, not by a flag on the booking** — the predicates are "is it now past
+X", which stays true every tick; a missed tick is self-healing, a duplicate is a
+no-op, and there's no second copy of "already sent" to keep in step.
+
+**`BookingStartOtps.SeenAtUtc` / `NightStayBookingStartOtps.SeenAtUtc`
+(2026-08-04)** — stamped by `Issue*StartOtp` (the sproc that returns the code to
+the parent), `COALESCE`d so re-opening the screen doesn't reset it. It exists only
+to separate two nudges the V3 spec words differently: `BOOKING_START_OTP_NOT_SEEN`
+("you're late, open your code") vs `BOOKING_START_OTP_NOT_SHARED` ("you have it —
+share it or be marked a no-show").
+
+**Two no-show types on purpose:** `BOOKING_NO_SHOW_REPORTED` (a party tapped it →
+counterparty ONLY, they already saw the result) vs `BOOKING_NO_SHOW_AUTO_SETTLED`
+(BR-38 derived it → BOTH, nobody tapped anything). Both carry `absentParty`, which
+is what lets one template read correctly in either direction and on either app.
+Likewise **two modification-expiry types**, one per deadline arm — see BR-30 below.
+
+**The original trigger — "New Service Booking" (`BOOKING_REQUESTED` /
+`NIGHT_STAY_BOOKING_REQUESTED`).** Fires to the **provider** when a parent creates
+a booking, from the **parent host's two create handlers only**
+(`PetParentEndpoints.CreateServiceBooking`, `NightStayBookingEndpoints.CreateBooking`).
+Composed by `IBookingNotificationService` (`BookingNotificationService`), which is
+deliberately **not** called from `BookingService.CreateAsync` — that method is
+shared by both hosts, and a provider creating a booking on their own host must not
+be notified about their own action. Custom walk-ins have no parent and are
+excluded for free.
+- Body: `{petName} · {serviceDate} at {startTime}. Please accept by {acceptBy},
+  else the booking will be removed.` (night-stay uses `{checkInDate}` +
+  `{dropOffTime}`).
+- **`acceptBy` is NOT just "created + 24h".** `BookingAcceptanceDeadline.Compute`
+  returns the EARLIER of **BR-17** (`CreatedAtUtc + 24h`) and **BR-53**
+  (`serviceStart − BookingLeadTime.Minimum`), because either can expire the
+  booking first. A booking made at 09:00 for a 14:00 service the same day must be
+  accepted by **12:00 that day** — quoting created+24h there would promise the
+  provider a deadline hours *after* the service, contradicting what
+  `Booking.ExpireStaleCreatedBookings` actually does. `PendingWindow` mirrors that
+  sproc's `@PendingHours` default — change one, change the other. Also sent as
+  `acceptByUtc` (ISO 8601) so the app can show a countdown or local time.
+- **`serviceName` is sent in `data` but NOT shown in the body** (2026-08-02 —
+  replaced by the accept-by message). It comes from `BookingServiceLabel` — the
+  grooming menu item's display name when the booking has a `ServiceItemCode`, else
+  a friendly `ServiceType` ("Day Care", "Vet Appointment"). This is why
+  **`GroomingServiceCatalog` MOVED from `Pawfront.Infrastructure.Cosmos` into
+  `Pawfront.Application/Services/PetGroomer/`** (public now, next to the
+  `GroomingServiceCatalogEntry` record it already populated) — Application can't
+  reference Infrastructure.Cosmos. `CosmosPetGroomerServiceRegistry.GetServiceCatalog()`
+  is now a straight pass-through.
+- `PetOwnershipLookup` gained **`PetName`** so the create handlers get the name
+  from the point read they already make — no extra query. Inline SQL, no sproc or
+  DeployAll change.
+- **Times render in UTC**, like everything else here. No provider timezone is
+  stored, so a +02:00 provider reads a time two hours behind their local clock.
+  Fixing it needs a timezone column on `Provider.Providers` — flagged, not done.
+
 ## In progress / next step
 
 **The booking expiry sweep has been rebuilt as an Azure Function (2026-08-02).**
@@ -1922,10 +2120,30 @@ it.
 6. **No pet-parent auth.** All endpoints share the provider's
    `FirebaseUser` policy. When the consumer app launches it'll need its
    own auth (separate Firebase project or role claim differentiation).
-7. **FCM push notifications not wired.** `NoOpProviderMobileOtpSender`
-   is the only `IProviderMobileOtpSender`. The Firebase Admin service
-   account file exists but isn't loaded. Natural follow-up when adding
-   notifications.
+7. **Push notifications: engine built, all booking triggers wired (2026-08-04).**
+   Every card in the Notifications V3 spec now has a trigger except the four whose
+   modules don't exist — `MESSAGE_RECEIVED` (no chat), `INVOICE_ISSUED` (no
+   invoicing), `DISPUTE_RESOLVED` (no Helpline/ticket module),
+   `PROMOTIONAL_MESSAGE` (no campaign module). Those carry type + copy + route +
+   payload contract so mobile can build against them; wiring one later is a
+   single publisher call. Of the six **event-ticket** types (2026-08-04) the two
+   ORGANISER-side ones are now wired via `Notification.EnqueueEventNotification`
+   (called from `Event.CreateEventBooking` / `Event.CancelEventBooking`); the four
+   buyer-side ones are not — `EVENT_BOOKING_CONFIRMED` / `_CANCELLED` are the
+   buyer's own action (relevance rule), and the two payment types have **no
+   addressable recipient**: `Event.EventBookings` identifies its booker only by
+   free-text `BookerEmail` with no FK, and the payment webhook carries no JWT, so
+   sending to the buyer needs a persisted booker id on the booking row first.
+   Still outstanding: the two Firebase
+   service-account credentials, the real mobile route table (`NotificationRoutes`
+   is placeholders), and APNs keys on both Firebase projects. **Device-token
+   register/refresh IS built** — `POST`/`DELETE /device-tokens` on both hosts
+   (2026-08-03). **None of the new SQL is deployed yet** — re-run
+   `Deployment/DeployAll.sql`, and deploy `BookingReminderFunction` with the
+   existing Function App.
+   Separately, SMS OTP is still unwired — `NoOpProviderMobileOtpSender` /
+   `NoOpPetParentMobileOtpSender` remain the only OTP senders. That is a
+   different transport (SMS, not push) and is unaffected by the FCM work.
 8. **`/api/v1/events/{eventId}` is provider-agnostic** — for future
    pet-parent discovery. No discovery search yet (filter by category,
    date, geo).
@@ -1947,6 +2165,8 @@ GET    /metadata                                                                
 
 POST   /parent-onboarding/firebase-auth                                          body { fcmToken?, deviceId?, devicePlatform? } — upserts Parent.ParentAuthIdentities + optional Parent.ParentDeviceTokens (one parent → many FCM tokens). Reads identity claims from the Firebase JWT.
 POST   /parent-onboarding/profile                                                body { firstName, lastName, gender, mobileCountryCode, mobileNumber, dateOfBirth, addressLine, latitude, longitude, zipCode, city, description? }. `description` ("About Me") is OPTIONAL — omit it or send null/blank and an empty string is stored (it also carries a C# default, so it stays out of the OpenAPI `required` list). `gender` accepts the picker's labels case-insensitively and ignoring spaces/hyphens — Male, Female, Others, Non Binary (also NonBinary / Other / PreferNotToSay) — normalised onto the canonical stored set { Male, Female, NonBinary, Other, PreferNotToSay } that CK_PetParents_Gender allows ("Others" stores as "Other"). **The owning auth identity is resolved server-side from the JWT sub/user_id claim** — the body intentionally has no parentAuthIdentityId field, so a caller cannot complete another parent's profile by guessing the id. Creates Parent.PetParents, flips ParentAuthIdentities.SignUpStatus → ParentProfileCompleted, back-fills PetParentId on device tokens. Idempotent (returns existing row if already linked). Sproc `Parent.CompletePetParentProfile` takes `@FirebaseUserId` and resolves the auth identity row under `UPDLOCK + HOLDLOCK`. **One account per mobile number:** the sproc pre-checks (MobileCountryCode, MobileNumber) under `UPDLOCK + HOLDLOCK` and THROWs 51222, with the UNIQUE index UX_PetParents_MobileNumber as the race-safe backstop → 409 MobileNumberAlreadyExists either way. 400 UnsupportedGender / InvalidRequest; 404 ParentAuthIdentityNotFound when no auth identity exists for the Firebase user (caller must hit `firebase-auth` first).
+POST   /device-tokens                                                            body { fcmToken, deviceId?, devicePlatform? } — registers/refreshes the caller's FCM token. **An FCM token is not stable** (reinstall, cleared app data, restore, Firebase's own rotation) and the sign-in flow only runs at sign in, so the app must call this on every launch AND from Firebase's onTokenRefresh callback; without it a rotated token is never reported and the device silently stops receiving notifications. Owner resolved from the JWT (sub/user_id) → ParentAuthIdentityId, never from the body. **NOT ownership-filtered** — the token binds to the auth identity, which exists before the profile does, so a parent mid-onboarding can register (PetParentId is back-filled by profile completion). **Stale-token retirement:** when `deviceId` is supplied, every OTHER active token for that physical device is deactivated *including another account's*, so a reinstall retires the old token immediately (rather than waiting for FCM to report UNREGISTERED on the next send) and a device that changes hands stops receiving the previous account's notifications; omit `deviceId` and nothing is retired, since devices can't be told apart and guessing would kill the user's other phones. `devicePlatform` ∈ { Android, iOS } case-insensitive (400 InvalidRequest otherwise); blank/omitted stores null. Returns { deviceTokenId, ownerId (null pre-profile), deviceId, devicePlatform, isActive, retiredTokenCount, lastSeenAtUtc, createdAtUtc, updatedAtUtc } — the FCM token itself is deliberately NOT echoed back. Sproc `Parent.SaveParentDeviceToken` (THROW 51225). 404 ParentAuthIdentityNotFound when the caller hasn't hit `firebase-auth` yet.
+POST   /device-tokens/deactivate                                                  body { fcmToken } — sign-out counterpart; flips IsActive = 0 so the handset stops receiving that account's notifications (matters most on a shared or resold device). Scoped to the caller's own auth identity, so a caller can't deactivate someone else's token even with a valid token string. The row is kept rather than deleted — FcmToken is UNIQUE, so signing back in reactivates it in place. Sproc `Parent.DeactivateParentDeviceToken` (THROW 51226). 404 DeviceTokenNotFound — "unknown" and "not yours" are the same case by design, so it can't be used to probe whether a token is registered. **POST, not DELETE:** minimal APIs refuse an inferred body on DELETE (startup throws "Body was inferred but the method does not allow inferred body parameters"), and both workarounds are worse — an FCM token in the URL lands in every access log, and DELETE bodies are stripped by some proxies, which would make sign-out fail silently. "Deactivate" is also the honest verb, since the row is never deleted.
 GET    /parent-onboarding/me                                                     resolves the caller's Firebase uid (sub/user_id claim) → { parentAuthIdentityId, petParentId?, firebaseUserId, email, isEmailVerified, displayName, signUpStatus, hasProfile, mobileVerifiedAtUtc? }. Mirror of the provider host's `/provider-onboarding/me` — used by mobile after a reinstall (which wipes local storage but Firebase keeps the session) to recover the PetParentId. PetParentId / HasProfile / MobileVerifiedAtUtc are only populated once `POST /parent-onboarding/profile` has run. Backed by `Parent.GetPetParentByFirebaseUid` (LEFT JOIN PetParents). 404 ParentAuthIdentityNotFound when no auth identity exists yet for this Firebase user (caller must hit `firebase-auth` first).
 
 DELETE /pet-parents/{petParentId}                                                "Delete account" = ANONYMISE + permanently DISABLE, NOT a row delete. Scrubs the personal fields on Parent.PetParents (name → "Deleted User", gender/DOB/mobile/address replaced, about + profile photo cleared), sets IsDeleted=1 + DeletedAtUtc, severs the Firebase auth identity (freeing the real uid AND mobile number for a fresh sign-up), anonymises the parent's Pets IN PLACE (name → "Deleted Pet", microchip/photo/notes cleared; type/breed/gender/DOB/weight/vaccination/sterilization kept so the provider's booking history keeps meaning), and deletes only operational data + media (device tokens, mobile OTPs, identity document, parent + pet photo galleries, next-consultations). **RETAINED untouched:** service + night-stay bookings with all their children, organised events + their ticket bookings, and the Booking.BookingPayments ledger — deleting them would destroy the PROVIDER's history too. One transaction via Parent.DeletePetParent (THROW 51223), then a best-effort blob sweep; no Cosmos leg (a parent owns no Cosmos doc). Orchestrated by IParentAccountService. Idempotent (second call returns the original deletedAtUtc with wasAlreadyDeleted: true). Returns { petParentId, deletedAtUtc, wasAlreadyDeleted, anonymisedPetCount, retained*Count… }. Ownership-filtered, so it can only ever delete the caller's own account. 404 PetParentNotFound. After it runs the caller's JWT no longer resolves → every /pet-parents/* route answers 403 ParentProfileNotCompleted, and PATCH /profile is additionally blocked by 409 ParentAccountDeleted.
@@ -2034,6 +2254,9 @@ GET    /metadata                                                                
 POST   /provider-onboarding/firebase-auth
 POST   /provider-onboarding/profile
 GET    /provider-onboarding/me                                                   resolves caller's Firebase uid → { providerAuthIdentityId, providerId?, hasProfile, onboardingStatus? } — used by mobile after reinstall to recover ProviderId
+
+POST   /device-tokens                                                            body { fcmToken, deviceId?, devicePlatform? } — registers/refreshes the caller's FCM token. Mirror of the parent host's endpoint (see there for the full rationale): FCM tokens rotate, the sign-in flow only runs at sign in, so the app calls this on every launch AND from onTokenRefresh. Owner from the JWT → ProviderAuthIdentityId. NOT scoped under /providers/{id} — the token binds to the auth identity, which exists before the profile (ProviderId back-filled on profile completion). Supplying `deviceId` retires every other active token for that device (incl. another account's), which is what makes a reinstall clean up immediately. Sproc `Provider.SaveProviderDeviceToken` (THROW 51004). 404 ProviderAuthIdentityNotFound; 400 InvalidRequest (blank token / unsupported devicePlatform).
+POST   /device-tokens/deactivate                                                  body { fcmToken } — sign-out counterpart; IsActive = 0, scoped to the caller's own auth identity. Sproc `Provider.DeactivateProviderDeviceToken` (THROW 51005). 404 DeviceTokenNotFound (unknown and not-yours are one case). POST rather than DELETE for the same reasons as the parent host's copy (no inferred body on DELETE; token must not go in the URL; stripped DELETE bodies would fail silently).
 
 POST   /providers/                                            (legacy in-memory)
 GET    /providers/                                            (legacy in-memory)

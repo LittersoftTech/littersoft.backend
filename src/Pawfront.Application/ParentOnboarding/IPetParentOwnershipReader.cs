@@ -30,13 +30,15 @@ public interface IPetParentOwnershipReader
 
     /// <summary>
     /// Returns the owning <c>PetParentId</c> together with the pet's type
-    /// (Dog | Cat | Hamster | GuineaPig) in one point read, or null if the
-    /// pet row doesn't exist. Used by provider discovery's petId filter,
-    /// which needs both the ownership check and the animal type.
+    /// (Dog | Cat | Hamster | GuineaPig) and name in one point read, or null if
+    /// the pet row doesn't exist. Used by provider discovery's petId filter,
+    /// which needs both the ownership check and the animal type, and by the
+    /// parent booking creates, which additionally name the pet in the
+    /// provider's "New Service Booking" notification.
     /// </summary>
     Task<PetOwnershipLookup?> GetPetLookupAsync(
         Guid petId,
         CancellationToken cancellationToken);
 }
 
-public sealed record PetOwnershipLookup(Guid OwningPetParentId, string PetType);
+public sealed record PetOwnershipLookup(Guid OwningPetParentId, string PetType, string PetName);

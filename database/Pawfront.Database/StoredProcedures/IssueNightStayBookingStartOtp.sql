@@ -46,6 +46,12 @@ BEGIN
         SELECT @ActiveId = [NightStayBookingStartOtpId] FROM @Inserted;
     END
 
+    -- Mirror of Booking.IssueBookingStartOtp: record the parent's first sighting
+    -- of the code, which is what separates the two nudge messages.
+    UPDATE [Booking].[NightStayBookingStartOtps]
+    SET [SeenAtUtc] = COALESCE([SeenAtUtc], @Now)
+    WHERE [NightStayBookingStartOtpId] = @ActiveId;
+
     SELECT [NightStayBookingStartOtpId] AS [BookingStartOtpId], [NightStayBookingId] AS [BookingId],
            [OtpCode], [Status], [IssuedAtUtc], [ExpiresAtUtc]
     FROM [Booking].[NightStayBookingStartOtps]

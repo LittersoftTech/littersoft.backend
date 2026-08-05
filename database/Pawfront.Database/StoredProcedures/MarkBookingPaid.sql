@@ -69,6 +69,19 @@ BEGIN
     VALUES
         (N'SingleDay', @BookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
 
+    -- The provider recorded the cash, so the parent gets the receipt. The amount
+    -- is the one just written to the ledger, not a re-derivation — the two must
+    -- never disagree.
+    DECLARE @AmountText NVARCHAR(64) =
+        N'CHF ' + CONVERT(NVARCHAR(32), CAST(@Amount AS DECIMAL(12, 2)));
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_PAID',
+        @Amount = @AmountText;
+
     SELECT [BookingId],
            [ProviderId],
            [PetParentId],

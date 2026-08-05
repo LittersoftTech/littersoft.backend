@@ -83,6 +83,16 @@ BEGIN
                 (@BookingId, @CurrentStatus, N'OTP_MAX_ATTEMPTS_EXCEEDED', N'System', NULL,
                  N'Job cancelled after 6 incorrect start-code attempts.');
 
+            -- The provider entered the wrong codes, so only the parent is told
+            -- their job is off. Enqueued before the COMMIT below so it lands in
+            -- the same transaction as the cancellation — the THROW that follows
+            -- is the API's 409, not a rollback.
+            EXEC [Notification].[EnqueueBookingNotification]
+                @BookingId = @BookingId,
+                @IsNightStay = 0,
+                @Audience = N'PetParent',
+                @NotificationType = N'BOOKING_OTP_ATTEMPTS_EXCEEDED';
+
             COMMIT TRANSACTION;
             THROW 51136, 'Too many incorrect start-code attempts; the job has been cancelled.', 1;
         END
@@ -104,6 +114,14 @@ BEGIN
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@BookingId, @CurrentStatus, N'IN_PROGRESS', N'Provider', @ProviderId, N'Job started with parent start-OTP');
+
+    -- "Your job has started. Thank you for the OTP!" — the provider entered the
+    -- code, so the parent is the one told.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_IN_PROGRESS';
 
     SELECT [BookingId],
            [ProviderId],

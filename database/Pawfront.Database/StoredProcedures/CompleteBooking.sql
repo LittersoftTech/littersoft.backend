@@ -48,6 +48,14 @@ BEGIN
     VALUES
         (@BookingId, @CurrentStatus, N'COMPLETED', N'Provider', @ProviderId, N'Job completed by provider');
 
+    -- The provider completed it, so only the parent is told — and the copy asks
+    -- for the cash, since payment is always still pending at this point.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_COMPLETED';
+
     SELECT [BookingId],
            [ProviderId],
            [PetParentId],

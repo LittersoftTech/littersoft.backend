@@ -90,12 +90,17 @@ BEGIN
         THROW 51143, 'A modification request is already awaiting a response.', 1;
     END
 
+    -- Captured so the notification's dedupe key can be scoped to THIS proposal
+    -- rather than to the booking (see the enqueue below).
+    DECLARE @InsertedModification TABLE ([BookingModificationId] UNIQUEIDENTIFIER);
+
     INSERT INTO [Booking].[BookingModifications]
         ([BookingId], [RequestedByActor], [RequestedByActorId],
          [ProposedBookingDate], [ProposedStartTime], [ProposedEndTime], [RequestNote],
          [HasAcknowledgedTerms], [AcknowledgedPricePerHour], [AcknowledgedCancellationPolicyHours],
          [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
          [AcknowledgedLatitude], [AcknowledgedLongitude])
+    OUTPUT inserted.[BookingModificationId] INTO @InsertedModification
     VALUES
         (@BookingId, @Actor, @ActorId, @ProposedBookingDate, @ProposedStartTime, @ProposedEndTime, @Note,
          ISNULL(@HasAcknowledgedTerms, 0), @AcknowledgedPricePerHour, @AcknowledgedCancellationPolicyHours,
@@ -114,6 +119,33 @@ BEGIN
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@BookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- The counterparty has to review it, so they are the one notified.
+    DECLARE @ReqAudience NVARCHAR(16) =
+        CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+    DECLARE @ReqType NVARCHAR(64) =
+        CASE WHEN @Actor = N'Provider'
+             THEN N'BOOKING_MODIFICATION_REQUESTED_BY_PROVIDER'
+             ELSE N'BOOKING_MODIFICATION_REQUESTED_BY_PARENT' END;
+
+    -- A booking can be modified more than once over its life, and each proposal
+    -- is a distinct thing to review — so the dedupe key is scoped to the staging
+    -- row rather than the booking, letting a later proposal notify again while
+    -- still collapsing a retry of the same one.
+    DECLARE @ReqDedupe NVARCHAR(64) =
+        CAST((SELECT TOP 1 [BookingModificationId] FROM @InsertedModification) AS NVARCHAR(36));
+
+    DECLARE @ProposedDateText NVARCHAR(32) = FORMAT(@ProposedBookingDate, N'd MMM', N'en-GB');
+    DECLARE @ProposedTimeText NVARCHAR(16) = CONVERT(NVARCHAR(5), @ProposedStartTime, 108);
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = @ReqAudience,
+        @NotificationType = @ReqType,
+        @NewServiceDate = @ProposedDateText,
+        @NewStartTime = @ProposedTimeText,
+        @DedupeSuffix = @ReqDedupe;
 
     SELECT [BookingId],
            [ProviderId],

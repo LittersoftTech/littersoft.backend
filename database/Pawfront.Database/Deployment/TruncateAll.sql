@@ -28,7 +28,7 @@
     * Cosmos DB (database `pawfront`)
         - container `ProviderServices` (partition /serviceCategory) — the
           per-category service listing. Parent-facing discovery
-          (GET /providers, and all five /providers/search/* endpoints) reads
+          (GET /providers, and all five /providers/search endpoints) reads
           Cosmos, so every provider whose SQL row you just deleted WILL STILL
           APPEAR in browse results until these documents are removed.
         - container `Events` (partition /eventCategory) — physical-event

@@ -1,5 +1,6 @@
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
+using Pawfront.Application.Notifications;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Contracts.Bookings;
@@ -58,6 +59,7 @@ internal static class NightStayBookingEndpoints
         INightStayBookingService bookingService,
         IProviderServiceCatalog serviceCatalog,
         IPetParentOwnershipReader ownershipReader,
+        IBookingNotificationService bookingNotifications,
         CancellationToken cancellationToken)
     {
         // The parent must say where the service happens — the detail read
@@ -102,6 +104,12 @@ internal static class NightStayBookingEndpoints
                     request.JobNotes,
                     request.LocationType),
                 cancellationToken);
+
+            // "New Service Booking" to the provider. Enqueued only — the
+            // publisher writes an outbox row and never throws, so a notification
+            // problem can't fail a stay that has already been created.
+            await bookingNotifications.NotifyNightStayBookingRequestedAsync(
+                result, pet.PetName, cancellationToken);
 
             return ApiResults.Created(
                 $"/api/v1/pet-parents/{petParentId}/night-stay-bookings/{result.NightStayBookingId}",

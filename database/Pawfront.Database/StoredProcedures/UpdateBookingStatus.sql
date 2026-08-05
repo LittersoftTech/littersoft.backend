@@ -185,6 +185,41 @@ BEGIN
     VALUES
         (@BookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
 
+    -- Notify the OTHER party, inside this transaction so the notification can
+    -- never exist without the status change (or vice versa). The actor never gets
+    -- one: they tapped it and saw the result — the "relevance rule".
+    DECLARE @NotificationType NVARCHAR(64) =
+        CASE @NewStatus
+            WHEN N'CONFIRMED'          THEN N'BOOKING_ACCEPTED'
+            WHEN N'PROVIDER_DECLINED'  THEN N'BOOKING_DECLINED'
+            WHEN N'PROVIDER_CANCELLED' THEN N'BOOKING_CANCELLED_BY_PROVIDER'
+            WHEN N'PARENT_CANCELLED'   THEN N'BOOKING_CANCELLED_BY_PARENT'
+            WHEN N'COMPLETED'          THEN N'BOOKING_COMPLETED'
+            WHEN N'PARENT_NO_SHOW'     THEN N'BOOKING_NO_SHOW_REPORTED'
+            WHEN N'PROVIDER_NO_SHOW'   THEN N'BOOKING_NO_SHOW_REPORTED'
+        END;
+
+    IF @NotificationType IS NOT NULL
+    BEGIN
+        -- A no-show always names the absent party, which is what lets one
+        -- template read correctly in both directions.
+        DECLARE @AbsentParty NVARCHAR(32) =
+            CASE @NewStatus
+                WHEN N'PARENT_NO_SHOW'   THEN N'the customer'
+                WHEN N'PROVIDER_NO_SHOW' THEN N'the provider'
+            END;
+
+        DECLARE @Audience NVARCHAR(16) =
+            CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @BookingId,
+            @IsNightStay = 0,
+            @Audience = @Audience,
+            @NotificationType = @NotificationType,
+            @AbsentParty = @AbsentParty;
+    END
+
     SELECT [BookingId],
            [ProviderId],
            [PetParentId],

@@ -84,6 +84,10 @@ BEGIN
         THROW 51263, 'A modification request is already awaiting a response.', 1;
     END
 
+    -- Captured so the notification's dedupe key scopes to THIS proposal, letting a
+    -- later proposal on the same stay notify again.
+    DECLARE @InsertedModification TABLE ([NightStayBookingModificationId] UNIQUEIDENTIFIER);
+
     INSERT INTO [Booking].[NightStayBookingModifications]
         ([NightStayBookingId], [RequestedByActor], [RequestedByActorId],
          [ProposedCheckInDate], [ProposedCheckOutDate], [RequestNote],
@@ -91,6 +95,7 @@ BEGIN
          [AcknowledgedDropOffTime], [AcknowledgedPickUpTime],
          [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
          [AcknowledgedLatitude], [AcknowledgedLongitude])
+    OUTPUT inserted.[NightStayBookingModificationId] INTO @InsertedModification
     VALUES
         (@NightStayBookingId, @Actor, @ActorId, @ProposedCheckInDate, @ProposedCheckOutDate, @Note,
          ISNULL(@HasAcknowledgedTerms, 0), @AcknowledgedPricePerNight, @AcknowledgedCancellationPolicyHours,
@@ -110,6 +115,30 @@ BEGIN
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@NightStayBookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- The counterparty has to review it. Mirror of Booking.RequestBookingModification.
+    DECLARE @ReqAudience NVARCHAR(16) =
+        CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+    DECLARE @ReqType NVARCHAR(64) =
+        CASE WHEN @Actor = N'Provider'
+             THEN N'BOOKING_MODIFICATION_REQUESTED_BY_PROVIDER'
+             ELSE N'BOOKING_MODIFICATION_REQUESTED_BY_PARENT' END;
+    DECLARE @ReqDedupe NVARCHAR(64) =
+        CAST((SELECT TOP 1 [NightStayBookingModificationId] FROM @InsertedModification) AS NVARCHAR(36));
+
+    -- A stay is proposed as a date range, so the "new time" slot carries the new
+    -- check-out rather than a clock time.
+    DECLARE @ProposedDateText NVARCHAR(32) = FORMAT(@ProposedCheckInDate, N'd MMM', N'en-GB');
+    DECLARE @ProposedOutText NVARCHAR(16) = FORMAT(@ProposedCheckOutDate, N'd MMM', N'en-GB');
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = @ReqAudience,
+        @NotificationType = @ReqType,
+        @NewServiceDate = @ProposedDateText,
+        @NewStartTime = @ProposedOutText,
+        @DedupeSuffix = @ReqDedupe;
 
     SELECT [NightStayBookingId],
            [ProviderId],

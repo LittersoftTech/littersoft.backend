@@ -15,6 +15,10 @@ CREATE TABLE [Booking].[NightStayBookingStartOtps]
         CONSTRAINT [DF_NightStayBookingStartOtps_IssuedAtUtc] DEFAULT SYSUTCDATETIME(),
     [ExpiresAtUtc] DATETIME2(7) NOT NULL,
     [ConsumedAtUtc] DATETIME2(7) NULL,
+    -- See [Booking].[BookingStartOtps].[SeenAtUtc] — separates "the parent hasn't
+    -- opened the code" from "the parent has it, the provider hasn't entered it",
+    -- which get different nudge copy.
+    [SeenAtUtc] DATETIME2(7) NULL,
 
     CONSTRAINT [PK_NightStayBookingStartOtps] PRIMARY KEY CLUSTERED ([NightStayBookingStartOtpId] ASC),
     CONSTRAINT [FK_NightStayBookingStartOtps_NightStayBookings]

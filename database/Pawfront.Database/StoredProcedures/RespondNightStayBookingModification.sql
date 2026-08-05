@@ -66,6 +66,16 @@ BEGIN
             DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
                     CAST(@CheckInDate AS DATETIME2(7)));
 
+        -- Mirror of the single-day sproc: the 24-hour review window is the other
+        -- deadline (2026-08-04), and whichever arrives first ends the proposal.
+        IF EXISTS (
+            SELECT 1 FROM [Booking].[NightStayBookingModifications]
+            WHERE [NightStayBookingId] = @NightStayBookingId
+              AND @Now >= DATEADD(HOUR, 24, [CreatedAtUtc]))
+        BEGIN
+            THROW 51272, 'The modification request timed out after 24 hours and can no longer be answered.', 1;
+        END
+
         IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
         BEGIN
             THROW 51272, 'The modification request expired 2 hours before the service start time and can no longer be answered.', 1;
@@ -168,6 +178,31 @@ BEGIN
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@NightStayBookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- The responder tapped it; the REQUESTER is waiting to hear. Mirror of
+    -- Booking.RespondBookingModification.
+    DECLARE @RespAudience NVARCHAR(16) =
+        CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+    DECLARE @RespType NVARCHAR(64) =
+        CASE
+            WHEN @Actor = N'Provider' AND @Accept = 1 THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER'
+            WHEN @Actor = N'Provider'                 THEN N'BOOKING_MODIFICATION_DECLINED_BY_PROVIDER'
+            WHEN @Accept = 1                          THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PARENT'
+            ELSE                                           N'BOOKING_MODIFICATION_DECLINED_BY_PARENT'
+        END;
+
+    DECLARE @RespDateText NVARCHAR(32) = FORMAT(@PIn, N'd MMM', N'en-GB');
+    DECLARE @RespOutText NVARCHAR(16) = FORMAT(@POut, N'd MMM', N'en-GB');
+    DECLARE @RespDedupe NVARCHAR(64) = CAST(@ModId AS NVARCHAR(36));
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = @RespAudience,
+        @NotificationType = @RespType,
+        @NewServiceDate = @RespDateText,
+        @NewStartTime = @RespOutText,
+        @DedupeSuffix = @RespDedupe;
 
     SELECT [NightStayBookingId],
            [ProviderId],

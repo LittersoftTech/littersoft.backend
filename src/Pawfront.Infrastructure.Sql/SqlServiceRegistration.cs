@@ -1,11 +1,14 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
+using Pawfront.Application.DeviceTokens;
 using Pawfront.Application.Events;
+using Pawfront.Application.Notifications;
 using Pawfront.Application.Onboarding;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
@@ -21,7 +24,9 @@ using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
 using Pawfront.Infrastructure.Sql.Closures;
+using Pawfront.Infrastructure.Sql.DeviceTokens;
 using Pawfront.Infrastructure.Sql.Events;
+using Pawfront.Infrastructure.Sql.Notifications;
 using Pawfront.Infrastructure.Sql.Onboarding;
 using Pawfront.Infrastructure.Sql.ParentOnboarding;
 using Pawfront.Infrastructure.Sql.ParentPets;
@@ -67,6 +72,15 @@ public static class SqlServiceRegistration
             services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
             services.AddSingleton<IProviderNameReader, NullProviderNameReader>();
             services.AddSingleton<IProviderContactReader, NullProviderContactReader>();
+            // No outbox table to write to — log and drop, same posture as the
+            // booking sweeps having no in-memory equivalent.
+            services.AddSingleton<INotificationPublisher, NullNotificationPublisher>();
+
+            // Both hosts' token services share one store here; each host only ever
+            // resolves its own interface, so they never actually mix.
+            services.AddSingleton<InMemoryDeviceTokenStore>();
+            services.AddSingleton<IProviderDeviceTokenService, InMemoryProviderDeviceTokenService>();
+            services.AddSingleton<IPetParentDeviceTokenService, InMemoryPetParentDeviceTokenService>();
         }
         else
         {
@@ -193,6 +207,28 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderContactReader>(provider =>
                 new SqlProviderContactReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Push notifications are enqueued onto Notification.NotificationOutbox
+            // here and dispatched to FCM by Pawfront.Functions — neither API host
+            // talks to Firebase, which keeps the external call off the request
+            // path and lets the SQL-only booking sweeps enqueue identically.
+            services.AddScoped<INotificationPublisher>(provider =>
+                new SqlNotificationPublisher(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>(),
+                    provider.GetRequiredService<ILogger<SqlNotificationPublisher>>()));
+
+            // FCM tokens rotate (reinstall, cleared data, restore), so each app
+            // re-registers its current token independently of the sign-in flow.
+            services.AddScoped<IProviderDeviceTokenService>(provider =>
+                new SqlProviderDeviceTokenService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IPetParentDeviceTokenService>(provider =>
+                new SqlPetParentDeviceTokenService(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
         }

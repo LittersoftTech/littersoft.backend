@@ -48,6 +48,12 @@ BEGIN
     VALUES
         (@NightStayBookingId, @CurrentStatus, N'COMPLETED', N'Provider', @ProviderId, N'Job completed by provider');
 
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_COMPLETED';
+
     SELECT [NightStayBookingId],
            [ProviderId],
            [PetParentId],

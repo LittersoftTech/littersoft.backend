@@ -4,6 +4,7 @@ using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Events;
+using Pawfront.Application.Notifications;
 using Pawfront.Application.Offerings;
 using Pawfront.Application.Onboarding;
 using Pawfront.Application.ParentOnboarding;
@@ -52,6 +53,11 @@ public static class ApplicationServiceRegistration
         // Diffs a booking's frozen-at-creation terms against the provider's current
         // ones, for the "these changed since you booked" confirmation sheet.
         services.TryAddScoped<IBookingTermsChangeService, BookingTermsChangeService>();
+
+        // Composes booking push notifications (who to tell, with what parameters).
+        // The copy itself lives in NotificationTemplateCatalog and is rendered by
+        // the dispatcher, not here.
+        services.TryAddScoped<IBookingNotificationService, BookingNotificationService>();
 
         // ProviderClosureService also implements two interfaces (service + narrow reader).
         services.TryAddScoped<ProviderClosureService>();

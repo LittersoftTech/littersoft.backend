@@ -86,6 +86,42 @@ BEGIN
            CASE WHEN [Reason] = N'Pending' THEN @PendingNote ELSE @LeadTimeNote END
     FROM @ExpiredNightStays;
 
+    -- ONE expiry event, TWO notifications (V3 cards P-S1 + V-S2) — the parent is
+    -- told to re-book and lands on the booking; the provider is told they lost the
+    -- job and lands on Payouts -> Ignored Jobs. Deliberately a single trigger with
+    -- two recipients rather than two independent timers, so the two can never
+    -- disagree about whether the booking expired.
+    DECLARE @BookingId UNIQUEIDENTIFIER;
+    DECLARE @IsNightStay BIT;
+
+    DECLARE expired_bookings CURSOR LOCAL FAST_FORWARD FOR
+        SELECT [BookingId], 0 FROM @ExpiredBookings
+        UNION ALL
+        SELECT [NightStayBookingId], 1 FROM @ExpiredNightStays;
+
+    OPEN expired_bookings;
+    FETCH NEXT FROM expired_bookings INTO @BookingId, @IsNightStay;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @BookingId,
+            @IsNightStay = @IsNightStay,
+            @Audience = N'PetParent',
+            @NotificationType = N'BOOKING_EXPIRED_FOR_PARENT';
+
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @BookingId,
+            @IsNightStay = @IsNightStay,
+            @Audience = N'Provider',
+            @NotificationType = N'BOOKING_EXPIRED_FOR_PROVIDER';
+
+        FETCH NEXT FROM expired_bookings INTO @BookingId, @IsNightStay;
+    END
+
+    CLOSE expired_bookings;
+    DEALLOCATE expired_bookings;
+
     COMMIT TRANSACTION;
 
     SELECT

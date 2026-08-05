@@ -52,6 +52,14 @@ BEGIN
         SELECT @ActiveId = [BookingStartOtpId] FROM @Inserted;
     END
 
+    -- This sproc runs precisely when the parent is shown the code, so it is the
+    -- honest place to record that they have seen it. COALESCE keeps the FIRST
+    -- sighting: the nudge that branches on this asks "have they opened it at
+    -- all?", and re-opening the screen must not reset that answer.
+    UPDATE [Booking].[BookingStartOtps]
+    SET [SeenAtUtc] = COALESCE([SeenAtUtc], @Now)
+    WHERE [BookingStartOtpId] = @ActiveId;
+
     SELECT [BookingStartOtpId], [BookingId], [OtpCode], [Status], [IssuedAtUtc], [ExpiresAtUtc]
     FROM [Booking].[BookingStartOtps]
     WHERE [BookingStartOtpId] = @ActiveId;
