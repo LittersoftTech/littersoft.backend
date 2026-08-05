@@ -4,6 +4,10 @@
 -- underway the provider simply marks it done. ENDING (the retired "End Job"
 -- intermediate state) is tolerated as a from-state so any legacy row parked
 -- there can still be completed.
+-- Completing the job is also what mints the booking's payout reference
+-- ([PayoutId], 'PO-000123') and leaves [PayoutStatus] = 'Pending' — the provider
+-- has earned the money but has not yet recorded receiving it. The subsequent
+-- [Booking].[MarkBookingPaid] settles it to 'Paid'.
 -- THROWs: 51131 not found, 51132 forbidden, 51133 not IN_PROGRESS (can't be
 -- completed).
 CREATE OR ALTER PROCEDURE [Booking].[CompleteBooking]
@@ -17,10 +21,13 @@ BEGIN
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @RowProvider UNIQUEIDENTIFIER;
+    DECLARE @Source NVARCHAR(16);
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
+           @Source = [Source], @PayoutId = [PayoutId]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
 
@@ -39,8 +46,25 @@ BEGIN
         THROW 51133, 'Booking is not in a state the job can be completed from.', 1;
     END
 
+    -- Mint the payout reference. Custom walk-ins are deliberately left unstamped:
+    -- they are arranged off-platform, carry no Pawfront commission, and can never
+    -- reach PAID (see 51163 in [Booking].[MarkBookingPaid]) — so a payout row for
+    -- one would sit "awaiting payment" forever and skew the provider's earnings.
+    -- COALESCE keeps this idempotent: a row that somehow already carries a
+    -- reference keeps it rather than minting a second.
+    IF @PayoutId IS NULL AND @Source = N'App'
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
+    -- [PayoutStatus] is not touched: it defaults to 'Pending' at insert and the
+    -- IN_PROGRESS from-state guarantees nothing has moved it since.
     UPDATE [Booking].[Bookings]
-    SET [Status] = N'COMPLETED', [UpdatedAtUtc] = @Now
+    SET [Status] = N'COMPLETED',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId)
     WHERE [BookingId] = @BookingId;
 
     INSERT INTO [Booking].[BookingStatusHistory]

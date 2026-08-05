@@ -58,6 +58,7 @@ api.MapParentOnboardingEndpoints();
 // bound to the auth identity, which exists before the profile does.
 api.MapDeviceTokenEndpoints();
 api.MapPetParentEndpoints();
+api.MapParentSpendEndpoints();
 api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapNightStayBookingEndpoints();

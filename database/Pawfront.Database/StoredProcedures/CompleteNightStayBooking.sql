@@ -4,6 +4,10 @@
 -- ([Booking].[VerifyNightStayBookingStartOtp]). ENDING (the retired "End Job"
 -- intermediate state) is tolerated as a from-state so any legacy row parked
 -- there can still be completed.
+-- Also mints the stay's payout reference ([PayoutId], 'PO-000123') and leaves
+-- [PayoutStatus] = 'Pending', settled to 'Paid' by
+-- [Booking].[MarkNightStayBookingPaid]. Night-stay bookings are always App
+-- bookings, so — unlike the single-day mirror — there is no Custom exclusion.
 -- THROWs: 51251 not found, 51252 forbidden, 51253 not IN_PROGRESS (can't be
 -- completed).
 CREATE OR ALTER PROCEDURE [Booking].[CompleteNightStayBooking]
@@ -17,10 +21,12 @@ BEGIN
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @RowProvider UNIQUEIDENTIFIER;
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
+           @PayoutId = [PayoutId]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -39,8 +45,19 @@ BEGIN
         THROW 51253, 'Booking is not in a state the job can be completed from.', 1;
     END
 
+    -- Same payout namespace as single-day bookings (one shared SEQUENCE), so a
+    -- 'PO-...' reference identifies a payout without needing the booking kind.
+    IF @PayoutId IS NULL
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
     UPDATE [Booking].[NightStayBookings]
-    SET [Status] = N'COMPLETED', [UpdatedAtUtc] = @Now
+    SET [Status] = N'COMPLETED',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]

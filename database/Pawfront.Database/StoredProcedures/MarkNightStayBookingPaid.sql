@@ -20,10 +20,12 @@ BEGIN
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @RowPetParent UNIQUEIDENTIFIER;
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @RowPetParent = [PetParentId]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
+           @RowPetParent = [PetParentId], @PayoutId = [PayoutId]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -47,8 +49,20 @@ BEGIN
         THROW 51282, 'Booking must be completed before it can be marked paid.', 1;
     END
 
+    -- Backstop for stays completed before payout stamping shipped — see the
+    -- single-day mirror.
+    IF @PayoutId IS NULL
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
     UPDATE [Booking].[NightStayBookings]
-    SET [Status] = N'PAID', [UpdatedAtUtc] = @Now
+    SET [Status] = N'PAID',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId),
+        [PayoutStatus] = N'Paid'
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]

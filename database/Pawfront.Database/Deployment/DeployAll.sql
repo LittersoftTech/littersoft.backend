@@ -4239,6 +4239,223 @@ GO
 
 
 --------------------------------------------------------------------------------
+-- 2.9 Sequences + functions (must precede the procedures that reference them —
+--     unlike table references, a function or sequence named by a procedure is
+--     resolved when the procedure is created, not deferred to first execution)
+--------------------------------------------------------------------------------
+
+-- Mints the payout reference stamped on a booking when its job completes
+-- ([PayoutId], 'PO-000123'). A SEQUENCE rather than a per-table IDENTITY because
+-- single-day and night-stay bookings live in separate tables but share ONE payout
+-- namespace, exactly as they share the [Booking].[BookingPayments] ledger.
+IF NOT EXISTS (SELECT 1 FROM sys.sequences
+               WHERE [name] = N'PayoutNumberSequence' AND [schema_id] = SCHEMA_ID(N'Booking'))
+BEGIN
+    CREATE SEQUENCE [Booking].[PayoutNumberSequence]
+        AS BIGINT START WITH 1 INCREMENT BY 1 NO CYCLE CACHE 50;
+    PRINT 'Created sequence [Booking].[PayoutNumberSequence].';
+END
+ELSE
+BEGIN
+    PRINT 'Sequence [Booking].[PayoutNumberSequence] already exists.';
+END
+GO
+
+-- Backfill 1: bookings already PAID were settled before payout tracking existed,
+-- so their [PayoutStatus] still reads 'Pending' — which is simply wrong. Cash-only
+-- means recording the payment settles the payout, so PAID implies 'Paid'.
+-- Idempotent: re-runs match nothing.
+IF EXISTS (SELECT 1 FROM [Booking].[Bookings]
+           WHERE [Status] = N'PAID' AND [PayoutStatus] <> N'Paid')
+BEGIN
+    UPDATE [Booking].[Bookings]
+    SET [PayoutStatus] = N'Paid'
+    WHERE [Status] = N'PAID' AND [PayoutStatus] <> N'Paid';
+    PRINT 'Backfilled [PayoutStatus] = Paid on already-PAID [Booking].[Bookings].';
+END
+GO
+
+IF EXISTS (SELECT 1 FROM [Booking].[NightStayBookings]
+           WHERE [Status] = N'PAID' AND [PayoutStatus] <> N'Paid')
+BEGIN
+    UPDATE [Booking].[NightStayBookings]
+    SET [PayoutStatus] = N'Paid'
+    WHERE [Status] = N'PAID' AND [PayoutStatus] <> N'Paid';
+    PRINT 'Backfilled [PayoutStatus] = Paid on already-PAID [Booking].[NightStayBookings].';
+END
+GO
+
+-- Backfill 2: mint payout references for bookings that completed before the
+-- stamping shipped, so the earnings breakdown doesn't show a blank reference
+-- against historical rows. Custom walk-ins are deliberately skipped — they are
+-- off-platform and never enter the payout pipeline.
+--
+-- sp_sequence_get_range reserves a contiguous block in ONE call, which is the
+-- documented way to allocate sequence values in bulk; NEXT VALUE FOR is not
+-- usable per-row inside a set-based UPDATE expression here.
+-- Idempotent: guarded on [PayoutId] IS NULL.
+DECLARE @PayoutBackfillCount INT =
+    (SELECT COUNT(*) FROM [Booking].[Bookings]
+     WHERE [PayoutId] IS NULL AND [Source] = N'App' AND [Status] IN (N'COMPLETED', N'PAID'));
+
+IF @PayoutBackfillCount > 0
+BEGIN
+    DECLARE @FirstValue SQL_VARIANT;
+    EXEC sys.sp_sequence_get_range
+        @sequence_name = N'[Booking].[PayoutNumberSequence]',
+        @range_size = @PayoutBackfillCount,
+        @range_first_value = @FirstValue OUTPUT;
+
+    DECLARE @First BIGINT = CONVERT(BIGINT, @FirstValue);
+
+    ;WITH [Numbered] AS
+    (
+        SELECT [PayoutId],
+               [Offset] = ROW_NUMBER() OVER (ORDER BY [JobNumber]) - 1
+        FROM [Booking].[Bookings]
+        WHERE [PayoutId] IS NULL AND [Source] = N'App' AND [Status] IN (N'COMPLETED', N'PAID')
+    )
+    UPDATE [Numbered]
+    SET [PayoutId] = N'PO-' + FORMAT(@First + [Offset], N'D6');
+
+    PRINT 'Backfilled [PayoutId] on ' + CONVERT(NVARCHAR(20), @PayoutBackfillCount)
+        + ' completed [Booking].[Bookings].';
+END
+GO
+
+DECLARE @NightPayoutBackfillCount INT =
+    (SELECT COUNT(*) FROM [Booking].[NightStayBookings]
+     WHERE [PayoutId] IS NULL AND [Status] IN (N'COMPLETED', N'PAID'));
+
+IF @NightPayoutBackfillCount > 0
+BEGIN
+    DECLARE @NightFirstValue SQL_VARIANT;
+    EXEC sys.sp_sequence_get_range
+        @sequence_name = N'[Booking].[PayoutNumberSequence]',
+        @range_size = @NightPayoutBackfillCount,
+        @range_first_value = @NightFirstValue OUTPUT;
+
+    DECLARE @NightFirst BIGINT = CONVERT(BIGINT, @NightFirstValue);
+
+    ;WITH [Numbered] AS
+    (
+        SELECT [PayoutId],
+               [Offset] = ROW_NUMBER() OVER (ORDER BY [JobNumber]) - 1
+        FROM [Booking].[NightStayBookings]
+        WHERE [PayoutId] IS NULL AND [Status] IN (N'COMPLETED', N'PAID')
+    )
+    UPDATE [Numbered]
+    SET [PayoutId] = N'PO-' + FORMAT(@NightFirst + [Offset], N'D6');
+
+    PRINT 'Backfilled [PayoutId] on ' + CONVERT(NVARCHAR(20), @NightPayoutBackfillCount)
+        + ' completed [Booking].[NightStayBookings].';
+END
+GO
+
+-- The single definition of "what is this booking worth, and has the money moved".
+-- Shared by the provider earnings sprocs and the pet-parent spend/history sprocs,
+-- so the two sides can never report different figures for the same booking. See
+-- database/Pawfront.Database/Functions/BookingAmounts.sql for the full rationale.
+CREATE OR ALTER FUNCTION [Booking].[BookingAmounts]
+(
+    @ProviderId UNIQUEIDENTIFIER,
+    @PetParentId UNIQUEIDENTIFIER,
+    @FeePercentage DECIMAL(9, 4)
+)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT [BookingType]   = N'SingleDay',
+           [BookingId]     = b.[BookingId],
+           [ProviderId]    = b.[ProviderId],
+           [PetParentId]   = b.[PetParentId],
+           [PetId]         = b.[PetId],
+           [ServiceDate]   = b.[BookingDate],
+           [Status]        = b.[Status],
+           [IsEarned]      = CAST(CASE WHEN b.[Status] IN (N'COMPLETED', N'PAID') THEN 1 ELSE 0 END AS BIT),
+           [IsPaid]        = CAST(CASE WHEN b.[Status] = N'PAID' THEN 1 ELSE 0 END AS BIT),
+           [IsPrivate]     = CAST(CASE WHEN b.[Source] = N'Custom' THEN 1 ELSE 0 END AS BIT),
+           [Amount]        = amt.[Amount],
+           [Fee]           = CAST(COALESCE(
+                                 pay.[PawfrontFee],
+                                 CASE
+                                     WHEN amt.[Amount] IS NULL THEN NULL
+                                     WHEN b.[Source] = N'Custom' THEN 0
+                                     ELSE ROUND(amt.[Amount] * @FeePercentage / 100.0, 2)
+                                 END) AS DECIMAL(12, 2)),
+           [PaidAtUtc]     = pay.[PaidAtUtc],
+           [PaymentMethod] = pay.[PaymentMethod]
+    FROM [Booking].[Bookings] b
+    LEFT JOIN [Booking].[BookingPayments] pay
+        ON pay.[BookingType] = N'SingleDay'
+       AND pay.[BookingId] = b.[BookingId]
+    CROSS APPLY
+    (
+        SELECT [Amount] = CAST(COALESCE(
+            pay.[Amount],
+            CASE
+                WHEN b.[PricePerHour] IS NULL THEN NULL
+                -- A Custom walk-in is ALWAYS rate x hours, whatever the category:
+                -- [PricePerHour] there is the hourly rate the provider typed for
+                -- that one job, not an offering's flat fee. Mirrors
+                -- BookingService.ResolveCustomPricing, which does not branch on
+                -- category at all.
+                WHEN b.[Source] = N'Custom' THEN
+                    ROUND(b.[PricePerHour] * (DATEDIFF(MINUTE, b.[StartTime], b.[EndTime]) / 60.0), 2)
+                -- App bookings: only PetSitter DayCare bills per hour; every other
+                -- single-day service snapshots a flat fee.
+                WHEN b.[ServiceCategory] = N'PetSitter'
+                    THEN ROUND(b.[PricePerHour] * (DATEDIFF(MINUTE, b.[StartTime], b.[EndTime]) / 60.0), 2)
+                ELSE ROUND(b.[PricePerHour], 2)
+            END) AS DECIMAL(12, 2))
+    ) amt
+    WHERE (@ProviderId IS NULL OR b.[ProviderId] = @ProviderId)
+      AND (@PetParentId IS NULL OR b.[PetParentId] = @PetParentId)
+
+    UNION ALL
+
+    -- Night-stay bookings are always App bookings, so [IsPrivate] is constant 0.
+    SELECT [BookingType]   = N'NightStay',
+           [BookingId]     = n.[NightStayBookingId],
+           [ProviderId]    = n.[ProviderId],
+           [PetParentId]   = n.[PetParentId],
+           [PetId]         = n.[PetId],
+           [ServiceDate]   = n.[CheckOutDate],
+           [Status]        = n.[Status],
+           [IsEarned]      = CAST(CASE WHEN n.[Status] IN (N'COMPLETED', N'PAID') THEN 1 ELSE 0 END AS BIT),
+           [IsPaid]        = CAST(CASE WHEN n.[Status] = N'PAID' THEN 1 ELSE 0 END AS BIT),
+           [IsPrivate]     = CAST(0 AS BIT),
+           [Amount]        = amt.[Amount],
+           [Fee]           = CAST(COALESCE(
+                                 pay.[PawfrontFee],
+                                 CASE
+                                     WHEN amt.[Amount] IS NULL THEN NULL
+                                     ELSE ROUND(amt.[Amount] * @FeePercentage / 100.0, 2)
+                                 END) AS DECIMAL(12, 2)),
+           [PaidAtUtc]     = pay.[PaidAtUtc],
+           [PaymentMethod] = pay.[PaymentMethod]
+    FROM [Booking].[NightStayBookings] n
+    LEFT JOIN [Booking].[BookingPayments] pay
+        ON pay.[BookingType] = N'NightStay'
+       AND pay.[BookingId] = n.[NightStayBookingId]
+    CROSS APPLY
+    (
+        SELECT [Amount] = CAST(COALESCE(
+            pay.[Amount],
+            CASE
+                WHEN n.[PricePerNight] IS NULL THEN NULL
+                -- Stayed nights = [CheckInDate, CheckOutDate); checkout day isn't billed.
+                ELSE ROUND(n.[PricePerNight] * DATEDIFF(DAY, n.[CheckInDate], n.[CheckOutDate]), 2)
+            END) AS DECIMAL(12, 2))
+    ) amt
+    WHERE (@ProviderId IS NULL OR n.[ProviderId] = @ProviderId)
+      AND (@PetParentId IS NULL OR n.[PetParentId] = @PetParentId)
+);
+GO
+
+
+--------------------------------------------------------------------------------
 -- 3. Stored procedures (CREATE OR ALTER — always reflects latest version)
 --------------------------------------------------------------------------------
 
@@ -9945,10 +10162,13 @@ BEGIN
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @RowProvider UNIQUEIDENTIFIER;
+    DECLARE @Source NVARCHAR(16);
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
+           @Source = [Source], @PayoutId = [PayoutId]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
 
@@ -9967,8 +10187,23 @@ BEGIN
         THROW 51133, 'Booking is not in a state the job can be completed from.', 1;
     END
 
+    -- Mint the payout reference. Custom walk-ins are deliberately left unstamped:
+    -- they are arranged off-platform, carry no Pawfront commission, and can never
+    -- reach PAID (see 51163 in [Booking].[MarkBookingPaid]) — so a payout for one
+    -- would sit "awaiting payment" forever and skew the provider's earnings.
+    IF @PayoutId IS NULL AND @Source = N'App'
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
+    -- [PayoutStatus] is not touched: it defaults to 'Pending' at insert and the
+    -- IN_PROGRESS from-state guarantees nothing has moved it since.
     UPDATE [Booking].[Bookings]
-    SET [Status] = N'COMPLETED', [UpdatedAtUtc] = @Now
+    SET [Status] = N'COMPLETED',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId)
     WHERE [BookingId] = @BookingId;
 
     INSERT INTO [Booking].[BookingStatusHistory]
@@ -10780,10 +11015,12 @@ BEGIN
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @RowProvider UNIQUEIDENTIFIER;
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
+           @PayoutId = [PayoutId]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -10802,8 +11039,19 @@ BEGIN
         THROW 51253, 'Booking is not in a state the job can be completed from.', 1;
     END
 
+    -- Same payout namespace as single-day bookings (one shared SEQUENCE), so a
+    -- 'PO-...' reference identifies a payout without needing the booking kind.
+    IF @PayoutId IS NULL
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
     UPDATE [Booking].[NightStayBookings]
-    SET [Status] = N'COMPLETED', [UpdatedAtUtc] = @Now
+    SET [Status] = N'COMPLETED',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]
@@ -10860,11 +11108,13 @@ BEGIN
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @RowPetParent UNIQUEIDENTIFIER;
     DECLARE @Source NVARCHAR(16);
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
-           @RowPetParent = [PetParentId], @Source = [Source]
+           @RowPetParent = [PetParentId], @Source = [Source],
+           @PayoutId = [PayoutId]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
 
@@ -10893,8 +11143,23 @@ BEGIN
         THROW 51162, 'Booking must be completed before it can be marked paid.', 1;
     END
 
+    -- The payout is normally minted at COMPLETED; stamp one here too so a booking
+    -- completed before payout stamping shipped still ends up with a reference.
+    IF @PayoutId IS NULL
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
+    -- Cash-only today, so recording the payment settles the payout in the same
+    -- step: the parent handed the provider the money directly, there is no
+    -- separate transfer leg to wait on.
     UPDATE [Booking].[Bookings]
-    SET [Status] = N'PAID', [UpdatedAtUtc] = @Now
+    SET [Status] = N'PAID',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId),
+        [PayoutStatus] = N'Paid'
     WHERE [BookingId] = @BookingId;
 
     INSERT INTO [Booking].[BookingStatusHistory]
@@ -10970,10 +11235,12 @@ BEGIN
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @RowPetParent UNIQUEIDENTIFIER;
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @RowPetParent = [PetParentId]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
+           @RowPetParent = [PetParentId], @PayoutId = [PayoutId]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -10997,8 +11264,20 @@ BEGIN
         THROW 51282, 'Booking must be completed before it can be marked paid.', 1;
     END
 
+    -- Backstop for stays completed before payout stamping shipped — see the
+    -- single-day mirror.
+    IF @PayoutId IS NULL
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
     UPDATE [Booking].[NightStayBookings]
-    SET [Status] = N'PAID', [UpdatedAtUtc] = @Now
+    SET [Status] = N'PAID',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId),
+        [PayoutStatus] = N'Paid'
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]
@@ -13848,6 +14127,256 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Notification].[MarkNotificationsRead].';
+GO
+
+
+--------------------------------------------------------------------------------
+-- Earnings / spend reporting. All four read [Booking].[BookingAmounts] (section
+-- 2.9), so the provider's "earned" and the parent's "spent" on a given booking
+-- are the same number by construction, and each summary describes exactly the
+-- set its paginated sibling returns.
+--------------------------------------------------------------------------------
+
+-- GetProviderEarningsSummary: aggregate earnings for one provider over an
+-- optional service-date range (both NULL = all time). Backs both the earnings
+-- overview and the period-filtered endpoint. Custom walk-ins are excluded from
+-- the platform totals and reported separately as [PrivateJob*].
+CREATE OR ALTER PROCEDURE [Booking].[GetProviderEarningsSummary]
+    @ProviderId UNIQUEIDENTIFIER,
+    @FromDate DATE = NULL,
+    @ToDate DATE = NULL,
+    @FeePercentage DECIMAL(9, 4) = 0
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT
+        [CompletedBookings]       = COUNT(CASE WHEN e.[IsPrivate] = 0 THEN 1 END),
+        [PaidBookings]            = COUNT(CASE WHEN e.[IsPrivate] = 0 AND e.[IsPaid] = 1 THEN 1 END),
+        [AwaitingPaymentBookings] = COUNT(CASE WHEN e.[IsPrivate] = 0 AND e.[IsPaid] = 0 THEN 1 END),
+        [UnpricedBookings]        = COUNT(CASE WHEN e.[IsPrivate] = 0 AND e.[Amount] IS NULL THEN 1 END),
+        [GrossAmount]   = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 THEN e.[Amount] END), 0),
+        [PawfrontFee]   = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 THEN e.[Fee] END), 0),
+        [ReceivedGross] = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 AND e.[IsPaid] = 1 THEN e.[Amount] END), 0),
+        [ReceivedFee]   = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 AND e.[IsPaid] = 1 THEN e.[Fee] END), 0),
+        [AwaitingGross] = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 AND e.[IsPaid] = 0 THEN e.[Amount] END), 0),
+        [AwaitingFee]   = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 AND e.[IsPaid] = 0 THEN e.[Fee] END), 0),
+        [PrivateJobCount]  = COUNT(CASE WHEN e.[IsPrivate] = 1 THEN 1 END),
+        [PrivateJobAmount] = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 1 THEN e.[Amount] END), 0)
+    FROM [Booking].[BookingAmounts](@ProviderId, NULL, @FeePercentage) e
+    WHERE e.[IsEarned] = 1
+      AND (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
+      AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate);
+END;
+GO
+PRINT 'Created/updated [Booking].[GetProviderEarningsSummary].';
+GO
+
+-- ListProviderEarningsBookings: which jobs produced the money. Two result sets —
+-- [TotalCount] before paging, then the page. Custom walk-ins ARE listed (real
+-- work) but flagged [IsPrivate] so the client can present them apart from the
+-- platform totals.
+CREATE OR ALTER PROCEDURE [Booking].[ListProviderEarningsBookings]
+    @ProviderId UNIQUEIDENTIFIER,
+    @FromDate DATE = NULL,
+    @ToDate DATE = NULL,
+    @FeePercentage DECIMAL(9, 4) = 0,
+    @SortBy NVARCHAR(16) = N'Date',
+    @SortDirection NVARCHAR(4) = N'Desc',
+    @Skip INT = 0,
+    @Take INT = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [TotalCount] = COUNT(*)
+    FROM [Booking].[BookingAmounts](@ProviderId, NULL, @FeePercentage) e
+    WHERE e.[IsEarned] = 1
+      AND (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
+      AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate);
+
+    SELECT
+        e.[BookingType],
+        e.[BookingId],
+        [JobNumber]       = COALESCE(b.[JobNumber], n.[JobNumber]),
+        [PayoutId]        = COALESCE(b.[PayoutId], n.[PayoutId]),
+        [PayoutStatus]    = COALESCE(b.[PayoutStatus], n.[PayoutStatus]),
+        e.[Status],
+        [ServiceCategory] = COALESCE(b.[ServiceCategory], n.[ServiceCategory]),
+        [SubCategory]     = COALESCE(b.[SubCategory], n.[SubCategory]),
+        [ServiceItemCode] = b.[ServiceItemCode],
+        e.[ServiceDate],
+        [StartTime]       = b.[StartTime],
+        [EndTime]         = b.[EndTime],
+        [CheckInDate]     = n.[CheckInDate],
+        [CheckOutDate]    = n.[CheckOutDate],
+        [Nights]          = CASE WHEN n.[NightStayBookingId] IS NOT NULL
+                                 THEN DATEDIFF(DAY, n.[CheckInDate], n.[CheckOutDate]) END,
+        [CustomerName]    = COALESCE(pp.[FirstName] + N' ' + pp.[LastName], b.[CustomerName]),
+        [PetName]         = COALESCE(pet.[PetName], b.[PetName]),
+        e.[IsPaid],
+        e.[IsPrivate],
+        e.[Amount],
+        e.[Fee],
+        e.[PaidAtUtc],
+        e.[PaymentMethod]
+    FROM [Booking].[BookingAmounts](@ProviderId, NULL, @FeePercentage) e
+    LEFT JOIN [Booking].[Bookings] b
+        ON e.[BookingType] = N'SingleDay' AND b.[BookingId] = e.[BookingId]
+    LEFT JOIN [Booking].[NightStayBookings] n
+        ON e.[BookingType] = N'NightStay' AND n.[NightStayBookingId] = e.[BookingId]
+    LEFT JOIN [Parent].[PetParents] pp
+        ON pp.[PetParentId] = e.[PetParentId]
+    LEFT JOIN [Parent].[Pets] pet
+        ON pet.[PetId] = e.[PetId]
+    WHERE e.[IsEarned] = 1
+      AND (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
+      AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate)
+    ORDER BY
+        CASE WHEN @SortBy = N'Earnings' AND @SortDirection = N'Asc'  THEN e.[Amount] END ASC,
+        CASE WHEN @SortBy = N'Earnings' AND @SortDirection = N'Desc' THEN e.[Amount] END DESC,
+        CASE WHEN @SortBy <> N'Earnings' AND @SortDirection = N'Asc'  THEN e.[ServiceDate] END ASC,
+        CASE WHEN @SortBy <> N'Earnings' AND @SortDirection = N'Desc' THEN e.[ServiceDate] END DESC,
+        -- Deterministic tie-break; without it OFFSET paging can repeat or skip
+        -- rows sharing a date or an amount.
+        e.[BookingId]
+    OFFSET @Skip ROWS FETCH NEXT @Take ROWS ONLY;
+END;
+GO
+PRINT 'Created/updated [Booking].[ListProviderEarningsBookings].';
+GO
+
+-- GetPetParentBookingSummary: how many bookings, and how much spent. @Statuses is
+-- a comma-separated list of raw lifecycle statuses (the API expands the friendly
+-- Completed / Upcoming / Cancelled groups into it). The three buckets are mutually
+-- exclusive and sum to [TotalBookings].
+CREATE OR ALTER PROCEDURE [Booking].[GetPetParentBookingSummary]
+    @PetParentId UNIQUEIDENTIFIER,
+    @FromDate DATE = NULL,
+    @ToDate DATE = NULL,
+    @PetId UNIQUEIDENTIFIER = NULL,
+    @Statuses NVARCHAR(MAX) = NULL,
+    @FeePercentage DECIMAL(9, 4) = 0
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT
+        [TotalBookings]           = COUNT(*),
+        [SingleDayBookings]       = COUNT(CASE WHEN e.[BookingType] = N'SingleDay' THEN 1 END),
+        [NightStayBookings]       = COUNT(CASE WHEN e.[BookingType] = N'NightStay' THEN 1 END),
+        [CompletedBookings]       = COUNT(CASE WHEN e.[IsEarned] = 1 THEN 1 END),
+        [CancelledBookings]       = COUNT(CASE WHEN e.[IsEarned] = 0 AND e.[Status] IN (
+                                        N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
+                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED',
+                                        N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN 1 END),
+        [UpcomingBookings]        = COUNT(CASE WHEN e.[IsEarned] = 0 AND e.[Status] NOT IN (
+                                        N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
+                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED',
+                                        N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN 1 END),
+        [PaidBookings]            = COUNT(CASE WHEN e.[IsPaid] = 1 THEN 1 END),
+        [AwaitingPaymentBookings] = COUNT(CASE WHEN e.[IsEarned] = 1 AND e.[IsPaid] = 0 THEN 1 END),
+        [UnpricedBookings]        = COUNT(CASE WHEN e.[IsEarned] = 1 AND e.[Amount] IS NULL THEN 1 END),
+        [AmountSpent]    = ISNULL(SUM(CASE WHEN e.[IsEarned] = 1 THEN e.[Amount] END), 0),
+        [UpcomingAmount] = ISNULL(SUM(CASE WHEN e.[IsEarned] = 0 AND e.[Status] NOT IN (
+                                        N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
+                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED',
+                                        N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN e.[Amount] END), 0)
+    FROM [Booking].[BookingAmounts](NULL, @PetParentId, @FeePercentage) e
+    WHERE (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
+      AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate)
+      AND (@PetId IS NULL OR e.[PetId] = @PetId)
+      AND (@Statuses IS NULL OR @Statuses = N''
+           OR e.[Status] IN (SELECT LTRIM(RTRIM([value])) FROM STRING_SPLIT(@Statuses, N',')));
+END;
+GO
+PRINT 'Created/updated [Booking].[GetPetParentBookingSummary].';
+GO
+
+-- ListPetParentBookingHistory: paginated history, single-day and night-stay merged
+-- into one feed. Two result sets — [TotalCount] before paging, then the page. The
+-- WHERE clause is deliberately identical to GetPetParentBookingSummary's, so the
+-- summary always describes exactly this set: change one, change the other.
+-- Unlike the provider earnings list this is NOT restricted to [IsEarned] rows —
+-- cancelled and upcoming bookings belong in a history screen.
+CREATE OR ALTER PROCEDURE [Booking].[ListPetParentBookingHistory]
+    @PetParentId UNIQUEIDENTIFIER,
+    @FromDate DATE = NULL,
+    @ToDate DATE = NULL,
+    @PetId UNIQUEIDENTIFIER = NULL,
+    @Statuses NVARCHAR(MAX) = NULL,
+    @FeePercentage DECIMAL(9, 4) = 0,
+    @SortBy NVARCHAR(16) = N'Date',
+    @SortDirection NVARCHAR(4) = N'Desc',
+    @Skip INT = 0,
+    @Take INT = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT [TotalCount] = COUNT(*)
+    FROM [Booking].[BookingAmounts](NULL, @PetParentId, @FeePercentage) e
+    WHERE (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
+      AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate)
+      AND (@PetId IS NULL OR e.[PetId] = @PetId)
+      AND (@Statuses IS NULL OR @Statuses = N''
+           OR e.[Status] IN (SELECT LTRIM(RTRIM([value])) FROM STRING_SPLIT(@Statuses, N',')));
+
+    SELECT
+        e.[BookingType],
+        e.[BookingId],
+        [JobNumber]        = COALESCE(b.[JobNumber], n.[JobNumber]),
+        e.[Status],
+        [ServiceId]        = COALESCE(b.[ServiceId], n.[ServiceId]),
+        [ServiceCategory]  = COALESCE(b.[ServiceCategory], n.[ServiceCategory]),
+        [SubCategory]      = COALESCE(b.[SubCategory], n.[SubCategory]),
+        [ServiceItemCode]  = b.[ServiceItemCode],
+        e.[ServiceDate],
+        [BookingDate]      = b.[BookingDate],
+        [StartTime]        = b.[StartTime],
+        [EndTime]          = b.[EndTime],
+        [CheckInDate]      = n.[CheckInDate],
+        [CheckOutDate]     = n.[CheckOutDate],
+        [Nights]           = CASE WHEN n.[NightStayBookingId] IS NOT NULL
+                                  THEN DATEDIFF(DAY, n.[CheckInDate], n.[CheckOutDate]) END,
+        [ProviderId]       = e.[ProviderId],
+        -- Personal name from SQL; the BUSINESS name lives in the Cosmos offering
+        -- doc and isn't joinable here — the booking-detail read does the same.
+        [ProviderName]     = pr.[FirstName] + N' ' + pr.[LastName],
+        e.[PetId],
+        [PetName]          = pet.[PetName],
+        [PetProfilePhotoUrl] = pet.[ProfilePhotoUrl],
+        e.[IsEarned],
+        e.[IsPaid],
+        -- Gross only. The Pawfront commission is the provider's concern — the
+        -- parent pays this amount either way.
+        e.[Amount],
+        e.[PaidAtUtc],
+        e.[PaymentMethod]
+    FROM [Booking].[BookingAmounts](NULL, @PetParentId, @FeePercentage) e
+    LEFT JOIN [Booking].[Bookings] b
+        ON e.[BookingType] = N'SingleDay' AND b.[BookingId] = e.[BookingId]
+    LEFT JOIN [Booking].[NightStayBookings] n
+        ON e.[BookingType] = N'NightStay' AND n.[NightStayBookingId] = e.[BookingId]
+    LEFT JOIN [Provider].[Providers] pr
+        ON pr.[ProviderId] = e.[ProviderId]
+    LEFT JOIN [Parent].[Pets] pet
+        ON pet.[PetId] = e.[PetId]
+    WHERE (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
+      AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate)
+      AND (@PetId IS NULL OR e.[PetId] = @PetId)
+      AND (@Statuses IS NULL OR @Statuses = N''
+           OR e.[Status] IN (SELECT LTRIM(RTRIM([value])) FROM STRING_SPLIT(@Statuses, N',')))
+    ORDER BY
+        CASE WHEN @SortBy = N'Amount' AND @SortDirection = N'Asc'  THEN e.[Amount] END ASC,
+        CASE WHEN @SortBy = N'Amount' AND @SortDirection = N'Desc' THEN e.[Amount] END DESC,
+        CASE WHEN @SortBy <> N'Amount' AND @SortDirection = N'Asc'  THEN e.[ServiceDate] END ASC,
+        CASE WHEN @SortBy <> N'Amount' AND @SortDirection = N'Desc' THEN e.[ServiceDate] END DESC,
+        e.[BookingId]
+    OFFSET @Skip ROWS FETCH NEXT @Take ROWS ONLY;
+END;
+GO
+PRINT 'Created/updated [Booking].[ListPetParentBookingHistory].';
 GO
 
 

@@ -7,6 +7,7 @@ using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.DeviceTokens;
+using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
 using Pawfront.Application.Notifications;
 using Pawfront.Application.Onboarding;
@@ -25,6 +26,7 @@ using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
 using Pawfront.Infrastructure.Sql.Closures;
 using Pawfront.Infrastructure.Sql.DeviceTokens;
+using Pawfront.Infrastructure.Sql.Earnings;
 using Pawfront.Infrastructure.Sql.Events;
 using Pawfront.Infrastructure.Sql.Notifications;
 using Pawfront.Infrastructure.Sql.Onboarding;
@@ -72,6 +74,11 @@ public static class SqlServiceRegistration
             services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
             services.AddSingleton<IProviderNameReader, NullProviderNameReader>();
             services.AddSingleton<IProviderContactReader, NullProviderContactReader>();
+            // Earnings are aggregates over the booking tables joined to the payment
+            // ledger, neither of which the in-memory stores keep — report zeros
+            // rather than 500ing the reporting screens.
+            services.AddSingleton<IProviderEarningsStore, NullProviderEarningsStore>();
+            services.AddSingleton<IParentSpendStore, NullParentSpendStore>();
             // No outbox table to write to — log and drop, same posture as the
             // booking sweeps having no in-memory equivalent.
             services.AddSingleton<INotificationPublisher, NullNotificationPublisher>();
@@ -202,6 +209,20 @@ public static class SqlServiceRegistration
 
             services.AddScoped<IProviderNameReader>(provider =>
                 new SqlProviderNameReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Earnings / spend reporting. Both sides read the shared
+            // Booking.BookingAmounts function, so a provider's "earned" and a
+            // parent's "spent" on the same booking are the same number by
+            // construction.
+            services.AddScoped<IProviderEarningsStore>(provider =>
+                new SqlProviderEarningsStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IParentSpendStore>(provider =>
+                new SqlParentSpendStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 

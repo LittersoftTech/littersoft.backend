@@ -1341,6 +1341,11 @@ New app bookings default to `CREATED`; custom walk-ins start `CONFIRMED`.
   server-side by `BookingService.MarkPaidAsync` (and the night-stay twin) from the
   booking's **price-locked total** — it reuses `GetDetailAsync`'s `TotalAmount` /
   `PawfrontFee`, so there's a single pricing source of truth.
+  **As of 2026-08-05 the mark-paid sprocs also settle the payout** —
+  `PayoutStatus → 'Paid'` (and a `PayoutId` stamped if one is somehow missing).
+  The reference itself is minted earlier, at `COMPLETED`; see the "Earnings &
+  spend reporting" section for the payout lifecycle and the reporting APIs built
+  on it.
   **Snapshots at creation (price / cancellation policy / selected-location address —
   2026-07-24).** Three things are frozen onto the booking row **at creation** so a
   later provider edit never re-prices / re-rules / re-addresses an already-created
@@ -1526,6 +1531,99 @@ window. It lives in `Booking.NightStayBookings` (+ `NightStayBookingStatusHistor
   **400 UseNightStayEndpoint** (`BookingNightStayUseDedicatedEndpointException`,
   thrown from both `BookingService.CreateAsync` and `CreateCustomAsync`) — you
   must use the night-stay endpoint with `checkInDate`/`checkOutDate`.
+
+### Earnings & spend reporting (2026-08-05) — payouts, provider earnings, parent spend
+
+**Cash is the only payment method today**, which decides most of the design below:
+the parent hands the provider money directly, so there is no transfer leg for
+Pawfront to execute — "payout" here means *the provider has been paid*, not
+*Pawfront owes them*.
+
+**A payout reference is minted when the job COMPLETES, not when it is paid.**
+`Booking.CompleteBooking` / `CompleteNightStayBooking` stamp
+`PayoutId` (`PO-000123`) and leave `PayoutStatus = 'Pending'`; the existing
+`POST .../bookings/{id}/paid` then flips it to `'Paid'` alongside the
+`Booking.BookingPayments` ledger row. The two columns already existed as
+capture-only (`Pending|Processing|Paid|Failed`) — nothing had ever written them.
+That split is the whole point of the earnings screen: **Received** (marked paid)
+vs **Awaiting payment** (job done, provider hasn't recorded the cash).
+- New **`Booking.PayoutNumberSequence`** mints the number. A SEQUENCE, not a
+  per-table IDENTITY, because single-day and night-stay bookings sit in separate
+  tables but share **one** payout namespace — exactly as they share the ledger.
+  Distinct from `JobNumber` (`PF-000123`): a job that never completes never earns
+  a payout reference, so the two drift apart by design.
+- **Custom walk-ins are never stamped.** They are off-platform, carry 0%
+  commission, and `MarkBookingPaid` rejects them (THROW 51163) — a payout on one
+  would sit "awaiting payment" forever and skew the totals.
+- The mark-paid sprocs also stamp a `PayoutId` if it is missing, so a booking
+  completed before this shipped doesn't end up settled-but-unreferenced.
+- `DeployAll.sql` backfills once, idempotently: `PayoutStatus = 'Paid'` on
+  already-`PAID` rows (the column was lying about them), and `PayoutId` on
+  completed rows via `sp_sequence_get_range` (the documented bulk allocation —
+  `NEXT VALUE FOR` isn't usable per-row in a set-based UPDATE).
+
+**`Booking.BookingAmounts` (new inline TVF) is the single definition of what a
+booking is worth**, and both sides read it — so a provider's "earned" and a
+parent's "spent" on the same booking cannot disagree. It unifies the two booking
+tables, takes `@ProviderId` **or** `@PetParentId` (the other NULL), and returns
+every booking with `Status`, `IsEarned`, `IsPaid`, `IsPrivate`, `Amount`, `Fee`.
+- **The ledger wins** whenever a `BookingPayments` row exists — it froze Amount +
+  PawfrontFee at payment time, so a later change to `Payments:PawfrontFeePercentage`
+  can't rewrite history. Only unpaid bookings are priced from the creation-time
+  price-lock, and **that arithmetic mirrors `BookingService.GetDetailAsync` /
+  `NightStayBookingService` exactly** — Custom = rate × hours (any category),
+  App PetSitter = rate × hours, every other App single-day service = the flat
+  snapshot, night-stay = rate × nights. **Change the C# and you must change the
+  TVF**, or the earnings screen will disagree with the booking detail.
+- A legacy row with no price snapshot yields `Amount` NULL, surfaced as
+  `unpricedBookings` rather than silently under-reporting.
+
+**What counts, and when.**
+- **Earned / spent = `COMPLETED` or `PAID`.** Completed-but-unpaid is included
+  deliberately: the provider did the work and the parent has typically already
+  paid in cash — only the provider's "mark paid" tap is outstanding, and the
+  parent has no control over it.
+- **Bucketed by SERVICE date** — `BookingDate` (single-day) / `CheckOutDate`
+  (night-stay), never `PaidAtUtc`. A job done Sunday and marked paid Monday
+  belongs to Sunday's week, and an unpaid booking has no payment date at all yet
+  still has to land in a period.
+- **Periods are calendar-aligned, in UTC** (`EarningsPeriodRange`): Weekly =
+  Mon–Sun, Monthly / Quarterly / Yearly = the current calendar period, AllTime =
+  unbounded. Whole period, not truncated at today, since a booking can be marked
+  COMPLETED ahead of its service date. UTC matches the codebase-wide convention,
+  so a Swiss provider's month rolls over at 01:00/02:00 local — revisit alongside
+  the provider-timezone column push notifications also want.
+- **Events are not earnings.** Ticket proceeds are a separate flow.
+
+**Money is reported three ways** because with cash they differ: **gross** (what
+the parent pays — the provider physically holds it), **fee** (the commission they
+collected on Pawfront's behalf and owe back), **net** = gross − fee, the headline.
+Each splits into `received*` / `awaiting*`. Custom walk-ins are excluded from all
+of them and reported as `privateJobCount` / `privateJobAmount`, so the provider
+still sees the work without it distorting platform earnings. Net is computed in
+C# (`ProviderEarningsTotals.NetAmount`), never in SQL — one subtraction, one place.
+
+**Application layer** lives in `Pawfront.Application/Earnings/`:
+`IProviderEarningsService` / `IParentSpendService` (+ their narrow
+`I*Store` SQL readers), `EarningsPeriod` + `EarningsPeriodRange`,
+`EarningsQueryParsing` (shared sort vocabulary so both hosts accept the same
+values), and `ParentBookingStatusFilter`, which expands the friendly
+`Completed` / `Upcoming` / `Cancelled` groups into raw lifecycle statuses **in C#**
+— the sprocs take a plain CSV, so adding a status means editing `BookingStatuses`
+and that one file rather than four stored procedures. Paging is capped at
+**20** server-side. In-memory dev fallbacks (`NullProviderEarningsStore` /
+`NullParentSpendStore`) report zeros — the in-memory stores hold neither the
+ledger nor the payout columns.
+
+**The provider earnings routes are ownership-enforced from the JWT** — the only
+routes on that host besides account-delete that are. The rest of the provider host
+trusts the route's `providerId`, which is fine for profile-shaped reads but not for
+revenue: a provider reading a competitor's takings by guessing a GUID is a
+materially different exposure. Mismatch → **403 Forbidden**. The parent routes need
+no special handling; they sit on the existing `RequireOwnedPetParent()` group.
+
+The parent endpoints are **additions** — the existing unpaginated
+`GET /pet-parents/{id}/bookings` and `/night-stay-bookings` are untouched.
 
 ### Per-service catalog (`Provider.ProviderServices`)
 A provider's offering can expose more than one bookable service (e.g.
@@ -2005,6 +2103,21 @@ excluded for free.
 
 ## In progress / next step
 
+**Earnings & spend reporting is built but NOT deployed (2026-08-05).** Re-run
+`Deployment/DeployAll.sql` — it adds `Booking.PayoutNumberSequence`, the
+`Booking.BookingAmounts` function and four sprocs
+(`GetProviderEarningsSummary`, `ListProviderEarningsBookings`,
+`GetPetParentBookingSummary`, `ListPetParentBookingHistory`), alters four existing
+sprocs to stamp/settle the payout columns, and runs the one-time
+`PayoutStatus`/`PayoutId` backfills. The solution builds clean and every SQL file
+parses, but **none of it has been executed against the dev database** — the sprocs,
+the TVF and especially the `sp_sequence_get_range` backfill are unverified at
+runtime (parse-clean is not deploy-clean; a binder error would only surface on
+deploy). Verify after deploying: complete a job and check `PayoutId` is stamped,
+mark it paid and check `PayoutStatus` flips, then confirm
+`GET /providers/{id}/earnings/overview` reconciles with
+`GET /providers/{id}/earnings/bookings`.
+
 **The booking expiry sweep has been rebuilt as an Azure Function (2026-08-02).**
 The old in-database sweep (`Booking.ExpireStaleBookings` + the
 `BookingExpirySweeper` hosted service, every 10 min in **both** API hosts with no
@@ -2178,6 +2291,8 @@ GET    /pet-parents/{petParentId}/pets                                          
 GET    /pet-parents/{petParentId}/event-bookings                                 returns the caller's event-ticket bookings — slim summary cards with the joined event (title, category, eventType, start date/time, banner URL, and venue `eventLocation` for physical events — null for online) so the mobile "My Bookings" screen can render without a follow-up fetch. Backed by Event.ListEventBookingsByBookerEmail (SQL) + a per-booking Cosmos point read that hydrates the venue location (physical events only, fanned out in parallel; a failed read returns that card with a null location). **Booker identity on Event.EventBookings is free text (no FK to PetParents), so the filter matches on the caller's Firebase email claim** — the route's petParentId is verified by the ownership filter, then the JWT email is used as the SQL filter. Ordered most-recent first; cancelled bookings included. Mobile drills into GET /event-bookings/{bookingId} for the full shape with attendee names. 403 EmailClaimMissing when the JWT carries no email claim (rare).
 GET    /pet-parents/{petParentId}/bookings                                       the parent's own SERVICE bookings ("my bookings"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered (petParentId from JWT), so a caller only sees their own. [] when none — no 404. Backed by IBookingService.ListByPetParentAsync (sproc Booking.ListBookingsByPetParent) + IParentBookingEnrichmentService. Returns sectioned cards `ParentServiceBookingCardResponse` { booking, providerDetails, serviceDetails, cancellationPolicy, location } — the last two added 2026-07-24, both read from the booking's frozen-at-creation snapshot (serviceDetails.pricePerHour likewise prefers the price-locked rate, live only as the legacy fallback). `serviceDetails.description` (2026-07-29) is the opposite case — the groomer menu item's blurb / the trainer's privateTrainingDescription, read LIVE on purpose (cosmetic copy, never price-locked), so a provider's later edit shows through; null for the other categories and when the offering can't be resolved. `location` address fields are null on legacy rows without a snapshot (the booking-DETAIL read is the live-fallback authority) and on Custom walk-ins. (The provider host's GET /pet-parents/{petParentId}/bookings is unscoped there and keeps the flat BookingResponse shape.)
 POST   /pet-parents/{petParentId}/bookings                                       body { petId, serviceId, bookingDate, startTime, endTime, serviceItemCode?, jobNotes?, locationType } — parent-initiated SERVICE booking. locationType is REQUIRED (ParentLocation | ProviderLocation → 400 InvalidRequest / UnsupportedLocationType); drives the detail read's `location` address block. ("book now" from a search result/slot). Booker = route petParentId (ownership-filtered; never from body). Provider resolved server-side from serviceId. petId must be one of the caller's pets (404 PetNotFound / 403 Forbidden inline; sproc re-checks via THROW 51068 → 400 InvalidPetId). Same shared IBookingService.CreateAsync + race-safe Booking.CreateBooking sproc as the provider host — full validation chain (working hours, closures → 409 ServiceClosed, duration rules, groomer serviceItemCode, capacity → 409 CapacityExceeded, 409 ProviderInactive, **booking lead time → 409 BookingLeadTimeTooShort** when the requested start is under 2 h away). Booking.Bookings now carries nullable PetId (FK → Parent.Pets), surfaced as petId on every booking read.
+GET    /pet-parents/{petParentId}/bookings/summary                               [?period=Weekly|Monthly|Quarterly|Yearly|AllTime &from= &to= &petId= &status=] counts + spend for the parent's bookings. Returns { period, periodStart, periodEnd, totalBookings, singleDayBookings, nightStayBookings, completedBookings, upcomingBookings, cancelledBookings, paidBookings, awaitingPaymentBookings, unpricedBookings, amountSpent, upcomingAmount }. The three buckets are mutually exclusive and sum to totalBookings — declines, no-shows and expiries all count as cancelled, since from the parent's side they equally mean "it didn't happen". amountSpent covers COMPLETED **or** PAID: a job the provider finished but hasn't tapped "mark paid" on is included, because the parent already handed over the cash and has no control over that tap (awaitingPaymentBookings says how many). upcomingAmount is what confirmed future bookings will cost and is deliberately NOT part of amountSpent. `status` accepts a comma-separated mix of the friendly groups Completed / Upcoming / Cancelled and raw lifecycle statuses. Same filters — and the identical WHERE clause — as /history below, so the summary always describes exactly the set that list returns. Ownership-filtered. 400 InvalidRequest (bad period/status, or from > to).
+GET    /pet-parents/{petParentId}/bookings/history                               [?period= &from= &to= &petId= &status= &sortBy=Date|Amount &sortDirection=Asc|Desc &skip= &take=] paginated history, single-day and night-stay merged into ONE feed (a parent thinks "my bookings", not "my two kinds of bookings"); bookingType discriminates and the other kind's fields are null. Unlike the provider earnings list this is NOT restricted to completed bookings — cancelled and upcoming ones belong in a history screen, each carrying its expected `amount`. Explicit from/to override period; take capped at 20; sort defaults to Date/Desc with a BookingId tie-break. Rows carry jobId, status, serviceDate, providerId + providerName (personal name from SQL — the business name lives in Cosmos, same as the booking-detail read), pet name + photo, isCompleted, isPaid, amount, paidAtUtc, paymentMethod. The Pawfront commission is deliberately absent: the parent pays `amount` either way and the split is the provider's concern. Ownership-filtered. 400 InvalidRequest. **Additive** — the existing unpaginated GET /pet-parents/{id}/bookings is unchanged.
 POST   /pet-parents/{petParentId}/bookings/{bookingId}/status                    body { status, note? } — parent sets APPROVAL_NEEDED|COMPLETED|PARENT_CANCELLED|PROVIDER_NO_SHOW on their own booking; audited. Actor=Parent, actorId=route petParentId. 403 Forbidden (not the parent's booking), 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged. Shared Booking.UpdateBookingStatus sproc with the provider host.
 POST   /pet-parents/{petParentId}/bookings/{bookingId}/no-show                   parent reports the PROVIDER never showed up → sets PROVIDER_NO_SHOW (terminal, frees capacity, audited). Allowed only from a confirmed-equivalent state and only 30+ minutes after the booking's scheduled start (BookingDate + StartTime, UTC). Reporting is optional: if nobody reports and the job is still unstarted at the end of the PROVIDER'S WORKING DAY on the booking date (their closing time from ProviderWeeklyAvailability, or the booking's own EndTime if that is later; midnight UTC when no hours are saved), the scheduled external job settles it automatically (START_JOB → PARENT_NO_SHOW, confirmed-equivalent → PROVIDER_NO_SHOW) — this used to be JOB_EXPIRED, and until 2026-08-02 fired at the booking's own end time. 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state), 409 NoShowTooEarly (grace window not elapsed, THROW 51128), 409 BookingStatusTerminal.
 GET    /pet-parents/{petParentId}/bookings/{bookingId}/terms-changes             terms-changes` — the provider's terms that changed since the booking was created (price, cancellation policy, drop-off/pick-up, selected-location address) plus rule-violation rows (fixed duration / minimum duration / minimum nights) checked against the booked window. Always 200 → { bookingId, hasChanges, changes: [{ field, changeType, bookedValue, currentValue, message }] }; hasChanges false = no confirmation sheet. Feeds `acknowledgeTermsChanges` on POST .../modifications (409 BookingTermsChanged without it once drifted). 404 BookingNotFound when the booking isn't the caller's. Ownership-filtered group.
@@ -2279,6 +2394,10 @@ POST   /providers/{providerId}/bookings/{bookingId}/no-show                     
 POST   /providers/{providerId}/bookings/{bookingId}/prescription               body { prescriptionText?, isPetVaccinated, vaccinations: [...] } — vet records/edits the visit prescription (upsert). Vet bookings only, provider-only, only from IN_PROGRESS/COMPLETED. Returns the saved prescription block. 404 BookingNotFound, 403 Forbidden, 400 PrescriptionNotVetBooking, 409 PrescriptionNotAllowed. Also settable via the `prescription` block on .../complete.
 GET    /providers/{providerId}/bookings/{bookingId}/terms-changes                terms-changes` — the provider's terms that changed since the booking was created (price, cancellation policy, drop-off/pick-up, selected-location address) plus rule-violation rows (fixed duration / minimum duration / minimum nights) checked against the booked window. Always 200 → { bookingId, hasChanges, changes: [{ field, changeType, bookedValue, currentValue, message }] }; hasChanges false = no confirmation sheet. Feeds `acknowledgeTermsChanges` on POST .../modifications (409 BookingTermsChanged without it once drifted). 404 BookingNotFound when the booking isn't this provider's. Night-stay twin: GET /providers/{providerId}/night-stay-bookings/{bookingId}/terms-changes.
 GET    /providers/{providerId}/bookings/{bookingId}/status-history               full status audit trail, oldest-first (404 if not this provider's booking)
+GET    /providers/{providerId}/earnings/overview                                 the earnings landing screen in one call: lifetime totals + thisWeek/thisMonth/thisYear, all resolved from ONE instant (four separate calls could straddle midnight UTC and mix two weeks into one screen). Each block carries counts (completed / paid / awaitingPayment / unpriced) and money three ways — grossAmount (what parents pay, the provider holds it), pawfrontFee (commission collected on Pawfront's behalf, owed back), netAmount (gross − fee, the headline) — each split into received* (marked PAID) and awaiting* (job COMPLETED, cash not yet recorded). privateJobCount/privateJobAmount report Custom walk-ins, which are off-platform and excluded from every other figure. **Ownership-enforced from the JWT → 403 Forbidden on a mismatch** (revenue data; unlike the rest of this host it does not trust the route id).
+GET    /providers/{providerId}/earnings                                          [?period=Weekly|Monthly|Quarterly|Yearly|AllTime] the same totals scoped to ONE calendar period (default AllTime), plus the resolved periodStart/periodEnd so the client can label the screen without redoing calendar maths. Periods are calendar-aligned in UTC and cover the WHOLE period, not truncated at today (a booking can be marked COMPLETED ahead of its service date). 400 InvalidRequest on an unknown period; 403 Forbidden.
+GET    /providers/{providerId}/earnings/bookings                                 [?period= &from= &to= &sortBy=Date|Earnings &sortDirection=Asc|Desc &skip= &take=] which jobs produced the money — single-day and night-stay merged, bookingType discriminates. Explicit from/to override period; take is capped at 20 server-side; sort defaults to Date/Desc with a BookingId tie-break (without it OFFSET paging repeats or skips rows sharing a date or amount). Rows carry jobId (PF-000123), payoutId (PO-000123) + payoutStatus, serviceDate, grossAmount/pawfrontFee/netAmount, isPaid, paidAtUtc, paymentMethod, and the customer + pet name. Reconciles exactly with the summary over the same range because both read Booking.BookingAmounts. Custom walk-ins ARE listed but flagged isPrivate — they are real work, just not part of the platform totals. 400 InvalidRequest (bad period/sortBy/sortDirection, or from > to); 403 Forbidden.
+
 GET    /bookings/{bookingId}
 POST   /bookings/{bookingId}/cancel                                              parent cancel → sets PARENT_CANCELLED + audit
 GET    /pet-parents/{petParentId}/bookings

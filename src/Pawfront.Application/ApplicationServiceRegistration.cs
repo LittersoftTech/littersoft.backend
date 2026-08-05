@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
+using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
 using Pawfront.Application.Notifications;
 using Pawfront.Application.Offerings;
@@ -53,6 +54,13 @@ public static class ApplicationServiceRegistration
         // Diffs a booking's frozen-at-creation terms against the provider's current
         // ones, for the "these changed since you booked" confirmation sheet.
         services.TryAddScoped<IBookingTermsChangeService, BookingTermsChangeService>();
+
+        // Earnings / spend reporting. Read-only aggregates over the booking tables
+        // and the payment ledger — the two sides read one shared SQL definition of
+        // a booking's amount, so a provider's "earned" and a parent's "spent" can
+        // never disagree.
+        services.TryAddScoped<IProviderEarningsService, ProviderEarningsService>();
+        services.TryAddScoped<IParentSpendService, ParentSpendService>();
 
         // Composes booking push notifications (who to tell, with what parameters).
         // The copy itself lives in NotificationTemplateCatalog and is rendered by

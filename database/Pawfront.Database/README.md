@@ -833,6 +833,34 @@ booking tables — a payments ledger should outlive booking deletion. Indexed on
 `ProviderId` (`IX_BookingPayments_Provider`) for the per-provider "total received"
 report. Written by `MarkBookingPaid` / `MarkNightStayBookingPaid`.
 
+**Payout tracking (2026-08-05).** The long-dormant `PayoutStatus` / `PayoutId`
+columns on both booking tables are now written. `CompleteBooking` /
+`CompleteNightStayBooking` mint `PayoutId` (`PO-000123`) from the new
+`Booking.PayoutNumberSequence` and leave `PayoutStatus = 'Pending'`; the mark-paid
+sprocs settle it to `'Paid'`. Cash is the only method today, so recording the
+payment settles the payout in the same step — there is no separate transfer leg.
+A SEQUENCE rather than a per-table IDENTITY because both booking kinds share one
+payout namespace, exactly as they share this ledger. **Custom walk-ins are never
+stamped** — they are off-platform, carry no commission, and can never reach `PAID`,
+so a payout on one would sit "awaiting payment" forever.
+
+`Booking.BookingAmounts` (inline TVF) is the **single definition of what a booking
+is worth**, read by all four earnings/spend sprocs so a provider's "earned" and a
+parent's "spent" on the same booking can never disagree. It unifies both booking
+tables, takes `@ProviderId` **or** `@PetParentId` (the other NULL), and returns
+every booking with `Status`, `IsEarned` (COMPLETED/PAID), `IsPaid`, `IsPrivate`,
+`Amount`, `Fee`. The ledger row wins whenever one exists (its figures are frozen at
+payment time, so a later fee-percentage change can't rewrite history); unpaid
+bookings are priced from the creation-time price-lock, and **that arithmetic
+mirrors `BookingService.GetDetailAsync` / `NightStayBookingService` exactly —
+change the C# and you must change the TVF.** Amounts are attributed to the
+**service** date (`BookingDate` / `CheckOutDate`), never the payment date.
+
+Consumers: `GetProviderEarningsSummary`, `ListProviderEarningsBookings`,
+`GetPetParentBookingSummary`, `ListPetParentBookingHistory` (each paginated pair's
+`WHERE` clause is deliberately identical to its summary's — change one, change the
+other).
+
 `Booking.Bookings.Status`, `NightStayBookings.Status`, and the two history
 tables' `From/ToStatus` columns are `NVARCHAR(48)` and accept the expanded status
 set (decline, the job states `START_JOB` / `IN_PROGRESS`, `PAID`, the retired

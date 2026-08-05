@@ -22,11 +22,13 @@ BEGIN
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @RowPetParent UNIQUEIDENTIFIER;
     DECLARE @Source NVARCHAR(16);
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
-           @RowPetParent = [PetParentId], @Source = [Source]
+           @RowPetParent = [PetParentId], @Source = [Source],
+           @PayoutId = [PayoutId]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
 
@@ -55,8 +57,24 @@ BEGIN
         THROW 51162, 'Booking must be completed before it can be marked paid.', 1;
     END
 
+    -- The payout is normally minted at COMPLETED; stamp one here too so a booking
+    -- completed before payout stamping shipped still ends up with a reference
+    -- rather than a settled payout that has no id.
+    IF @PayoutId IS NULL
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
+    -- Cash-only today, so recording the payment settles the payout in the same
+    -- step: the parent handed the provider the money directly, there is no
+    -- separate transfer leg to wait on.
     UPDATE [Booking].[Bookings]
-    SET [Status] = N'PAID', [UpdatedAtUtc] = @Now
+    SET [Status] = N'PAID',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId),
+        [PayoutStatus] = N'Paid'
     WHERE [BookingId] = @BookingId;
 
     INSERT INTO [Booking].[BookingStatusHistory]
