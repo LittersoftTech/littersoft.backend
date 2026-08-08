@@ -9,13 +9,26 @@
 -- It emits the canonical id block the apps read on every notification:
 --   category, bookingId, eventId, parentId, providerId, petId, isNightStay, payoutId
 -- plus the template parameters the copy needs (petName, providerName, parentName,
--- serviceDate/startTime or checkInDate/dropOffTime, serviceType, serviceItemCode).
+-- serviceStartUtc / checkOutUtc, serviceType, serviceItemCode).
 --
 -- NOTE on `serviceName`: deliberately NOT built here. The 18 grooming menu-item
 -- display names live in the C# GroomingServiceCatalog, so this sproc emits the
 -- raw [ServiceType] + [ServiceItemCode] and NotificationRenderer derives the
 -- label at render time. Duplicating those names in T-SQL would create a second
 -- copy that silently drifts from the catalog.
+--
+-- NOTE on DATES and TIMES (2026-08-06): same division of labour, for the same
+-- reason. This sproc emits raw UTC INSTANTS (`serviceStartUtc`, `checkOutUtc`,
+-- `newServiceStartUtc`, `newCheckOutUtc`, `closingAtUtc`) and never a formatted
+-- string; NotificationRenderer converts each one to the recipient's timezone —
+-- Switzerland for everybody today — and derives the display keys
+-- (`serviceDate`, `startTime`, `checkInDate`, `dropOffTime`, `checkOutDate`,
+-- `newServiceDate`, `newStartTime`, `newCheckOutDate`, `closingTime`) from them.
+-- The columns read below are UTC wall-clock values, as everything in this schema
+-- is, so formatting them here is what used to announce a 14:00 UTC booking as
+-- "14:00" to a Swiss provider whose clock read 16:00. Doing the conversion in
+-- T-SQL instead would put the timezone, the DST rules and the format strings in
+-- two places that must never disagree. See C# NotificationLocalTime.
 --
 -- Values are all CAST to NVARCHAR: FCM rejects non-string data values, so a
 -- number reaching the payload would have to be re-stringified anyway. NULL
@@ -35,11 +48,15 @@ CREATE OR ALTER PROCEDURE [Notification].[EnqueueBookingNotification]
     -- them. Explicit parameters rather than a JSON blob to merge: T-SQL has no
     -- clean object-merge, and naming them keeps the contract greppable.
     @Amount NVARCHAR(64) = NULL,
-    @NewServiceDate NVARCHAR(32) = NULL,
-    @NewStartTime NVARCHAR(16) = NULL,
+    -- The staged proposal on a modification, as UTC instants rather than display
+    -- text: the renderer localises them (@NewCheckOutUtc is night-stay only).
+    @NewServiceStartUtc DATETIME2(0) = NULL,
+    @NewCheckOutUtc DATETIME2(0) = NULL,
     @AbsentParty NVARCHAR(32) = NULL,
     @Location NVARCHAR(500) = NULL,
-    @ClosingTime NVARCHAR(16) = NULL,
+    -- When the provider closes on the service date. An instant, not a bare TIME:
+    -- converting a clock time to the recipient's zone needs the date it falls on.
+    @ClosingAtUtc DATETIME2(0) = NULL,
     -- Idempotency. Callers pass a suffix rather than a whole key so the
     -- type + booking prefix stays consistent across every producer.
     @DedupeSuffix NVARCHAR(64) = NULL
@@ -56,6 +73,9 @@ BEGIN
     DECLARE @ServiceDate DATE;
     DECLARE @StartTime TIME(0);
     DECLARE @CheckOutDate DATE;
+    -- Night-stay only: the hand-back time on the check-out day, so the stay's end
+    -- can be expressed as an instant like its start.
+    DECLARE @PickUpTime TIME(0);
     -- Custom walk-ins carry the pet's name on the booking row rather than a PetId.
     DECLARE @RowPetName NVARCHAR(100);
     DECLARE @SnapshotAddressLine NVARCHAR(500);
@@ -75,6 +95,7 @@ BEGIN
                -- same instant BR-01 / BR-53 / the modification cutoff all measure
                -- against, so the notification quotes what the rules use.
                @StartTime = [DropOffTime],
+               @PickUpTime = [PickUpTime],
                @SnapshotAddressLine = [SnapshotAddressLine],
                @UnitPrice = [PricePerNight],
                -- The checkout day is not a stayed night.
@@ -165,6 +186,20 @@ BEGIN
             CAST(ROUND(@UnitPrice * @Quantity, 2) AS DECIMAL(12, 2)));
     END
 
+    -- The service's start as a single UTC instant: BookingDate + StartTime, or
+    -- CheckInDate + DropOffTime for a stay. Same arithmetic BR-01 / BR-53 and the
+    -- modification cutoff use, so what the notification says and what the rules
+    -- enforce can't drift apart. DATEDIFF-of-seconds rather than a cast-and-add
+    -- because TIME + DATETIME2 is not a legal addition in T-SQL.
+    DECLARE @ServiceStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
+                CAST(@ServiceDate AS DATETIME2(0)));
+
+    DECLARE @CheckOutUtc DATETIME2(0) =
+        CASE WHEN @IsNightStay = 1 AND @PickUpTime IS NOT NULL
+             THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PickUpTime),
+                          CAST(@CheckOutDate AS DATETIME2(0))) END;
+
     DECLARE @DataJson NVARCHAR(MAX) =
     (
         SELECT
@@ -184,22 +219,18 @@ BEGIN
             @PetName                                     AS [petName],
             @ServiceType                                 AS [serviceType],
             @ServiceItemCode                             AS [serviceItemCode],
-            FORMAT(@ServiceDate, N'd MMM', N'en-GB')     AS [serviceDate],
-            CONVERT(NVARCHAR(5), @StartTime, 108)        AS [startTime],
+            -- --- times, as UTC instants; the renderer localises + formats them ---
+            -- Style 126 on a DATETIME2(0) gives "2026-08-05T14:00:00" exactly.
+            CONVERT(NVARCHAR(19), @ServiceStartUtc, 126)  AS [serviceStartUtc],
             -- Night-stay only; NULL columns drop out of the JSON.
-            CASE WHEN @IsNightStay = 1
-                 THEN FORMAT(@ServiceDate, N'd MMM', N'en-GB') END   AS [checkInDate],
-            CASE WHEN @IsNightStay = 1
-                 THEN FORMAT(@CheckOutDate, N'd MMM', N'en-GB') END  AS [checkOutDate],
-            CASE WHEN @IsNightStay = 1
-                 THEN CONVERT(NVARCHAR(5), @StartTime, 108) END      AS [dropOffTime],
+            CONVERT(NVARCHAR(19), @CheckOutUtc, 126)      AS [checkOutUtc],
             -- --- caller-supplied extras ---
             @Amount                                      AS [amount],
-            @NewServiceDate                              AS [newServiceDate],
-            @NewStartTime                                AS [newStartTime],
+            CONVERT(NVARCHAR(19), @NewServiceStartUtc, 126) AS [newServiceStartUtc],
+            CONVERT(NVARCHAR(19), @NewCheckOutUtc, 126)   AS [newCheckOutUtc],
             @AbsentParty                                 AS [absentParty],
-            COALESCE(@Location, @SnapshotAddressLine)    AS [location],
-            @ClosingTime                                 AS [closingTime]
+            COALESCE(@Location, @SnapshotAddressLine)     AS [location],
+            CONVERT(NVARCHAR(19), @ClosingAtUtc, 126)     AS [closingAtUtc]
         FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
     );
 

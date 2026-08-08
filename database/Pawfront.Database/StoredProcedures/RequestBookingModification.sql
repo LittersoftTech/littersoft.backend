@@ -135,16 +135,18 @@ BEGIN
     DECLARE @ReqDedupe NVARCHAR(64) =
         CAST((SELECT TOP 1 [BookingModificationId] FROM @InsertedModification) AS NVARCHAR(36));
 
-    DECLARE @ProposedDateText NVARCHAR(32) = FORMAT(@ProposedBookingDate, N'd MMM', N'en-GB');
-    DECLARE @ProposedTimeText NVARCHAR(16) = CONVERT(NVARCHAR(5), @ProposedStartTime, 108);
+    -- The proposal as a single UTC instant; the renderer localises it into the
+    -- newServiceDate + newStartTime the copy quotes.
+    DECLARE @ProposedStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @ProposedStartTime),
+                CAST(@ProposedBookingDate AS DATETIME2(0)));
 
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @BookingId,
         @IsNightStay = 0,
         @Audience = @ReqAudience,
         @NotificationType = @ReqType,
-        @NewServiceDate = @ProposedDateText,
-        @NewStartTime = @ProposedTimeText,
+        @NewServiceStartUtc = @ProposedStartUtc,
         @DedupeSuffix = @ReqDedupe;
 
     SELECT [BookingId],

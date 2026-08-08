@@ -263,8 +263,10 @@ internal static class ProviderDetailsEndpoints
             profile.ProfilePhotoUrl,
             profile.BannerImageUrl,
             profile.GalleryImages,
-            // Reviews not built yet — always an empty array for now.
-            Array.Empty<ProviderReviewResponse>(),
+            ReviewResponseMapping.ToSummary(profile.ReviewSummary),
+            // A preview of the newest reviews. The full sorted/paged list is
+            // GET /providers/{providerId}/reviews.
+            [.. profile.RecentReviews.Select(ReviewResponseMapping.ToItem)],
             profile.PetSitter is null ? null : ToPetSitterResponse(profile.PetSitter),
             profile.PetGroomer is null
                 ? null

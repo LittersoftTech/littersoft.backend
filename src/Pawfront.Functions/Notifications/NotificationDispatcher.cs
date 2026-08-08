@@ -87,8 +87,16 @@ public sealed class NotificationDispatcher(
         CancellationToken cancellationToken)
     {
         var data = NotificationPayloadBuilder.ParseData(notification.DataJson);
+
+        // Every date and time in the copy is rendered in this zone. PROVISION:
+        // when Provider.Providers / Parent.PetParents gain a TimeZoneId column,
+        // read it onto ClaimedNotification and pass it here — nothing else has to
+        // change. Until then every recipient is Swiss, which is what a null id
+        // resolves to.
+        var timeZone = NotificationLocalTime.Resolve(recipientTimeZoneId: null);
+
         var rendered = NotificationRenderer.Render(
-            notification.NotificationType, notification.Audience, data);
+            notification.NotificationType, notification.Audience, data, timeZone);
 
         if (rendered is null)
         {

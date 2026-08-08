@@ -351,7 +351,8 @@ internal sealed class BookingService(
         return new BookingDetailResult(
             row, jobId, unitPrice, total, fee, feePercentage,
             serviceLocation, row.CancellationPolicyHours, location,
-            providerSummary?.Address, providerSummary?.City, providerSummary?.Zip);
+            providerSummary?.Address, providerSummary?.City, providerSummary?.Zip,
+            providerSummary?.ImageUrl);
     }
 
     /// <summary>

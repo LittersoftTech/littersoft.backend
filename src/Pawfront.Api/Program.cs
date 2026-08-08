@@ -62,6 +62,9 @@ api.MapEventBookingEndpoints();
 api.MapEventDashboardEndpoints();
 api.MapBookingEndpoints();
 api.MapProviderEarningsEndpoints();
+// Provider rates the parent after a finished job (rating only) + reads the reviews
+// parents have left for them.
+api.MapProviderReviewEndpoints();
 api.MapPetParentLookupEndpoints();
 api.MapProviderNightStayBookingEndpoints();
 api.MapBlobImageEndpoints();

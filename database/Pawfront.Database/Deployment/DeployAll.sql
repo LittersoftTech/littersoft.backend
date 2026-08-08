@@ -120,6 +120,21 @@ BEGIN
 END
 GO
 
+-- Reviews exchanged between the parties to a finished booking. Its own schema
+-- because a review is about neither party's profile nor the booking itself, and
+-- because the subject set is expected to widen (events were scoped out of the
+-- first cut) — [Booking] would have been the wrong home for that.
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Review')
+BEGIN
+    EXEC ('CREATE SCHEMA [Review]');
+    PRINT 'Created schema [Review].';
+END
+ELSE
+BEGIN
+    PRINT 'Schema [Review] already exists.';
+END
+GO
+
 --------------------------------------------------------------------------------
 -- 2. Tables (created in FK-dependency order)
 --------------------------------------------------------------------------------
@@ -1313,6 +1328,13 @@ BEGIN
         [Prescription] NVARCHAR(MAX) NULL,
         -- Single primary/profile photo (distinct from the gallery in PetPhotos).
         [ProfilePhotoUrl] NVARCHAR(1000) NULL,
+        -- DELETE /pets/{petId} is a soft delete: the row survives because
+        -- [Booking].[Bookings].[PetId] references it and the booking-detail read
+        -- joins the pet through it, so removing the row would blank the pet out
+        -- of the PROVIDER's history of a job they actually did.
+        [IsDeleted] BIT NOT NULL
+            CONSTRAINT [DF_Pets_IsDeleted] DEFAULT 0,
+        [DeletedAtUtc] DATETIME2(7) NULL,
         [CreatedAtUtc] DATETIME2(7) NOT NULL
             CONSTRAINT [DF_Pets_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
         [UpdatedAtUtc] DATETIME2(7) NOT NULL
@@ -1441,6 +1463,35 @@ AND EXISTS (
         ON [Parent].[Pets] ([MicrochipId])
         WHERE [MicrochipId] IS NOT NULL;
 GO
+
+-- Retrofit (2026-08-05): [IsDeleted] + [DeletedAtUtc] on [Parent].[Pets].
+-- DELETE /pets/{petId} used to remove the row and NULL out
+-- [Booking].[Bookings].[PetId] on every booking that referenced it, which
+-- silently erased the pet from the PROVIDER's record of a job they performed.
+-- It is now an anonymise + hide (see [Parent].[DeletePetParentPet]), so the row
+-- has to survive and carry a flag instead.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'IsDeleted'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    ALTER TABLE [Parent].[Pets]
+        ADD [IsDeleted] BIT NOT NULL
+            CONSTRAINT [DF_Pets_IsDeleted] DEFAULT 0;
+    PRINT 'Added column [Parent].[Pets].[IsDeleted].';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE [name] = N'DeletedAtUtc'
+      AND [object_id] = OBJECT_ID(N'[Parent].[Pets]'))
+BEGIN
+    ALTER TABLE [Parent].[Pets] ADD [DeletedAtUtc] DATETIME2(7) NULL;
+    PRINT 'Added column [Parent].[Pets].[DeletedAtUtc].';
+END
+GO
+
 
 -- Idempotent: extend [Parent].[Pets] with the medical-info columns. All four
 -- are nullable in the schema because pets are inserted via AddPetParentPet
@@ -4238,6 +4289,126 @@ END
 GO
 
 
+-- 2.22 Review.BookingReviews ---------------------------------------------------
+-- Reviews exchanged between the two parties to a finished booking. ONE table holds
+-- both directions, discriminated by [ReviewerType]: 'Parent' is the pet parent
+-- reviewing the provider (rating + optional comment + optional photos), 'Provider'
+-- is the provider rating the pet parent (rating ONLY — the CHECK below refuses a
+-- comment on that direction).
+--
+-- [BookingType] discriminates which booking table [BookingId] points at, and as with
+-- [Booking].[BookingPayments] there is deliberately NO FK — one column cannot
+-- reference two tables. [Review].[UpsertBookingReview] is what proves the booking
+-- exists, that the caller is a party to it, and that it has reached COMPLETED or PAID.
+--
+-- Names are NOT denormalised here: the list read joins [Parent].[PetParents] live, so
+-- an anonymised account reads "Deleted User" instead of keeping the real name frozen.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'BookingReviews' AND [schema_id] = SCHEMA_ID(N'Review'))
+BEGIN
+    CREATE TABLE [Review].[BookingReviews]
+    (
+        [BookingReviewId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_BookingReviews_Id] DEFAULT NEWSEQUENTIALID(),
+        [BookingType] NVARCHAR(16) NOT NULL,
+        [BookingId] UNIQUEIDENTIFIER NOT NULL,
+        [ReviewerType] NVARCHAR(16) NOT NULL,
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        [Rating] TINYINT NOT NULL,
+        [Comment] NVARCHAR(1000) NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_BookingReviews_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_BookingReviews_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT [PK_BookingReviews] PRIMARY KEY CLUSTERED ([BookingReviewId] ASC),
+        -- One review per booking per direction. Resubmitting edits the existing row,
+        -- so this is what makes a concurrent double-submit safe.
+        CONSTRAINT [UQ_BookingReviews_Booking_Reviewer]
+            UNIQUE ([BookingType], [BookingId], [ReviewerType]),
+        CONSTRAINT [CK_BookingReviews_BookingType]
+            CHECK ([BookingType] IN (N'SingleDay', N'NightStay')),
+        CONSTRAINT [CK_BookingReviews_ReviewerType]
+            CHECK ([ReviewerType] IN (N'Parent', N'Provider')),
+        CONSTRAINT [CK_BookingReviews_Rating]
+            CHECK ([Rating] >= 1 AND [Rating] <= 5),
+        CONSTRAINT [CK_BookingReviews_ProviderRatingHasNoComment]
+            CHECK ([ReviewerType] = N'Parent' OR [Comment] IS NULL)
+    );
+    PRINT 'Created table [Review].[BookingReviews].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Review].[BookingReviews] already exists.';
+END
+GO
+
+-- Drives the provider-reviews list + its average/histogram summary. Filtered to the
+-- parent direction, which is the only one this read ever wants.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_BookingReviews_Provider_Created'
+      AND [object_id] = OBJECT_ID(N'[Review].[BookingReviews]'))
+    CREATE INDEX [IX_BookingReviews_Provider_Created]
+        ON [Review].[BookingReviews] ([ProviderId], [CreatedAtUtc] DESC)
+        INCLUDE ([Rating], [BookingType], [BookingId], [PetParentId])
+        WHERE [ReviewerType] = N'Parent';
+GO
+
+-- The mirror: a pet parent's aggregate rating, shown on the provider-facing
+-- customer card.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_BookingReviews_PetParent'
+      AND [object_id] = OBJECT_ID(N'[Review].[BookingReviews]'))
+    CREATE INDEX [IX_BookingReviews_PetParent]
+        ON [Review].[BookingReviews] ([PetParentId])
+        INCLUDE ([Rating])
+        WHERE [ReviewerType] = N'Provider';
+GO
+
+
+-- 2.23 Review.BookingReviewPhotos ----------------------------------------------
+-- Photos attached to a pet parent's booking review — one row per uploaded photo,
+-- same shape as [Booking].[BookingEvidence]. Blobs live under the [ReviewPhotos]
+-- folder keyed by the review id, which is why photos are a SECOND call after the
+-- review row exists. Only parent-authored reviews can carry them.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'BookingReviewPhotos' AND [schema_id] = SCHEMA_ID(N'Review'))
+BEGIN
+    CREATE TABLE [Review].[BookingReviewPhotos]
+    (
+        [BookingReviewPhotoId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_BookingReviewPhotos_Id] DEFAULT NEWSEQUENTIALID(),
+        [BookingReviewId] UNIQUEIDENTIFIER NOT NULL,
+        [PhotoUrl] NVARCHAR(1000) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_BookingReviewPhotos_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT [PK_BookingReviewPhotos] PRIMARY KEY CLUSTERED ([BookingReviewPhotoId] ASC),
+        CONSTRAINT [FK_BookingReviewPhotos_BookingReviews_BookingReviewId]
+            FOREIGN KEY ([BookingReviewId]) REFERENCES [Review].[BookingReviews] ([BookingReviewId])
+            ON DELETE CASCADE
+    );
+    PRINT 'Created table [Review].[BookingReviewPhotos].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Review].[BookingReviewPhotos] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_BookingReviewPhotos_Review_Created'
+      AND [object_id] = OBJECT_ID(N'[Review].[BookingReviewPhotos]'))
+    CREATE INDEX [IX_BookingReviewPhotos_Review_Created]
+        ON [Review].[BookingReviewPhotos] ([BookingReviewId], [CreatedAtUtc] ASC)
+        INCLUDE ([PhotoUrl]);
+GO
+
+
 --------------------------------------------------------------------------------
 -- 2.9 Sequences + functions (must precede the procedures that reference them —
 --     unlike table references, a function or sequence named by a procedure is
@@ -5333,7 +5504,10 @@ BEGIN
                ELSE CAST(0 AS BIT)
            END AS [IsMedicalInfoComplete]
     FROM [Parent].[Pets]
-    WHERE [PetParentId] = @PetParentId
+    -- Soft-deleted pets don't count towards onboarding: the parent no longer
+    -- has them, and their (retained) medical fields would otherwise keep the
+    -- pet-medical-info stage looking Complete.
+    WHERE [PetParentId] = @PetParentId AND [IsDeleted] = 0
     ORDER BY [CreatedAtUtc] ASC;
 
     -- Result set 3: identity. Zero rows = no identity uploaded yet (stage
@@ -5536,7 +5710,9 @@ BEGIN
            [VaccinationDose],
            [Prescription]
     FROM [Parent].[Pets]
-    WHERE [PetParentId] = @PetParentId
+    -- Soft-deleted pets never appear in the parent's list; the row survives only
+    -- so a past booking's petDetails join still resolves.
+    WHERE [PetParentId] = @PetParentId AND [IsDeleted] = 0
     ORDER BY [CreatedAtUtc] ASC;
 
     -- Result set 2: photos for those pets. Grouped by PetId in the C# layer
@@ -5550,7 +5726,7 @@ BEGIN
     FROM [Parent].[PetPhotos] AS ph
     INNER JOIN [Parent].[Pets] AS p
         ON p.[PetId] = ph.[PetId]
-    WHERE p.[PetParentId] = @PetParentId
+    WHERE p.[PetParentId] = @PetParentId AND p.[IsDeleted] = 0
     ORDER BY ph.[CreatedAtUtc] ASC;
 
     -- Result set 3: next-consultation dates for those pets, one row per
@@ -5561,7 +5737,7 @@ BEGIN
     FROM [Parent].[PetNextConsultations] AS c
     INNER JOIN [Parent].[Pets] AS p
         ON p.[PetId] = c.[PetId]
-    WHERE p.[PetParentId] = @PetParentId
+    WHERE p.[PetParentId] = @PetParentId AND p.[IsDeleted] = 0
     ORDER BY c.[ConsultationType] ASC;
 END;
 GO
@@ -5599,7 +5775,9 @@ BEGIN
            [VaccinationDose],
            [Prescription]
     FROM [Parent].[Pets]
-    WHERE [PetId] = @PetId;
+    -- Soft-deleted pets are invisible to both apps' pet screens: the row only
+    -- survives so a past booking's petDetails join still resolves.
+    WHERE [PetId] = @PetId AND [IsDeleted] = 0;
 
     -- Result set 2: the pet's photo gallery, oldest-first so the mobile
     -- gallery renders in upload order. Nested under the pet in the response.
@@ -5741,9 +5919,37 @@ GO
 
 
 -- 3.1l2 Parent.DeletePetParentPet ----------------------------------------------
--- Permanently removes a pet. Photo rows cascade (ON DELETE CASCADE); blobs are
--- left for a future sweep. Bookings that referenced the pet are detached
--- (PetId set null) so FK_Bookings_Pets_PetId doesn't block the delete.
+-- "Delete pet" is an ANONYMISE + HIDE, not a row delete — the same shape as the
+-- two account deletes ([Parent].[DeletePetParent] / [Provider].[DeleteProvider]),
+-- and for the same reason: the PetId is referenced by history that is not only
+-- the parent's.
+--
+-- [Booking].[Bookings].[PetId] points at this row and [Booking].[GetBookingDetail]
+-- reads the whole petDetails block through that join. The previous version
+-- deleted the row and NULLed PetId on every booking that referenced it, which
+-- silently blanked the pet out of the PROVIDER's record of a job they actually
+-- performed — they were left with a booking whose pet no longer existed.
+--
+-- What goes: everything that identifies the animal — name, microchip, photo,
+-- description, and the free-text medical fields. MicrochipId is cleared rather
+-- than replaced because it is a real-world ISO 11784/11785 identifier under a
+-- UNIQUE index; clearing it frees the chip so the animal can be registered again.
+-- What stays: the facts that keep a past booking meaningful — type, breed,
+-- gender, date of birth, weight, and the vaccination / sterilization / temperament
+-- statuses.
+--
+-- [IsDeleted] then hides the pet from every parent-facing read, from the
+-- ownership filter behind /pets/{petId}/*, from onboarding status, and from
+-- booking creation. Booking reads deliberately do NOT filter on it — that is the
+-- history the row is being kept for.
+--
+-- Photo rows are removed outright (gallery media, no historical value) along with
+-- the forward-looking next-consultation reminders. The blobs themselves are left
+-- for a future sweep, unchanged from the previous behaviour.
+--
+-- Idempotent: a second call on an already-deleted pet returns the original
+-- DeletedAtUtc with WasAlreadyDeleted = 1 rather than re-scrubbing.
+--
 -- THROW 51214 = pet not found (pet delete).
 CREATE OR ALTER PROCEDURE [Parent].[DeletePetParentPet]
     @PetId UNIQUEIDENTIFIER
@@ -5752,29 +5958,60 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @PetParentId UNIQUEIDENTIFIER;
+    DECLARE @Exists BIT = 0;
+    DECLARE @IsDeleted BIT;
+    DECLARE @DeletedAtUtc DATETIME2(7);
+    DECLARE @WasAlreadyDeleted BIT = 0;
 
     BEGIN TRANSACTION;
 
-    SELECT @PetParentId = [PetParentId]
+    -- UPDLOCK + HOLDLOCK: serialise against a concurrent booking create naming
+    -- this pet, so the create either sees a live pet or is rejected by the
+    -- IsDeleted guard — never reads "live" while this scrub is committing.
+    SELECT @Exists = 1,
+           @PetParentId = [PetParentId],
+           @IsDeleted = [IsDeleted],
+           @DeletedAtUtc = [DeletedAtUtc]
     FROM [Parent].[Pets] WITH (UPDLOCK, HOLDLOCK)
     WHERE [PetId] = @PetId;
 
-    IF @PetParentId IS NULL
+    -- XACT_ABORT ON rolls the transaction back on THROW.
+    IF @Exists = 0
     BEGIN
         THROW 51214, 'Pet was not found.', 1;
     END
 
-    UPDATE [Booking].[Bookings]
-    SET [PetId] = NULL
-    WHERE [PetId] = @PetId;
+    IF @IsDeleted = 1
+    BEGIN
+        SET @WasAlreadyDeleted = 1;
+        SET @Now = ISNULL(@DeletedAtUtc, @Now);
+    END
+    ELSE
+    BEGIN
+        UPDATE [Parent].[Pets]
+        SET [PetName] = N'Deleted Pet',
+            [MicrochipId] = NULL,
+            [Description] = NULL,
+            [MedicalHistory] = NULL,
+            [VaccinationType] = NULL,
+            [VaccinationDose] = NULL,
+            [Prescription] = NULL,
+            [ProfilePhotoUrl] = NULL,
+            [IsDeleted] = 1,
+            [DeletedAtUtc] = @Now,
+            [UpdatedAtUtc] = @Now
+        WHERE [PetId] = @PetId;
 
-    DELETE FROM [Parent].[Pets]
-    WHERE [PetId] = @PetId;
+        DELETE FROM [Parent].[PetPhotos] WHERE [PetId] = @PetId;
+        DELETE FROM [Parent].[PetNextConsultations] WHERE [PetId] = @PetId;
+    END
 
     SELECT @PetId AS [PetId],
            @PetParentId AS [PetParentId],
-           SYSUTCDATETIME() AS [DeletedAtUtc];
+           @Now AS [DeletedAtUtc],
+           @WasAlreadyDeleted AS [WasAlreadyDeleted];
 
     COMMIT TRANSACTION;
 END;
@@ -6046,8 +6283,9 @@ GO
 --      is UNIQUE, so this frees the real uid; the mobile placeholder frees the
 --      real number under UX_PetParents_MobileNumber. A fresh sign-up therefore
 --      gets a brand-new identity and PetParentId.
---   3. Anonymises the parent's PETS in place — bookings FK to PetId and read the
---      pet through that join, so deleting them would blank out the provider's own
+--   3. Anonymises the parent's PETS in place and marks them IsDeleted (the same
+--      flag a per-pet delete sets) — bookings FK to PetId and read the pet
+--      through that join, so deleting them would blank out the provider's own
 --      booking history. Identity goes (name, microchip, photo, notes); the animal
 --      facts that give a past booking meaning stay.
 --   4. Deletes operational data + media only: device tokens, mobile OTPs, the
@@ -6066,9 +6304,37 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @ParentAuthIdentityId UNIQUEIDENTIFIER;
-    DECLARE @Exists BIT = 0, @IsDeleted BIT, @DeletedAtUtc DATETIME2(7);
-    DECLARE @WasAlreadyDeleted BIT = 0, @AnonymisedPetCount INT = 0;
-    DECLARE @BlobUrls TABLE ([BlobUrl] NVARCHAR(1000) NOT NULL, [Kind] NVARCHAR(32) NOT NULL);
+    DECLARE @Exists BIT = 0;
+    DECLARE @IsDeleted BIT;
+    DECLARE @DeletedAtUtc DATETIME2(7);
+    DECLARE @WasAlreadyDeleted BIT = 0;
+    DECLARE @AnonymisedPetCount INT = 0;
+    DECLARE @BlockedByPendingJobs BIT = 0;
+
+    -- Captured before the scrub so the caller can clean Blob Storage.
+    DECLARE @BlobUrls TABLE
+    (
+        [BlobUrl] NVARCHAR(1000) NOT NULL,
+        [Kind] NVARCHAR(32) NOT NULL
+    );
+
+    -- Unfinished jobs blocking the delete. Populated only when the parent still
+    -- has some; the caller surfaces them so they can be cancelled or seen through.
+    DECLARE @PendingJobs TABLE
+    (
+        [BookingId] UNIQUEIDENTIFIER NOT NULL,
+        [BookingType] NVARCHAR(16) NOT NULL,
+        [JobId] NVARCHAR(32) NOT NULL,
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [ProviderName] NVARCHAR(201) NULL,
+        [ServiceCategory] NVARCHAR(64) NOT NULL,
+        [SubCategory] NVARCHAR(64) NOT NULL,
+        [Status] NVARCHAR(48) NOT NULL,
+        [ServiceDate] DATE NOT NULL,
+        [StartTime] TIME(0) NULL,
+        [EndTime] TIME(0) NULL,
+        [PetName] NVARCHAR(100) NULL
+    );
 
     BEGIN TRANSACTION;
 
@@ -6081,14 +6347,90 @@ BEGIN
     FROM [Parent].[PetParents] WITH (UPDLOCK, HOLDLOCK)
     WHERE [PetParentId] = @PetParentId;
 
-    IF @Exists = 0 THROW 51223, 'Pet parent was not found.', 1;
+    -- XACT_ABORT ON rolls the transaction back on THROW.
+    IF @Exists = 0
+    BEGIN
+        THROW 51223, 'Pet parent was not found.', 1;
+    END
 
     IF @IsDeleted = 1
     BEGIN
+        -- Idempotent: already anonymised. Report the original timestamp and skip
+        -- straight to the result sets (nothing left to clean up out of SQL).
         SET @WasAlreadyDeleted = 1;
         SET @Now = ISNULL(@DeletedAtUtc, @Now);
     END
     ELSE
+    BEGIN
+        ------------------------------------------------------------------
+        -- 0. Refuse while unfinished jobs exist.
+        --    "Unfinished" is the complement of the terminal set, so a job that
+        --    is done (COMPLETED / PAID) or dead (cancelled / declined / no-show
+        --    / expired / OTP-cancelled) never blocks — only one that still has
+        --    a provider waiting on it or a service still to be delivered.
+        --    Both booking kinds count: a boarding stay is as live as an
+        --    appointment. Kept in step with Pawfront.Application's
+        --    BookingStatuses.Terminal — change one, change the other.
+        --
+        --    Note a CREATED booking that is already past its expiry rule still
+        --    reads CREATED until the sweep job flips it (every 5 minutes), so it
+        --    can block for that long. Self-correcting, and blocking briefly is
+        --    the safe direction.
+        ------------------------------------------------------------------
+        INSERT INTO @PendingJobs
+            ([BookingId], [BookingType], [JobId], [ProviderId], [ProviderName],
+             [ServiceCategory], [SubCategory], [Status], [ServiceDate],
+             [StartTime], [EndTime], [PetName])
+        SELECT b.[BookingId],
+               N'SingleDay',
+               N'PF-' + FORMAT(b.[JobNumber], N'D6'),
+               b.[ProviderId],
+               NULLIF(LTRIM(RTRIM(ISNULL(pr.[FirstName], N'') + N' ' + ISNULL(pr.[LastName], N''))), N''),
+               b.[ServiceCategory],
+               b.[SubCategory],
+               b.[Status],
+               b.[BookingDate],
+               b.[StartTime],
+               b.[EndTime],
+               pet.[PetName]
+        FROM [Booking].[Bookings] AS b
+        LEFT JOIN [Provider].[Providers] AS pr ON pr.[ProviderId] = b.[ProviderId]
+        LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = b.[PetId]
+        WHERE b.[PetParentId] = @PetParentId
+          AND b.[Status] NOT IN (
+                N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
+                N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+        UNION ALL
+        SELECT n.[NightStayBookingId],
+               N'NightStay',
+               N'PF-' + FORMAT(n.[JobNumber], N'D6'),
+               n.[ProviderId],
+               NULLIF(LTRIM(RTRIM(ISNULL(pr.[FirstName], N'') + N' ' + ISNULL(pr.[LastName], N''))), N''),
+               n.[ServiceCategory],
+               n.[SubCategory],
+               n.[Status],
+               n.[CheckInDate],
+               n.[DropOffTime],
+               n.[PickUpTime],
+               pet.[PetName]
+        FROM [Booking].[NightStayBookings] AS n
+        LEFT JOIN [Provider].[Providers] AS pr ON pr.[ProviderId] = n.[ProviderId]
+        LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = n.[PetId]
+        WHERE n.[PetParentId] = @PetParentId
+          AND n.[Status] NOT IN (
+                N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
+                N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED');
+
+        IF EXISTS (SELECT 1 FROM @PendingJobs)
+        BEGIN
+            SET @BlockedByPendingJobs = 1;
+        END
+    END
+
+    -- Everything below only runs when the account is live AND unblocked.
+    IF @IsDeleted = 0 AND @BlockedByPendingJobs = 0
     BEGIN
         INSERT INTO @BlobUrls ([BlobUrl], [Kind])
         SELECT [ProfilePhotoUrl], N'ParentProfilePhoto'
@@ -6096,10 +6438,12 @@ BEGIN
         WHERE [PetParentId] = @PetParentId AND [ProfilePhotoUrl] IS NOT NULL
         UNION ALL
         SELECT [PhotoUrl], N'ParentPhoto'
-        FROM [Parent].[PetParentPhotos] WHERE [PetParentId] = @PetParentId
+        FROM [Parent].[PetParentPhotos]
+        WHERE [PetParentId] = @PetParentId
         UNION ALL
         SELECT [IdentityPhotoUrl], N'ParentIdentity'
-        FROM [Parent].[ParentIdentities] WHERE [PetParentId] = @PetParentId
+        FROM [Parent].[ParentIdentities]
+        WHERE [PetParentId] = @PetParentId
         UNION ALL
         SELECT p.[ProfilePhotoUrl], N'PetProfilePhoto'
         FROM [Parent].[Pets] p
@@ -6110,6 +6454,11 @@ BEGIN
         INNER JOIN [Parent].[Pets] p ON p.[PetId] = ph.[PetId]
         WHERE p.[PetParentId] = @PetParentId;
 
+        ------------------------------------------------------------------
+        -- 1. Anonymise the profile row and disable the account.
+        --    The mobile placeholder is derived from the PetParentId so it stays
+        --    unique under UX_PetParents_MobileNumber, and frees the real number.
+        ------------------------------------------------------------------
         UPDATE [Parent].[PetParents]
         SET [FirstName] = N'Deleted',
             [LastName] = N'User',
@@ -6130,6 +6479,11 @@ BEGIN
             [UpdatedAtUtc] = @Now
         WHERE [PetParentId] = @PetParentId;
 
+        ------------------------------------------------------------------
+        -- 2. Sever the Firebase login. FirebaseUserId is UNIQUE, so replacing it
+        --    frees the real uid for a fresh sign-up. The PetParentId link is kept
+        --    for audit — the row is unreachable by any real Firebase user now.
+        ------------------------------------------------------------------
         UPDATE [Parent].[ParentAuthIdentities]
         SET [FirebaseUserId] = N'deleted:' + CONVERT(NVARCHAR(36), @PetParentId),
             [FirebaseTenantId] = NULL,
@@ -6141,6 +6495,10 @@ BEGIN
             [UpdatedAtUtc] = @Now
         WHERE [ParentAuthIdentityId] = @ParentAuthIdentityId;
 
+        ------------------------------------------------------------------
+        -- 3. Anonymise the pets. The rows stay — bookings FK to PetId and read
+        --    the pet through that join — but nothing identifying survives.
+        ------------------------------------------------------------------
         UPDATE [Parent].[Pets]
         SET [PetName] = N'Deleted Pet',
             [MicrochipId] = NULL,
@@ -6150,28 +6508,49 @@ BEGIN
             [VaccinationDose] = NULL,
             [Prescription] = NULL,
             [ProfilePhotoUrl] = NULL,
+            -- The pets go with the account, so they carry the same flag a
+            -- per-pet delete sets. COALESCE keeps the original timestamp on a
+            -- pet the parent had already deleted individually.
+            [IsDeleted] = 1,
+            [DeletedAtUtc] = COALESCE([DeletedAtUtc], @Now),
             [UpdatedAtUtc] = @Now
         WHERE [PetParentId] = @PetParentId;
         SET @AnonymisedPetCount = @@ROWCOUNT;
 
+        ------------------------------------------------------------------
+        -- 4. Remove operational data + media only. Nothing here carries
+        --    historical meaning: each booking already froze the parent details
+        --    and address it was created with.
+        ------------------------------------------------------------------
         DELETE FROM [Parent].[ParentDeviceTokens]
-        WHERE [PetParentId] = @PetParentId OR [ParentAuthIdentityId] = @ParentAuthIdentityId;
+        WHERE [PetParentId] = @PetParentId
+           OR [ParentAuthIdentityId] = @ParentAuthIdentityId;
+
         DELETE FROM [Parent].[ParentMobileOtps] WHERE [PetParentId] = @PetParentId;
         DELETE FROM [Parent].[ParentIdentities] WHERE [PetParentId] = @PetParentId;
         DELETE FROM [Parent].[PetParentPhotos] WHERE [PetParentId] = @PetParentId;
 
-        DELETE ph FROM [Parent].[PetPhotos] ph
+        DELETE ph
+        FROM [Parent].[PetPhotos] ph
         INNER JOIN [Parent].[Pets] p ON p.[PetId] = ph.[PetId]
         WHERE p.[PetParentId] = @PetParentId;
 
-        DELETE nc FROM [Parent].[PetNextConsultations] nc
+        DELETE nc
+        FROM [Parent].[PetNextConsultations] nc
         INNER JOIN [Parent].[Pets] p ON p.[PetId] = nc.[PetId]
         WHERE p.[PetParentId] = @PetParentId;
     END
 
+    -- Result set 1: summary. The retained counts are reported so the caller can
+    -- see that history survived the delete. When BlockedByPendingJobs = 1 the
+    -- account is UNTOUCHED and every other column here is meaningless — the
+    -- caller reads that flag first and goes to result set 3. [DeletedAtUtc]
+    -- still carries @Now rather than NULL only to keep the column non-nullable
+    -- for the reader; it is never surfaced in that case.
     SELECT @PetParentId AS [PetParentId],
            @Now AS [DeletedAtUtc],
            @WasAlreadyDeleted AS [WasAlreadyDeleted],
+           @BlockedByPendingJobs AS [BlockedByPendingJobs],
            @AnonymisedPetCount AS [AnonymisedPetCount],
            (SELECT COUNT(*) FROM [Booking].[Bookings] WHERE [PetParentId] = @PetParentId)
                AS [RetainedBookingCount],
@@ -6182,7 +6561,17 @@ BEGIN
            (SELECT COUNT(*) FROM [Booking].[BookingPayments] WHERE [PetParentId] = @PetParentId)
                AS [RetainedPaymentCount];
 
+    -- Result set 2: blob URLs to delete best-effort.
     SELECT [BlobUrl], [Kind] FROM @BlobUrls;
+
+    -- Result set 3: the unfinished jobs that refused the delete. Empty on the
+    -- normal path. Ordered soonest-first — the parent has to deal with the next
+    -- one before anything else.
+    SELECT [BookingId], [BookingType], [JobId], [ProviderId], [ProviderName],
+           [ServiceCategory], [SubCategory], [Status], [ServiceDate],
+           [StartTime], [EndTime], [PetName]
+    FROM @PendingJobs
+    ORDER BY [ServiceDate] ASC, [StartTime] ASC;
 
     COMMIT TRANSACTION;
 END;
@@ -7418,9 +7807,11 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM [Parent].[PetParents] WHERE [PetParentId] = @PetParentId)
         THROW 51060, 'Pet parent was not found.', 1;
 
+    -- A soft-deleted pet can't be booked. The row survives only to keep
+    -- EXISTING bookings readable; it is not a pet the parent still has.
     IF @PetId IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM [Parent].[Pets]
-        WHERE [PetId] = @PetId AND [PetParentId] = @PetParentId)
+        WHERE [PetId] = @PetId AND [PetParentId] = @PetParentId AND [IsDeleted] = 0)
         THROW 51068, 'Pet was not found or does not belong to the pet parent.', 1;
 
     IF NOT EXISTS (
@@ -7628,7 +8019,14 @@ BEGIN
            b.[SnapshotCity],
            b.[SnapshotZipCode],
            b.[SnapshotLatitude],
-           b.[SnapshotLongitude]
+           b.[SnapshotLongitude],
+           -- Payment ledger join. HOW the money changed hands ('Cash'/'Digital')
+           -- is recorded only on the ledger row, never on the booking, so the
+           -- payment block could not report it without this. Both columns stay
+           -- NULL until the provider marks the booking PAID. Appended LAST so
+           -- existing reader ordinals stay stable.
+           pay.[PaymentMethod] AS [PayoutMethod],
+           pay.[PaidAtUtc]
     FROM [Booking].[Bookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
@@ -7640,6 +8038,10 @@ BEGIN
         ON rx.[BookingId] = b.[BookingId]
     LEFT JOIN [Parent].[PetNextConsultations] AS nc
         ON nc.[PetId] = b.[PetId] AND nc.[ConsultationType] = N'Vet'
+    -- BookingType discriminates which booking table BookingId points at — the
+    -- ledger is shared by single-day and night-stay bookings and has no FK.
+    LEFT JOIN [Booking].[BookingPayments] AS pay
+        ON pay.[BookingId] = b.[BookingId] AND pay.[BookingType] = N'SingleDay'
     WHERE b.[BookingId] = @BookingId;
 END;
 GO
@@ -8392,6 +8794,9 @@ BEGIN
         FROM [Parent].[Pets]
         WHERE [PetId] = @PetId
           AND [PetParentId] = @PetParentId
+          -- A soft-deleted pet can't be booked. The row survives only to keep
+          -- EXISTING stays readable; it is not a pet the parent still has.
+          AND [IsDeleted] = 0
     )
     BEGIN
         THROW 51233, 'Pet was not found or does not belong to the pet parent.', 1;
@@ -8600,7 +9005,13 @@ BEGIN
            b.[SnapshotCity],
            b.[SnapshotZipCode],
            b.[SnapshotLatitude],
-           b.[SnapshotLongitude]
+           b.[SnapshotLongitude],
+           -- Payment ledger join. HOW the money changed hands ('Cash'/'Digital')
+           -- is recorded only on the ledger row, never on the booking. Both
+           -- columns stay NULL until the provider marks the stay PAID. Appended
+           -- LAST so existing reader ordinals stay stable.
+           pay.[PaymentMethod] AS [PayoutMethod],
+           pay.[PaidAtUtc]
     FROM [Booking].[NightStayBookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
@@ -8608,6 +9019,10 @@ BEGIN
         ON pet.[PetId] = b.[PetId]
     LEFT JOIN [Provider].[Providers] AS prov
         ON prov.[ProviderId] = b.[ProviderId]
+    -- BookingType discriminates which booking table BookingId points at — the
+    -- ledger is shared by single-day and night-stay bookings and has no FK.
+    LEFT JOIN [Booking].[BookingPayments] AS pay
+        ON pay.[BookingId] = b.[NightStayBookingId] AND pay.[BookingType] = N'NightStay'
     WHERE b.[NightStayBookingId] = @NightStayBookingId;
 END;
 GO
@@ -9484,7 +9899,10 @@ BEGIN
         [IsNightStay] BIT NOT NULL,
         [NotificationType] NVARCHAR(64) NOT NULL,
         [Audience] NVARCHAR(16) NOT NULL,
-        [ClosingTime] NVARCHAR(16) NULL,
+        -- The provider's closing INSTANT, not a bare clock time: the notification
+        -- is rendered in the recipient's timezone, and converting a time-of-day
+        -- needs the date it falls on.
+        [ClosingAtUtc] DATETIME2(0) NULL,
         PRIMARY KEY ([BookingId], [NotificationType], [Audience]));
 
     -- Single-day bookings with their derived instants. Night-stay is handled
@@ -9498,10 +9916,11 @@ BEGIN
         -- The provider's closing time on the booking date, when they have saved
         -- weekly hours for that weekday. NULL means "no hours on file", which is
         -- treated as "never closes" â€” the same posture the start-job gate takes.
-        [ClosesAtUtc] DATETIME2(7) NULL,
-        [ClosingTimeText] NVARCHAR(16) NULL);
+        -- It doubles as the {closingTime} the pick-up nudges quote, which is why
+        -- no separate display column is kept.
+        [ClosesAtUtc] DATETIME2(7) NULL);
 
-    INSERT INTO @SingleDay ([BookingId], [Status], [StartsAtUtc], [EndsAtUtc], [ClosesAtUtc], [ClosingTimeText])
+    INSERT INTO @SingleDay ([BookingId], [Status], [StartsAtUtc], [EndsAtUtc], [ClosesAtUtc])
     SELECT b.[BookingId],
            b.[Status],
            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[StartTime]),
@@ -9510,8 +9929,7 @@ BEGIN
                    CAST(b.[BookingDate] AS DATETIME2(7))),
            CASE WHEN w.[EndTime] IS NOT NULL
                 THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), w.[EndTime]),
-                             CAST(b.[BookingDate] AS DATETIME2(7))) END,
-           CONVERT(NVARCHAR(5), w.[EndTime], 108)
+                             CAST(b.[BookingDate] AS DATETIME2(7))) END
     FROM [Booking].[Bookings] b
     LEFT JOIN [Provider].[ProviderWeeklyAvailability] w
         ON w.[ProviderId] = b.[ProviderId]
@@ -9649,15 +10067,15 @@ BEGIN
       AND @Now >= s.[EndsAtUtc]
       AND (s.[ClosesAtUtc] IS NULL OR @Now < s.[ClosesAtUtc]);
 
-    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingTime])
-    SELECT s.[BookingId], 0, N'BOOKING_PICKUP_OVERDUE', N'PetParent', s.[ClosingTimeText]
+    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingAtUtc])
+    SELECT s.[BookingId], 0, N'BOOKING_PICKUP_OVERDUE', N'PetParent', s.[ClosesAtUtc]
     FROM @SingleDay s
     WHERE s.[Status] = N'IN_PROGRESS'
       AND s.[ClosesAtUtc] IS NOT NULL
       AND @Now >= s.[ClosesAtUtc];
 
-    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingTime])
-    SELECT s.[BookingId], 0, N'BOOKING_NOT_MARKED_COMPLETE', N'Provider', s.[ClosingTimeText]
+    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingAtUtc])
+    SELECT s.[BookingId], 0, N'BOOKING_NOT_MARKED_COMPLETE', N'Provider', s.[ClosesAtUtc]
     FROM @SingleDay s
     WHERE s.[Status] = N'IN_PROGRESS'
       AND s.[ClosesAtUtc] IS NOT NULL
@@ -9671,13 +10089,13 @@ BEGIN
     DECLARE @IsNightStay BIT;
     DECLARE @Type NVARCHAR(64);
     DECLARE @Audience NVARCHAR(16);
-    DECLARE @ClosingTime NVARCHAR(16);
+    DECLARE @ClosingAtUtc DATETIME2(0);
 
     DECLARE due_reminders CURSOR LOCAL FAST_FORWARD FOR
-        SELECT [BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingTime] FROM @Due;
+        SELECT [BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingAtUtc] FROM @Due;
 
     OPEN due_reminders;
-    FETCH NEXT FROM due_reminders INTO @BookingId, @IsNightStay, @Type, @Audience, @ClosingTime;
+    FETCH NEXT FROM due_reminders INTO @BookingId, @IsNightStay, @Type, @Audience, @ClosingAtUtc;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
@@ -9686,9 +10104,9 @@ BEGIN
             @IsNightStay = @IsNightStay,
             @Audience = @Audience,
             @NotificationType = @Type,
-            @ClosingTime = @ClosingTime;
+            @ClosingAtUtc = @ClosingAtUtc;
 
-        FETCH NEXT FROM due_reminders INTO @BookingId, @IsNightStay, @Type, @Audience, @ClosingTime;
+        FETCH NEXT FROM due_reminders INTO @BookingId, @IsNightStay, @Type, @Audience, @ClosingAtUtc;
     END
 
     CLOSE due_reminders;
@@ -10365,16 +10783,18 @@ BEGIN
     DECLARE @ReqDedupe NVARCHAR(64) =
         CAST((SELECT TOP 1 [BookingModificationId] FROM @InsertedModification) AS NVARCHAR(36));
 
-    DECLARE @ProposedDateText NVARCHAR(32) = FORMAT(@ProposedBookingDate, N'd MMM', N'en-GB');
-    DECLARE @ProposedTimeText NVARCHAR(16) = CONVERT(NVARCHAR(5), @ProposedStartTime, 108);
+    -- The proposal as a single UTC instant; the renderer localises it into the
+    -- newServiceDate + newStartTime the copy quotes.
+    DECLARE @ProposedStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @ProposedStartTime),
+                CAST(@ProposedBookingDate AS DATETIME2(0)));
 
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @BookingId,
         @IsNightStay = 0,
         @Audience = @ReqAudience,
         @NotificationType = @ReqType,
-        @NewServiceDate = @ProposedDateText,
-        @NewStartTime = @ProposedTimeText,
+        @NewServiceStartUtc = @ProposedStartUtc,
         @DedupeSuffix = @ReqDedupe;
 
     SELECT [BookingId],
@@ -10601,8 +11021,11 @@ BEGIN
     -- startTime already read as the new window; newServiceDate/newStartTime are
     -- passed so the "confirmed: X at Y" copy is explicit either way. On decline the
     -- booking kept its original window, which is what the copy quotes.
-    DECLARE @RespDateText NVARCHAR(32) = FORMAT(@PDate, N'd MMM', N'en-GB');
-    DECLARE @RespTimeText NVARCHAR(16) = CONVERT(NVARCHAR(5), @PStart, 108);
+    -- The proposal as a single UTC instant; the renderer localises it into the
+    -- newServiceDate + newStartTime the copy quotes.
+    DECLARE @RespStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PStart),
+                CAST(@PDate AS DATETIME2(0)));
     DECLARE @RespDedupe NVARCHAR(64) = CAST(@ModId AS NVARCHAR(36));
 
     EXEC [Notification].[EnqueueBookingNotification]
@@ -10610,8 +11033,7 @@ BEGIN
         @IsNightStay = 0,
         @Audience = @RespAudience,
         @NotificationType = @RespType,
-        @NewServiceDate = @RespDateText,
-        @NewStartTime = @RespTimeText,
+        @NewServiceStartUtc = @RespStartUtc,
         @DedupeSuffix = @RespDedupe;
 
     SELECT [BookingId],
@@ -11351,11 +11773,15 @@ BEGIN
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @CheckInDate DATE;
     DECLARE @DropOffTime TIME(0);
+    -- Only used to turn the proposed check-out DATE into an instant for the
+    -- notification's timezone conversion.
+    DECLARE @PickUpTime TIME(0);
 
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId],
-           @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime]
+           @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime],
+           @PickUpTime = [PickUpTime]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -11435,18 +11861,24 @@ BEGIN
     DECLARE @ReqDedupe NVARCHAR(64) =
         CAST((SELECT TOP 1 [NightStayBookingModificationId] FROM @InsertedModification) AS NVARCHAR(36));
 
-    -- A stay is proposed as a date range, so the "new time" slot carries the new
-    -- check-out rather than a clock time.
-    DECLARE @ProposedDateText NVARCHAR(32) = FORMAT(@ProposedCheckInDate, N'd MMM', N'en-GB');
-    DECLARE @ProposedOutText NVARCHAR(16) = FORMAT(@ProposedCheckOutDate, N'd MMM', N'en-GB');
+    -- Both ends of the proposed stay as UTC instants, pinned to the booking's
+    -- hand-over times so the renderer can localise them. A stay is proposed as a
+    -- date range, so the copy's "new time" slot carries the new check-out DATE
+    -- rather than a clock time — the renderer applies that for night-stay rows.
+    DECLARE @ProposedStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+                CAST(@ProposedCheckInDate AS DATETIME2(0)));
+    DECLARE @ProposedCheckOutUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PickUpTime),
+                CAST(@ProposedCheckOutDate AS DATETIME2(0)));
 
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @NightStayBookingId,
         @IsNightStay = 1,
         @Audience = @ReqAudience,
         @NotificationType = @ReqType,
-        @NewServiceDate = @ProposedDateText,
-        @NewStartTime = @ProposedOutText,
+        @NewServiceStartUtc = @ProposedStartUtc,
+        @NewCheckOutUtc = @ProposedCheckOutUtc,
         @DedupeSuffix = @ReqDedupe;
 
     SELECT [NightStayBookingId],
@@ -11647,8 +12079,24 @@ BEGIN
             ELSE                                           N'BOOKING_MODIFICATION_DECLINED_BY_PARENT'
         END;
 
-    DECLARE @RespDateText NVARCHAR(32) = FORMAT(@PIn, N'd MMM', N'en-GB');
-    DECLARE @RespOutText NVARCHAR(16) = FORMAT(@POut, N'd MMM', N'en-GB');
+    -- Both ends of the proposed stay as UTC instants for the renderer to localise.
+    -- The hand-over times are re-read from the row rather than recomputed from the
+    -- acknowledged-terms CASEs above: on accept the UPDATE has already applied
+    -- them, on decline the row is untouched, so this is correct either way without
+    -- a second copy of that logic. As with the request side, the copy's "new time"
+    -- slot carries the new check-out DATE — the renderer applies that for
+    -- night-stay rows.
+    DECLARE @EffDropOffTime TIME(0), @EffPickUpTime TIME(0);
+    SELECT @EffDropOffTime = [DropOffTime], @EffPickUpTime = [PickUpTime]
+    FROM [Booking].[NightStayBookings]
+    WHERE [NightStayBookingId] = @NightStayBookingId;
+
+    DECLARE @RespStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EffDropOffTime),
+                CAST(@PIn AS DATETIME2(0)));
+    DECLARE @RespCheckOutUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EffPickUpTime),
+                CAST(@POut AS DATETIME2(0)));
     DECLARE @RespDedupe NVARCHAR(64) = CAST(@ModId AS NVARCHAR(36));
 
     EXEC [Notification].[EnqueueBookingNotification]
@@ -11656,8 +12104,8 @@ BEGIN
         @IsNightStay = 1,
         @Audience = @RespAudience,
         @NotificationType = @RespType,
-        @NewServiceDate = @RespDateText,
-        @NewStartTime = @RespOutText,
+        @NewServiceStartUtc = @RespStartUtc,
+        @NewCheckOutUtc = @RespCheckOutUtc,
         @DedupeSuffix = @RespDedupe;
 
     SELECT [NightStayBookingId],
@@ -13583,7 +14031,10 @@ GO
 -- payoutId) plus the template parameters. `serviceName` is deliberately NOT built
 -- here: the grooming display names live in the C# catalog, so this emits the raw
 -- ServiceType + ServiceItemCode and NotificationRenderer names it at render time.
--- Never THROWs.
+-- Dates/times are handled the same way: this emits raw UTC INSTANTS
+-- (serviceStartUtc, checkOutUtc, newServiceStartUtc, newCheckOutUtc,
+-- closingAtUtc) and the renderer converts each to the recipient's timezone
+-- (Switzerland for everybody today) and formats it. Never THROWs.
 CREATE OR ALTER PROCEDURE [Notification].[EnqueueBookingNotification]
     @BookingId UNIQUEIDENTIFIER,
     @IsNightStay BIT,
@@ -13593,11 +14044,15 @@ CREATE OR ALTER PROCEDURE [Notification].[EnqueueBookingNotification]
     -- them. Explicit parameters rather than a JSON blob to merge: T-SQL has no
     -- clean object-merge, and naming them keeps the contract greppable.
     @Amount NVARCHAR(64) = NULL,
-    @NewServiceDate NVARCHAR(32) = NULL,
-    @NewStartTime NVARCHAR(16) = NULL,
+    -- The staged proposal on a modification, as UTC instants rather than display
+    -- text: the renderer localises them (@NewCheckOutUtc is night-stay only).
+    @NewServiceStartUtc DATETIME2(0) = NULL,
+    @NewCheckOutUtc DATETIME2(0) = NULL,
     @AbsentParty NVARCHAR(32) = NULL,
     @Location NVARCHAR(500) = NULL,
-    @ClosingTime NVARCHAR(16) = NULL,
+    -- When the provider closes on the service date. An instant, not a bare TIME:
+    -- converting a clock time to the recipient's zone needs the date it falls on.
+    @ClosingAtUtc DATETIME2(0) = NULL,
     -- Idempotency. Callers pass a suffix rather than a whole key so the
     -- type + booking prefix stays consistent across every producer.
     @DedupeSuffix NVARCHAR(64) = NULL
@@ -13614,6 +14069,9 @@ BEGIN
     DECLARE @ServiceDate DATE;
     DECLARE @StartTime TIME(0);
     DECLARE @CheckOutDate DATE;
+    -- Night-stay only: the hand-back time on the check-out day, so the stay's end
+    -- can be expressed as an instant like its start.
+    DECLARE @PickUpTime TIME(0);
     -- Custom walk-ins carry the pet's name on the booking row rather than a PetId.
     DECLARE @RowPetName NVARCHAR(100);
     DECLARE @SnapshotAddressLine NVARCHAR(500);
@@ -13633,6 +14091,7 @@ BEGIN
                -- same instant BR-01 / BR-53 / the modification cutoff all measure
                -- against, so the notification quotes what the rules use.
                @StartTime = [DropOffTime],
+               @PickUpTime = [PickUpTime],
                @SnapshotAddressLine = [SnapshotAddressLine],
                @UnitPrice = [PricePerNight],
                -- The checkout day is not a stayed night.
@@ -13723,6 +14182,20 @@ BEGIN
             CAST(ROUND(@UnitPrice * @Quantity, 2) AS DECIMAL(12, 2)));
     END
 
+    -- The service's start as a single UTC instant: BookingDate + StartTime, or
+    -- CheckInDate + DropOffTime for a stay. Same arithmetic BR-01 / BR-53 and the
+    -- modification cutoff use, so what the notification says and what the rules
+    -- enforce can't drift apart. DATEDIFF-of-seconds rather than a cast-and-add
+    -- because TIME + DATETIME2 is not a legal addition in T-SQL.
+    DECLARE @ServiceStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
+                CAST(@ServiceDate AS DATETIME2(0)));
+
+    DECLARE @CheckOutUtc DATETIME2(0) =
+        CASE WHEN @IsNightStay = 1 AND @PickUpTime IS NOT NULL
+             THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PickUpTime),
+                          CAST(@CheckOutDate AS DATETIME2(0))) END;
+
     DECLARE @DataJson NVARCHAR(MAX) =
     (
         SELECT
@@ -13742,22 +14215,18 @@ BEGIN
             @PetName                                     AS [petName],
             @ServiceType                                 AS [serviceType],
             @ServiceItemCode                             AS [serviceItemCode],
-            FORMAT(@ServiceDate, N'd MMM', N'en-GB')     AS [serviceDate],
-            CONVERT(NVARCHAR(5), @StartTime, 108)        AS [startTime],
+            -- --- times, as UTC instants; the renderer localises + formats them ---
+            -- Style 126 on a DATETIME2(0) gives "2026-08-05T14:00:00" exactly.
+            CONVERT(NVARCHAR(19), @ServiceStartUtc, 126)  AS [serviceStartUtc],
             -- Night-stay only; NULL columns drop out of the JSON.
-            CASE WHEN @IsNightStay = 1
-                 THEN FORMAT(@ServiceDate, N'd MMM', N'en-GB') END   AS [checkInDate],
-            CASE WHEN @IsNightStay = 1
-                 THEN FORMAT(@CheckOutDate, N'd MMM', N'en-GB') END  AS [checkOutDate],
-            CASE WHEN @IsNightStay = 1
-                 THEN CONVERT(NVARCHAR(5), @StartTime, 108) END      AS [dropOffTime],
+            CONVERT(NVARCHAR(19), @CheckOutUtc, 126)      AS [checkOutUtc],
             -- --- caller-supplied extras ---
             @Amount                                      AS [amount],
-            @NewServiceDate                              AS [newServiceDate],
-            @NewStartTime                                AS [newStartTime],
+            CONVERT(NVARCHAR(19), @NewServiceStartUtc, 126) AS [newServiceStartUtc],
+            CONVERT(NVARCHAR(19), @NewCheckOutUtc, 126)   AS [newCheckOutUtc],
             @AbsentParty                                 AS [absentParty],
-            COALESCE(@Location, @SnapshotAddressLine)    AS [location],
-            @ClosingTime                                 AS [closingTime]
+            COALESCE(@Location, @SnapshotAddressLine)     AS [location],
+            CONVERT(NVARCHAR(19), @ClosingAtUtc, 126)     AS [closingAtUtc]
         FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
     );
 
@@ -14377,6 +14846,522 @@ BEGIN
 END;
 GO
 PRINT 'Created/updated [Booking].[ListPetParentBookingHistory].';
+GO
+
+
+
+--------------------------------------------------------------------------------
+-- 3.90 Review procedures -------------------------------------------------------
+--     Booking reviews, both directions. The eligibility gate (booking exists,
+--     caller is that party, status is COMPLETED or PAID, App booking) lives in
+--     [Review].[UpsertBookingReview] so it runs in the same transaction as the
+--     write. Mirrors database/Pawfront.Database/StoredProcedures/*.sql — keep both
+--     in sync.
+--------------------------------------------------------------------------------
+
+-- Records (or edits) one party's review of a finished booking. Handles BOTH
+-- directions and BOTH booking kinds:
+--   @ReviewerType = 'Parent'   -> the pet parent reviewing the provider; @ActorId
+--                                 is their PetParentId. Rating + optional comment.
+--   @ReviewerType = 'Provider' -> the provider rating the pet parent; @ActorId is
+--                                 their ProviderId. Rating only — any comment
+--                                 passed in is dropped (the provider-side endpoint
+--                                 has no comment field; this only guards a direct
+--                                 caller from tripping the table CHECK).
+--
+-- Deliberately ONE procedure rather than the single-day / night-stay twin pair used
+-- elsewhere (cf. [Booking].[MarkBookingPaid] + [Booking].[MarkNightStayBookingPaid]).
+-- Those twins exist because the flows genuinely differ — date range vs time window,
+-- different grace windows, different codes. Here the ONLY difference is which table
+-- supplies the two party ids and the status, so twinning would just be two copies of
+-- the same gate to keep in step.
+--
+-- Submitting again replaces the rating and comment on the SAME row (the endpoint is
+-- an upsert), so a corrected star or a fixed typo does not create a second review.
+-- Photos are attached separately via [Review].[AddBookingReviewPhoto] — the blob
+-- path is keyed by the review id, which does not exist until this runs.
+--
+-- Returns TWO result sets: the review row, then its photos (empty on first submit).
+--
+-- THROWs: 51300 booking not found, 51301 caller is not that party to the booking,
+-- 51302 booking has not reached COMPLETED / PAID, 51303 Custom walk-in (no
+-- pet-parent record to author or receive a review), 51304 invalid argument.
+CREATE OR ALTER PROCEDURE [Review].[UpsertBookingReview]
+    @BookingType NVARCHAR(16),      -- 'SingleDay' | 'NightStay'
+    @BookingId UNIQUEIDENTIFIER,
+    @ReviewerType NVARCHAR(16),     -- 'Parent' | 'Provider'
+    @ActorId UNIQUEIDENTIFIER,
+    @Rating TINYINT,
+    @Comment NVARCHAR(1000) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    -- Defensive: the API validates all three before calling, so reaching these is
+    -- a direct-caller error rather than something a client can provoke.
+    IF @BookingType NOT IN (N'SingleDay', N'NightStay')
+        OR @ReviewerType NOT IN (N'Parent', N'Provider')
+        OR @Rating IS NULL OR @Rating < 1 OR @Rating > 5
+    BEGIN
+        THROW 51304, 'Invalid review request.', 1;
+    END
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @RowProvider UNIQUEIDENTIFIER;
+    DECLARE @RowPetParent UNIQUEIDENTIFIER;
+    DECLARE @Status NVARCHAR(48);
+    DECLARE @Found BIT = 0;
+    DECLARE @ExistingId UNIQUEIDENTIFIER;
+
+    -- A provider rates, and says nothing more.
+    IF @ReviewerType = N'Provider'
+    BEGIN
+        SET @Comment = NULL;
+    END
+    ELSE IF LTRIM(RTRIM(COALESCE(@Comment, N''))) = N''
+    BEGIN
+        -- Store "no comment written" as NULL, not as an empty string, so a rating
+        -- with no words reads back the same whether the field was omitted or blanked.
+        SET @Comment = NULL;
+    END
+
+    BEGIN TRANSACTION;
+
+    -- No UPDLOCK on the booking, unlike most write paths here: this read cannot go
+    -- stale in a way that matters. The only transition out of COMPLETED is to PAID
+    -- and PAID is terminal, so once a booking is reviewable it stays reviewable —
+    -- a concurrent status change can never invalidate a review we are about to
+    -- accept. The lock that DOES matter is the one below, on the review row.
+    IF @BookingType = N'SingleDay'
+    BEGIN
+        SELECT @RowProvider = [ProviderId],
+               @RowPetParent = [PetParentId],
+               @Status = [Status],
+               @Found = 1
+        FROM [Booking].[Bookings]
+        WHERE [BookingId] = @BookingId;
+    END
+    ELSE
+    BEGIN
+        SELECT @RowProvider = [ProviderId],
+               @RowPetParent = [PetParentId],
+               @Status = [Status],
+               @Found = 1
+        FROM [Booking].[NightStayBookings]
+        WHERE [NightStayBookingId] = @BookingId;
+    END
+
+    -- Every THROW below relies on SET XACT_ABORT ON to roll the transaction back,
+    -- matching [Booking].[UpdateBookingStatus] and the rest of this codebase.
+    IF @Found = 0
+    BEGIN
+        THROW 51300, 'Booking was not found.', 1;
+    END
+
+    -- Custom walk-ins carry free-text customer details and no PetParentId, so
+    -- neither direction is possible: there is nobody to author the parent's review
+    -- and nobody for the provider to rate. (Night-stay is App-only, so this can
+    -- only fire on a single-day booking.)
+    IF @RowPetParent IS NULL
+    BEGIN
+        THROW 51303, 'Only app bookings can be reviewed.', 1;
+    END
+
+    IF (@ReviewerType = N'Parent' AND @RowPetParent <> @ActorId)
+        OR (@ReviewerType = N'Provider' AND @RowProvider <> @ActorId)
+    BEGIN
+        THROW 51301, 'You are not a party to this booking.', 1;
+    END
+
+    -- PAID counts as well as COMPLETED. PAID sits downstream of COMPLETED, so
+    -- gating on COMPLETED alone would close the review window the moment the
+    -- provider recorded the payment — which for cash is often immediately.
+    IF @Status NOT IN (N'COMPLETED', N'PAID')
+    BEGIN
+        THROW 51302, 'Booking must be completed before it can be reviewed.', 1;
+    END
+
+    -- UPDLOCK + HOLDLOCK over the unique key range: when no row exists yet this
+    -- takes a range lock, so two devices submitting at once serialise and the
+    -- second updates the first's row instead of hitting a UNIQUE violation.
+    SELECT @ExistingId = [BookingReviewId]
+    FROM [Review].[BookingReviews] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [BookingType] = @BookingType
+      AND [BookingId] = @BookingId
+      AND [ReviewerType] = @ReviewerType;
+
+    IF @ExistingId IS NULL
+    BEGIN
+        DECLARE @Inserted TABLE ([BookingReviewId] UNIQUEIDENTIFIER);
+
+        INSERT INTO [Review].[BookingReviews]
+            ([BookingType], [BookingId], [ReviewerType], [ProviderId], [PetParentId],
+             [Rating], [Comment], [CreatedAtUtc], [UpdatedAtUtc])
+        OUTPUT inserted.[BookingReviewId] INTO @Inserted
+        VALUES
+            (@BookingType, @BookingId, @ReviewerType, @RowProvider, @RowPetParent,
+             @Rating, @Comment, @Now, @Now);
+
+        SELECT @ExistingId = [BookingReviewId] FROM @Inserted;
+    END
+    ELSE
+    BEGIN
+        -- CreatedAtUtc is left alone: it is the date the review was GIVEN, which is
+        -- what the list sorts on and what the app shows. An edit is not a new review.
+        UPDATE [Review].[BookingReviews]
+        SET [Rating] = @Rating,
+            [Comment] = @Comment,
+            [UpdatedAtUtc] = @Now
+        WHERE [BookingReviewId] = @ExistingId;
+    END
+
+    SELECT [BookingReviewId],
+           [BookingType],
+           [BookingId],
+           [ReviewerType],
+           [ProviderId],
+           [PetParentId],
+           [Rating],
+           [Comment],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Review].[BookingReviews]
+    WHERE [BookingReviewId] = @ExistingId;
+
+    SELECT [BookingReviewPhotoId],
+           [BookingReviewId],
+           [PhotoUrl],
+           [CreatedAtUtc]
+    FROM [Review].[BookingReviewPhotos]
+    WHERE [BookingReviewId] = @ExistingId
+    ORDER BY [CreatedAtUtc] ASC, [BookingReviewPhotoId] ASC;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Review].[UpsertBookingReview].';
+GO
+
+-- Reads one party's review of a booking, if they have written one. Used for the
+-- read-back endpoint and for the "own review" section appended to the two
+-- booking-detail reads, so the app can tell "not reviewed yet" (prompt) from
+-- "already reviewed" (show it, allow an edit).
+--
+-- Takes no actor: the caller's identity is already established by the route the
+-- review is read through, and @ReviewerType alone says whose review is wanted.
+--
+-- Returns TWO result sets: the review row (EMPTY when none exists — that is the
+-- ordinary case, not an error), then its photos.
+CREATE OR ALTER PROCEDURE [Review].[GetBookingReview]
+    @BookingType NVARCHAR(16),      -- 'SingleDay' | 'NightStay'
+    @BookingId UNIQUEIDENTIFIER,
+    @ReviewerType NVARCHAR(16)      -- 'Parent' | 'Provider'
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @BookingReviewId UNIQUEIDENTIFIER;
+
+    SELECT @BookingReviewId = [BookingReviewId]
+    FROM [Review].[BookingReviews]
+    WHERE [BookingType] = @BookingType
+      AND [BookingId] = @BookingId
+      AND [ReviewerType] = @ReviewerType;
+
+    SELECT [BookingReviewId],
+           [BookingType],
+           [BookingId],
+           [ReviewerType],
+           [ProviderId],
+           [PetParentId],
+           [Rating],
+           [Comment],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Review].[BookingReviews]
+    WHERE [BookingReviewId] = @BookingReviewId;
+
+    SELECT [BookingReviewPhotoId],
+           [BookingReviewId],
+           [PhotoUrl],
+           [CreatedAtUtc]
+    FROM [Review].[BookingReviewPhotos]
+    WHERE [BookingReviewId] = @BookingReviewId
+    ORDER BY [CreatedAtUtc] ASC, [BookingReviewPhotoId] ASC;
+END;
+GO
+PRINT 'Created/updated [Review].[GetBookingReview].';
+GO
+
+-- Records one photo against a pet parent's booking review (the blob upload happens
+-- in the app layer; this stores the resulting URL). Scoped to the review's own
+-- author: a provider-direction review is rating-only and can never carry photos.
+--
+-- The per-review cap is enforced HERE rather than only in C# because the count is a
+-- race: two uploads in flight would each read four existing photos and both insert.
+-- UPDLOCK + HOLDLOCK on the count makes them serialise.
+--
+-- THROWs: 51305 review not found for this author (unknown id and "not yours" are
+-- deliberately the same case, so it cannot be used to probe whether a review
+-- exists), 51306 the photo cap for this review is already reached.
+CREATE OR ALTER PROCEDURE [Review].[AddBookingReviewPhoto]
+    @BookingReviewId UNIQUEIDENTIFIER,
+    @PetParentId UNIQUEIDENTIFIER,
+    @PhotoUrl NVARCHAR(1000),
+    @MaxPhotos INT = 5
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Existing INT;
+
+    BEGIN TRANSACTION;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM [Review].[BookingReviews] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [BookingReviewId] = @BookingReviewId
+          AND [PetParentId] = @PetParentId
+          AND [ReviewerType] = N'Parent')
+    BEGIN
+        -- SET XACT_ABORT ON rolls the transaction back, as elsewhere in this codebase.
+        THROW 51305, 'Review was not found for this pet parent.', 1;
+    END
+
+    SELECT @Existing = COUNT(*)
+    FROM [Review].[BookingReviewPhotos] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [BookingReviewId] = @BookingReviewId;
+
+    IF @Existing >= @MaxPhotos
+    BEGIN
+        THROW 51306, 'This review already has the maximum number of photos.', 1;
+    END
+
+    DECLARE @Inserted TABLE ([BookingReviewPhotoId] UNIQUEIDENTIFIER);
+
+    INSERT INTO [Review].[BookingReviewPhotos] ([BookingReviewId], [PhotoUrl])
+    OUTPUT inserted.[BookingReviewPhotoId] INTO @Inserted
+    VALUES (@BookingReviewId, @PhotoUrl);
+
+    SELECT [BookingReviewPhotoId],
+           [BookingReviewId],
+           [PhotoUrl],
+           [CreatedAtUtc]
+    FROM [Review].[BookingReviewPhotos]
+    WHERE [BookingReviewPhotoId] = (SELECT TOP (1) [BookingReviewPhotoId] FROM @Inserted);
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Review].[AddBookingReviewPhoto].';
+GO
+
+-- Removes one photo from a pet parent's booking review, scoped by review + author
+-- so a caller can only ever delete their own. The row here is the source of truth;
+-- the app layer makes a best-effort attempt at the blob afterwards, which is why the
+-- deleted [PhotoUrl] is returned.
+--
+-- The review itself is NOT deletable — only its photos — so this never leaves a
+-- rating stranded.
+--
+-- THROWs: 51307 photo not found for this review and author (unknown id, wrong
+-- review, and "not yours" are deliberately one case).
+CREATE OR ALTER PROCEDURE [Review].[DeleteBookingReviewPhoto]
+    @BookingReviewId UNIQUEIDENTIFIER,
+    @BookingReviewPhotoId UNIQUEIDENTIFIER,
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @PhotoUrl NVARCHAR(1000);
+
+    BEGIN TRANSACTION;
+
+    SELECT @PhotoUrl = p.[PhotoUrl]
+    FROM [Review].[BookingReviewPhotos] p WITH (UPDLOCK, HOLDLOCK)
+    INNER JOIN [Review].[BookingReviews] r
+        ON r.[BookingReviewId] = p.[BookingReviewId]
+    WHERE p.[BookingReviewPhotoId] = @BookingReviewPhotoId
+      AND p.[BookingReviewId] = @BookingReviewId
+      AND r.[PetParentId] = @PetParentId
+      AND r.[ReviewerType] = N'Parent';
+
+    IF @PhotoUrl IS NULL
+    BEGIN
+        -- SET XACT_ABORT ON rolls the transaction back, as elsewhere in this codebase.
+        THROW 51307, 'Review photo was not found.', 1;
+    END
+
+    DELETE FROM [Review].[BookingReviewPhotos]
+    WHERE [BookingReviewPhotoId] = @BookingReviewPhotoId;
+
+    SELECT [BookingReviewPhotoId] = @BookingReviewPhotoId,
+           [BookingReviewId] = @BookingReviewId,
+           [PhotoUrl] = @PhotoUrl,
+           [DeletedAtUtc] = SYSUTCDATETIME();
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Review].[DeleteBookingReviewPhoto].';
+GO
+
+-- The reviews pet parents have left for a provider: the list behind the provider's
+-- public profile and their own "my reviews" screen. Paginated (the API caps @Take at
+-- 20), sortable by the date the review was given or by the rating score, either
+-- direction.
+--
+-- Returns THREE result sets:
+--   1. Summary over ALL the provider's reviews (not just this page) — count,
+--      average, and the 1-5 histogram, so the header reads "4.6 (23)" without a
+--      second call.
+--   2. The page itself, ordered.
+--   3. The photos belonging to that page's reviews, so the client needs no per-review
+--      follow-up (an N+1 across a page of reviews is the thing to avoid here).
+--
+-- Only parent-authored rows are considered: a provider's ratings OF parents are the
+-- other direction and belong on the customer card, not here. The filtered index
+-- [IX_BookingReviews_Provider_Created] matches that predicate exactly.
+--
+-- The parent's name and photo are joined LIVE rather than denormalised onto the
+-- review, so a parent who deletes their account correctly reads "Deleted User"
+-- instead of leaving their real name frozen in every review they ever wrote.
+CREATE OR ALTER PROCEDURE [Review].[ListProviderReviews]
+    @ProviderId UNIQUEIDENTIFIER,
+    @SortBy NVARCHAR(16) = N'Date',        -- 'Date' | 'Rating'
+    @SortDirection NVARCHAR(4) = N'Desc',  -- 'Asc'  | 'Desc'
+    @Skip INT = 0,
+    @Take INT = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- 1. Summary. With no reviews at all, AVG yields NULL and every count is 0 —
+    -- which is exactly what the profile should show for a provider nobody has
+    -- reviewed yet, so there is no special-casing to do.
+    -- The SUMs are COALESCEd because SUM over ZERO rows is NULL, not 0 — the counts
+    -- must stay non-null integers so the reader needs no null check per bucket. The
+    -- average is deliberately left nullable (see above).
+    SELECT
+        [ReviewCount]   = COUNT(*),
+        [AverageRating] = CAST(AVG(CAST([Rating] AS DECIMAL(9, 4))) AS DECIMAL(3, 2)),
+        [FiveStar]      = COALESCE(SUM(CASE WHEN [Rating] = 5 THEN 1 ELSE 0 END), 0),
+        [FourStar]      = COALESCE(SUM(CASE WHEN [Rating] = 4 THEN 1 ELSE 0 END), 0),
+        [ThreeStar]     = COALESCE(SUM(CASE WHEN [Rating] = 3 THEN 1 ELSE 0 END), 0),
+        [TwoStar]       = COALESCE(SUM(CASE WHEN [Rating] = 2 THEN 1 ELSE 0 END), 0),
+        [OneStar]       = COALESCE(SUM(CASE WHEN [Rating] = 1 THEN 1 ELSE 0 END), 0)
+    FROM [Review].[BookingReviews]
+    WHERE [ProviderId] = @ProviderId
+      AND [ReviewerType] = N'Parent';
+
+    -- Resolve the page's ids once, so result sets 2 and 3 describe the same rows
+    -- even under a concurrent insert, and so the photo read is a join rather than a
+    -- repeat of the ordering logic.
+    DECLARE @Page TABLE (
+        [Ordinal] INT NOT NULL PRIMARY KEY,
+        [BookingReviewId] UNIQUEIDENTIFIER NOT NULL UNIQUE);
+
+    INSERT INTO @Page ([Ordinal], [BookingReviewId])
+    SELECT ordered.[Ordinal], ordered.[BookingReviewId]
+    FROM (
+        SELECT
+            r.[BookingReviewId],
+            [Ordinal] = ROW_NUMBER() OVER (ORDER BY
+                -- Rating, when that is what was asked for.
+                CASE WHEN @SortBy = N'Rating' AND @SortDirection = N'Asc'  THEN r.[Rating] END ASC,
+                CASE WHEN @SortBy = N'Rating' AND @SortDirection = N'Desc' THEN r.[Rating] END DESC,
+                -- The date given: the primary key for @SortBy = 'Date', and the
+                -- secondary for a rating sort — newest first within a star band,
+                -- which is what a reader scanning "all the 5s" expects.
+                CASE WHEN @SortBy = N'Date' AND @SortDirection = N'Asc' THEN r.[CreatedAtUtc] END ASC,
+                CASE WHEN @SortBy = N'Date' AND @SortDirection = N'Asc' THEN NULL
+                     ELSE r.[CreatedAtUtc] END DESC,
+                -- Deterministic tie-break. Without it, reviews sharing a timestamp
+                -- (or a score) can order differently between two calls, which makes
+                -- OFFSET paging repeat or skip rows.
+                r.[BookingReviewId])
+        FROM [Review].[BookingReviews] r
+        WHERE r.[ProviderId] = @ProviderId
+          AND r.[ReviewerType] = N'Parent'
+    ) ordered
+    WHERE ordered.[Ordinal] > @Skip
+      AND ordered.[Ordinal] <= @Skip + @Take;
+
+    -- 2. The page.
+    SELECT
+        r.[BookingReviewId],
+        r.[BookingType],
+        r.[BookingId],
+        -- Raw job number; the 'PF-000123' label is formatted in C# exactly as the
+        -- booking-detail read does, so the two surfaces show the same id. NULL only
+        -- if the booking row has since gone (it does not: bookings are retained
+        -- through both account deletes).
+        [JobNumber] = COALESCE(b.[JobNumber], n.[JobNumber]),
+        r.[PetParentId],
+        [ParentName] = pp.[FirstName] + N' ' + pp.[LastName],
+        [ParentPhotoUrl] = pp.[ProfilePhotoUrl],
+        r.[Rating],
+        r.[Comment],
+        r.[CreatedAtUtc],
+        r.[UpdatedAtUtc]
+    FROM @Page pg
+    INNER JOIN [Review].[BookingReviews] r
+        ON r.[BookingReviewId] = pg.[BookingReviewId]
+    LEFT JOIN [Booking].[Bookings] b
+        ON r.[BookingType] = N'SingleDay' AND b.[BookingId] = r.[BookingId]
+    LEFT JOIN [Booking].[NightStayBookings] n
+        ON r.[BookingType] = N'NightStay' AND n.[NightStayBookingId] = r.[BookingId]
+    LEFT JOIN [Parent].[PetParents] pp
+        ON pp.[PetParentId] = r.[PetParentId]
+    ORDER BY pg.[Ordinal] ASC;
+
+    -- 3. That page's photos, grouped in C# by BookingReviewId.
+    SELECT
+        p.[BookingReviewPhotoId],
+        p.[BookingReviewId],
+        p.[PhotoUrl],
+        p.[CreatedAtUtc]
+    FROM @Page pg
+    INNER JOIN [Review].[BookingReviewPhotos] p
+        ON p.[BookingReviewId] = pg.[BookingReviewId]
+    ORDER BY pg.[Ordinal] ASC, p.[CreatedAtUtc] ASC, p.[BookingReviewPhotoId] ASC;
+END;
+GO
+PRINT 'Created/updated [Review].[ListProviderReviews].';
+GO
+
+-- A pet parent's aggregate rating, as given BY providers they have booked with.
+-- Feeds the [Rating] field on the provider-facing customer card
+-- (GET /pet-parents/{petParentId}/details on the provider host), which was wired
+-- ahead of this feature and had always returned null.
+--
+-- The provider direction is rating-only, so there is no comment or photo to read —
+-- just the average and the count. The count matters as much as the average: "5.0"
+-- off one rating and "4.6" off forty are very different claims, and the card should
+-- be able to say which it is.
+--
+-- Always returns exactly ONE row. A parent nobody has rated yet gets a NULL average
+-- and a count of 0 rather than an empty result set, so the caller needs no
+-- no-rows branch.
+CREATE OR ALTER PROCEDURE [Review].[GetPetParentRatingSummary]
+    @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT
+        [RatingCount]   = COUNT(*),
+        [AverageRating] = CAST(AVG(CAST([Rating] AS DECIMAL(9, 4))) AS DECIMAL(3, 2))
+    FROM [Review].[BookingReviews]
+    WHERE [PetParentId] = @PetParentId
+      AND [ReviewerType] = N'Provider';
+END;
+GO
+PRINT 'Created/updated [Review].[GetPetParentRatingSummary].';
 GO
 
 

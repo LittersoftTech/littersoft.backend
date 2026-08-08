@@ -21,6 +21,7 @@ using Pawfront.Application.ProviderPhotos;
 using Pawfront.Application.ProviderServiceBanners;
 using Pawfront.Application.Providers;
 using Pawfront.Application.ProviderServices;
+using Pawfront.Application.Reviews;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
@@ -40,6 +41,7 @@ using Pawfront.Infrastructure.Sql.ProviderPhotos;
 using Pawfront.Infrastructure.Sql.ProviderServiceBanners;
 using Pawfront.Infrastructure.Sql.Providers;
 using Pawfront.Infrastructure.Sql.ProviderServices;
+using Pawfront.Infrastructure.Sql.Reviews;
 
 namespace Pawfront.Infrastructure.Sql;
 
@@ -74,6 +76,10 @@ public static class SqlServiceRegistration
             services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
             services.AddSingleton<IProviderNameReader, NullProviderNameReader>();
             services.AddSingleton<IProviderContactReader, NullProviderContactReader>();
+            // The in-memory provider store has no IsActive concept, so this one
+            // reports everything active — otherwise discovery and all five
+            // searches would come back empty on a dev machine without SQL.
+            services.AddSingleton<IProviderActiveStatusReader, NullProviderActiveStatusReader>();
             // Earnings are aggregates over the booking tables joined to the payment
             // ledger, neither of which the in-memory stores keep — report zeros
             // rather than 500ing the reporting screens.
@@ -82,6 +88,14 @@ public static class SqlServiceRegistration
             // No outbox table to write to — log and drop, same posture as the
             // booking sweeps having no in-memory equivalent.
             services.AddSingleton<INotificationPublisher, NullNotificationPublisher>();
+
+            // Reviews DO work in-memory (unlike earnings, which report zeros): this
+            // is a write flow, so a store that accepted a submit and never showed it
+            // again would make the feature untestable without SQL. It cannot enforce
+            // the COMPLETED/PAID gate though — that needs the booking tables.
+            services.AddSingleton<InMemoryBookingReviewStore>();
+            services.AddSingleton<IBookingReviewStore>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
+            services.AddSingleton<IPetParentRatingReader>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
 
             // Both hosts' token services share one store here; each host only ever
             // resolves its own interface, so they never actually mix.
@@ -212,6 +226,14 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            // Backs the discovery/search active filter — the provider's master
+            // Active switch lives here in SQL, not in the Cosmos offering doc
+            // that discovery lists from.
+            services.AddScoped<IProviderActiveStatusReader>(provider =>
+                new SqlProviderActiveStatusReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             // Earnings / spend reporting. Both sides read the shared
             // Booking.BookingAmounts function, so a provider's "earned" and a
             // parent's "spent" on the same booking are the same number by
@@ -230,6 +252,17 @@ public static class SqlServiceRegistration
                 new SqlProviderContactReader(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
+
+            // Booking reviews. One store serves both interfaces — the provider's
+            // received reviews and a parent's aggregate rating are the two directions
+            // of the same table, so registering the concrete type once and mapping
+            // both interfaces to it keeps them reading the same rows.
+            services.AddScoped(provider =>
+                new SqlBookingReviewStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+            services.AddScoped<IBookingReviewStore>(sp => sp.GetRequiredService<SqlBookingReviewStore>());
+            services.AddScoped<IPetParentRatingReader>(sp => sp.GetRequiredService<SqlBookingReviewStore>());
 
             // Push notifications are enqueued onto Notification.NotificationOutbox
             // here and dispatched to FCM by Pawfront.Functions — neither API host

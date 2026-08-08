@@ -1,3 +1,5 @@
+using Pawfront.Contracts.Reviews;
+
 namespace Pawfront.Contracts.Bookings;
 
 /// <summary>
@@ -91,7 +93,11 @@ public sealed record NightStayBookingDetailResponse(
     // ProviderLocation). Fields are null when the type is unset or unresolvable.
     BookingLocationDetailsSection Location,
     StartOtpResponse? StartOtp,
-    NightStayBookingModificationResponse? PendingModification);
+    NightStayBookingModificationResponse? PendingModification,
+    // The caller's OWN review of this stay, plus whether it is in a reviewable
+    // state. Same per-host split as the single-day detail: each host reports its
+    // own side only.
+    BookingReviewDetailsSection? Review = null);
 
 /// <summary>The stay/job facts: identity, the check-in/check-out range + nights,
 /// drop-off/pick-up times, status, and where the provider delivers the service.</summary>
@@ -121,11 +127,19 @@ public sealed record NightStayBookingDetailsSection(
 /// <summary>The money facts for a night stay. <c>PricePerNight</c> is the offering's
 /// per-night rate; <c>TotalAmount</c> is rate × nights; <c>PawfrontFee</c> is
 /// <c>FeePercentage</c> percent of the total. Pricing is null when the offering can't
-/// be resolved. Payout fields are capture-only for now.</summary>
+/// be resolved.
+///
+/// The payout block mirrors <see cref="PaymentDetailsSection"/>: <c>PayoutId</c>
+/// is minted when the stay COMPLETES and <c>PayoutStatus</c> flips from 'Pending'
+/// to 'Paid' when the provider records the payment; <c>PayoutMethod</c> ('Cash' /
+/// 'Digital') and <c>PaidAtUtc</c> come from the payment ledger row and are null
+/// until then.</summary>
 public sealed record NightStayPaymentDetailsSection(
     decimal? PricePerNight,
     decimal? TotalAmount,
     decimal? PawfrontFee,
     decimal FeePercentage,
     string PayoutStatus,
-    string? PayoutId);
+    string? PayoutId,
+    string? PayoutMethod = null,
+    DateTimeOffset? PaidAtUtc = null);

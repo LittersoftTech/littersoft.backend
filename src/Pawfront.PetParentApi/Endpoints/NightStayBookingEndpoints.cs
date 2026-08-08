@@ -3,6 +3,7 @@ using Pawfront.Application.Closures;
 using Pawfront.Application.Notifications;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ProviderServices;
+using Pawfront.Application.Reviews;
 using Pawfront.Contracts.Bookings;
 using Pawfront.Domain.Services;
 using Pawfront.PetParentApi.Auth;
@@ -224,6 +225,7 @@ internal static class NightStayBookingEndpoints
         Guid petParentId,
         Guid bookingId,
         INightStayBookingService bookingService,
+        IBookingReviewService reviewService,
         CancellationToken cancellationToken)
     {
         // The group is ownership-filtered on petParentId, but bookingId is not —
@@ -246,7 +248,10 @@ internal static class NightStayBookingEndpoints
 
         var pending = await ToPendingAsync(bookingService, bookingId, detail.Row.Status, cancellationToken);
 
-        return ApiResults.Ok(ToDetailResponse(detail, startOtp, pending));
+        var myReview = await reviewService.GetAsync(
+            ReviewedBookingTypes.NightStay, bookingId, ReviewerTypes.Parent, cancellationToken);
+
+        return ApiResults.Ok(ToDetailResponse(detail, startOtp, pending, myReview));
     }
 
     /// <summary>
@@ -257,7 +262,8 @@ internal static class NightStayBookingEndpoints
     private static NightStayBookingDetailResponse ToDetailResponse(
         NightStayBookingDetailResult detail,
         StartOtpResponse? startOtp,
-        NightStayBookingModificationResponse? pendingModification)
+        NightStayBookingModificationResponse? pendingModification,
+        BookingReviewRecord? myReview = null)
     {
         var row = detail.Row;
         return new NightStayBookingDetailResponse(
@@ -311,7 +317,7 @@ internal static class NightStayBookingEndpoints
                 row.ProviderMobileCountryCode,
                 row.ProviderMobileNumber,
                 row.ProviderGender,
-                ProviderPhotoUrl: null,
+                detail.ProviderPhotoUrl,
                 detail.ProviderAddress,
                 detail.ProviderCity,
                 detail.ProviderZip),
@@ -321,7 +327,9 @@ internal static class NightStayBookingEndpoints
                 detail.PawfrontFee,
                 detail.FeePercentage,
                 row.PayoutStatus,
-                row.PayoutId),
+                row.PayoutId,
+                row.PayoutMethod,
+                row.PaidAtUtc),
             new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
             PetParentEndpoints.ToLocationSection(detail.Location),
             startOtp,

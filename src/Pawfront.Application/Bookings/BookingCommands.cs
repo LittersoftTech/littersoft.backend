@@ -274,7 +274,13 @@ public sealed record BookingDetailRow(
     string? SnapshotCity = null,
     string? SnapshotZipCode = null,
     decimal? SnapshotLatitude = null,
-    decimal? SnapshotLongitude = null);
+    decimal? SnapshotLongitude = null,
+    // The payment ledger row ([Booking].[BookingPayments]) for this booking, joined
+    // on read. Both are null until the provider records the payment (Status = PAID);
+    // from then on PayoutMethod is the 'Cash' / 'Digital' the money actually changed
+    // hands as, which is the one payment fact the booking row itself never stores.
+    string? PayoutMethod = null,
+    DateTimeOffset? PaidAtUtc = null);
 
 /// <summary>
 /// Fully resolved booking-detail view: the raw <see cref="Row"/> plus the friendly
@@ -306,7 +312,12 @@ public sealed record BookingDetailResult(
     // Null when the offering can't be resolved.
     string? ProviderAddress = null,
     string? ProviderCity = null,
-    string? ProviderZip = null);
+    string? ProviderZip = null,
+    // The provider's photo, from the same Cosmos service doc: the business image
+    // for shops/hotels/clinics, the freelancer's profile image otherwise. The SQL
+    // provider row has no photo column, which is why providerDetails used to
+    // report null here.
+    string? ProviderPhotoUrl = null);
 
 /// <summary>Which party is driving a booking status change.</summary>
 public enum BookingStatusActor

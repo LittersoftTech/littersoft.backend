@@ -1,5 +1,6 @@
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
+using Pawfront.Application.Reviews;
 using Pawfront.Application.Storage;
 using Pawfront.Contracts.Bookings;
 
@@ -219,6 +220,7 @@ internal static class BookingEndpoints
     private static async Task<IResult> GetBooking(
         Guid bookingId,
         IBookingService bookingService,
+        IBookingReviewService reviewService,
         CancellationToken cancellationToken)
     {
         var detail = await bookingService.GetDetailAsync(bookingId, cancellationToken);
@@ -236,7 +238,10 @@ internal static class BookingEndpoints
             pending = ToModificationResponse(mod);
         }
 
-        return ApiResults.Ok(ToBookingDetailResponse(detail, startOtp: null, pending));
+        var myRating = await reviewService.GetAsync(
+            ReviewedBookingTypes.SingleDay, bookingId, ReviewerTypes.Provider, cancellationToken);
+
+        return ApiResults.Ok(ToBookingDetailResponse(detail, startOtp: null, pending, myRating));
     }
 
     private static BookingModificationResponse? ToModificationResponse(BookingModificationResult? mod) =>
@@ -784,7 +789,8 @@ internal static class BookingEndpoints
     private static BookingDetailResponse ToBookingDetailResponse(
         BookingDetailResult detail,
         StartOtpResponse? startOtp,
-        BookingModificationResponse? pendingModification)
+        BookingModificationResponse? pendingModification,
+        BookingReviewRecord? myRating = null)
     {
         var row = detail.Row;
         var isCustom = string.Equals(row.Source, "Custom", StringComparison.Ordinal);
@@ -841,7 +847,7 @@ internal static class BookingEndpoints
                 row.ProviderMobileCountryCode,
                 row.ProviderMobileNumber,
                 row.ProviderGender,
-                ProviderPhotoUrl: null,
+                detail.ProviderPhotoUrl,
                 detail.ProviderAddress,
                 detail.ProviderCity,
                 detail.ProviderZip),
@@ -851,12 +857,18 @@ internal static class BookingEndpoints
                 detail.PawfrontFee,
                 detail.FeePercentage,
                 row.PayoutStatus,
-                row.PayoutId),
+                row.PayoutId,
+                row.PayoutMethod,
+                row.PaidAtUtc),
             new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
             ToLocationSection(detail.Location),
             startOtp,
             pendingModification,
-            ToPrescriptionSection(row));
+            ToPrescriptionSection(row),
+            // This host's side only: the provider's own rating of the parent. The
+            // review the PARENT left for the provider is public and read via
+            // GET /providers/{providerId}/reviews.
+            ReviewResponseMapping.ToDetailsSection(row.Status, row.Source, myRating));
     }
 
     internal static BookingLocationDetailsSection ToLocationSection(BookingLocationResult location) =>

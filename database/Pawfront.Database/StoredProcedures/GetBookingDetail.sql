@@ -92,7 +92,14 @@ BEGIN
            b.[SnapshotCity],
            b.[SnapshotZipCode],
            b.[SnapshotLatitude],
-           b.[SnapshotLongitude]
+           b.[SnapshotLongitude],
+           -- Payment ledger join. HOW the money changed hands ('Cash'/'Digital')
+           -- is recorded only on the ledger row, never on the booking, so the
+           -- payment block could not report it without this. Both columns stay
+           -- NULL until the provider marks the booking PAID. Appended LAST so
+           -- existing reader ordinals stay stable.
+           pay.[PaymentMethod] AS [PayoutMethod],
+           pay.[PaidAtUtc]
     FROM [Booking].[Bookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
@@ -104,5 +111,9 @@ BEGIN
         ON rx.[BookingId] = b.[BookingId]
     LEFT JOIN [Parent].[PetNextConsultations] AS nc
         ON nc.[PetId] = b.[PetId] AND nc.[ConsultationType] = N'Vet'
+    -- BookingType discriminates which booking table BookingId points at — the
+    -- ledger is shared by single-day and night-stay bookings and has no FK.
+    LEFT JOIN [Booking].[BookingPayments] AS pay
+        ON pay.[BookingId] = b.[BookingId] AND pay.[BookingType] = N'SingleDay'
     WHERE b.[BookingId] = @BookingId;
 END;

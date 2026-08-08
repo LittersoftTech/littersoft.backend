@@ -11,6 +11,7 @@ using Pawfront.Application.Onboarding;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.Providers;
+using Pawfront.Application.Reviews;
 
 namespace Pawfront.Application;
 
@@ -61,6 +62,11 @@ public static class ApplicationServiceRegistration
         // never disagree.
         services.TryAddScoped<IProviderEarningsService, ProviderEarningsService>();
         services.TryAddScoped<IParentSpendService, ParentSpendService>();
+
+        // Booking reviews, both directions. The eligibility gate (COMPLETED or PAID,
+        // correct party, App booking) is enforced in Review.UpsertBookingReview, so
+        // this layer only validates input and caps the page size.
+        services.TryAddScoped<IBookingReviewService, BookingReviewService>();
 
         // Composes booking push notifications (who to tell, with what parameters).
         // The copy itself lives in NotificationTemplateCatalog and is rendered by

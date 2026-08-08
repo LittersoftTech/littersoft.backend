@@ -54,7 +54,10 @@ BEGIN
         [IsNightStay] BIT NOT NULL,
         [NotificationType] NVARCHAR(64) NOT NULL,
         [Audience] NVARCHAR(16) NOT NULL,
-        [ClosingTime] NVARCHAR(16) NULL,
+        -- The provider's closing INSTANT, not a bare clock time: the notification
+        -- is rendered in the recipient's timezone, and converting a time-of-day
+        -- needs the date it falls on.
+        [ClosingAtUtc] DATETIME2(0) NULL,
         PRIMARY KEY ([BookingId], [NotificationType], [Audience]));
 
     -- Single-day bookings with their derived instants. Night-stay is handled
@@ -68,10 +71,11 @@ BEGIN
         -- The provider's closing time on the booking date, when they have saved
         -- weekly hours for that weekday. NULL means "no hours on file", which is
         -- treated as "never closes" — the same posture the start-job gate takes.
-        [ClosesAtUtc] DATETIME2(7) NULL,
-        [ClosingTimeText] NVARCHAR(16) NULL);
+        -- It doubles as the {closingTime} the pick-up nudges quote, which is why
+        -- no separate display column is kept.
+        [ClosesAtUtc] DATETIME2(7) NULL);
 
-    INSERT INTO @SingleDay ([BookingId], [Status], [StartsAtUtc], [EndsAtUtc], [ClosesAtUtc], [ClosingTimeText])
+    INSERT INTO @SingleDay ([BookingId], [Status], [StartsAtUtc], [EndsAtUtc], [ClosesAtUtc])
     SELECT b.[BookingId],
            b.[Status],
            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[StartTime]),
@@ -80,8 +84,7 @@ BEGIN
                    CAST(b.[BookingDate] AS DATETIME2(7))),
            CASE WHEN w.[EndTime] IS NOT NULL
                 THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), w.[EndTime]),
-                             CAST(b.[BookingDate] AS DATETIME2(7))) END,
-           CONVERT(NVARCHAR(5), w.[EndTime], 108)
+                             CAST(b.[BookingDate] AS DATETIME2(7))) END
     FROM [Booking].[Bookings] b
     LEFT JOIN [Provider].[ProviderWeeklyAvailability] w
         ON w.[ProviderId] = b.[ProviderId]
@@ -219,15 +222,15 @@ BEGIN
       AND @Now >= s.[EndsAtUtc]
       AND (s.[ClosesAtUtc] IS NULL OR @Now < s.[ClosesAtUtc]);
 
-    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingTime])
-    SELECT s.[BookingId], 0, N'BOOKING_PICKUP_OVERDUE', N'PetParent', s.[ClosingTimeText]
+    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingAtUtc])
+    SELECT s.[BookingId], 0, N'BOOKING_PICKUP_OVERDUE', N'PetParent', s.[ClosesAtUtc]
     FROM @SingleDay s
     WHERE s.[Status] = N'IN_PROGRESS'
       AND s.[ClosesAtUtc] IS NOT NULL
       AND @Now >= s.[ClosesAtUtc];
 
-    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingTime])
-    SELECT s.[BookingId], 0, N'BOOKING_NOT_MARKED_COMPLETE', N'Provider', s.[ClosingTimeText]
+    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingAtUtc])
+    SELECT s.[BookingId], 0, N'BOOKING_NOT_MARKED_COMPLETE', N'Provider', s.[ClosesAtUtc]
     FROM @SingleDay s
     WHERE s.[Status] = N'IN_PROGRESS'
       AND s.[ClosesAtUtc] IS NOT NULL
@@ -241,13 +244,13 @@ BEGIN
     DECLARE @IsNightStay BIT;
     DECLARE @Type NVARCHAR(64);
     DECLARE @Audience NVARCHAR(16);
-    DECLARE @ClosingTime NVARCHAR(16);
+    DECLARE @ClosingAtUtc DATETIME2(0);
 
     DECLARE due_reminders CURSOR LOCAL FAST_FORWARD FOR
-        SELECT [BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingTime] FROM @Due;
+        SELECT [BookingId], [IsNightStay], [NotificationType], [Audience], [ClosingAtUtc] FROM @Due;
 
     OPEN due_reminders;
-    FETCH NEXT FROM due_reminders INTO @BookingId, @IsNightStay, @Type, @Audience, @ClosingTime;
+    FETCH NEXT FROM due_reminders INTO @BookingId, @IsNightStay, @Type, @Audience, @ClosingAtUtc;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
@@ -256,9 +259,9 @@ BEGIN
             @IsNightStay = @IsNightStay,
             @Audience = @Audience,
             @NotificationType = @Type,
-            @ClosingTime = @ClosingTime;
+            @ClosingAtUtc = @ClosingAtUtc;
 
-        FETCH NEXT FROM due_reminders INTO @BookingId, @IsNightStay, @Type, @Audience, @ClosingTime;
+        FETCH NEXT FROM due_reminders INTO @BookingId, @IsNightStay, @Type, @Audience, @ClosingAtUtc;
     END
 
     CLOSE due_reminders;

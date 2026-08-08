@@ -1,3 +1,4 @@
+using Pawfront.Contracts.Reviews;
 using Pawfront.Contracts.Services.PetAdoptionSale;
 using Pawfront.Contracts.Services.PetGroomer;
 using Pawfront.Contracts.Services.PetSitter;
@@ -61,22 +62,21 @@ public sealed record ProviderPublicProfileResponse(
     // The provider's gallery photos (Provider.ProviderPhotos), oldest-first;
     // empty when none.
     IReadOnlyList<string> GalleryImages,
-    // Parent reviews of the provider. Always empty for now — the review
-    // feature isn't built yet; the field is wired so the mobile client can
-    // bind it ahead of time.
-    IReadOnlyList<ProviderReviewResponse> Reviews,
+    // Aggregate over every review this provider has received — the header's
+    // "4.6 (23)" plus the star histogram. AverageRating is null when nobody has
+    // reviewed them yet ("No reviews yet", not 0.0).
+    ReviewSummaryResponse ReviewSummary,
+    // The most recent parent reviews, newest first — enough to render the profile
+    // without a second call. This is a PREVIEW, not the whole set: for the full
+    // list, with sorting by date or score and paging, use
+    // GET /providers/{providerId}/reviews.
+    IReadOnlyList<ProviderReviewItemResponse> Reviews,
     PetSitterServiceResponse? PetSitter,
     PetGroomerServiceResponse? PetGroomer,
     PetTrainerServiceResponse? PetTrainer,
     PetAdoptionSaleServiceResponse? PetAdoptionSale,
     VetServiceResponse? Vet);
 
-/// <summary>
-/// Placeholder for a parent's review of a provider. The review feature is not
-/// built yet, so this carries no fields and the <c>Reviews</c> array is always
-/// empty — fields will be added when reviews land.
-/// </summary>
-public sealed record ProviderReviewResponse();
 
 public sealed record ProviderWorkingHoursDayResponse(
     int DayOfWeek,              // 0 = Sunday .. 6 = Saturday

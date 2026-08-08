@@ -59,6 +59,9 @@ api.MapParentOnboardingEndpoints();
 api.MapDeviceTokenEndpoints();
 api.MapPetParentEndpoints();
 api.MapParentSpendEndpoints();
+// Parent reviews a provider after a finished booking (rating + comment + photos),
+// plus the public read of a provider's reviews.
+api.MapParentReviewEndpoints();
 api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapNightStayBookingEndpoints();

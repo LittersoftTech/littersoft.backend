@@ -153,6 +153,45 @@ public sealed record DeletePetParentAccountResponse(
     int RetainedEventCount,
     int RetainedPaymentCount);
 
+/// <summary>
+/// One unfinished job standing in the way of a pet-parent account delete —
+/// returned in the body of the <c>409 PendingJobsExist</c> response so the app
+/// can list exactly what must be settled first. "Unfinished" means the booking
+/// is in none of the terminal statuses: a request the provider hasn't answered,
+/// a confirmed job still to come, one underway, or one with an open modification
+/// proposal.
+///
+/// <see cref="BookingType"/> is <c>SingleDay</c> or <c>NightStay</c> and says
+/// which detail screen to open — the two kinds live in separate tables and share
+/// no id space. For a night stay <see cref="ServiceDate"/> is the check-in date
+/// and the two times are drop-off / pick-up.
+/// </summary>
+public sealed record PendingParentJobResponse(
+    Guid BookingId,
+    string BookingType,
+    // Friendly sequential job id, e.g. "PF-000123".
+    string JobId,
+    Guid ProviderId,
+    string? ProviderName,
+    string ServiceCategory,
+    string SubCategory,
+    string Status,
+    DateOnly ServiceDate,
+    TimeOnly? StartTime,
+    TimeOnly? EndTime,
+    string? PetName);
+
+/// <summary>
+/// Body of the <c>409 PendingJobsExist</c> response from
+/// <c>DELETE /api/v1/pet-parents/{petParentId}</c>. Nothing was changed — the
+/// account is untouched. The parent must cancel or see through every job in
+/// <see cref="PendingJobs"/> (soonest first) and retry. There is deliberately no
+/// force override, matching the provider-side deactivation and closure flows.
+/// </summary>
+public sealed record PendingParentJobsResponse(
+    Guid PetParentId,
+    IReadOnlyList<PendingParentJobResponse> PendingJobs);
+
 public sealed record PetParentOnboardingStatusResponse(
     Guid PetParentId,
     OnboardingStageResponse BasicInfo,

@@ -72,6 +72,12 @@ public sealed record ProviderPublicProfile(
     // The provider's gallery photos (Provider.ProviderPhotos), oldest-first.
     // Empty when none.
     IReadOnlyList<string> GalleryImages,
+    // Aggregate over every review this provider has received (count, average,
+    // star histogram). AverageRating is null when nobody has reviewed them.
+    Reviews.ReviewSummary ReviewSummary,
+    // The most recent reviews, newest first — a PREVIEW for the profile screen.
+    // The full sorted/paged list is GET /providers/{providerId}/reviews.
+    IReadOnlyList<Reviews.ProviderReviewRow> RecentReviews,
     PetSitterServiceResult? PetSitter,
     PetGroomerServiceResult? PetGroomer,
     PetTrainerServiceResult? PetTrainer,

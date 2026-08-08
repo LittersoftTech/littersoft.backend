@@ -1,3 +1,5 @@
+using Pawfront.Contracts.Reviews;
+
 namespace Pawfront.Contracts.Bookings;
 
 public sealed record CreateBookingRequest(
@@ -267,7 +269,13 @@ public sealed record BookingDetailResponse(
     BookingModificationResponse? PendingModification,
     // The Vet prescription recorded for this booking — null until a vet records
     // one (Vet bookings only). Drives the parent app's "View Prescription" screen.
-    PrescriptionDetailsSection? Prescription);
+    PrescriptionDetailsSection? Prescription,
+    // The caller's OWN review of this booking, plus whether the booking is in a
+    // reviewable state at all. Each host reports its own side: the parent host the
+    // parent's review of the provider, the provider host the provider's rating of
+    // the parent. A provider's rating of a parent is never returned on the parent
+    // host. Drives the "Rate your experience" prompt and its edit state.
+    BookingReviewDetailsSection? Review = null);
 
 /// <summary>
 /// The resolved "where does the service happen" block on a booking-detail read.
@@ -343,9 +351,11 @@ public sealed record ParentDetailsSection(
 
 /// <summary>The provider (service-side) facts, joined from the provider's profile —
 /// the counterpart of <see cref="ParentDetailsSection"/> so the parent app can show
-/// who delivers the service. <see cref="ProviderPhotoUrl"/> is null for now: the
-/// provider's business photo lives in the Cosmos offering doc, not on the SQL
-/// profile row (same posture as the event organizer block).</summary>
+/// who delivers the service. <see cref="ProviderPhotoUrl"/> comes from the Cosmos
+/// offering doc (the business photo for shops/hotels/clinics, the freelancer's own
+/// profile image) rather than the SQL profile row, which has no photo column — the
+/// same image the discovery and search cards show. Null when the offering can't be
+/// resolved or the provider never uploaded one.</summary>
 public sealed record ProviderDetailsSection(
     Guid ProviderId,
     string? ProviderName,
@@ -389,14 +399,25 @@ public sealed record PetDetailsSection(
 /// (Custom walk-in) jobs carry <c>PawfrontFee</c> = 0 and <c>FeePercentage</c> = 0
 /// — Pawfront takes no commission (and hence no taxes) on off-platform jobs.
 /// Pricing fields are null when the provider's offering can't be resolved (e.g.
-/// deactivated service). Payout fields are capture-only for now.</summary>
+/// deactivated service).
+///
+/// The payout block describes the real state of the money. <c>PayoutId</c>
+/// ("PO-000123") is minted when the job COMPLETES and <c>PayoutStatus</c> is
+/// 'Pending' from then until the provider records the payment, at which point it
+/// becomes 'Paid'. <c>PayoutMethod</c> ('Cash' / 'Digital') and <c>PaidAtUtc</c>
+/// come from the payment ledger row and are null until that happens — cash is
+/// handed over off-platform, so nothing can be asserted about the method before
+/// the provider confirms it. A Custom walk-in never reaches PAID (off-platform,
+/// no commission), so its payout fields stay unset.</summary>
 public sealed record PaymentDetailsSection(
     decimal? PricePerHour,
     decimal? TotalAmount,
     decimal? PawfrontFee,
     decimal FeePercentage,
     string PayoutStatus,
-    string? PayoutId);
+    string? PayoutId,
+    string? PayoutMethod = null,
+    DateTimeOffset? PaidAtUtc = null);
 
 /// <summary>One row of a booking's status-change audit trail.</summary>
 public sealed record BookingStatusHistoryEntryResponse(

@@ -29,7 +29,10 @@ BEGIN
                ELSE CAST(0 AS BIT)
            END AS [IsMedicalInfoComplete]
     FROM [Parent].[Pets]
-    WHERE [PetParentId] = @PetParentId
+    -- Soft-deleted pets don't count towards onboarding: the parent no longer
+    -- has them, and their (retained) medical fields would otherwise keep the
+    -- pet-medical-info stage looking Complete.
+    WHERE [PetParentId] = @PetParentId AND [IsDeleted] = 0
     ORDER BY [CreatedAtUtc] ASC;
 
     -- Result set 3: identity. Zero rows = no identity uploaded yet (stage

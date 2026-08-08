@@ -42,11 +42,15 @@ BEGIN
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @CheckInDate DATE;
     DECLARE @DropOffTime TIME(0);
+    -- Only used to turn the proposed check-out DATE into an instant for the
+    -- notification's timezone conversion.
+    DECLARE @PickUpTime TIME(0);
 
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId],
-           @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime]
+           @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime],
+           @PickUpTime = [PickUpTime]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -126,18 +130,24 @@ BEGIN
     DECLARE @ReqDedupe NVARCHAR(64) =
         CAST((SELECT TOP 1 [NightStayBookingModificationId] FROM @InsertedModification) AS NVARCHAR(36));
 
-    -- A stay is proposed as a date range, so the "new time" slot carries the new
-    -- check-out rather than a clock time.
-    DECLARE @ProposedDateText NVARCHAR(32) = FORMAT(@ProposedCheckInDate, N'd MMM', N'en-GB');
-    DECLARE @ProposedOutText NVARCHAR(16) = FORMAT(@ProposedCheckOutDate, N'd MMM', N'en-GB');
+    -- Both ends of the proposed stay as UTC instants, pinned to the booking's
+    -- hand-over times so the renderer can localise them. A stay is proposed as a
+    -- date range, so the copy's "new time" slot carries the new check-out DATE
+    -- rather than a clock time — the renderer applies that for night-stay rows.
+    DECLARE @ProposedStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+                CAST(@ProposedCheckInDate AS DATETIME2(0)));
+    DECLARE @ProposedCheckOutUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PickUpTime),
+                CAST(@ProposedCheckOutDate AS DATETIME2(0)));
 
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @NightStayBookingId,
         @IsNightStay = 1,
         @Audience = @ReqAudience,
         @NotificationType = @ReqType,
-        @NewServiceDate = @ProposedDateText,
-        @NewStartTime = @ProposedOutText,
+        @NewServiceStartUtc = @ProposedStartUtc,
+        @NewCheckOutUtc = @ProposedCheckOutUtc,
         @DedupeSuffix = @ReqDedupe;
 
     SELECT [NightStayBookingId],

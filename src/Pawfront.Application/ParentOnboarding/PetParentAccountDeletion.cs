@@ -21,3 +21,23 @@ public sealed record PetParentAccountDeletionResult(
     // gallery photos. Booking evidence and event banners are deliberately
     // absent: those belong to records the delete retains.
     IReadOnlyList<string> BlobUrls);
+
+/// <summary>
+/// One unfinished booking blocking a pet-parent account delete. Flat and
+/// booking-kind-agnostic: <see cref="BookingType"/> ('SingleDay' | 'NightStay')
+/// discriminates, and for a stay <see cref="ServiceDate"/> is the check-in date
+/// with the times being drop-off / pick-up.
+/// </summary>
+public sealed record PendingParentJob(
+    Guid BookingId,
+    string BookingType,
+    string JobId,
+    Guid ProviderId,
+    string? ProviderName,
+    string ServiceCategory,
+    string SubCategory,
+    string Status,
+    DateOnly ServiceDate,
+    TimeOnly? StartTime,
+    TimeOnly? EndTime,
+    string? PetName);

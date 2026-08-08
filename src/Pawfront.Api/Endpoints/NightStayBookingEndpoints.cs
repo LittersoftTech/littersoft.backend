@@ -1,5 +1,6 @@
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
+using Pawfront.Application.Reviews;
 using Pawfront.Application.Storage;
 using Pawfront.Contracts.Bookings;
 
@@ -52,7 +53,11 @@ internal static class NightStayBookingEndpoints
     }
 
     private static async Task<IResult> GetBooking(
-        Guid providerId, Guid bookingId, INightStayBookingService bookingService, CancellationToken cancellationToken)
+        Guid providerId,
+        Guid bookingId,
+        INightStayBookingService bookingService,
+        IBookingReviewService reviewService,
+        CancellationToken cancellationToken)
     {
         var detail = await bookingService.GetDetailAsync(bookingId, cancellationToken);
         if (detail is null || detail.Row.ProviderId != providerId)
@@ -74,7 +79,10 @@ internal static class NightStayBookingEndpoints
                     BookingEndpoints.ToAcknowledgedTermsResponse(mod.AcknowledgedTerms));
         }
 
-        return ApiResults.Ok(ToDetailResponse(detail, startOtp: null, pending));
+        var myRating = await reviewService.GetAsync(
+            ReviewedBookingTypes.NightStay, bookingId, ReviewerTypes.Provider, cancellationToken);
+
+        return ApiResults.Ok(ToDetailResponse(detail, startOtp: null, pending, myRating));
     }
 
     /// <summary>
@@ -84,7 +92,8 @@ internal static class NightStayBookingEndpoints
     private static NightStayBookingDetailResponse ToDetailResponse(
         NightStayBookingDetailResult detail,
         StartOtpResponse? startOtp,
-        NightStayBookingModificationResponse? pendingModification)
+        NightStayBookingModificationResponse? pendingModification,
+        BookingReviewRecord? myRating = null)
     {
         var row = detail.Row;
         return new NightStayBookingDetailResponse(
@@ -138,7 +147,7 @@ internal static class NightStayBookingEndpoints
                 row.ProviderMobileCountryCode,
                 row.ProviderMobileNumber,
                 row.ProviderGender,
-                ProviderPhotoUrl: null,
+                detail.ProviderPhotoUrl,
                 detail.ProviderAddress,
                 detail.ProviderCity,
                 detail.ProviderZip),
@@ -148,11 +157,15 @@ internal static class NightStayBookingEndpoints
                 detail.PawfrontFee,
                 detail.FeePercentage,
                 row.PayoutStatus,
-                row.PayoutId),
+                row.PayoutId,
+                row.PayoutMethod,
+                row.PaidAtUtc),
             new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
             BookingEndpoints.ToLocationSection(detail.Location),
             startOtp,
-            pendingModification);
+            pendingModification,
+            // Night-stay is App-only, so there is no Custom walk-in case to exclude.
+            ReviewResponseMapping.ToDetailsSection(row.Status, myRating));
     }
 
     private static string? CombineName(string? first, string? last)

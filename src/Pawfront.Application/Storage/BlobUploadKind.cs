@@ -16,5 +16,9 @@ public enum BlobUploadKind
     ServiceBanner = 10,
     // A provider's single provider-level banner image (owner = ProviderId),
     // captured at registration and shown on their search card.
-    ProviderBanner = 11
+    ProviderBanner = 11,
+    // A photo a pet parent attached to their review of a booking
+    // (owner = BookingReviewId). The review row has to exist first, which is why
+    // review photos are a second call rather than part of the submit.
+    ReviewPhoto = 12
 }

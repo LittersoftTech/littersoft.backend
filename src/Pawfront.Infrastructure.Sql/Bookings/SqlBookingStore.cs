@@ -1132,7 +1132,12 @@ internal sealed class SqlBookingStore(
             SnapshotCity: reader.IsDBNull(64) ? null : reader.GetString(64),
             SnapshotZipCode: reader.IsDBNull(65) ? null : reader.GetString(65),
             SnapshotLatitude: reader.IsDBNull(66) ? null : reader.GetDecimal(66),
-            SnapshotLongitude: reader.IsDBNull(67) ? null : reader.GetDecimal(67));
+            SnapshotLongitude: reader.IsDBNull(67) ? null : reader.GetDecimal(67),
+            // Payment ledger join — null until the booking is marked PAID.
+            PayoutMethod: reader.IsDBNull(68) ? null : reader.GetString(68),
+            PaidAtUtc: reader.IsDBNull(69)
+                ? null
+                : new DateTimeOffset(reader.GetDateTime(69), TimeSpan.Zero));
     }
 
     private static BookingPrescriptionResult ReadPrescription(SqlDataReader reader) =>

@@ -6,6 +6,7 @@ using Pawfront.Application.Notifications;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
 using Pawfront.Application.ParentPhotos;
+using Pawfront.Application.Reviews;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Storage;
 using Pawfront.Contracts.Bookings;
@@ -402,7 +403,11 @@ internal static class PetParentEndpoints
     /// state, issues/returns the start-OTP for the parent to read to the provider.
     /// </summary>
     private static async Task<IResult> GetServiceBookingDetail(
-        Guid petParentId, Guid bookingId, IBookingService bookingService, CancellationToken cancellationToken)
+        Guid petParentId,
+        Guid bookingId,
+        IBookingService bookingService,
+        IBookingReviewService reviewService,
+        CancellationToken cancellationToken)
     {
         var detail = await bookingService.GetDetailAsync(bookingId, cancellationToken);
         if (detail is null || detail.Row.PetParentId != petParentId)
@@ -432,7 +437,10 @@ internal static class PetParentEndpoints
                     ToAcknowledgedTermsResponse(mod.AcknowledgedTerms));
         }
 
-        return ApiResults.Ok(ToBookingDetailResponse(detail, startOtp, pending));
+        var myReview = await reviewService.GetAsync(
+            ReviewedBookingTypes.SingleDay, bookingId, ReviewerTypes.Parent, cancellationToken);
+
+        return ApiResults.Ok(ToBookingDetailResponse(detail, startOtp, pending, myReview));
     }
 
     private static Task<IResult> ParentCancelServiceBooking(
@@ -662,7 +670,8 @@ internal static class PetParentEndpoints
     private static BookingDetailResponse ToBookingDetailResponse(
         BookingDetailResult detail,
         StartOtpResponse? startOtp,
-        BookingModificationResponse? pendingModification)
+        BookingModificationResponse? pendingModification,
+        BookingReviewRecord? myReview = null)
     {
         var row = detail.Row;
         var isCustom = string.Equals(row.Source, "Custom", StringComparison.Ordinal);
@@ -719,7 +728,7 @@ internal static class PetParentEndpoints
                 row.ProviderMobileCountryCode,
                 row.ProviderMobileNumber,
                 row.ProviderGender,
-                ProviderPhotoUrl: null,
+                detail.ProviderPhotoUrl,
                 detail.ProviderAddress,
                 detail.ProviderCity,
                 detail.ProviderZip),
@@ -729,12 +738,17 @@ internal static class PetParentEndpoints
                 detail.PawfrontFee,
                 detail.FeePercentage,
                 row.PayoutStatus,
-                row.PayoutId),
+                row.PayoutId,
+                row.PayoutMethod,
+                row.PaidAtUtc),
             new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
             ToLocationSection(detail.Location),
             startOtp,
             pendingModification,
-            ToPrescriptionSection(row));
+            ToPrescriptionSection(row),
+            // This host's side only: the parent's own review of the provider. The
+            // provider's rating OF the parent is deliberately not returned here.
+            ReviewResponseMapping.ToDetailsSection(row.Status, row.Source, myReview));
     }
 
     /// <summary>Builds the detail read's prescription block — null until a vet records one.</summary>
@@ -827,7 +841,34 @@ internal static class PetParentEndpoints
         {
             return ApiResults.NotFound("PetParentNotFound", exception.Message);
         }
+        // Unfinished jobs block the delete. Nothing was changed — the account is
+        // untouched — so the list goes back in the body for the parent to settle
+        // first. There is no force override, matching the provider-side
+        // deactivation and closure flows.
+        catch (PetParentPendingJobsException exception)
+        {
+            return ApiResults.Conflict(
+                "PendingJobsExist",
+                exception.Message,
+                new PendingParentJobsResponse(
+                    exception.PetParentId,
+                    exception.PendingJobs.Select(ToPendingJobResponse).ToArray()));
+        }
     }
+
+    private static PendingParentJobResponse ToPendingJobResponse(PendingParentJob job) =>
+        new(job.BookingId,
+            job.BookingType,
+            job.JobId,
+            job.ProviderId,
+            job.ProviderName,
+            job.ServiceCategory,
+            job.SubCategory,
+            job.Status,
+            job.ServiceDate,
+            job.StartTime,
+            job.EndTime,
+            job.PetName);
 
     private static async Task<IResult> SendMobileOtp(
         Guid petParentId,

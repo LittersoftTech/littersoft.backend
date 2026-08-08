@@ -27,7 +27,9 @@ BEGIN
            [VaccinationDose],
            [Prescription]
     FROM [Parent].[Pets]
-    WHERE [PetId] = @PetId;
+    -- Soft-deleted pets are invisible to both apps' pet screens: the row only
+    -- survives so a past booking's petDetails join still resolves.
+    WHERE [PetId] = @PetId AND [IsDeleted] = 0;
 
     -- Result set 2: the pet's photo gallery, oldest-first so the mobile
     -- gallery renders in upload order. Nested under the pet in the response.

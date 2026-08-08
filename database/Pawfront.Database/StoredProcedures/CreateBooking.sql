@@ -74,6 +74,9 @@ BEGIN
         FROM [Parent].[Pets]
         WHERE [PetId] = @PetId
           AND [PetParentId] = @PetParentId
+          -- A soft-deleted pet can't be booked. The row survives only to keep
+          -- EXISTING bookings readable; it is not a pet the parent still has.
+          AND [IsDeleted] = 0
     )
     BEGIN
         THROW 51068, 'Pet was not found or does not belong to the pet parent.', 1;

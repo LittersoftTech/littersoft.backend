@@ -130,7 +130,13 @@ public sealed record NightStayBookingDetailRow(
     string? SnapshotCity = null,
     string? SnapshotZipCode = null,
     decimal? SnapshotLatitude = null,
-    decimal? SnapshotLongitude = null);
+    decimal? SnapshotLongitude = null,
+    // The payment ledger row ([Booking].[BookingPayments]) for this stay, joined on
+    // read. Both are null until the provider records the payment (Status = PAID);
+    // from then on PayoutMethod is the 'Cash' / 'Digital' the money actually changed
+    // hands as, which the booking row itself never stores.
+    string? PayoutMethod = null,
+    DateTimeOffset? PaidAtUtc = null);
 
 /// <summary>
 /// Fully resolved night-stay booking-detail view: the raw <see cref="Row"/> plus the
@@ -158,7 +164,11 @@ public sealed record NightStayBookingDetailResult(
     // Null when the offering can't be resolved.
     string? ProviderAddress = null,
     string? ProviderCity = null,
-    string? ProviderZip = null);
+    string? ProviderZip = null,
+    // The provider's photo, from the same Cosmos service doc: the business image
+    // for hotels, the freelancer's profile image otherwise. The SQL provider row
+    // has no photo column, which is why providerDetails used to report null here.
+    string? ProviderPhotoUrl = null);
 
 /// <summary>
 /// Request to move a night-stay booking to a new lifecycle status. Same shape

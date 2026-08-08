@@ -1,4 +1,3 @@
-using System.Globalization;
 using Pawfront.Application.Bookings;
 
 namespace Pawfront.Application.Notifications;
@@ -7,17 +6,10 @@ namespace Pawfront.Application.Notifications;
 public sealed class BookingNotificationService(INotificationPublisher publisher)
     : IBookingNotificationService
 {
-    // "5 Aug" / "14:00". Invariant so the wording is deterministic regardless of
-    // the host's culture. NOTE: these are UTC, like every time in this codebase —
-    // no provider timezone is stored, so a provider in a +02:00 zone reads a time
-    // two hours behind their local clock. Fixing that needs a timezone column on
-    // Provider.Providers.
-    private const string DateFormat = "d MMM";
-    private const string TimeFormat = @"HH\:mm";
-
-    // The accept-by deadline can fall on a different day from the service, so it
-    // carries its date as well as its time.
-    private const string DateTimeFormat = @"d MMM HH\:mm";
+    // Times are handed over as raw UTC instants, never as formatted strings: the
+    // dispatcher converts them to the recipient's timezone and formats them at
+    // render time, so a notification enqueued here reads identically to one
+    // enqueued by a T-SQL sweep. See NotificationLocalTime.
 
     public Task NotifyBookingRequestedAsync(
         BookingResult booking,
@@ -25,12 +17,13 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
         string? petName,
         CancellationToken cancellationToken)
     {
+        var serviceStartUtc = BookingLeadTime.ServiceStartUtc(booking.BookingDate, booking.StartTime);
+
         var data = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             [NotificationDataKeys.BookingId] = booking.BookingId.ToString(),
             [NotificationDataKeys.BookingType] = "SingleDay",
-            [NotificationDataKeys.ServiceDate] = booking.BookingDate.ToString(DateFormat, CultureInfo.InvariantCulture),
-            [NotificationDataKeys.StartTime] = booking.StartTime.ToString(TimeFormat, CultureInfo.InvariantCulture),
+            [NotificationDataKeys.ServiceStartUtc] = NotificationLocalTime.ToIso(serviceStartUtc),
             // Not shown in the body any more, but still handed to the app so it
             // can label the booking in its own UI without a second lookup.
             [NotificationDataKeys.ServiceName] = BookingServiceLabel.Resolve(serviceType, booking.ServiceItemCode)
@@ -40,8 +33,7 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
         AddPetName(data, petName);
         AddAcceptByDeadline(
             data,
-            BookingAcceptanceDeadline.Compute(
-                booking.CreatedAtUtc, booking.BookingDate, booking.StartTime));
+            BookingAcceptanceDeadline.Compute(booking.CreatedAtUtc, serviceStartUtc));
 
         return publisher.PublishAsync(
             new NotificationRequest(
@@ -60,13 +52,17 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
         string? petName,
         CancellationToken cancellationToken)
     {
+        // A stay's service begins at drop-off on the check-in day — the same
+        // instant BR-53 and the lead-time rule measure against.
+        var serviceStartUtc = BookingLeadTime.ServiceStartUtc(booking.CheckInDate, booking.DropOffTime);
+        var checkOutUtc = BookingLeadTime.ServiceStartUtc(booking.CheckOutDate, booking.PickUpTime);
+
         var data = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             [NotificationDataKeys.BookingId] = booking.NightStayBookingId.ToString(),
             [NotificationDataKeys.BookingType] = "NightStay",
-            [NotificationDataKeys.CheckInDate] = booking.CheckInDate.ToString(DateFormat, CultureInfo.InvariantCulture),
-            [NotificationDataKeys.CheckOutDate] = booking.CheckOutDate.ToString(DateFormat, CultureInfo.InvariantCulture),
-            [NotificationDataKeys.DropOffTime] = booking.DropOffTime.ToString(TimeFormat, CultureInfo.InvariantCulture),
+            [NotificationDataKeys.ServiceStartUtc] = NotificationLocalTime.ToIso(serviceStartUtc),
+            [NotificationDataKeys.CheckOutUtc] = NotificationLocalTime.ToIso(checkOutUtc),
             // Not shown in the body any more, but still handed to the app so it
             // can label the booking in its own UI without a second lookup.
             [NotificationDataKeys.ServiceName] =
@@ -75,12 +71,9 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
 
         AddCanonicalIds(data, booking.ProviderId, booking.PetParentId, booking.PetId, isNightStay: true);
         AddPetName(data, petName);
-        // A stay's service begins at drop-off on the check-in day — the same
-        // instant BR-53 and the lead-time rule measure against.
         AddAcceptByDeadline(
             data,
-            BookingAcceptanceDeadline.Compute(
-                booking.CreatedAtUtc, booking.CheckInDate, booking.DropOffTime));
+            BookingAcceptanceDeadline.Compute(booking.CreatedAtUtc, serviceStartUtc));
 
         return publisher.PublishAsync(
             new NotificationRequest(
@@ -95,17 +88,12 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
     }
 
     /// <summary>
-    /// Adds the accept-by deadline twice: once rendered for the notification body,
-    /// once as an ISO instant so the app can show a countdown or convert to the
-    /// provider's local time — which the rendered string can't, since no provider
-    /// timezone exists server-side.
+    /// Adds the accept-by deadline as a UTC instant. The renderer turns it into the
+    /// <c>acceptBy</c> string shown in the body, in the recipient's timezone; the
+    /// instant itself also reaches the app, which needs it to run a countdown.
     /// </summary>
-    private static void AddAcceptByDeadline(IDictionary<string, string> data, DateTimeOffset deadlineUtc)
-    {
-        data[NotificationDataKeys.AcceptBy] =
-            deadlineUtc.UtcDateTime.ToString(DateTimeFormat, CultureInfo.InvariantCulture);
-        data[NotificationDataKeys.AcceptByUtc] = deadlineUtc.ToString("O", CultureInfo.InvariantCulture);
-    }
+    private static void AddAcceptByDeadline(IDictionary<string, string> data, DateTimeOffset deadlineUtc) =>
+        data[NotificationDataKeys.AcceptByUtc] = NotificationLocalTime.ToIso(deadlineUtc);
 
     /// <summary>
     /// Adds the canonical id block the mobile apps read on every notification.

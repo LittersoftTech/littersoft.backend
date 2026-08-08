@@ -262,8 +262,9 @@ internal sealed class SqlParentOnboardingService(
 
         try
         {
-            // Two result sets: summary, then the blob URLs to clean up. See the
-            // sproc's header for what is retained vs cleared.
+            // Three result sets: summary, the blob URLs to clean up, then the
+            // unfinished jobs that refused the delete. See the sproc's header
+            // for what is retained vs cleared.
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
             if (!await reader.ReadAsync(cancellationToken))
@@ -271,15 +272,21 @@ internal sealed class SqlParentOnboardingService(
                 throw new InvalidOperationException("Pet parent delete summary was not returned.");
             }
 
-            var summary = new DeletePetParentAccountResponse(
-                reader.GetGuid(0),
-                new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
-                reader.GetBoolean(2),
-                reader.GetInt32(3),
-                reader.GetInt32(4),
-                reader.GetInt32(5),
-                reader.GetInt32(6),
-                reader.GetInt32(7));
+            // Read the refusal flag before anything else: when it is set the
+            // account was NOT touched and the rest of this row is meaningless.
+            var blockedByPendingJobs = reader.GetBoolean(3);
+
+            var summary = blockedByPendingJobs
+                ? null
+                : new DeletePetParentAccountResponse(
+                    reader.GetGuid(0),
+                    new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
+                    reader.GetBoolean(2),
+                    reader.GetInt32(4),
+                    reader.GetInt32(5),
+                    reader.GetInt32(6),
+                    reader.GetInt32(7),
+                    reader.GetInt32(8));
 
             var blobUrls = new List<string>();
             if (await reader.NextResultAsync(cancellationToken))
@@ -290,7 +297,35 @@ internal sealed class SqlParentOnboardingService(
                 }
             }
 
-            return new PetParentAccountDeletionResult(summary, blobUrls);
+            if (!blockedByPendingJobs)
+            {
+                return new PetParentAccountDeletionResult(summary!, blobUrls);
+            }
+
+            // Result set 3 only carries rows on the refusal path. It has to be
+            // drained before throwing so the reader isn't abandoned mid-stream.
+            var pendingJobs = new List<PendingParentJob>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pendingJobs.Add(new PendingParentJob(
+                        BookingId: reader.GetGuid(0),
+                        BookingType: reader.GetString(1),
+                        JobId: reader.GetString(2),
+                        ProviderId: reader.GetGuid(3),
+                        ProviderName: reader.IsDBNull(4) ? null : reader.GetString(4),
+                        ServiceCategory: reader.GetString(5),
+                        SubCategory: reader.GetString(6),
+                        Status: reader.GetString(7),
+                        ServiceDate: DateOnly.FromDateTime(reader.GetDateTime(8)),
+                        StartTime: reader.IsDBNull(9) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(9)),
+                        EndTime: reader.IsDBNull(10) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(10)),
+                        PetName: reader.IsDBNull(11) ? null : reader.GetString(11)));
+                }
+            }
+
+            throw new PetParentPendingJobsException(petParentId, pendingJobs);
         }
         catch (SqlException exception) when (exception.Number == 51223)
         {

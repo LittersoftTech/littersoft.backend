@@ -202,8 +202,11 @@ BEGIN
     -- startTime already read as the new window; newServiceDate/newStartTime are
     -- passed so the "confirmed: X at Y" copy is explicit either way. On decline the
     -- booking kept its original window, which is what the copy quotes.
-    DECLARE @RespDateText NVARCHAR(32) = FORMAT(@PDate, N'd MMM', N'en-GB');
-    DECLARE @RespTimeText NVARCHAR(16) = CONVERT(NVARCHAR(5), @PStart, 108);
+    -- The proposal as a single UTC instant; the renderer localises it into the
+    -- newServiceDate + newStartTime the copy quotes.
+    DECLARE @RespStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PStart),
+                CAST(@PDate AS DATETIME2(0)));
     DECLARE @RespDedupe NVARCHAR(64) = CAST(@ModId AS NVARCHAR(36));
 
     EXEC [Notification].[EnqueueBookingNotification]
@@ -211,8 +214,7 @@ BEGIN
         @IsNightStay = 0,
         @Audience = @RespAudience,
         @NotificationType = @RespType,
-        @NewServiceDate = @RespDateText,
-        @NewStartTime = @RespTimeText,
+        @NewServiceStartUtc = @RespStartUtc,
         @DedupeSuffix = @RespDedupe;
 
     SELECT [BookingId],

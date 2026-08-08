@@ -259,24 +259,56 @@ public static class NotificationDataKeys
     public const string ParentName = "parentName";
     public const string PetName = "petName";
     public const string EventTitle = "eventTitle";
+
+    // --- Times: raw instants in, display strings out --------------------------
+    // Producers emit the *Utc keys below; NotificationRenderer converts them to
+    // the recipient's timezone (Swiss today) and derives the display keys from
+    // them. See NotificationLocalTime for why the split exists. Both halves reach
+    // the app: the display strings match the body it is showing, the instants let
+    // it re-format or count down on its own.
+
+    /// <summary>
+    /// When the service begins, as a UTC instant — <c>BookingDate + StartTime</c>,
+    /// or <c>CheckInDate + DropOffTime</c> for a stay. The same instant BR-01 /
+    /// BR-53 and the modification cutoff all measure against.
+    /// </summary>
+    public const string ServiceStartUtc = "serviceStartUtc";
+
+    /// <summary>
+    /// Night-stay only: when the stay ends, as a UTC instant —
+    /// <c>CheckOutDate + PickUpTime</c>.
+    /// </summary>
+    public const string CheckOutUtc = "checkOutUtc";
+
+    /// <summary>Local date of <see cref="ServiceStartUtc"/> ("5 Aug").</summary>
     public const string ServiceDate = "serviceDate";
+
+    /// <summary>Local time of <see cref="ServiceStartUtc"/> ("14:00").</summary>
     public const string StartTime = "startTime";
+
+    /// <summary>Night-stay alias of <see cref="ServiceDate"/>.</summary>
     public const string CheckInDate = "checkInDate";
+
+    /// <summary>Local date of <see cref="CheckOutUtc"/>.</summary>
     public const string CheckOutDate = "checkOutDate";
-    /// <summary>Hand-over time on the check-in day, for night-stay bookings.</summary>
+
+    /// <summary>
+    /// Hand-over time on the check-in day, for night-stay bookings — the
+    /// night-stay alias of <see cref="StartTime"/>.
+    /// </summary>
     public const string DropOffTime = "dropOffTime";
 
     /// <summary>
     /// Display form of the accept-by deadline ("4 Aug 10:00"), rendered into the
-    /// notification body. UTC, like everything else here.
+    /// notification body in the recipient's timezone. Derived from
+    /// <see cref="AcceptByUtc"/>; carries its date as well as its time because the
+    /// deadline can fall on a different day from the service.
     /// </summary>
     public const string AcceptBy = "acceptBy";
 
     /// <summary>
-    /// The same deadline as a round-trip ISO 8601 instant, so the app can show a
-    /// countdown or convert to the provider's local time — which the rendered
-    /// <see cref="AcceptBy"/> string cannot do, since no provider timezone is
-    /// stored server-side.
+    /// The accept-by deadline as a UTC instant, so the app can show a live
+    /// countdown rather than only the rendered <see cref="AcceptBy"/> string.
     /// </summary>
     public const string AcceptByUtc = "acceptByUtc";
     /// <summary>
@@ -303,11 +335,29 @@ public static class NotificationDataKeys
     public const string AbsentParty = "absentParty";
     public const string Reason = "reason";
 
-    /// <summary>Proposed date on an accepted modification — the booking's new timing.</summary>
+    /// <summary>
+    /// The proposed start of the service on a modification, as a UTC instant. Same
+    /// arithmetic as <see cref="ServiceStartUtc"/>, applied to the staged proposal.
+    /// </summary>
+    public const string NewServiceStartUtc = "newServiceStartUtc";
+
+    /// <summary>
+    /// Night-stay only: the proposed end of the stay on a modification, as a UTC
+    /// instant.
+    /// </summary>
+    public const string NewCheckOutUtc = "newCheckOutUtc";
+
+    /// <summary>Proposed date on a modification — local date of <see cref="NewServiceStartUtc"/>.</summary>
     public const string NewServiceDate = "newServiceDate";
 
-    /// <summary>Proposed time on an accepted modification.</summary>
+    /// <summary>Proposed time on a modification — local time of <see cref="NewServiceStartUtc"/>.</summary>
     public const string NewStartTime = "newStartTime";
+
+    /// <summary>
+    /// Night-stay only: proposed check-out — local date of
+    /// <see cref="NewCheckOutUtc"/>.
+    /// </summary>
+    public const string NewCheckOutDate = "newCheckOutDate";
 
     /// <summary>
     /// Where the service happens, for the T-5min reminder. Free-text address line;
@@ -315,7 +365,17 @@ public static class NotificationDataKeys
     /// </summary>
     public const string Location = "location";
 
-    /// <summary>The provider's closing time on the service date, for the pick-up nudges.</summary>
+    /// <summary>
+    /// When the provider closes on the service date, as a UTC instant. An instant
+    /// rather than a bare time-of-day because converting a clock time to the
+    /// recipient's zone needs the date it falls on.
+    /// </summary>
+    public const string ClosingAtUtc = "closingAtUtc";
+
+    /// <summary>
+    /// The provider's closing time, for the pick-up nudges — local time of
+    /// <see cref="ClosingAtUtc"/>.
+    /// </summary>
     public const string ClosingTime = "closingTime";
 
     // --- Parameters for the not-yet-built modules -----------------------------

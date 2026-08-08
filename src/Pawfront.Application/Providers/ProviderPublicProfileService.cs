@@ -4,6 +4,7 @@ using Pawfront.Application.Closures;
 using Pawfront.Application.Policies;
 using Pawfront.Application.ProviderBanners;
 using Pawfront.Application.ProviderPhotos;
+using Pawfront.Application.Reviews;
 using Pawfront.Application.Services.PetAdoptionSale;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.PetSitter;
@@ -27,12 +28,18 @@ internal sealed class ProviderPublicProfileService(
     IProviderPhotoService photoService,
     IProviderBannerImageService bannerImageService,
     IProviderBookingStatsReader bookingStatsReader,
-    IProviderContactReader contactReader) : IProviderPublicProfileService
+    IProviderContactReader contactReader,
+    IBookingReviewService reviewService) : IProviderPublicProfileService
 {
     // 10-year window for "future time off" — closures rarely run beyond this,
     // and the closure list endpoint requires a bounded range. Trimmed in the
     // unlikely event a closure runs longer.
     private static readonly TimeSpan FutureTimeOffWindow = TimeSpan.FromDays(365 * 10);
+
+    // How many reviews the profile carries inline. Enough to fill the section
+    // without making a provider with hundreds of reviews an expensive read — the
+    // dedicated endpoint is where the rest lives.
+    private const int RecentReviewCount = 10;
 
     public async Task<ProviderPublicProfile> GetAsync(
         Guid providerId,
@@ -142,6 +149,19 @@ internal sealed class ProviderPublicProfileService(
             new[] { providerId }, cancellationToken);
         var completedBookings = completedCounts.TryGetValue(providerId, out var count) ? count : 0;
 
+        // Reviews: the whole-population summary for the header, plus the newest few
+        // inline. One call gives both — the summary is computed over every review
+        // regardless of the page, so it does not shift as a reader pages the
+        // dedicated list endpoint.
+        var reviews = await reviewService.ListForProviderAsync(
+            new ProviderReviewQuery(
+                providerId,
+                ReviewSortBy.Date,
+                Earnings.EarningsSortDirection.Descending,
+                Skip: 0,
+                Take: RecentReviewCount),
+            cancellationToken);
+
         return new ProviderPublicProfile(
             providerId,
             location.ServiceCategory,
@@ -162,6 +182,8 @@ internal sealed class ProviderPublicProfileService(
             profilePhotoUrl,
             bannerImageUrl,
             galleryImages,
+            reviews.Summary,
+            reviews.Items,
             petSitterResult,
             petGroomerResult,
             petTrainerResult,

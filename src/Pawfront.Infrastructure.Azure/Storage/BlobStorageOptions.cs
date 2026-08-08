@@ -21,4 +21,5 @@ public sealed class BlobStorageFolderOptions
     public string BookingEvidence { get; init; } = "booking-evidence";
     public string ServiceBanners { get; init; } = "service-banners";
     public string ProviderBanners { get; init; } = "provider-banners";
+    public string ReviewPhotos { get; init; } = "review-photos";
 }

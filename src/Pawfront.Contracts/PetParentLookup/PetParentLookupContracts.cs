@@ -4,10 +4,18 @@ namespace Pawfront.Contracts.PetParentLookup;
 /// Provider-facing pet-parent profile card, returned by
 /// <c>GET /api/v1/pet-parents/{petParentId}/details</c> on the PROVIDER host.
 /// The provider app shows this when viewing a customer (e.g. from a booking).
-/// <c>Rating</c> is always null for now — the review feature isn't built yet;
-/// the field is wired so mobile can bind ahead of time. <c>Age</c> is computed
-/// server-side from <c>DateOfBirth</c> (full years, UTC today).
+/// <c>Age</c> is computed server-side from <c>DateOfBirth</c> (full years, UTC today).
 /// </summary>
+/// <param name="Rating">
+/// The parent's average rating as given BY providers they have booked with, over
+/// completed jobs. Null when no provider has rated them yet — no ratings means no
+/// average, which should render differently from a bad one.
+/// </param>
+/// <param name="RatingCount">
+/// How many ratings <paramref name="Rating"/> averages. It travels with the average
+/// because the two together are the honest claim: "5.0" off one rating and "4.6" off
+/// forty mean very different things.
+/// </param>
 public sealed record PetParentDetailsResponse(
     Guid PetParentId,
     string? ProfileImageUrl,
@@ -21,7 +29,8 @@ public sealed record PetParentDetailsResponse(
     string Email,
     string MobileCountryCode,
     string MobileNumber,
-    IReadOnlyList<PetParentPetCardResponse> Pets);
+    IReadOnlyList<PetParentPetCardResponse> Pets,
+    int RatingCount = 0);
 
 /// <summary>The parent's profile address (where they live / default service location).</summary>
 public sealed record PetParentAddressResponse(

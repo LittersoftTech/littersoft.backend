@@ -87,15 +87,21 @@ public sealed record PetPhotoResponse(
     DateTimeOffset UpdatedAtUtc);
 
 /// <summary>
-/// Returned by <c>DELETE /pets/{petId}</c>. The pet row and its photo rows
-/// (cascade) are gone; any bookings that referenced the pet are detached
-/// (their <c>petId</c> set null, snapshots preserved). Photo blobs are left
-/// for a future cleanup sweep.
+/// Returned by <c>DELETE /pets/{petId}</c>. The delete is an ANONYMISE + HIDE:
+/// the pet's identifying details (name, microchip, photo, notes, free-text
+/// medical fields) are scrubbed and its photo + next-consultation rows removed,
+/// but the ROW SURVIVES — bookings reference the <c>PetId</c> and read the pet
+/// through it, so deleting it would blank the pet out of the provider's record
+/// of a job they actually did. The pet stops appearing in every parent-facing
+/// read and can no longer be booked. Photo blobs are left for a future cleanup
+/// sweep. <see cref="WasAlreadyDeleted"/> is true when the pet had already been
+/// deleted, in which case <see cref="DeletedAtUtc"/> is the original timestamp.
 /// </summary>
 public sealed record DeletePetResponse(
     Guid PetId,
     Guid PetParentId,
-    DateTimeOffset DeletedAtUtc);
+    DateTimeOffset DeletedAtUtc,
+    bool WasAlreadyDeleted = false);
 
 /// <summary>
 /// Returned by <c>DELETE /pets/{petId}/photos/{photoId}</c>. Carries the

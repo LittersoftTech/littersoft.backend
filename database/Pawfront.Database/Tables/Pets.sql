@@ -27,6 +27,15 @@ CREATE TABLE [Parent].[Pets]
     -- The pet's single primary/profile photo. Distinct from the photo gallery
     -- in [Parent].[PetPhotos]; set via POST /pets/{petId}/profile-image.
     [ProfilePhotoUrl] NVARCHAR(1000) NULL,
+    -- DELETE /pets/{petId} is a soft delete: the row survives because
+    -- [Booking].[Bookings].[PetId] references it and the booking-detail read
+    -- joins the pet through it, so removing the row would blank the pet out of
+    -- the PROVIDER's history of a job they actually did. The identifying fields
+    -- are scrubbed instead (see [Parent].[DeletePetParentPet]) and this flag
+    -- hides the pet from every parent-facing read and from booking creation.
+    [IsDeleted] BIT NOT NULL
+        CONSTRAINT [DF_Pets_IsDeleted] DEFAULT 0,
+    [DeletedAtUtc] DATETIME2(7) NULL,
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_Pets_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
     [UpdatedAtUtc] DATETIME2(7) NOT NULL

@@ -89,12 +89,20 @@ public interface IParentPetService
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Permanently removes a pet. Photo rows (<c>Parent.PetPhotos</c>) cascade
-    /// with the pet; any bookings that referenced it are detached (their
-    /// <c>PetId</c> is set null — booking snapshots stay intact). Photo blobs
-    /// are not removed (left for a future sweep, matching cascade behaviour
-    /// elsewhere). Throws <see cref="PetNotFoundException"/> when the pet row
-    /// is missing.
+    /// Deletes a pet by ANONYMISING it, not by removing the row — the same shape
+    /// as the two account deletes. The identifying fields (name, microchip,
+    /// photo, description, free-text medical notes) are scrubbed, the photo and
+    /// next-consultation rows are removed, and <c>IsDeleted</c> is set; the row
+    /// itself survives because <c>Booking.Bookings.PetId</c> references it and
+    /// the booking-detail read resolves petDetails through that join. Deleting it
+    /// would erase the pet from the PROVIDER's record of a completed job.
+    ///
+    /// From then on the pet is invisible to every parent-facing read (the
+    /// ownership reader treats it as missing, so all <c>/pets/{petId}/*</c>
+    /// routes 404) and can no longer be booked. Photo blobs are not removed
+    /// (left for a future sweep). Idempotent — a second call reports
+    /// <c>WasAlreadyDeleted</c> with the original timestamp. Throws
+    /// <see cref="PetNotFoundException"/> when the pet row is missing.
     /// </summary>
     Task<DeletePetResponse> DeletePetAsync(
         Guid petId,

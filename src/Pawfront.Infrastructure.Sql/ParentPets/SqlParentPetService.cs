@@ -352,7 +352,8 @@ internal sealed class SqlParentPetService(
             return new DeletePetResponse(
                 PetId: reader.GetGuid(0),
                 PetParentId: reader.GetGuid(1),
-                DeletedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero));
+                DeletedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero),
+                WasAlreadyDeleted: reader.GetBoolean(3));
         }
         catch (SqlException exception) when (exception.Number == 51214)
         {

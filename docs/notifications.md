@@ -63,15 +63,14 @@ So a booking made at 09:00 for a service at 14:00 **the same day** must be
 accepted by **12:00 that day**, not 09:00 tomorrow. Anything the app displays
 should use these values rather than recomputing from a 24-hour assumption.
 
-`acceptByUtc` carries the same instant as a round-trip ISO 8601 string, so the
-app can render a countdown or convert to the provider's local time — worth using,
-since `acceptBy` itself is UTC (see the warning below).
+`acceptByUtc` carries the same instant as an ISO 8601 string, so the app can run a
+live countdown rather than only showing the rendered `acceptBy` text.
 
 ### `data` keys on these two
 
-`petName`, `acceptBy`, `acceptByUtc`, `serviceName`, plus `serviceDate` +
-`startTime` (single-day) or `checkInDate` + `checkOutDate` + `dropOffTime`
-(night-stay).
+`petName`, `acceptBy`, `acceptByUtc`, `serviceName`, `serviceStartUtc`, plus
+`serviceDate` + `startTime` (single-day) or `checkInDate` + `dropOffTime` +
+`checkOutDate` + `checkOutUtc` (night-stay).
 
 `serviceName` is **no longer shown in the body** but is still sent, so the app can
 label the booking in its own UI: the specific grooming menu item when the booking
@@ -81,10 +80,22 @@ names one (`Nails Clipping`, `Bath & Dry`), otherwise the bookable service
 **Not fired** for provider-created bookings or Custom walk-ins — a provider
 shouldn't be notified about their own action, and a walk-in has no parent.
 
-> ⚠️ **Times are UTC.** No provider timezone is stored anywhere in the schema, so
-> a provider in a +02:00 zone sees `12:00` for a 14:00 local job. Fixing this
-> needs a timezone column on `Provider.Providers` and a backfill — flagged, not
-> yet done.
+> ⚠️ **Every date and time in the copy is SWISS local time** (`Europe/Zurich`),
+> converted from UTC at send time — including across DST, so 14:00 UTC reads
+> `16:00` in August and `15:00` in January. Until 2026-08-06 these strings were
+> raw UTC and were therefore an hour or two wrong for every user.
+>
+> Alongside each display string the payload also carries the underlying **UTC
+> instant** — `serviceStartUtc`, `checkOutUtc`, `newServiceStartUtc`,
+> `newCheckOutUtc`, `closingAtUtc`, `acceptByUtc` — in
+> `yyyy-MM-ddTHH:mm:ss` (UTC, no offset suffix) or ISO 8601 with an explicit
+> offset. **Prefer the instant** whenever the app formats a time itself: the
+> display strings are frozen at send time in the recipient's zone, whereas the
+> instant lets the device render in whatever zone it is actually in.
+>
+> Every user is in Switzerland today, so the server applies one zone to everybody.
+> When a per-user timezone lands on the profile, these strings will follow it
+> automatically and the wire contract will not change.
 
 ---
 
@@ -128,8 +139,9 @@ Every push is a **hybrid `notification` + `data`** message.
     "bookingType": "SingleDay",                 // legacy twin of isNightStay
     "providerName": "Anna",
     "petName": "Max",
-    "serviceDate": "5 Aug",
-    "startTime": "14:00"
+    "serviceStartUtc": "2026-08-05T12:00:00",   // UTC instant — format it yourself
+    "serviceDate": "5 Aug",                     // already Swiss local
+    "startTime": "14:00"                        // already Swiss local
   },
   "android": {
     "notification": {
@@ -159,7 +171,11 @@ Every push is a **hybrid `notification` + `data`** message.
    event with ONE `type`, rendered per audience: the parent is told to bring
    cash, the provider to ask for the OTP. Do not assume identical copy on both
    sides, and do not treat the two as different events.
-5. **`v` will only change on a breaking payload change.** Guard on it if you
+6. **Display times are already Swiss local; the `*Utc` keys are not.** Show
+   `startTime` / `serviceDate` as-is, but if you reformat a time yourself, read
+   `serviceStartUtc` (and friends) and convert on the device — do not convert a
+   display string, and do not treat one as UTC.
+7. **`v` will only change on a breaking payload change.** Guard on it if you
    want; today it is always `"1"`.
 
 ---

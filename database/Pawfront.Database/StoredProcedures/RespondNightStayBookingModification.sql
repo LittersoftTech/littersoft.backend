@@ -191,8 +191,24 @@ BEGIN
             ELSE                                           N'BOOKING_MODIFICATION_DECLINED_BY_PARENT'
         END;
 
-    DECLARE @RespDateText NVARCHAR(32) = FORMAT(@PIn, N'd MMM', N'en-GB');
-    DECLARE @RespOutText NVARCHAR(16) = FORMAT(@POut, N'd MMM', N'en-GB');
+    -- Both ends of the proposed stay as UTC instants for the renderer to localise.
+    -- The hand-over times are re-read from the row rather than recomputed from the
+    -- acknowledged-terms CASEs above: on accept the UPDATE has already applied
+    -- them, on decline the row is untouched, so this is correct either way without
+    -- a second copy of that logic. As with the request side, the copy's "new time"
+    -- slot carries the new check-out DATE — the renderer applies that for
+    -- night-stay rows.
+    DECLARE @EffDropOffTime TIME(0), @EffPickUpTime TIME(0);
+    SELECT @EffDropOffTime = [DropOffTime], @EffPickUpTime = [PickUpTime]
+    FROM [Booking].[NightStayBookings]
+    WHERE [NightStayBookingId] = @NightStayBookingId;
+
+    DECLARE @RespStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EffDropOffTime),
+                CAST(@PIn AS DATETIME2(0)));
+    DECLARE @RespCheckOutUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EffPickUpTime),
+                CAST(@POut AS DATETIME2(0)));
     DECLARE @RespDedupe NVARCHAR(64) = CAST(@ModId AS NVARCHAR(36));
 
     EXEC [Notification].[EnqueueBookingNotification]
@@ -200,8 +216,8 @@ BEGIN
         @IsNightStay = 1,
         @Audience = @RespAudience,
         @NotificationType = @RespType,
-        @NewServiceDate = @RespDateText,
-        @NewStartTime = @RespOutText,
+        @NewServiceStartUtc = @RespStartUtc,
+        @NewCheckOutUtc = @RespCheckOutUtc,
         @DedupeSuffix = @RespDedupe;
 
     SELECT [NightStayBookingId],

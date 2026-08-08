@@ -837,7 +837,12 @@ internal sealed class SqlNightStayBookingStore(
             SnapshotCity: reader.IsDBNull(51) ? null : reader.GetString(51),
             SnapshotZipCode: reader.IsDBNull(52) ? null : reader.GetString(52),
             SnapshotLatitude: reader.IsDBNull(53) ? null : reader.GetDecimal(53),
-            SnapshotLongitude: reader.IsDBNull(54) ? null : reader.GetDecimal(54));
+            SnapshotLongitude: reader.IsDBNull(54) ? null : reader.GetDecimal(54),
+            // Payment ledger join — null until the stay is marked PAID.
+            PayoutMethod: reader.IsDBNull(55) ? null : reader.GetString(55),
+            PaidAtUtc: reader.IsDBNull(56)
+                ? null
+                : new DateTimeOffset(reader.GetDateTime(56), TimeSpan.Zero));
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)
     {

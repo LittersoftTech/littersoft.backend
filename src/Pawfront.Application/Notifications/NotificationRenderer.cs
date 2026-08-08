@@ -80,10 +80,16 @@ public static class NotificationRenderer
     /// with different wording, so copy is selected per audience — see
     /// <see cref="NotificationTemplateCatalog"/>.
     /// </param>
+    /// <param name="timeZone">
+    /// The zone every date and time in the copy is expressed in — the recipient's
+    /// own once profiles carry one, Switzerland for everybody today. Null falls
+    /// back to <see cref="NotificationLocalTime.Default"/>.
+    /// </param>
     public static RenderedNotification? Render(
         string notificationType,
         NotificationAudience audience,
-        IReadOnlyDictionary<string, string>? data)
+        IReadOnlyDictionary<string, string>? data,
+        TimeZoneInfo? timeZone = null)
     {
         var template = NotificationTemplateCatalog.Find(notificationType, audience);
         if (template is null)
@@ -91,6 +97,7 @@ public static class NotificationRenderer
             return null;
         }
 
+        data = WithLocalTimes(data, timeZone ?? NotificationLocalTime.Default);
         data = WithDerivedServiceName(data);
 
         return new RenderedNotification(
@@ -103,6 +110,105 @@ public static class NotificationRenderer
 
     private static readonly IReadOnlyDictionary<string, string> EmptyData =
         new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Converts the UTC instants a producer emitted into the display strings the
+    /// copy uses, in the recipient's timezone.
+    ///
+    /// This is THE conversion — every date and time a user reads in a notification
+    /// passes through here, whether the notification was enqueued by an API host
+    /// or by a T-SQL sweep. See <see cref="NotificationLocalTime"/> for why
+    /// producers hand over instants instead of formatting them themselves.
+    ///
+    /// Derived values overwrite any same-named display key already present:
+    /// after the 2026-08-06 deploy no producer emits both, and a row enqueued
+    /// BEFORE it carries only the old UTC-formatted display strings and no
+    /// instant, so it renders exactly as it used to. That is what makes the change
+    /// safe for whatever is already sitting in the outbox.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string>? WithLocalTimes(
+        IReadOnlyDictionary<string, string>? data,
+        TimeZoneInfo timeZone)
+    {
+        if (data is null || data.Count == 0)
+        {
+            return data;
+        }
+
+        Dictionary<string, string>? localised = null;
+
+        void Set(string key, string value) =>
+            (localised ??= new Dictionary<string, string>(data, StringComparer.Ordinal))[key] = value;
+
+        if (TryReadInstant(data, NotificationDataKeys.ServiceStartUtc, out var serviceStart))
+        {
+            Set(NotificationDataKeys.ServiceDate, NotificationLocalTime.FormatDate(serviceStart, timeZone));
+            Set(NotificationDataKeys.StartTime, NotificationLocalTime.FormatTime(serviceStart, timeZone));
+
+            // A stay's service starts at drop-off on the check-in day, so the two
+            // pairs of keys describe the same instant. Both are emitted because the
+            // night-stay-specific copy reads {checkInDate}/{dropOffTime} while every
+            // shared booking template reads {serviceDate}/{startTime}.
+            if (IsNightStay(data))
+            {
+                Set(NotificationDataKeys.CheckInDate, NotificationLocalTime.FormatDate(serviceStart, timeZone));
+                Set(NotificationDataKeys.DropOffTime, NotificationLocalTime.FormatTime(serviceStart, timeZone));
+            }
+        }
+
+        if (TryReadInstant(data, NotificationDataKeys.CheckOutUtc, out var checkOut))
+        {
+            Set(NotificationDataKeys.CheckOutDate, NotificationLocalTime.FormatDate(checkOut, timeZone));
+        }
+
+        if (TryReadInstant(data, NotificationDataKeys.AcceptByUtc, out var acceptBy))
+        {
+            Set(NotificationDataKeys.AcceptBy, NotificationLocalTime.FormatDateAndTime(acceptBy, timeZone));
+        }
+
+        if (TryReadInstant(data, NotificationDataKeys.NewServiceStartUtc, out var newServiceStart))
+        {
+            Set(NotificationDataKeys.NewServiceDate, NotificationLocalTime.FormatDate(newServiceStart, timeZone));
+            Set(NotificationDataKeys.NewStartTime, NotificationLocalTime.FormatTime(newServiceStart, timeZone));
+        }
+
+        if (TryReadInstant(data, NotificationDataKeys.NewCheckOutUtc, out var newCheckOut))
+        {
+            Set(NotificationDataKeys.NewCheckOutDate, NotificationLocalTime.FormatDate(newCheckOut, timeZone));
+
+            // A stay is proposed as a date RANGE, so its copy puts the new
+            // check-out where a single-day booking puts a clock time: "the new
+            // timing is confirmed: 10 Aug at 15 Aug". Deliberate — one shared
+            // modification template serves both booking kinds — so the override
+            // must come after the {newServiceStartUtc} block above.
+            if (IsNightStay(data))
+            {
+                Set(NotificationDataKeys.NewStartTime, NotificationLocalTime.FormatDate(newCheckOut, timeZone));
+            }
+        }
+
+        if (TryReadInstant(data, NotificationDataKeys.ClosingAtUtc, out var closingAt))
+        {
+            Set(NotificationDataKeys.ClosingTime, NotificationLocalTime.FormatTime(closingAt, timeZone));
+        }
+
+        return localised ?? data;
+    }
+
+    private static bool TryReadInstant(
+        IReadOnlyDictionary<string, string> data,
+        string key,
+        out DateTimeOffset instantUtc)
+    {
+        instantUtc = default;
+        return data.TryGetValue(key, out var value) && NotificationLocalTime.TryParse(value, out instantUtc);
+    }
+
+    private static bool IsNightStay(IReadOnlyDictionary<string, string> data) =>
+        (data.TryGetValue(NotificationDataKeys.IsNightStay, out var flag)
+            && string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase))
+        || (data.TryGetValue(NotificationDataKeys.BookingType, out var bookingType)
+            && string.Equals(bookingType, "NightStay", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Fills in <c>serviceName</c> from <c>serviceType</c> + <c>serviceItemCode</c>

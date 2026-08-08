@@ -40,7 +40,17 @@ public static class CosmosServiceRegistration
         services.TryAddSingleton<IEventCosmosStore, CosmosEventStore>();
         services.TryAddSingleton<IProviderServiceCosmosStore, CosmosProviderServiceStore>();
 
-        services.TryAddSingleton<IProviderDiscoveryService, CosmosProviderDiscoveryService>();
+        // Discovery is registered WRAPPED, so nothing can resolve the raw Cosmos
+        // reader by interface. The wrapper drops providers whose SQL master
+        // Active switch is off (or who deleted their account) — a fact the
+        // offering document doesn't carry, which is why the parent apps used to
+        // list providers that then rejected every booking with 409
+        // ProviderInactive. Scoped, because the SQL reader it composes is.
+        services.TryAddSingleton<CosmosProviderDiscoveryService>();
+        services.TryAddScoped<IProviderDiscoveryService>(sp =>
+            new ActiveOnlyProviderDiscoveryService(
+                sp.GetRequiredService<CosmosProviderDiscoveryService>(),
+                sp.GetRequiredService<IProviderActiveStatusReader>()));
 
         services.AddHostedService<CosmosBootstrapper>();
 

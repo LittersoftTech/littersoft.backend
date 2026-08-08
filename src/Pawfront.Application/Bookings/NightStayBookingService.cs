@@ -203,7 +203,8 @@ internal sealed class NightStayBookingService(
         return new NightStayBookingDetailResult(
             row, jobId, nights, pricePerNight, total, fee, feePercentage,
             serviceLocation, row.CancellationPolicyHours, location,
-            providerSummary?.Address, providerSummary?.City, providerSummary?.Zip);
+            providerSummary?.Address, providerSummary?.City, providerSummary?.Zip,
+            providerSummary?.ImageUrl);
     }
 
     public Task<NightStayBookingResult> CancelAsync(

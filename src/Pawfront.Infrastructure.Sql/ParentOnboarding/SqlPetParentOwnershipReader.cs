@@ -43,10 +43,16 @@ internal sealed class SqlPetParentOwnershipReader(
 
         // Lookup hits PK_Pets. Returns null when the pet row doesn't exist —
         // the ownership filter surfaces that as 404 rather than 403.
+        //
+        // A soft-deleted pet reads as "doesn't exist" here, which is what makes
+        // this the single gate for the whole /pets/{petId}/* group: every read
+        // and every mutation behind it 404s without each sproc needing its own
+        // IsDeleted guard. Booking READS deliberately still join the row — that
+        // history is why it is kept.
         await using var command = new SqlCommand(
             "SELECT [PetParentId] " +
             "FROM [Parent].[Pets] " +
-            "WHERE [PetId] = @PetId;",
+            "WHERE [PetId] = @PetId AND [IsDeleted] = 0;",
             connection);
         command.Parameters.AddWithValue("@PetId", petId);
 
@@ -70,10 +76,12 @@ internal sealed class SqlPetParentOwnershipReader(
         // discovery endpoint's petId filter pays a single round-trip, and the
         // booking creates get the pet name for the provider's notification
         // without a second query.
+        // Soft-deleted pets read as missing here too, so the discovery petId
+        // filter and both booking creates reject them before SQL is reached.
         await using var command = new SqlCommand(
             "SELECT [PetParentId], [PetType], [PetName] " +
             "FROM [Parent].[Pets] " +
-            "WHERE [PetId] = @PetId;",
+            "WHERE [PetId] = @PetId AND [IsDeleted] = 0;",
             connection);
         command.Parameters.AddWithValue("@PetId", petId);
 
