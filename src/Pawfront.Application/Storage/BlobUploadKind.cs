@@ -20,5 +20,9 @@ public enum BlobUploadKind
     // A photo a pet parent attached to their review of a booking
     // (owner = BookingReviewId). The review row has to exist first, which is why
     // review photos are a second call rather than part of the submit.
-    ReviewPhoto = 12
+    ReviewPhoto = 12,
+    // An image sent in a chat message (owner = ConversationId). Uploaded BEFORE
+    // the message, unlike review photos: the message carries the resulting url,
+    // so the conversation — which already exists — is what keys the path.
+    ChatAttachment = 13
 }

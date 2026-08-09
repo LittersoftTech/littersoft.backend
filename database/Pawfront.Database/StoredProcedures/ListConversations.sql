@@ -1,0 +1,67 @@
+-- The caller's chat inbox: their threads, most recently active first, with the
+-- counterparty's name and their own unread count on each card.
+--
+-- One indexed read, not a fan-out. That is what the denormalised last-message
+-- columns on [Chat].[Conversations] are for — without them this screen would need
+-- a Cosmos query per thread just to show a preview line.
+--
+-- Threads that exist but have never been used sort last (LastMessageAtUtc NULL),
+-- rather than being hidden: a conversation is created the moment someone opens
+-- it, and a parent who opened a provider's thread and hesitated should still find
+-- it where they left it.
+--
+-- Names are joined LIVE. A review, a booking and a chat all read a
+-- counterparty's name this way for the same reason: an anonymised account must
+-- read "Deleted Provider" / "Deleted User" everywhere, and a denormalised copy
+-- would keep the real name.
+--
+-- Returns ONE result set. Paged by the caller; @Take is capped there.
+CREATE OR ALTER PROCEDURE [Chat].[ListConversations]
+    @ParticipantType NVARCHAR(16),
+    @ParticipantId UNIQUEIDENTIFIER,
+    @Skip INT = 0,
+    @Take INT = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @Skip IS NULL OR @Skip < 0 SET @Skip = 0;
+    IF @Take IS NULL OR @Take < 1 SET @Take = 20;
+
+    SELECT c.[ConversationId],
+           c.[ProviderId],
+           c.[PetParentId],
+           c.[LastSequence],
+           c.[LastMessageAtUtc],
+           c.[LastMessagePreview],
+           c.[LastMessageSenderType],
+           c.[CreatedAtUtc],
+           p.[LastReadSequence],
+           p.[UnreadCount],
+           p.[IsMuted],
+           CASE WHEN @ParticipantType = N'Provider' THEN N'PetParent' ELSE N'Provider' END
+               AS [CounterpartyType],
+           CASE WHEN @ParticipantType = N'Provider' THEN c.[PetParentId] ELSE c.[ProviderId] END
+               AS [CounterpartyId],
+           CASE WHEN @ParticipantType = N'Provider'
+                THEN LTRIM(RTRIM(COALESCE(pp.[FirstName], N'') + N' ' + COALESCE(pp.[LastName], N'')))
+                ELSE LTRIM(RTRIM(COALESCE(pr.[FirstName], N'') + N' ' + COALESCE(pr.[LastName], N'')))
+           END AS [CounterpartyName],
+           -- Parent photos only; a provider's image is in Cosmos. The caller
+           -- batch-resolves those for the page it is returning.
+           CASE WHEN @ParticipantType = N'Provider' THEN pp.[ProfilePhotoUrl] END
+               AS [CounterpartyPhotoUrl]
+    FROM [Chat].[ConversationParticipants] p
+    INNER JOIN [Chat].[Conversations] c
+        ON c.[ConversationId] = p.[ConversationId]
+    LEFT JOIN [Provider].[Providers] pr ON pr.[ProviderId] = c.[ProviderId]
+    LEFT JOIN [Parent].[PetParents] pp ON pp.[PetParentId] = c.[PetParentId]
+    WHERE p.[ParticipantType] = @ParticipantType
+      AND p.[ParticipantId] = @ParticipantId
+    -- Newest activity first; never-used threads fall to the bottom. The
+    -- ConversationId tie-break is what stops OFFSET paging repeating or skipping
+    -- a row when two threads share a timestamp — the same reason the review and
+    -- earnings lists carry one.
+    ORDER BY c.[LastMessageAtUtc] DESC, c.[ConversationId] DESC
+    OFFSET @Skip ROWS FETCH NEXT @Take ROWS ONLY;
+END;

@@ -1,9 +1,10 @@
-using Microsoft.Extensions.Configuration;
+﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
+using Pawfront.Application.Chat;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.DeviceTokens;
@@ -25,6 +26,7 @@ using Pawfront.Application.Reviews;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
+using Pawfront.Infrastructure.Sql.Chat;
 using Pawfront.Infrastructure.Sql.Closures;
 using Pawfront.Infrastructure.Sql.DeviceTokens;
 using Pawfront.Infrastructure.Sql.Earnings;
@@ -88,6 +90,7 @@ public static class SqlServiceRegistration
             // No outbox table to write to — log and drop, same posture as the
             // booking sweeps having no in-memory equivalent.
             services.AddSingleton<INotificationPublisher, NullNotificationPublisher>();
+            services.AddSingleton<IInstantNotificationSender, NullInstantNotificationSender>();
 
             // Reviews DO work in-memory (unlike earnings, which report zeros): this
             // is a write flow, so a store that accepted a submit and never showed it
@@ -96,6 +99,15 @@ public static class SqlServiceRegistration
             services.AddSingleton<InMemoryBookingReviewStore>();
             services.AddSingleton<IBookingReviewStore>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
             services.AddSingleton<IPetParentRatingReader>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
+
+            // Chat works in-memory for the same reason reviews do — it is a write
+            // flow, and a store that swallowed messages would make it untestable
+            // without SQL. Two limits: no outbox, so no pushes are ever queued;
+            // and no profile tables, so the counterparty is unnamed.
+            services.AddSingleton<InMemoryChatPresenceStore>();
+            services.AddSingleton<IChatPresenceStore>(sp => sp.GetRequiredService<InMemoryChatPresenceStore>());
+            services.AddSingleton<IChatConversationStore>(sp =>
+                new InMemoryChatConversationStore(sp.GetRequiredService<IChatPresenceStore>()));
 
             // Both hosts' token services share one store here; each host only ever
             // resolves its own interface, so they never actually mix.
@@ -285,6 +297,27 @@ public static class SqlServiceRegistration
                 new SqlPetParentDeviceTokenService(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
+
+            // Chat's SQL side: the thread index, per-side read state and blocks.
+            // Message bodies are not here — they live in the Cosmos ChatMessages
+            // container, registered by AddPawfrontCosmosInfrastructure.
+            services.AddScoped<IChatConversationStore>(provider =>
+                new SqlChatConversationStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IChatPresenceStore>(provider =>
+                new SqlChatPresenceStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Closes out a notification the chat host sent itself, through the
+            // same procedure the scheduled dispatcher uses.
+            services.AddScoped<IInstantNotificationSender>(provider =>
+                new SqlInstantNotificationSender(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>(),
+                    provider.GetRequiredService<ILogger<SqlInstantNotificationSender>>()));
         }
 
         return services;

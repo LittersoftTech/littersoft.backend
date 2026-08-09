@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
+using Pawfront.Application.Chat;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
@@ -19,6 +20,14 @@ public static class ApplicationServiceRegistration
 {
     public static IServiceCollection AddPawfrontApplication(this IServiceCollection services)
     {
+        // Chat. Composes the SQL thread index, the Cosmos message store and the
+        // live fan-out, so the REST endpoints and the SignalR hub take one path.
+        // The realtime publisher is TryAdd'd as a no-op: only the chat host has a
+        // hub to register in its place, and the other hosts must still resolve.
+        services.TryAddScoped<IChatService, ChatService>();
+        services.TryAddScoped<IChatRealtimePublisher, NullChatRealtimePublisher>();
+        services.TryAddSingleton<IChatPushDispatcher, NullChatPushDispatcher>();
+
         services.TryAddScoped<IProviderOnboardingStatusService, ProviderOnboardingStatusService>();
         services.TryAddScoped<IPetParentOnboardingStatusService, PetParentOnboardingStatusService>();
         services.TryAddScoped<IProviderPublicProfileService, ProviderPublicProfileService>();

@@ -23,6 +23,7 @@ the empty schema.
 ```
 src/
 ├── Pawfront.Api                    minimal-API host, endpoints, auth, telemetry
+├── Pawfront.ChatApi                chat host — SignalR hub + REST, BOTH Firebase projects
 ├── Pawfront.Application            use-case interfaces + orchestrators (pure C#)
 ├── Pawfront.Contracts              wire DTOs (records)
 ├── Pawfront.Domain                 entities + enums (POCO, no infra deps)
@@ -2150,9 +2151,16 @@ same wording as the API hosts. The inbox lists only rendered rows
   credential. `FirebaseAppRegistry` caches one `FirebaseApp` per audience.
   Credentials come from a gitignored file (dev) or `IPawfrontSecretProvider`
   (Key Vault, prod); **never** from `appsettings.json`.
-- **`Pawfront.Infrastructure.Firebase` is the ONLY project referencing Firebase**
-  — neither API host does. That falls out of the outbox design and is worth
-  preserving.
+- **The two CRUD hosts reference Firebase nowhere** — `Pawfront.Api` and
+  `Pawfront.PetParentApi` only ever write an outbox row, and
+  `Pawfront.Functions` owns delivery. That falls out of the outbox design and is
+  worth preserving.
+  **`Pawfront.ChatApi` is the deliberate exception** (2026-08-09): it references
+  `Pawfront.Infrastructure.Firebase` and sends its own pushes. The outbox exists
+  to keep an outbound HTTP call off the *booking* request path, where a minute of
+  latency costs nothing and durability is everything; for chat the latency IS the
+  feature. It still writes the same outbox row — pre-claimed — so the row remains
+  the record and the retry backstop. See the chat section below.
 - **Read and write sides live in different projects.** The API hosts get
   `SqlNotificationPublisher` (write-only) from `Pawfront.Infrastructure.Sql`; the
   dispatcher's `SqlNotificationOutboxStore` (claim/complete/prune) lives in
@@ -2315,7 +2323,153 @@ the two apps' own screens are untouched, so a notification saying "16:00" now si
 next to an API payload saying `14:00`. That is the deliberate scope of this change
 — see the deferred-issues list.
 
+### Chat — provider ↔ pet-parent messaging (2026-08-09)
+
+Real-time 1:1 chat, in its own host: **`Pawfront.ChatApi`** (SignalR hub + REST).
+Mobile contract in [`docs/chat.md`](docs/chat.md).
+
+**OPEN model** — any pet parent may message any provider, with **no booking
+between them**. That is the right call for pre-sales questions, and it is why
+blocking and rate limiting are part of the feature rather than follow-ups.
+
+**Why a third host, not a hub on each existing one.** Azure SignalR cannot route a
+message from host A's hub to a client connected to host B's hub. Two hubs would
+mean two group namespaces and a cross-host relay. One hub, one host — which then
+has to validate BOTH Firebase projects anyway, so the dual-scheme auth lands in a
+host whose whole job is that rather than duplicated in two.
+
+**Auth is the only place in the product where one host accepts two Firebase
+projects.** Two named `JwtBearer` schemes (`ProviderFirebase` / `ParentFirebase`)
+behind one `ChatUser` policy; whichever validates stamps a `pawfront_audience`
+claim, so nothing downstream has to ask which fired. Expect one "issuer validation
+failed" debug line per request — that is the mechanism working. The bearer token
+is additionally accepted from `?access_token=` **on `/hubs/*` only**, because a
+WebSocket handshake cannot carry a header; the REST surface stays header-only so
+tokens never reach access logs.
+
+**No `IUserIdProvider`.** SignalR's `GetUserId` is synchronous, but mapping a
+Firebase token to a ProviderId / PetParentId needs an async SQL lookup — the id
+this product addresses people by simply cannot be produced there. Two group
+namespaces joined in `OnConnectedAsync` (which IS async) do the job instead:
+`conv:{conversationId}` and `user:{Type}:{id}`. Azure SignalR routes groups across
+instances, so nothing is lost.
+
+**Storage split.** SQL owns the thread index, per-side read state, blocks and
+presence — everything that must be consistent and countable. Cosmos owns message
+bodies in the **`ChatMessages`** container, partition `/conversationId`, so a
+thread's history is always a single-partition query. Same split as
+`Event.Events` + the Events document.
+
+**`[Chat]` schema** — `Conversations` (UNIQUE `(ProviderId, PetParentId)`, which
+is what makes get-or-create race-safe), `ConversationParticipants` (a row per side
+so every sproc is symmetric instead of branching on `CASE WHEN @ActorType`),
+`ChatConnections` (presence), `BlockedParticipants`. No FK to
+`Provider.Providers` / `Parent.PetParents` — same posture as
+`Booking.BookingPayments`; an anonymised account keeps its conversations, and
+counterparty names are **joined live** so a deleted account reads "Deleted
+Provider" / "Deleted User".
+
+**An INACTIVE provider is still chattable** — only `IsDeleted` closes the door.
+Inactive means "not taking bookings": hidden from discovery, refused by
+`Booking.CreateBooking`, but their profile is still viewable by deep link and
+answering a question before switching back on is exactly what chat is for.
+
+**`Chat.AppendMessage` is the heart of it.** One transaction: assign the sequence,
+refresh the inbox cache, advance the sender's read pointer, increment the
+recipient's unread, read presence, and — only when the recipient has no connection
+with `ActiveConversationId` = this conversation, and has not muted — enqueue their
+push and return its id, its `DataJson` and their FCM tokens. Deciding presence
+inside the sproc is race-safe for free, the same reasoning that put the
+notification enqueue inside the booking transition sprocs.
+
+**Instant push, with the outbox demoted to a backstop.** `Notification.EnqueueInstantNotification`
+writes the row **already claimed** (`Status = 'Sending'`, lease held). The
+dispatcher's predicate is `Status IN ('Pending','Sending') AND NextAttemptAtUtc <= now`,
+so it skips a leased row — no double push — but takes it over if the lease lapses
+because the chat host died mid-send. The host renders with the **same**
+`NotificationRenderer` + `NotificationPayloadBuilder`, sends with the **same**
+`IPushSender`, and reports through the **same**
+`Notification.CompleteNotificationDelivery`. There is no case where a message is
+stored and its notification is lost.
+
+**The message id comes from the client** and is also the Cosmos document id. That
+is the whole of idempotency: a retried send 409s and returns the original. Cosmos
+enforces uniqueness on nothing but `id`, so it is the only way to get this without
+a second index, and ids are partition-scoped so two threads cannot collide.
+
+**One accepted trade-off, documented in the sproc.** SQL is written before Cosmos,
+so a crash between them burns a sequence number and leaves a stale preview. The
+client's retry (same `clientMessageId`) heals it. The alternative costs an extra
+round trip on **every** message. Sequence gaps are harmless — which is exactly why
+there is deliberately **no message-count column** anywhere to be wrong;
+`LastSequence` is a high-water mark.
+
+**Presence** is `Chat.ChatConnections`, written on connect and cleared on
+disconnect. `OnDisconnectedAsync` is best-effort — a crashed host never fires it —
+and a stale row is worse than clutter: it makes its owner look permanently present
+and silences their pushes. `ChatPresenceSweepFunction` (Pawfront.Functions, every
+1 minute) purges rows quiet for 3 minutes. Clients heartbeat every ~60 s.
+
+**Rate limits** partition on the **Firebase uid claim**, not the IP — abuse is
+per-account, a carrier NAT shares one IP, and the uid is available synchronously
+(the partition selector is sync; a ProviderId needs async SQL). 30 messages/minute
+and 10 new conversations/hour. **Covers the REST send only** — a hub invocation
+arrives over an established socket, so `ChatHub.SendMessage` is not limited.
+
+**Blob** — `chat-attachments/<conversationId>/<guid>.<ext>`,
+`BlobUploadKind.ChatAttachment`, ≤5 MB (larger than the 3 MB galleries: a chat
+photo is usually straight from a camera). Uploaded BEFORE the message, the
+opposite order to review photos — there the review must exist to key the path,
+here the conversation already does.
+
+**THROW codes 51320-51327:** `51320` provider not found · `51321` provider account
+deleted · `51322` pet parent not found or deleted · `51323` blocked (either
+direction) · `51324` actor is not a party · `51325` conversation not found ·
+`51326` sender is not a party · `51327` block between two participants on the same
+side.
+
+**Deliberately not built:** reporting/abuse (it terminates in a support workflow
+and there is no Helpline module — same reason `DISPUTE_RESOLVED` has copy but no
+trigger); group threads; message editing; and a mute ENDPOINT — `IsMuted` is
+modelled end to end and consulted by the push decision, but nothing can set it yet.
+
 ## In progress / next step
+
+**Chat (2026-08-09) — built, NOT deployed, and NOT runtime-tested.** See the
+"Chat" section above and [`docs/chat.md`](docs/chat.md). New host
+`src/Pawfront.ChatApi`, new `[Chat]` schema (4 tables, 13 sprocs), new
+`Notification.EnqueueInstantNotification`, new Cosmos container `ChatMessages`,
+`ChatPresenceSweepFunction` in Pawfront.Functions. Re-run
+`Deployment/DeployAll.sql`.
+
+Verified so far: the solution builds clean; all 18 new SQL files and DeployAll
+parse clean under a **verified-loaded** net462 ScriptDom (the parser is now
+null-checked, after an earlier run silently passed everything); the host starts
+and its DI graph validates; the **`ChatMessages` container was actually created**
+in the dev Cosmos account with partition `/conversationId`; all routes register
+and enforce auth; and the hub's query-string token fallback is proven discriminating
+via `WWW-Authenticate` (`error="invalid_token"` on `/hubs/*`, bare `Bearer` on a
+REST path with the same `?access_token=`).
+
+**Not verified — nothing has run against SQL.** No chat stored procedure has ever
+executed, so every `SqlChatConversationStore` call fails with "could not find
+stored procedure" until DeployAll runs. No hub connection has been established, no
+message sent, no push delivered — those need a real Firebase token from each
+project (the web API keys are blank in
+`docs/Pawfront.E2E.postman_environment.json`) and the two Firebase service-account
+credentials, which are **still outstanding** (same blocker as the rest of the
+notification work). Without credentials the host still starts and chat still
+works; sends report "No Firebase credentials are configured", the outbox row is
+left un-completed, and the scheduled dispatcher retries it.
+
+After deploying, verify in this order: (1) `POST /conversations` between a real
+provider and parent; (2) send a message and confirm the Cosmos document and the
+`Chat.Conversations` preview agree; (3) two hub clients, both online — assert
+delivery in well under a second AND that **no** outbox row was written; (4)
+recipient offline — assert exactly ONE row and that it ends `Status = 'Sent'`, not
+`Pending` (Pending would mean the timer is about to send a duplicate); (5) kill the
+chat host mid-send and assert the scheduled dispatcher takes the leased row over
+exactly once.
 
 **Booking reviews & ratings (2026-08-08) — built, NOT deployed.** See the "Reviews &
 ratings" section above. Adds the **`[Review]` schema**, two tables
@@ -2527,12 +2681,14 @@ it.
    `FirebaseUser` policy. When the consumer app launches it'll need its
    own auth (separate Firebase project or role claim differentiation).
 7. **Push notifications: engine built, all booking triggers wired (2026-08-04).**
-   Every card in the Notifications V3 spec now has a trigger except the four whose
-   modules don't exist — `MESSAGE_RECEIVED` (no chat), `INVOICE_ISSUED` (no
-   invoicing), `DISPUTE_RESOLVED` (no Helpline/ticket module),
-   `PROMOTIONAL_MESSAGE` (no campaign module). Those carry type + copy + route +
-   payload contract so mobile can build against them; wiring one later is a
-   single publisher call. Of the six **event-ticket** types (2026-08-04) the two
+   Every card in the Notifications V3 spec now has a trigger except the three
+   whose modules don't exist — `INVOICE_ISSUED` (no invoicing),
+   `DISPUTE_RESOLVED` (no Helpline/ticket module), `PROMOTIONAL_MESSAGE` (no
+   campaign module). Those carry type + copy + route + payload contract so mobile
+   can build against them; wiring one later is a single publisher call.
+   **`MESSAGE_RECEIVED` left this list on 2026-08-09** — the chat module enqueues
+   it from `Chat.AppendMessage`, and it is the one type normally sent by an API
+   host rather than by the scheduled dispatcher (see the Chat section). Of the six **event-ticket** types (2026-08-04) the two
    ORGANISER-side ones are now wired via `Notification.EnqueueEventNotification`
    (called from `Event.CreateEventBooking` / `Event.CancelEventBooking`); the four
    buyer-side ones are not — `EVENT_BOOKING_CONFIRMED` / `_CANCELLED` are the
@@ -2595,6 +2751,28 @@ it.
     Notifications V3 spec, so nothing was invented; wiring one later is a single
     publisher call plus a template entry, the same as the four unwired types in
     issue 7.
+14. **`ChatHub.SendMessage` is NOT rate limited.** ASP.NET Core rate limiting is
+    middleware, and a hub invocation arrives over an already-established socket
+    rather than as a new request — so the 30/min and 10/hour policies cover the
+    REST send and conversation-open only. A client determined to flood will use
+    the socket. Closing it needs a limiter inside the hub method (a per-connection
+    token bucket in `Context.Items` would do), which was deliberately not built
+    for the first cut. Blocking still works, so the recipient has a remedy.
+15. **Chat muting has no endpoint.** `Chat.ConversationParticipants.IsMuted` is
+    modelled end to end — column, procedures, and it is genuinely consulted by
+    `Chat.AppendMessage`'s push decision — but nothing can set it. Adding it is one
+    sproc and one route; it was left out because the plan did not call for it and
+    inventing the UX for it here would have been guessing.
+16. **Chat attachment blobs are never cleaned up.** A soft-deleted message clears
+    its `attachment` from the Cosmos document, but the blob itself stays in
+    `chat-attachments/<conversationId>/`. Same known gap as the pet and review photo
+    galleries, and it wants one sweep covering all of them rather than a per-feature
+    fix.
+17. **Chat has no E2E scenario coverage.** The Postman/newman suite in
+    [`docs/E2E-TESTING.md`](docs/E2E-TESTING.md) does not touch the chat host. The
+    REST surface is scriptable there (that is partly why the socket-less send path
+    exists), but the hub and the push-suppression behaviour are not — proving those
+    needs a real SignalR client and two Firebase tokens.
 
 ## Endpoint catalogue (current)
 
@@ -2697,6 +2875,38 @@ POST   /blob-images                                                             
 ```
 
 > Note: the gateway webhook `POST /event-bookings/{bookingId}/payment-confirmation` is intentionally **not** mirrored on the parent host — already reachable on the provider host, and a Firebase-JWT-gated webhook only needs one entry point.
+
+### Chat host (`Pawfront.ChatApi`)
+
+Third host, and the only one that accepts **both** Firebase projects — a
+conversation spans a provider and a pet parent, and one hub has to serve both ends
+of it. All under `/api/v1` behind the `ChatUser` policy (schemes
+`ProviderFirebase` + `ParentFirebase`). The caller's participant id is ALWAYS
+resolved from the token, never from a route or body. Full mobile contract:
+[`docs/chat.md`](docs/chat.md).
+
+```
+GET    /health
+GET    /me                                            who the server thinks you are → { participantType, participantId, firebaseUserId, canChat, userId }. canChat false = valid token, no completed profile; every chat route then answers 403 ChatProfileNotCompleted.
+
+POST   /conversations                                 body { counterpartyId } — get-or-create the caller's thread with somebody. The counterparty's TYPE is not sent: a thread always runs provider <-> parent, so the server derives it from whichever app validated the token. Idempotent by construction (UNIQUE (ProviderId, PetParentId)). Rate limited to 10/hour — opening threads with strangers is the actual spam vector, not volume within one. 404 ProviderNotFound / PetParentNotFound; 409 ProviderAccountDeleted; 403 ConversationBlocked.
+GET    /conversations                                 [?skip= &take=] inbox, most recently active first; never-used threads sort last. take caps at 20. Counterparty name joined LIVE, so a deleted account reads "Deleted Provider" / "Deleted User". counterpartyPhotoUrl is populated for a pet parent only — a provider's image lives in their Cosmos offering doc, not the SQL row this joins.
+GET    /conversations/unread-summary                  { unreadMessageCount, unreadConversationCount } — two figures because the badge wants one and "3 conversations need you" wants the other. A muted thread still counts: muting silences the push, it does not mark anything read.
+GET    /conversations/{conversationId}                thread header + your own read state. 404 ConversationNotFound for BOTH unknown and not-yours, so an id cannot be probed.
+GET    /conversations/{conversationId}/messages       [?beforeSequence= &take=] history, newest first, take caps at 50. Ordered by SEQUENCE not timestamp — two messages can share a millisecond, never a sequence. Page back with the response's nextBeforeSequence; null means the start of the thread.
+POST   /conversations/{conversationId}/messages       body { clientMessageId?, kind?, text?, attachment? }. Socket-less send path — identical server logic to the hub's SendMessage. ALWAYS send clientMessageId: it becomes the message id (and the Cosmos document id), so a retry after a dropped response returns the original instead of posting twice. Returns 200 not 201, because a replay legitimately returns an existing message. Rate limited to 30/min. 400 UnsupportedMessageKind.
+DELETE /conversations/{conversationId}/messages/{messageId}   SOFT delete — the message keeps its place and its sequence, only its content goes, and it reads back isDeleted: true. Removing it would leave a hole in the thread and rewrite what the other party already saw. Scoped to the sender; "not yours" and "no such message" are one answer.
+POST   /conversations/{conversationId}/read           body { upToSequence } — clamped to the thread's own last sequence and never moves backwards, so a stale client cannot un-read a thread. Unread only reaches zero when the caller has fully caught up.
+POST   /conversations/{conversationId}/attachments    multipart { file } — <=5 MB, JPEG/PNG/WebP, uploaded to chat-attachments/<conversationId>/. Participant-authorised BEFORE the blob write. Returns the attachment block to put straight on the message you then send with kind "Image". 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat.
+
+POST   /blocks                                        body { counterpartyId, reason? } — idempotent. Stops new messages BOTH ways and stops the thread reopening; existing history stays readable, because it is part of both parties' record and is what a blocked user would need in order to report the exchange.
+GET    /blocks                                        only blocks the caller PLACED. Blocks against them are never returned — telling someone they have been blocked confirms the other party acted.
+DELETE /blocks/{chatBlockId}                          lifts one the caller placed. 404 ChatBlockNotFound (unknown and not-yours are one case).
+
+POST   /blob-images                                   body { blobUrl } — the same private-container fetch both other hosts carry.
+
+HUB    /hubs/chat                                     Client->server: JoinConversation, LeaveConversation, SendMessage, MarkRead, SetTyping, Heartbeat. Server->client: MessageReceived, MessageRead, TypingChanged, ConversationUpdated, UnreadCountChanged. Token via ?access_token= (a WebSocket handshake cannot carry a header) — honoured on /hubs/* ONLY. JoinConversation authorises before joining the group, so a thread cannot be subscribed to by guessing an id, and it sets the ActiveConversationId that SUPPRESSES the push — a client that never calls LeaveConversation stops notifying its user. Typing is broadcast only, never stored. Heartbeat every ~60s or the 3-minute sweep purges the connection.
+```
 
 ### Provider host (`Pawfront.Api`)
 

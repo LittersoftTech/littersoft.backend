@@ -1,9 +1,10 @@
 # Push notifications — mobile integration contract
 
 Status: **engine built; every booking trigger in the Notifications V3 spec is
-wired.** The only types with no trigger are the four whose product modules do not
-exist in this backend at all — messaging, invoicing, disputes and promotional
-(see §3.4). This document is the contract the two mobile apps code against.
+wired.** `MESSAGE_RECEIVED` was wired on 2026-08-09 with the chat module (see
+`docs/chat.md`). The only types with no trigger are the three whose product
+modules still do not exist — invoicing, disputes and promotional (see §3.4). This
+document is the contract the two mobile apps code against.
 
 ## The `data` object
 
@@ -313,9 +314,16 @@ These have a type, copy, a route and the full `data` contract, so you can build
 against them now. **Nothing enqueues them**, because the backend has no such
 feature yet.
 
+> `MESSAGE_RECEIVED` used to be listed here. It is now wired — enqueued by
+> `Chat.AppendMessage`, and only when the recipient has no live connection viewing
+> that thread, so an open chat never buzzes. It is also the one type normally sent
+> by an API host rather than the scheduled dispatcher: its outbox row is written
+> pre-claimed so the timer skips it, and the dispatcher only takes over if the
+> chat host dies mid-send. Its `data` carries `conversationId` (now part of the
+> canonical id block) and `senderName`. See `docs/chat.md`.
+
 | `type` | `category` | Blocked on | V3 card |
 |---|---|---|---|
-| `MESSAGE_RECEIVED` | `MESSAGING` | No chat module | P-U14 / V-U5 |
 | `INVOICE_ISSUED` | `BOOKING` | No invoicing | P-S16 / V-S14 |
 | `DISPUTE_RESOLVED` | `BOOKING` | No Helpline / ticket module | P-S15 / V-S13 |
 | `PROMOTIONAL_MESSAGE` | `PROMOTIONAL` | No campaign module | *(not in V3)* |

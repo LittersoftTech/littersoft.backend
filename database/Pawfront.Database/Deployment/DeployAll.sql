@@ -135,6 +135,24 @@ BEGIN
 END
 GO
 
+-- Provider <-> pet-parent messaging. Its own schema because a conversation
+-- belongs to neither party's profile and to no booking: chat is OPEN, so a thread
+-- can exist between two people who have never transacted. [Chat] owns the thread
+-- index, per-side read state, live connections and blocks; the message BODIES
+-- live in the Cosmos "ChatMessages" container, partitioned by conversation --
+-- the same SQL-owns-relationships / Cosmos-owns-volume split as
+-- [Event].[Events] + the Events document.
+IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE [name] = N'Chat')
+BEGIN
+    EXEC ('CREATE SCHEMA [Chat]');
+    PRINT 'Created schema [Chat].';
+END
+ELSE
+BEGIN
+    PRINT 'Schema [Chat] already exists.';
+END
+GO
+
 --------------------------------------------------------------------------------
 -- 2. Tables (created in FK-dependency order)
 --------------------------------------------------------------------------------
@@ -15364,6 +15382,1378 @@ GO
 PRINT 'Created/updated [Review].[GetPetParentRatingSummary].';
 GO
 
+
+
+--------------------------------------------------------------------------------
+-- 2.25 Chat.* — provider <-> pet-parent messaging
+--------------------------------------------------------------------------------
+-- SQL owns the thread index, per-side read state, live connections and blocks.
+-- Message BODIES live in the Cosmos "ChatMessages" container partitioned by
+-- /conversationId — the same split as [Event].[Events] + the Events document.
+
+-- 2.25.1 Chat.Conversations ----------------------------------------------------
+-- One thread per (provider, pet parent) pair. The UNIQUE below is load-bearing:
+-- it makes "one thread per pair" a database fact, which is what lets
+-- [Chat].[GetOrCreateConversation] be race-safe with a lock over that one key.
+--
+-- NO FK to [Provider].[Providers] / [Parent].[PetParents] — same posture as
+-- [Booking].[BookingPayments] and [Notification].[NotificationOutbox]. An
+-- anonymised account keeps its conversations: the counterparty was part of those
+-- exchanges too. Names come from a LIVE join at read time, so a deleted account
+-- correctly reads "Deleted Provider" / "Deleted User".
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'Conversations' AND [schema_id] = SCHEMA_ID(N'Chat'))
+BEGIN
+    CREATE TABLE [Chat].[Conversations]
+    (
+        [ConversationId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_Conversations_ConversationId] DEFAULT NEWSEQUENTIALID(),
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [PetParentId] UNIQUEIDENTIFIER NOT NULL,
+        -- Monotonic per conversation; orders the thread and is the ?beforeSequence=
+        -- paging cursor. A HIGH-WATER MARK, not a count — the Cosmos body is written
+        -- after this advances, so a crash in between burns a number. Gaps are
+        -- harmless, which is exactly why there is no [MessageCount] column to be wrong.
+        [LastSequence] BIGINT NOT NULL
+            CONSTRAINT [DF_Conversations_LastSequence] DEFAULT 0,
+        -- Newest-message cache for the inbox card, so the list is one indexed read
+        -- rather than a Cosmos query per thread. NULL until the first message: a
+        -- conversation exists from the moment somebody opens it.
+        [LastMessageAtUtc] DATETIME2(7) NULL,
+        [LastMessagePreview] NVARCHAR(200) NULL,
+        [LastMessageSenderType] NVARCHAR(16) NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Conversations_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_Conversations_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT [PK_Conversations] PRIMARY KEY CLUSTERED ([ConversationId] ASC),
+        CONSTRAINT [UQ_Conversations_Pair] UNIQUE ([ProviderId], [PetParentId]),
+        CONSTRAINT [CK_Conversations_LastMessageSenderType]
+            CHECK ([LastMessageSenderType] IS NULL
+                   OR [LastMessageSenderType] IN (N'Provider', N'PetParent'))
+    );
+    PRINT 'Created table [Chat].[Conversations].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Chat].[Conversations] already exists.';
+END
+GO
+
+-- The two inbox reads. One index per side, because the participants live in
+-- different columns.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Conversations_Provider_LastMessage'
+      AND [object_id] = OBJECT_ID(N'[Chat].[Conversations]'))
+    CREATE INDEX [IX_Conversations_Provider_LastMessage]
+        ON [Chat].[Conversations] ([ProviderId], [LastMessageAtUtc] DESC)
+        INCLUDE ([PetParentId], [LastMessagePreview], [LastMessageSenderType], [LastSequence]);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_Conversations_PetParent_LastMessage'
+      AND [object_id] = OBJECT_ID(N'[Chat].[Conversations]'))
+    CREATE INDEX [IX_Conversations_PetParent_LastMessage]
+        ON [Chat].[Conversations] ([PetParentId], [LastMessageAtUtc] DESC)
+        INCLUDE ([ProviderId], [LastMessagePreview], [LastMessageSenderType], [LastSequence]);
+GO
+
+
+-- 2.25.2 Chat.ConversationParticipants -----------------------------------------
+-- Per-side read state. A separate table rather than four more columns on
+-- [Chat].[Conversations] because every read and write of this state is symmetric
+-- ("advance the sender, increment the recipient"), and column pairs would force a
+-- CASE WHEN @ActorType branch into every one of those statements. With a row per
+-- side, [Chat].[AppendMessage] updates both in a single statement.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ConversationParticipants' AND [schema_id] = SCHEMA_ID(N'Chat'))
+BEGIN
+    CREATE TABLE [Chat].[ConversationParticipants]
+    (
+        [ConversationParticipantId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_ConversationParticipants_Id] DEFAULT NEWSEQUENTIALID(),
+        [ConversationId] UNIQUEIDENTIFIER NOT NULL,
+        [ParticipantType] NVARCHAR(16) NOT NULL,
+        [ParticipantId] UNIQUEIDENTIFIER NOT NULL,
+        [LastReadSequence] BIGINT NOT NULL
+            CONSTRAINT [DF_ConversationParticipants_LastReadSequence] DEFAULT 0,
+        -- A real counter, not something derived from the sequence gap: sequences
+        -- can have gaps, so subtracting would over-count.
+        [UnreadCount] INT NOT NULL
+            CONSTRAINT [DF_ConversationParticipants_UnreadCount] DEFAULT 0,
+        -- Suppresses the push for this thread only. The message still arrives over
+        -- the socket and still lands in the inbox.
+        [IsMuted] BIT NOT NULL
+            CONSTRAINT [DF_ConversationParticipants_IsMuted] DEFAULT 0,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ConversationParticipants_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [UpdatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ConversationParticipants_UpdatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT [PK_ConversationParticipants] PRIMARY KEY CLUSTERED ([ConversationParticipantId] ASC),
+        CONSTRAINT [FK_ConversationParticipants_Conversations_ConversationId]
+            FOREIGN KEY ([ConversationId]) REFERENCES [Chat].[Conversations] ([ConversationId])
+            ON DELETE CASCADE,
+        CONSTRAINT [UQ_ConversationParticipants_Conversation_Type]
+            UNIQUE ([ConversationId], [ParticipantType]),
+        CONSTRAINT [CK_ConversationParticipants_ParticipantType]
+            CHECK ([ParticipantType] IN (N'Provider', N'PetParent')),
+        CONSTRAINT [CK_ConversationParticipants_UnreadCount]
+            CHECK ([UnreadCount] >= 0)
+    );
+    PRINT 'Created table [Chat].[ConversationParticipants].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Chat].[ConversationParticipants] already exists.';
+END
+GO
+
+-- The unread badge, and the per-participant lookups on the send path.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ConversationParticipants_Participant'
+      AND [object_id] = OBJECT_ID(N'[Chat].[ConversationParticipants]'))
+    CREATE INDEX [IX_ConversationParticipants_Participant]
+        ON [Chat].[ConversationParticipants] ([ParticipantType], [ParticipantId])
+        INCLUDE ([ConversationId], [UnreadCount], [LastReadSequence], [IsMuted]);
+GO
+
+
+-- 2.25.3 Chat.ChatConnections --------------------------------------------------
+-- Live SignalR connections, and which thread each has open. This exists for
+-- exactly one decision: whether a message earns an FCM push. Without it the choice
+-- would be to buzz someone for a message they are reading, or to leave an offline
+-- recipient silent.
+--
+-- OPERATIONAL data, not history. [Chat].[PurgeStaleConnections] is what makes it
+-- trustworthy — OnDisconnectedAsync does not run if the host crashes, and a stale
+-- row does not merely waste space, it makes the recipient look present forever.
+--
+-- No FK on [ActiveConversationId] on purpose: it is a transient pointer, and a FK
+-- would make deleting a conversation depend on nobody currently viewing it.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'ChatConnections' AND [schema_id] = SCHEMA_ID(N'Chat'))
+BEGIN
+    CREATE TABLE [Chat].[ChatConnections]
+    (
+        [ConnectionId] NVARCHAR(128) NOT NULL,
+        [ParticipantType] NVARCHAR(16) NOT NULL,
+        [ParticipantId] UNIQUEIDENTIFIER NOT NULL,
+        -- NULL when connected but elsewhere in the app — the common case, and the
+        -- one that still earns a push.
+        [ActiveConversationId] UNIQUEIDENTIFIER NULL,
+        [ConnectedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ChatConnections_ConnectedAtUtc] DEFAULT SYSUTCDATETIME(),
+        [LastHeartbeatAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_ChatConnections_LastHeartbeatAtUtc] DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT [PK_ChatConnections] PRIMARY KEY CLUSTERED ([ConnectionId] ASC),
+        CONSTRAINT [CK_ChatConnections_ParticipantType]
+            CHECK ([ParticipantType] IN (N'Provider', N'PetParent'))
+    );
+    PRINT 'Created table [Chat].[ChatConnections].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Chat].[ChatConnections] already exists.';
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ChatConnections_Participant'
+      AND [object_id] = OBJECT_ID(N'[Chat].[ChatConnections]'))
+    CREATE INDEX [IX_ChatConnections_Participant]
+        ON [Chat].[ChatConnections] ([ParticipantType], [ParticipantId])
+        INCLUDE ([ActiveConversationId]);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_ChatConnections_LastHeartbeat'
+      AND [object_id] = OBJECT_ID(N'[Chat].[ChatConnections]'))
+    CREATE INDEX [IX_ChatConnections_LastHeartbeat]
+        ON [Chat].[ChatConnections] ([LastHeartbeatAtUtc]);
+GO
+
+
+-- 2.25.4 Chat.BlockedParticipants ----------------------------------------------
+-- A direct consequence of chat being OPEN: any parent may message any provider
+-- with no booking between them, which is right for pre-sales questions but means
+-- unsolicited contact is possible by design. A block is the user's own remedy and
+-- is the one piece of anti-abuse the feature cannot ship without.
+--
+-- Stops NEW messages both ways and stops the thread being reopened. Deliberately
+-- does NOT hide existing history: that is part of both parties' record, and
+-- removing it would also remove what a blocked user might need in order to report.
+--
+-- Reporting is NOT modelled — it has to terminate in a support workflow, and this
+-- backend has no Helpline / ticket module (see DISPUTE_RESOLVED, which has copy
+-- and a route but no trigger, for the same reason).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.tables
+    WHERE [name] = N'BlockedParticipants' AND [schema_id] = SCHEMA_ID(N'Chat'))
+BEGIN
+    CREATE TABLE [Chat].[BlockedParticipants]
+    (
+        [ChatBlockId] UNIQUEIDENTIFIER NOT NULL
+            CONSTRAINT [DF_BlockedParticipants_ChatBlockId] DEFAULT NEWSEQUENTIALID(),
+        [BlockerType] NVARCHAR(16) NOT NULL,
+        [BlockerId] UNIQUEIDENTIFIER NOT NULL,
+        [BlockedType] NVARCHAR(16) NOT NULL,
+        [BlockedId] UNIQUEIDENTIFIER NOT NULL,
+        -- Kept for a future report flow to quote; never shown to the blocked party.
+        [Reason] NVARCHAR(500) NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+            CONSTRAINT [DF_BlockedParticipants_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT [PK_BlockedParticipants] PRIMARY KEY CLUSTERED ([ChatBlockId] ASC),
+        CONSTRAINT [UQ_BlockedParticipants_Pair]
+            UNIQUE ([BlockerType], [BlockerId], [BlockedType], [BlockedId]),
+        CONSTRAINT [CK_BlockedParticipants_BlockerType]
+            CHECK ([BlockerType] IN (N'Provider', N'PetParent')),
+        CONSTRAINT [CK_BlockedParticipants_BlockedType]
+            CHECK ([BlockedType] IN (N'Provider', N'PetParent')),
+        -- A conversation only ever runs provider <-> parent, so a block within one
+        -- side is meaningless and would silently never be consulted.
+        CONSTRAINT [CK_BlockedParticipants_OppositeSides]
+            CHECK ([BlockerType] <> [BlockedType])
+    );
+    PRINT 'Created table [Chat].[BlockedParticipants].';
+END
+ELSE
+BEGIN
+    PRINT 'Table [Chat].[BlockedParticipants] already exists.';
+END
+GO
+
+-- The send path checks BOTH directions at once, so the reverse lookup needs its
+-- own index — the UNIQUE above only serves the blocker-first direction.
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE [name] = N'IX_BlockedParticipants_Blocked'
+      AND [object_id] = OBJECT_ID(N'[Chat].[BlockedParticipants]'))
+    CREATE INDEX [IX_BlockedParticipants_Blocked]
+        ON [Chat].[BlockedParticipants] ([BlockedType], [BlockedId])
+        INCLUDE ([BlockerType], [BlockerId]);
+GO
+
+
+--------------------------------------------------------------------------------
+-- 3.x Chat.* stored procedures + Notification.EnqueueInstantNotification
+--------------------------------------------------------------------------------
+
+-- Enqueues a notification that the CALLER intends to send itself, right now,
+-- instead of leaving it for the 1-minute NotificationDispatchFunction.
+--
+-- This exists for chat. Every other notification in the product is a side effect
+-- of a booking or a ticket, where a minute of latency costs nothing and
+-- durability is everything — so those go through [Notification].[EnqueueNotification]
+-- and wait for the timer. A chat message is the opposite: the latency IS the
+-- feature.
+--
+-- The row is inserted ALREADY CLAIMED — [Status] = 'Sending' with the lease
+-- pushed forward — which is the whole trick:
+--   * the timer's claim predicate skips it, so the recipient is not pushed twice;
+--   * if the caller dies before reporting the outcome, the lease lapses and the
+--     ordinary dispatcher picks it up on its next tick and sends it after all.
+-- So the outbox stops being the delivery path here and becomes the RETRY
+-- BACKSTOP, with no extra machinery and no second code path to keep in step.
+--
+-- The caller renders copy with the C# NotificationTemplateCatalog, sends via FCM,
+-- and reports through the existing [Notification].[CompleteNotificationDelivery]
+-- exactly as the dispatcher does — which is what keeps chat copy and payload
+-- shape identical to everything else.
+--
+-- Returns TWO result sets: the notification id, then the recipient's active FCM
+-- tokens (same join [Notification].[ClaimPendingNotifications] uses), so the
+-- caller needs no follow-up round trip to find the devices.
+--
+-- Never THROWs, for the same reason [Notification].[EnqueueNotification] never
+-- does: a notification must not be the reason the thing that caused it fails.
+CREATE OR ALTER PROCEDURE [Notification].[EnqueueInstantNotification]
+    @Audience NVARCHAR(16),
+    @RecipientId UNIQUEIDENTIFIER,
+    @NotificationType NVARCHAR(64),
+    @EntityType NVARCHAR(32) = NULL,
+    @EntityId UNIQUEIDENTIFIER = NULL,
+    @DataJson NVARCHAR(MAX) = NULL,
+    @ImageUrl NVARCHAR(1000) = NULL,
+    @DedupeKey NVARCHAR(200) = NULL,
+    -- How long the caller has to render, send and report before the timer
+    -- considers the row abandoned and takes it over. Generous relative to an FCM
+    -- call, because a premature takeover means a duplicate push.
+    @LeaseMinutes INT = 5,
+    -- Set by sproc-to-sproc callers ([Chat].[AppendMessage]), for the same reason
+    -- [Notification].[EnqueueNotification] has it: a nested EXEC's result set
+    -- propagates to the client and would corrupt the caller's own reader. Such a
+    -- caller reads the id back through @NotificationId OUTPUT instead.
+    @SuppressResultSet BIT = 0,
+    @NotificationId UNIQUEIDENTIFIER = NULL OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+
+    SET @NotificationId = NULL;
+
+    IF @DedupeKey IS NOT NULL
+    BEGIN
+        SELECT @NotificationId = [NotificationId]
+        FROM [Notification].[NotificationOutbox] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [DedupeKey] = @DedupeKey;
+    END
+
+    IF @NotificationId IS NULL
+    BEGIN
+        DECLARE @Inserted TABLE ([NotificationId] UNIQUEIDENTIFIER);
+
+        BEGIN TRY
+            INSERT INTO [Notification].[NotificationOutbox]
+            (
+                [Audience],
+                [RecipientId],
+                [NotificationType],
+                [EntityType],
+                [EntityId],
+                [DataJson],
+                [ImageUrl],
+                [DedupeKey],
+                [Status],
+                [AttemptCount],
+                [NextAttemptAtUtc],
+                [CreatedAtUtc],
+                [UpdatedAtUtc]
+            )
+            OUTPUT inserted.[NotificationId] INTO @Inserted
+            VALUES
+            (
+                @Audience,
+                @RecipientId,
+                @NotificationType,
+                @EntityType,
+                @EntityId,
+                @DataJson,
+                @ImageUrl,
+                @DedupeKey,
+                -- Claimed on insert. AttemptCount starts at 1 because this row's
+                -- first attempt is the one the caller is about to make.
+                N'Sending',
+                1,
+                DATEADD(MINUTE, @LeaseMinutes, @Now),
+                @Now,
+                @Now
+            );
+
+            SELECT @NotificationId = [NotificationId] FROM @Inserted;
+        END TRY
+        BEGIN CATCH
+            -- 2601/2627 = the dedupe race the lock above almost always prevents.
+            IF ERROR_NUMBER() NOT IN (2601, 2627) OR @DedupeKey IS NULL
+            BEGIN
+                THROW;
+            END
+
+            SELECT @NotificationId = [NotificationId]
+            FROM [Notification].[NotificationOutbox]
+            WHERE [DedupeKey] = @DedupeKey;
+        END CATCH
+    END
+
+    IF @SuppressResultSet = 1
+    BEGIN
+        RETURN;
+    END
+
+    SELECT @NotificationId AS [NotificationId];
+
+    IF @Audience = N'Provider'
+    BEGIN
+        SELECT [FcmToken], [DevicePlatform]
+        FROM [Provider].[ProviderDeviceTokens]
+        WHERE [ProviderId] = @RecipientId
+          AND [IsActive] = 1;
+    END
+    ELSE
+    BEGIN
+        SELECT [FcmToken], [DevicePlatform]
+        FROM [Parent].[ParentDeviceTokens]
+        WHERE [PetParentId] = @RecipientId
+          AND [IsActive] = 1;
+    END
+END;
+GO
+PRINT 'Created/updated [Notification].[EnqueueInstantNotification].';
+GO
+
+-- Opens the one thread between a provider and a pet parent, creating it if this
+-- is the first contact.
+--
+-- Chat is OPEN — any parent may message any provider with no booking between them
+-- — so this procedure is where "may these two talk at all" is decided, and the
+-- only gates are: both accounts still exist, and neither has blocked the other.
+--
+-- An INACTIVE provider is deliberately still reachable. Inactive means "not
+-- taking bookings": they are hidden from discovery and [Booking].[CreateBooking]
+-- refuses them, but their profile is still viewable by deep link and answering a
+-- question before switching back on is exactly what chat is for. Only IsDeleted —
+-- which is permanent — closes the door.
+--
+-- Race safety comes from the UNIQUE ([ProviderId], [PetParentId]) on
+-- [Chat].[Conversations]: the lookup below takes UPDLOCK + HOLDLOCK over that key
+-- range, so two devices opening the same thread at once serialise and the second
+-- finds the first's row instead of hitting a UNIQUE violation. Same shape as
+-- [Review].[UpsertBookingReview].
+--
+-- Returns TWO result sets: the conversation row, then both participant rows.
+--
+-- THROWs: 51320 provider not found, 51321 provider account deleted,
+-- 51322 pet parent not found or deleted, 51323 blocked in one direction or the
+-- other, 51324 the actor is not one of the two named parties.
+CREATE OR ALTER PROCEDURE [Chat].[GetOrCreateConversation]
+    @ProviderId UNIQUEIDENTIFIER,
+    @PetParentId UNIQUEIDENTIFIER,
+    @ActorType NVARCHAR(16),        -- 'Provider' | 'PetParent'
+    @ActorId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    -- Defensive. The API derives the actor from the JWT and never from the body,
+    -- so a mismatch here means a direct caller, not something a client can reach.
+    IF @ActorType NOT IN (N'Provider', N'PetParent')
+        OR (@ActorType = N'Provider' AND @ActorId <> @ProviderId)
+        OR (@ActorType = N'PetParent' AND @ActorId <> @PetParentId)
+    BEGIN
+        THROW 51324, 'The acting participant is not a party to this conversation.', 1;
+    END
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @ConversationId UNIQUEIDENTIFIER;
+    DECLARE @ProviderIsDeleted BIT;
+    DECLARE @ParentIsDeleted BIT;
+
+    BEGIN TRANSACTION;
+
+    SELECT @ProviderIsDeleted = [IsDeleted]
+    FROM [Provider].[Providers]
+    WHERE [ProviderId] = @ProviderId;
+
+    IF @ProviderIsDeleted IS NULL
+    BEGIN
+        THROW 51320, 'Provider was not found.', 1;
+    END
+
+    IF @ProviderIsDeleted = 1
+    BEGIN
+        THROW 51321, 'This provider account has been deleted.', 1;
+    END
+
+    SELECT @ParentIsDeleted = [IsDeleted]
+    FROM [Parent].[PetParents]
+    WHERE [PetParentId] = @PetParentId;
+
+    -- Deleted and absent are one case on this side. A deleted parent has had
+    -- their Firebase identity severed, so they could never read the thread; the
+    -- provider gains nothing from being told the difference.
+    IF @ParentIsDeleted IS NULL OR @ParentIsDeleted = 1
+    BEGIN
+        THROW 51322, 'Pet parent was not found.', 1;
+    END
+
+    -- Either direction blocks. The blocked party is not told which way round it
+    -- is — that would confirm the other person acted, which is the thing a block
+    -- is meant to end.
+    IF EXISTS (
+        SELECT 1
+        FROM [Chat].[BlockedParticipants]
+        WHERE ([BlockerType] = N'Provider' AND [BlockerId] = @ProviderId
+               AND [BlockedType] = N'PetParent' AND [BlockedId] = @PetParentId)
+           OR ([BlockerType] = N'PetParent' AND [BlockerId] = @PetParentId
+               AND [BlockedType] = N'Provider' AND [BlockedId] = @ProviderId))
+    BEGIN
+        THROW 51323, 'This conversation is not available.', 1;
+    END
+
+    -- UPDLOCK + HOLDLOCK over the unique pair: when no row exists this takes a
+    -- range lock, so a concurrent open of the same thread waits here rather than
+    -- racing to INSERT.
+    SELECT @ConversationId = [ConversationId]
+    FROM [Chat].[Conversations] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [ProviderId] = @ProviderId
+      AND [PetParentId] = @PetParentId;
+
+    IF @ConversationId IS NULL
+    BEGIN
+        DECLARE @Inserted TABLE ([ConversationId] UNIQUEIDENTIFIER);
+
+        INSERT INTO [Chat].[Conversations]
+            ([ProviderId], [PetParentId], [CreatedAtUtc], [UpdatedAtUtc])
+        OUTPUT inserted.[ConversationId] INTO @Inserted
+        VALUES
+            (@ProviderId, @PetParentId, @Now, @Now);
+
+        SELECT @ConversationId = [ConversationId] FROM @Inserted;
+
+        -- Both sides, always, in the same statement — a conversation with one
+        -- participant row is not a state any read path knows how to handle.
+        INSERT INTO [Chat].[ConversationParticipants]
+            ([ConversationId], [ParticipantType], [ParticipantId], [CreatedAtUtc], [UpdatedAtUtc])
+        VALUES
+            (@ConversationId, N'Provider', @ProviderId, @Now, @Now),
+            (@ConversationId, N'PetParent', @PetParentId, @Now, @Now);
+    END
+
+    SELECT [ConversationId],
+           [ProviderId],
+           [PetParentId],
+           [LastSequence],
+           [LastMessageAtUtc],
+           [LastMessagePreview],
+           [LastMessageSenderType],
+           [CreatedAtUtc],
+           [UpdatedAtUtc]
+    FROM [Chat].[Conversations]
+    WHERE [ConversationId] = @ConversationId;
+
+    SELECT [ConversationParticipantId],
+           [ConversationId],
+           [ParticipantType],
+           [ParticipantId],
+           [LastReadSequence],
+           [UnreadCount],
+           [IsMuted]
+    FROM [Chat].[ConversationParticipants]
+    WHERE [ConversationId] = @ConversationId
+    ORDER BY [ParticipantType] ASC;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Chat].[GetOrCreateConversation].';
+GO
+
+-- Records one chat message's SQL-side effects, in a single transaction: assign
+-- its sequence number, refresh the inbox cache, move both participants' read
+-- state, decide whether the recipient needs a push, and — when they do — queue it.
+--
+-- The message BODY is not stored here. It goes to Cosmos, partitioned by
+-- conversation, which is where the volume belongs. This procedure owns everything
+-- that has to be consistent and countable: ordering, unread counts, and the
+-- newest-message cache the inbox list reads.
+--
+-- WHY THE PUSH DECISION LIVES HERE. It needs the recipient's presence, their mute
+-- flag, and their device tokens — three reads against tables this transaction is
+-- already in. Deciding it in C# would mean extra round trips and a window in
+-- which presence could change between the decision and the write. Same reasoning
+-- that put the notification enqueue inside the booking transition sprocs and the
+-- pending-jobs check inside [Parent].[DeletePetParent].
+--
+-- ORDER OF WRITES, and the one trade-off in it. The caller writes to Cosmos AFTER
+-- this returns, so a crash in between leaves a sequence number and a preview for a
+-- message with no body. That is deliberate: the alternative (reserve, write,
+-- commit) costs an extra SQL round trip on every single message. The client
+-- retries with the same @MessageId, a fresh sequence is assigned, and the correct
+-- preview overwrites the stale one. The burnt sequence is a harmless gap — see the
+-- note on [Chat].[Conversations].[LastSequence] for why nothing counts them.
+--
+-- Returns THREE result sets:
+--   1. the appended message's sequence + the conversation's new cache state
+--   2. the recipient, and the notification id if one was queued (NULL if not)
+--   3. the recipient's active FCM tokens (empty unless a notification was queued)
+--
+-- THROWs: 51323 blocked, 51325 conversation not found, 51326 sender is not a
+-- party to it.
+CREATE OR ALTER PROCEDURE [Chat].[AppendMessage]
+    @ConversationId UNIQUEIDENTIFIER,
+    @SenderType NVARCHAR(16),           -- 'Provider' | 'PetParent'
+    @SenderId UNIQUEIDENTIFIER,
+    -- The client-generated message id, which is also the Cosmos document id. It
+    -- appears here only to key the notification's DedupeKey, so a retried send
+    -- cannot produce a second push.
+    @MessageId UNIQUEIDENTIFIER,
+    -- What the inbox card shows. The caller truncates and, for an attachment,
+    -- substitutes a label ("Photo") rather than sending a blob URL.
+    @Preview NVARCHAR(200)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    IF @SenderType NOT IN (N'Provider', N'PetParent')
+    BEGIN
+        THROW 51326, 'You are not a party to this conversation.', 1;
+    END
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @ProviderId UNIQUEIDENTIFIER;
+    DECLARE @PetParentId UNIQUEIDENTIFIER;
+    DECLARE @Sequence BIGINT;
+
+    DECLARE @RecipientType NVARCHAR(16) = CASE WHEN @SenderType = N'Provider'
+                                               THEN N'PetParent' ELSE N'Provider' END;
+    DECLARE @RecipientId UNIQUEIDENTIFIER;
+    DECLARE @RecipientUnread INT;
+    DECLARE @RecipientIsMuted BIT;
+    DECLARE @RecipientIsViewing BIT = 0;
+    DECLARE @NotificationId UNIQUEIDENTIFIER = NULL;
+    -- Returned to the caller so it can render the copy itself. The C#
+    -- NotificationTemplateCatalog is the only place wording lives, and the
+    -- renderer needs these parameters; without handing them back, the chat host
+    -- would have to re-read the outbox row it just wrote.
+    DECLARE @DataJson NVARCHAR(MAX) = NULL;
+
+    BEGIN TRANSACTION;
+
+    -- UPDLOCK on the conversation row is what serialises concurrent sends and
+    -- makes the sequence strictly increasing: two messages at once queue here
+    -- rather than both reading the same LastSequence.
+    SELECT @ProviderId = [ProviderId],
+           @PetParentId = [PetParentId],
+           @Sequence = [LastSequence] + 1
+    FROM [Chat].[Conversations] WITH (UPDLOCK, ROWLOCK)
+    WHERE [ConversationId] = @ConversationId;
+
+    IF @ProviderId IS NULL
+    BEGIN
+        THROW 51325, 'Conversation was not found.', 1;
+    END
+
+    SET @RecipientId = CASE WHEN @RecipientType = N'Provider' THEN @ProviderId ELSE @PetParentId END;
+
+    IF (@SenderType = N'Provider' AND @SenderId <> @ProviderId)
+        OR (@SenderType = N'PetParent' AND @SenderId <> @PetParentId)
+    BEGIN
+        THROW 51326, 'You are not a party to this conversation.', 1;
+    END
+
+    -- Re-checked on every message, not just at conversation creation: a block
+    -- raised mid-thread has to take effect immediately, and the conversation row
+    -- already exists by then.
+    IF EXISTS (
+        SELECT 1
+        FROM [Chat].[BlockedParticipants]
+        WHERE ([BlockerType] = N'Provider' AND [BlockerId] = @ProviderId
+               AND [BlockedType] = N'PetParent' AND [BlockedId] = @PetParentId)
+           OR ([BlockerType] = N'PetParent' AND [BlockerId] = @PetParentId
+               AND [BlockedType] = N'Provider' AND [BlockedId] = @ProviderId))
+    BEGIN
+        THROW 51323, 'This conversation is not available.', 1;
+    END
+
+    UPDATE [Chat].[Conversations]
+    SET [LastSequence] = @Sequence,
+        [LastMessageAtUtc] = @Now,
+        [LastMessagePreview] = @Preview,
+        [LastMessageSenderType] = @SenderType,
+        [UpdatedAtUtc] = @Now
+    WHERE [ConversationId] = @ConversationId;
+
+    -- Both sides in one statement, which is the reason participants are rows
+    -- rather than column pairs on the conversation. The sender's read pointer
+    -- advances because you have obviously read what you just sent.
+    UPDATE [Chat].[ConversationParticipants]
+    SET [LastReadSequence] = CASE WHEN [ParticipantType] = @SenderType
+                                  THEN @Sequence ELSE [LastReadSequence] END,
+        [UnreadCount] = CASE WHEN [ParticipantType] = @SenderType
+                             THEN 0 ELSE [UnreadCount] + 1 END,
+        [UpdatedAtUtc] = @Now
+    WHERE [ConversationId] = @ConversationId;
+
+    SELECT @RecipientUnread = [UnreadCount],
+           @RecipientIsMuted = [IsMuted]
+    FROM [Chat].[ConversationParticipants]
+    WHERE [ConversationId] = @ConversationId
+      AND [ParticipantType] = @RecipientType;
+
+    -- Presence, at THREAD level rather than merely "are they connected". Someone
+    -- connected but on another screen still deserves a push — they are not
+    -- looking at this. Only an open thread suppresses it.
+    IF EXISTS (
+        SELECT 1
+        FROM [Chat].[ChatConnections]
+        WHERE [ParticipantType] = @RecipientType
+          AND [ParticipantId] = @RecipientId
+          AND [ActiveConversationId] = @ConversationId)
+    BEGIN
+        SET @RecipientIsViewing = 1;
+    END
+
+    IF @RecipientIsViewing = 0 AND COALESCE(@RecipientIsMuted, 0) = 0
+    BEGIN
+        -- Copy is NOT built here. The dispatcher's C# NotificationTemplateCatalog
+        -- owns every user-facing string in the product, and chat is not an
+        -- exception to that — this only supplies the type and its parameters.
+        DECLARE @SenderName NVARCHAR(200) =
+            CASE WHEN @SenderType = N'Provider'
+                 THEN (SELECT LTRIM(RTRIM(COALESCE([FirstName], N'') + N' ' + COALESCE([LastName], N'')))
+                       FROM [Provider].[Providers] WHERE [ProviderId] = @ProviderId)
+                 ELSE (SELECT LTRIM(RTRIM(COALESCE([FirstName], N'') + N' ' + COALESCE([LastName], N'')))
+                       FROM [Parent].[PetParents] WHERE [PetParentId] = @PetParentId)
+            END;
+
+        -- Joined live rather than denormalised onto the message, so a deleted
+        -- account reads "Deleted Provider" / "Deleted User" — the same invariant
+        -- the review and booking reads hold. NULLIF sends nothing at all when the
+        -- name is blank, letting the renderer's "Someone" fallback take over.
+        SET @DataJson =
+        (
+            SELECT
+                -- --- the canonical id block ---
+                N'MESSAGING'                                 AS [category],
+                CAST(@ConversationId AS NVARCHAR(36))        AS [conversationId],
+                CAST(@PetParentId AS NVARCHAR(36))           AS [parentId],
+                CAST(@ProviderId AS NVARCHAR(36))            AS [providerId],
+                -- --- template parameters ---
+                NULLIF(@SenderName, N'')                     AS [senderName]
+            FOR JSON PATH, WITHOUT_ARRAY_WRAPPER
+        );
+
+        DECLARE @DedupeKey NVARCHAR(200) =
+            N'MESSAGE_RECEIVED:' + CAST(@MessageId AS NVARCHAR(36));
+
+        EXEC [Notification].[EnqueueInstantNotification]
+            @Audience = @RecipientType,
+            @RecipientId = @RecipientId,
+            @NotificationType = N'MESSAGE_RECEIVED',
+            @EntityType = N'Conversation',
+            @EntityId = @ConversationId,
+            @DataJson = @DataJson,
+            -- Keyed on the message, not the conversation: every message is a
+            -- distinct event, but a retried send of the SAME message must not
+            -- buzz twice. Prefixed and cast explicitly, matching the DedupeKey
+            -- shape [Notification].[EnqueueBookingNotification] builds.
+            @DedupeKey = @DedupeKey,
+            @SuppressResultSet = 1,
+            @NotificationId = @NotificationId OUTPUT;
+    END
+
+    -- Result set 1 — what the sender gets back.
+    SELECT @ConversationId AS [ConversationId],
+           @Sequence AS [Sequence],
+           @Now AS [CreatedAtUtc],
+           @Preview AS [LastMessagePreview];
+
+    -- Result set 2 — who to deliver to, and whether a push was queued.
+    SELECT @RecipientType AS [RecipientType],
+           @RecipientId AS [RecipientId],
+           COALESCE(@RecipientUnread, 0) AS [RecipientUnreadCount],
+           @RecipientIsViewing AS [RecipientIsViewing],
+           COALESCE(@RecipientIsMuted, 0) AS [RecipientIsMuted],
+           @NotificationId AS [NotificationId],
+           @DataJson AS [DataJson];
+
+    -- Result set 3 — the devices to push to. Empty when no notification was
+    -- queued, so the caller can branch on row count alone.
+    IF @NotificationId IS NULL
+    BEGIN
+        SELECT CAST(NULL AS NVARCHAR(2048)) AS [FcmToken],
+               CAST(NULL AS NVARCHAR(32)) AS [DevicePlatform]
+        WHERE 1 = 0;
+    END
+    ELSE IF @RecipientType = N'Provider'
+    BEGIN
+        SELECT [FcmToken], [DevicePlatform]
+        FROM [Provider].[ProviderDeviceTokens]
+        WHERE [ProviderId] = @RecipientId
+          AND [IsActive] = 1;
+    END
+    ELSE
+    BEGIN
+        SELECT [FcmToken], [DevicePlatform]
+        FROM [Parent].[ParentDeviceTokens]
+        WHERE [PetParentId] = @RecipientId
+          AND [IsActive] = 1;
+    END
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Chat].[AppendMessage].';
+GO
+
+-- The authorisation point read: "does this conversation exist, and is the caller
+-- one of its two participants?"
+--
+-- Every path that touches a thread goes through this first — the history read,
+-- the hub's JoinConversation (so a client cannot subscribe to a group by
+-- guessing its name), mark-read, and attachment upload. It returns NOTHING for a
+-- conversation the caller is not part of, deliberately conflating "no such
+-- thread" with "not yours" so the caller answers 404 for both and an id cannot be
+-- probed for existence. Same posture as [Provider].[DeactivateProviderDeviceToken]
+-- and the review-photo reads.
+--
+-- Returns TWO result sets: the conversation with the caller's own participant
+-- state, then the counterparty's name joined LIVE from
+-- [Provider].[Providers] / [Parent].[PetParents] — never denormalised, so a
+-- deleted account reads "Deleted Provider" / "Deleted User" rather than keeping
+-- its real name frozen in the thread.
+--
+-- Never THROWs; an empty result is the answer.
+CREATE OR ALTER PROCEDURE [Chat].[GetConversationForParticipant]
+    @ConversationId UNIQUEIDENTIFIER,
+    @ParticipantType NVARCHAR(16),
+    @ParticipantId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT c.[ConversationId],
+           c.[ProviderId],
+           c.[PetParentId],
+           c.[LastSequence],
+           c.[LastMessageAtUtc],
+           c.[LastMessagePreview],
+           c.[LastMessageSenderType],
+           c.[CreatedAtUtc],
+           c.[UpdatedAtUtc],
+           p.[LastReadSequence],
+           p.[UnreadCount],
+           p.[IsMuted]
+    FROM [Chat].[Conversations] c
+    INNER JOIN [Chat].[ConversationParticipants] p
+        ON p.[ConversationId] = c.[ConversationId]
+       AND p.[ParticipantType] = @ParticipantType
+       AND p.[ParticipantId] = @ParticipantId
+    WHERE c.[ConversationId] = @ConversationId;
+
+    -- The other side, for the thread header. Scoped by the same participant join
+    -- as above so a non-participant gets nothing here either.
+    SELECT CASE WHEN @ParticipantType = N'Provider' THEN N'PetParent' ELSE N'Provider' END
+               AS [CounterpartyType],
+           CASE WHEN @ParticipantType = N'Provider' THEN c.[PetParentId] ELSE c.[ProviderId] END
+               AS [CounterpartyId],
+           CASE WHEN @ParticipantType = N'Provider'
+                THEN LTRIM(RTRIM(COALESCE(pp.[FirstName], N'') + N' ' + COALESCE(pp.[LastName], N'')))
+                ELSE LTRIM(RTRIM(COALESCE(pr.[FirstName], N'') + N' ' + COALESCE(pr.[LastName], N'')))
+           END AS [CounterpartyName],
+           -- Only the pet parent has a photo on their SQL row. A provider's image
+           -- lives in their Cosmos offering document, so the caller resolves that
+           -- one separately — the same split GetBookingDetail's providerPhotoUrl
+           -- has to live with.
+           CASE WHEN @ParticipantType = N'Provider' THEN pp.[ProfilePhotoUrl] END
+               AS [CounterpartyPhotoUrl],
+           CASE WHEN @ParticipantType = N'Provider' THEN pp.[IsDeleted] ELSE pr.[IsDeleted] END
+               AS [CounterpartyIsDeleted]
+    FROM [Chat].[Conversations] c
+    INNER JOIN [Chat].[ConversationParticipants] p
+        ON p.[ConversationId] = c.[ConversationId]
+       AND p.[ParticipantType] = @ParticipantType
+       AND p.[ParticipantId] = @ParticipantId
+    LEFT JOIN [Provider].[Providers] pr ON pr.[ProviderId] = c.[ProviderId]
+    LEFT JOIN [Parent].[PetParents] pp ON pp.[PetParentId] = c.[PetParentId]
+    WHERE c.[ConversationId] = @ConversationId;
+END;
+GO
+PRINT 'Created/updated [Chat].[GetConversationForParticipant].';
+GO
+
+-- The caller's chat inbox: their threads, most recently active first, with the
+-- counterparty's name and their own unread count on each card.
+--
+-- One indexed read, not a fan-out. That is what the denormalised last-message
+-- columns on [Chat].[Conversations] are for — without them this screen would need
+-- a Cosmos query per thread just to show a preview line.
+--
+-- Threads that exist but have never been used sort last (LastMessageAtUtc NULL),
+-- rather than being hidden: a conversation is created the moment someone opens
+-- it, and a parent who opened a provider's thread and hesitated should still find
+-- it where they left it.
+--
+-- Names are joined LIVE. A review, a booking and a chat all read a
+-- counterparty's name this way for the same reason: an anonymised account must
+-- read "Deleted Provider" / "Deleted User" everywhere, and a denormalised copy
+-- would keep the real name.
+--
+-- Returns ONE result set. Paged by the caller; @Take is capped there.
+CREATE OR ALTER PROCEDURE [Chat].[ListConversations]
+    @ParticipantType NVARCHAR(16),
+    @ParticipantId UNIQUEIDENTIFIER,
+    @Skip INT = 0,
+    @Take INT = 20
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @Skip IS NULL OR @Skip < 0 SET @Skip = 0;
+    IF @Take IS NULL OR @Take < 1 SET @Take = 20;
+
+    SELECT c.[ConversationId],
+           c.[ProviderId],
+           c.[PetParentId],
+           c.[LastSequence],
+           c.[LastMessageAtUtc],
+           c.[LastMessagePreview],
+           c.[LastMessageSenderType],
+           c.[CreatedAtUtc],
+           p.[LastReadSequence],
+           p.[UnreadCount],
+           p.[IsMuted],
+           CASE WHEN @ParticipantType = N'Provider' THEN N'PetParent' ELSE N'Provider' END
+               AS [CounterpartyType],
+           CASE WHEN @ParticipantType = N'Provider' THEN c.[PetParentId] ELSE c.[ProviderId] END
+               AS [CounterpartyId],
+           CASE WHEN @ParticipantType = N'Provider'
+                THEN LTRIM(RTRIM(COALESCE(pp.[FirstName], N'') + N' ' + COALESCE(pp.[LastName], N'')))
+                ELSE LTRIM(RTRIM(COALESCE(pr.[FirstName], N'') + N' ' + COALESCE(pr.[LastName], N'')))
+           END AS [CounterpartyName],
+           -- Parent photos only; a provider's image is in Cosmos. The caller
+           -- batch-resolves those for the page it is returning.
+           CASE WHEN @ParticipantType = N'Provider' THEN pp.[ProfilePhotoUrl] END
+               AS [CounterpartyPhotoUrl]
+    FROM [Chat].[ConversationParticipants] p
+    INNER JOIN [Chat].[Conversations] c
+        ON c.[ConversationId] = p.[ConversationId]
+    LEFT JOIN [Provider].[Providers] pr ON pr.[ProviderId] = c.[ProviderId]
+    LEFT JOIN [Parent].[PetParents] pp ON pp.[PetParentId] = c.[PetParentId]
+    WHERE p.[ParticipantType] = @ParticipantType
+      AND p.[ParticipantId] = @ParticipantId
+    -- Newest activity first; never-used threads fall to the bottom. The
+    -- ConversationId tie-break is what stops OFFSET paging repeating or skipping
+    -- a row when two threads share a timestamp — the same reason the review and
+    -- earnings lists carry one.
+    ORDER BY c.[LastMessageAtUtc] DESC, c.[ConversationId] DESC
+    OFFSET @Skip ROWS FETCH NEXT @Take ROWS ONLY;
+END;
+GO
+PRINT 'Created/updated [Chat].[ListConversations].';
+GO
+
+-- Advances the caller's read pointer on one thread and clears their unread count.
+--
+-- @UpToSequence is what the client claims to have seen. It is clamped to the
+-- conversation's own [LastSequence] and never moves backwards, so a stale client
+-- reporting an old number cannot un-read a thread, and a client that has somehow
+-- got ahead cannot mark unsent messages as read.
+--
+-- The unread count is recomputed rather than zeroed outright: marking up to
+-- sequence 40 on a thread that is already at 45 should leave five unread, not
+-- none. It only reaches zero when the caller has caught up completely.
+--
+-- Scoped by participant, so a caller can only ever mark their own side read —
+-- there is no way to clear somebody else's badge.
+--
+-- Returns ONE result set with the resulting state. Empty when the conversation
+-- does not exist or is not the caller's: the same non-disclosure posture as
+-- [Chat].[GetConversationForParticipant]. Never THROWs.
+CREATE OR ALTER PROCEDURE [Chat].[MarkConversationRead]
+    @ConversationId UNIQUEIDENTIFIER,
+    @ParticipantType NVARCHAR(16),
+    @ParticipantId UNIQUEIDENTIFIER,
+    @UpToSequence BIGINT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @LastSequence BIGINT;
+
+    BEGIN TRANSACTION;
+
+    SELECT @LastSequence = [LastSequence]
+    FROM [Chat].[Conversations]
+    WHERE [ConversationId] = @ConversationId;
+
+    IF @LastSequence IS NULL
+    BEGIN
+        COMMIT TRANSACTION;
+        RETURN;
+    END
+
+    IF @UpToSequence IS NULL OR @UpToSequence > @LastSequence
+    BEGIN
+        SET @UpToSequence = @LastSequence;
+    END
+
+    UPDATE [Chat].[ConversationParticipants]
+    SET [LastReadSequence] = CASE WHEN @UpToSequence > [LastReadSequence]
+                                  THEN @UpToSequence ELSE [LastReadSequence] END,
+        -- What is left after catching up to here. CASE rather than arithmetic on
+        -- the old count because unread is a counter and sequences can have gaps —
+        -- subtracting sequence numbers would over-count.
+        [UnreadCount] = CASE WHEN @UpToSequence >= @LastSequence THEN 0
+                             ELSE [UnreadCount] END,
+        [UpdatedAtUtc] = @Now
+    WHERE [ConversationId] = @ConversationId
+      AND [ParticipantType] = @ParticipantType
+      AND [ParticipantId] = @ParticipantId;
+
+    SELECT [ConversationId],
+           [ParticipantType],
+           [ParticipantId],
+           [LastReadSequence],
+           [UnreadCount],
+           [IsMuted]
+    FROM [Chat].[ConversationParticipants]
+    WHERE [ConversationId] = @ConversationId
+      AND [ParticipantType] = @ParticipantType
+      AND [ParticipantId] = @ParticipantId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Chat].[MarkConversationRead].';
+GO
+
+-- The app's chat badge: how many unread messages the caller has, and across how
+-- many threads.
+--
+-- Both numbers, because they answer different questions — the tab badge wants
+-- the message total, while "3 conversations need you" is the more useful line in
+-- a notification summary. Computing them separately client-side would need the
+-- whole conversation list.
+--
+-- Served entirely from [IX_ConversationParticipants_Participant], which INCLUDEs
+-- [UnreadCount], so it never touches [Chat].[Conversations].
+--
+-- Returns ONE result set, always exactly one row (zeros when the caller has no
+-- conversations). Never THROWs.
+CREATE OR ALTER PROCEDURE [Chat].[GetUnreadSummary]
+    @ParticipantType NVARCHAR(16),
+    @ParticipantId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- A muted thread still counts toward the badge. Muting silences the push, it
+    -- does not mark the messages read — the user still has them waiting.
+    SELECT COALESCE(SUM([UnreadCount]), 0) AS [UnreadMessageCount],
+           COALESCE(SUM(CASE WHEN [UnreadCount] > 0 THEN 1 ELSE 0 END), 0)
+               AS [UnreadConversationCount]
+    FROM [Chat].[ConversationParticipants]
+    WHERE [ParticipantType] = @ParticipantType
+      AND [ParticipantId] = @ParticipantId;
+END;
+GO
+PRINT 'Created/updated [Chat].[GetUnreadSummary].';
+GO
+
+-- Records a live SignalR connection, or refreshes its heartbeat.
+--
+-- Called from OnConnectedAsync and again on every client heartbeat, so it is an
+-- upsert rather than an insert: a heartbeat for a connection the stale sweep
+-- already purged (a long GC pause, a slow tick) re-registers it instead of
+-- failing, which is the behaviour that keeps a live user reachable.
+--
+-- Presence is what decides whether a message earns a push, so a missing row costs
+-- the user an unwanted buzz rather than a lost message — the safe direction to
+-- fail in.
+--
+-- Never THROWs. Returns nothing.
+CREATE OR ALTER PROCEDURE [Chat].[SaveChatConnection]
+    @ConnectionId NVARCHAR(128),
+    @ParticipantType NVARCHAR(16),
+    @ParticipantId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+
+    UPDATE [Chat].[ChatConnections]
+    SET [LastHeartbeatAtUtc] = @Now,
+        -- Re-asserted on every heartbeat: a connection id is unique per socket,
+        -- so if it somehow resolves to a different participant the newer claim is
+        -- the true one.
+        [ParticipantType] = @ParticipantType,
+        [ParticipantId] = @ParticipantId
+    WHERE [ConnectionId] = @ConnectionId;
+
+    IF @@ROWCOUNT = 0
+    BEGIN
+        BEGIN TRY
+            INSERT INTO [Chat].[ChatConnections]
+                ([ConnectionId], [ParticipantType], [ParticipantId],
+                 [ConnectedAtUtc], [LastHeartbeatAtUtc])
+            VALUES
+                (@ConnectionId, @ParticipantType, @ParticipantId, @Now, @Now);
+        END TRY
+        BEGIN CATCH
+            -- 2601/2627: a concurrent connect for the same id won the race. Its
+            -- row is as good as the one we were about to write, so let it stand.
+            IF ERROR_NUMBER() NOT IN (2601, 2627)
+            BEGIN
+                THROW;
+            END
+        END CATCH
+    END
+END;
+GO
+PRINT 'Created/updated [Chat].[SaveChatConnection].';
+GO
+
+-- Removes a connection on disconnect.
+--
+-- Best-effort by design: OnDisconnectedAsync does not run if the host crashes or
+-- the socket dies unnoticed, which is exactly why
+-- [Chat].[PurgeStaleConnections] exists. This is the tidy path, not the
+-- guaranteed one.
+--
+-- Never THROWs. Returns nothing.
+CREATE OR ALTER PROCEDURE [Chat].[DeleteChatConnection]
+    @ConnectionId NVARCHAR(128)
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM [Chat].[ChatConnections]
+    WHERE [ConnectionId] = @ConnectionId;
+END;
+GO
+PRINT 'Created/updated [Chat].[DeleteChatConnection].';
+GO
+
+-- Records which thread a connection currently has open — or NULL when the client
+-- has navigated away.
+--
+-- This one column is the whole of presence-gated push: [Chat].[AppendMessage]
+-- sends an FCM push only when the recipient has no connection whose
+-- [ActiveConversationId] matches. Without it the choice would be to buzz someone
+-- for a message they are reading, or to leave an offline recipient silent.
+--
+-- It is set from JoinConversation / LeaveConversation on the hub, and cleared
+-- implicitly when the connection row is deleted.
+--
+-- Scoped by participant as well as connection id: a connection may only declare
+-- itself viewing on behalf of the participant it authenticated as, so a client
+-- cannot suppress somebody else's push by claiming their id.
+--
+-- The caller is expected to have already authorised the participant against the
+-- conversation (via [Chat].[GetConversationForParticipant]); this does not
+-- re-check membership, because being "on" a thread you are not part of has no
+-- effect — the presence match in AppendMessage is scoped to the recipient.
+--
+-- Never THROWs. Returns nothing.
+CREATE OR ALTER PROCEDURE [Chat].[SetActiveConversation]
+    @ConnectionId NVARCHAR(128),
+    @ParticipantType NVARCHAR(16),
+    @ParticipantId UNIQUEIDENTIFIER,
+    @ConversationId UNIQUEIDENTIFIER = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    UPDATE [Chat].[ChatConnections]
+    SET [ActiveConversationId] = @ConversationId,
+        -- Opening a thread is proof of life, so it counts as a heartbeat and
+        -- keeps the stale sweep off an actively used connection.
+        [LastHeartbeatAtUtc] = SYSUTCDATETIME()
+    WHERE [ConnectionId] = @ConnectionId
+      AND [ParticipantType] = @ParticipantType
+      AND [ParticipantId] = @ParticipantId;
+END;
+GO
+PRINT 'Created/updated [Chat].[SetActiveConversation].';
+GO
+
+-- Deletes connection rows whose heartbeat has gone quiet.
+--
+-- Run on a timer by ChatPresenceSweepFunction, and it is what makes presence
+-- trustworthy: OnDisconnectedAsync is best-effort — a crashed host, a killed
+-- process or a silently dropped socket never fires it — so without this sweep
+-- dead rows would accumulate and permanently suppress a user's pushes. That is
+-- the failure mode worth engineering against: a stale row does not merely waste
+-- space, it makes the recipient look present forever.
+--
+-- @StaleMinutes must stay comfortably longer than the client heartbeat interval,
+-- or live connections get purged out from under themselves. A purged-but-live
+-- connection self-heals on its next heartbeat ([Chat].[SaveChatConnection] is an
+-- upsert), but it earns the user a spurious push in the meantime.
+--
+-- Returns ONE row: how many were removed, for the function's log line.
+-- Never THROWs.
+CREATE OR ALTER PROCEDURE [Chat].[PurgeStaleConnections]
+    @StaleMinutes INT = 3
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @StaleMinutes IS NULL OR @StaleMinutes < 1
+    BEGIN
+        SET @StaleMinutes = 3;
+    END
+
+    DECLARE @Cutoff DATETIME2(7) = DATEADD(MINUTE, -@StaleMinutes, SYSUTCDATETIME());
+
+    DELETE FROM [Chat].[ChatConnections]
+    WHERE [LastHeartbeatAtUtc] < @Cutoff;
+
+    SELECT @@ROWCOUNT AS [PurgedCount];
+END;
+GO
+PRINT 'Created/updated [Chat].[PurgeStaleConnections].';
+GO
+
+-- Blocks the counterparty, in the caller's direction.
+--
+-- Idempotent: blocking somebody already blocked returns the existing row rather
+-- than failing or duplicating, so a double-tap is harmless.
+--
+-- A block stops new messages BOTH ways and stops the thread being reopened
+-- ([Chat].[GetOrCreateConversation] and [Chat].[AppendMessage] both consult this
+-- table, in either direction). It deliberately leaves existing history in place:
+-- what was already said is part of both parties' record, and deleting it would
+-- also destroy what a blocked user might need in order to report the exchange.
+--
+-- Returns ONE result set: the block row.
+--
+-- THROWs: 51327 the two parties are on the same side (a conversation only ever
+-- runs provider <-> parent, so such a block could never be consulted).
+CREATE OR ALTER PROCEDURE [Chat].[BlockChatParticipant]
+    @BlockerType NVARCHAR(16),
+    @BlockerId UNIQUEIDENTIFIER,
+    @BlockedType NVARCHAR(16),
+    @BlockedId UNIQUEIDENTIFIER,
+    @Reason NVARCHAR(500) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    IF @BlockerType NOT IN (N'Provider', N'PetParent')
+        OR @BlockedType NOT IN (N'Provider', N'PetParent')
+        OR @BlockerType = @BlockedType
+    BEGIN
+        THROW 51327, 'A chat block must run between a provider and a pet parent.', 1;
+    END
+
+    IF LTRIM(RTRIM(COALESCE(@Reason, N''))) = N''
+    BEGIN
+        SET @Reason = NULL;
+    END
+
+    DECLARE @ChatBlockId UNIQUEIDENTIFIER;
+    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+
+    BEGIN TRANSACTION;
+
+    -- UPDLOCK + HOLDLOCK over the unique 4-tuple: with no row yet this takes a
+    -- range lock, so two concurrent blocks serialise instead of one hitting a
+    -- UNIQUE violation.
+    SELECT @ChatBlockId = [ChatBlockId]
+    FROM [Chat].[BlockedParticipants] WITH (UPDLOCK, HOLDLOCK)
+    WHERE [BlockerType] = @BlockerType
+      AND [BlockerId] = @BlockerId
+      AND [BlockedType] = @BlockedType
+      AND [BlockedId] = @BlockedId;
+
+    IF @ChatBlockId IS NULL
+    BEGIN
+        DECLARE @Inserted TABLE ([ChatBlockId] UNIQUEIDENTIFIER);
+
+        INSERT INTO [Chat].[BlockedParticipants]
+            ([BlockerType], [BlockerId], [BlockedType], [BlockedId], [Reason], [CreatedAtUtc])
+        OUTPUT inserted.[ChatBlockId] INTO @Inserted
+        VALUES
+            (@BlockerType, @BlockerId, @BlockedType, @BlockedId, @Reason, @Now);
+
+        SELECT @ChatBlockId = [ChatBlockId] FROM @Inserted;
+    END
+
+    SELECT [ChatBlockId],
+           [BlockerType],
+           [BlockerId],
+           [BlockedType],
+           [BlockedId],
+           [Reason],
+           [CreatedAtUtc]
+    FROM [Chat].[BlockedParticipants]
+    WHERE [ChatBlockId] = @ChatBlockId;
+
+    COMMIT TRANSACTION;
+END;
+GO
+PRINT 'Created/updated [Chat].[BlockChatParticipant].';
+GO
+
+-- Lifts a block the caller placed.
+--
+-- Scoped to the caller as BLOCKER, so a user can only ever undo their own block —
+-- there is no way to remove one placed against you.
+--
+-- Returns ONE result set describing what was lifted. Empty when the id is unknown
+-- OR belongs to somebody else's block: deliberately the same case, so a block id
+-- cannot be probed for existence (the posture
+-- [Provider].[DeactivateProviderDeviceToken] and the review-photo delete take).
+-- The caller maps an empty result to 404. Never THROWs.
+CREATE OR ALTER PROCEDURE [Chat].[UnblockChatParticipant]
+    @ChatBlockId UNIQUEIDENTIFIER,
+    @BlockerType NVARCHAR(16),
+    @BlockerId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DELETE FROM [Chat].[BlockedParticipants]
+    OUTPUT deleted.[ChatBlockId],
+           deleted.[BlockerType],
+           deleted.[BlockerId],
+           deleted.[BlockedType],
+           deleted.[BlockedId],
+           deleted.[Reason],
+           deleted.[CreatedAtUtc]
+    WHERE [ChatBlockId] = @ChatBlockId
+      AND [BlockerType] = @BlockerType
+      AND [BlockerId] = @BlockerId;
+END;
+GO
+PRINT 'Created/updated [Chat].[UnblockChatParticipant].';
+GO
+
+-- Everyone the caller has blocked, newest first — the "blocked users" settings
+-- screen.
+--
+-- Lists only blocks the caller PLACED. Blocks placed against them are
+-- deliberately not returned: telling someone they have been blocked confirms the
+-- other party acted, which is the thing a block is meant to end. A blocked sender
+-- gets the same neutral "this conversation is not available" either way.
+--
+-- Names joined LIVE, so a blocked account that has since been deleted reads
+-- "Deleted Provider" / "Deleted User" rather than keeping its real name — the
+-- same invariant every other counterparty read here holds.
+--
+-- Returns ONE result set. Never THROWs.
+CREATE OR ALTER PROCEDURE [Chat].[ListBlockedParticipants]
+    @BlockerType NVARCHAR(16),
+    @BlockerId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT b.[ChatBlockId],
+           b.[BlockerType],
+           b.[BlockerId],
+           b.[BlockedType],
+           b.[BlockedId],
+           b.[Reason],
+           b.[CreatedAtUtc],
+           CASE WHEN b.[BlockedType] = N'Provider'
+                THEN LTRIM(RTRIM(COALESCE(pr.[FirstName], N'') + N' ' + COALESCE(pr.[LastName], N'')))
+                ELSE LTRIM(RTRIM(COALESCE(pp.[FirstName], N'') + N' ' + COALESCE(pp.[LastName], N'')))
+           END AS [BlockedName],
+           -- Parent photos only; a provider's image lives in their Cosmos
+           -- offering document and is resolved by the caller if wanted.
+           CASE WHEN b.[BlockedType] = N'PetParent' THEN pp.[ProfilePhotoUrl] END
+               AS [BlockedPhotoUrl]
+    FROM [Chat].[BlockedParticipants] b
+    LEFT JOIN [Provider].[Providers] pr
+        ON b.[BlockedType] = N'Provider' AND pr.[ProviderId] = b.[BlockedId]
+    LEFT JOIN [Parent].[PetParents] pp
+        ON b.[BlockedType] = N'PetParent' AND pp.[PetParentId] = b.[BlockedId]
+    WHERE b.[BlockerType] = @BlockerType
+      AND b.[BlockerId] = @BlockerId
+    ORDER BY b.[CreatedAtUtc] DESC, b.[ChatBlockId] DESC;
+END;
+GO
+PRINT 'Created/updated [Chat].[ListBlockedParticipants].';
+GO
 
 PRINT '--- Pawfront deployment complete ---';
 GO

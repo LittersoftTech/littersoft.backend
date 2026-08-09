@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Pawfront.ChatApi</RootNamespace>
+    <AssemblyName>Pawfront.ChatApi</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Pawfront.Application\Pawfront.Application.csproj" />
+    <ProjectReference Include="..\Pawfront.Contracts\Pawfront.Contracts.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Sql\Pawfront.Infrastructure.Sql.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Cosmos\Pawfront.Infrastructure.Cosmos.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Azure\Pawfront.Infrastructure.Azure.csproj" />
+    <!-- A DELIBERATE departure from the two CRUD hosts, which reference Firebase
+         nowhere. The outbox exists to keep an outbound HTTP call off the *booking*
+         request path, where a minute of latency costs nothing and durability is
+         everything. For chat the latency IS the feature, so this host sends its
+         own pushes — off the request thread, and with the outbox demoted to a
+         retry backstop rather than the delivery path. -->
+    <ProjectReference Include="..\Pawfront.Infrastructure.Firebase\Pawfront.Infrastructure.Firebase.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Monitor.OpenTelemetry.AspNetCore" Version="1.5.0" />
+    <!-- Default mode: the hub runs here and Azure SignalR proxies connections.
+         Serverless mode is for Functions-hosted apps with no hub server, which is
+         not this. The package targets net8.0, which net10.0 consumes fine. -->
+    <PackageReference Include="Microsoft.Azure.SignalR" Version="1.33.1" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.7" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.7" />
+    <PackageReference Include="Microsoft.OpenApi" Version="2.7.5" />
+    <PackageReference Include="OpenTelemetry.Exporter.Console" Version="1.15.3" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.15.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.SqlClient" Version="1.15.2" />
+  </ItemGroup>
+
+</Project>

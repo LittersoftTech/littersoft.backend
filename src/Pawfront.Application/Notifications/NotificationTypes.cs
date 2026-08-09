@@ -133,8 +133,14 @@ public static class NotificationTypes
     // --- Modules not built yet: contract only, nothing enqueues these ---------
 
     /// <summary>
-    /// Chat message (P-U14 / V-U5). <b>No trigger</b> — the messaging module does
-    /// not exist in this backend. Defined so the apps can code against the payload.
+    /// Chat message (P-U14 / V-U5). <b>Wired 2026-08-09.</b> Enqueued by
+    /// <c>Chat.AppendMessage</c> — and only when the recipient has no live
+    /// connection viewing that thread, so an open chat never buzzes.
+    ///
+    /// Unlike every other type here it is normally sent by <c>Pawfront.ChatApi</c>
+    /// itself rather than by the scheduled dispatcher: its row is enqueued
+    /// pre-claimed so the timer skips it, and the dispatcher only takes over if
+    /// the chat host dies mid-send. See <c>docs/chat.md</c>.
     /// </summary>
     public const string MessageReceived = "MESSAGE_RECEIVED";
 

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Pawfront.Application.Chat;
 using Pawfront.Application.Events;
 using Pawfront.Application.Providers;
 using Pawfront.Application.ProviderServices;
@@ -9,6 +10,7 @@ using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.PetSitter;
 using Pawfront.Application.Services.PetTrainer;
 using Pawfront.Application.Services.Vet;
+using Pawfront.Infrastructure.Cosmos.Chat;
 using Pawfront.Infrastructure.Cosmos.Events;
 using Pawfront.Infrastructure.Cosmos.ProviderDiscovery;
 using Pawfront.Infrastructure.Cosmos.ProviderServices;
@@ -31,6 +33,7 @@ public static class CosmosServiceRegistration
 
         services.TryAddSingleton<IProviderServicesContainerAccessor, ProviderServicesContainerAccessor>();
         services.TryAddSingleton<IEventsContainerAccessor, EventsContainerAccessor>();
+        services.TryAddSingleton<IChatMessagesContainerAccessor, ChatMessagesContainerAccessor>();
 
         services.TryAddSingleton<IPetSitterServiceRegistry, CosmosPetSitterServiceRegistry>();
         services.TryAddSingleton<IPetGroomerServiceRegistry, CosmosPetGroomerServiceRegistry>();
@@ -39,6 +42,7 @@ public static class CosmosServiceRegistration
         services.TryAddSingleton<IVetServiceRegistry, CosmosVetServiceRegistry>();
         services.TryAddSingleton<IEventCosmosStore, CosmosEventStore>();
         services.TryAddSingleton<IProviderServiceCosmosStore, CosmosProviderServiceStore>();
+        services.TryAddSingleton<IChatMessageStore, CosmosChatMessageStore>();
 
         // Discovery is registered WRAPPED, so nothing can resolve the raw Cosmos
         // reader by interface. The wrapper drops providers whose SQL master

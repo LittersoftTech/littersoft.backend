@@ -40,7 +40,11 @@ public static class NotificationPayloadBuilder
         NotificationDataKeys.ProviderId,
         NotificationDataKeys.PetId,
         NotificationDataKeys.IsNightStay,
-        NotificationDataKeys.PayoutId
+        NotificationDataKeys.PayoutId,
+        // Added with chat (2026-08-09). A messaging notification is useless
+        // without it, and the always-present rule is what lets a tap handler read
+        // any id without first checking whether this type carries one.
+        NotificationDataKeys.ConversationId
     ];
 
     public static IReadOnlyDictionary<string, string> Build(
