@@ -292,6 +292,7 @@ erDiagram
         DATE             BookingDate
         TIME             StartTime
         TIME             EndTime
+        TIME             ActualEndTime        "nullable; set only on an EARLY finish"
         NVARCHAR         Status               "Confirmed|Cancelled|Completed|NoShow"
         DATETIME2        CancelledAtUtc       "nullable; required when Status=Cancelled"
     }
@@ -699,6 +700,37 @@ create names a `PetId`; Custom walk-ins are unaffected. The night-stay twin uses
   bookings remain meaningful even if the provider deregisters or changes
   sub-category.
 - `BookingDate`, `StartTime`, `EndTime` — `StartTime < EndTime` (CHECK).
+- `ActualEndTime` (nullable) — when the job actually finished, **if it finished
+  early**; stamped by `Booking.CompleteBooking` (and the legacy `/status` shim)
+  and left NULL whenever the booked window ran its course. Its twin on
+  `Booking.NightStayBookings` is `ActualCheckOutDate` (nullable DATE — the day
+  the pet actually went home, floored at one night).
+
+  Both exist **only to release the unused remainder back to capacity**: a 6-hour
+  day care wrapped up after 3 hours, or a 3-night stay collected a day early,
+  used to keep the rest blocked so nobody else could book it. Occupancy is
+  therefore `[StartTime, COALESCE(ActualEndTime, EndTime))` and
+  `[CheckInDate, COALESCE(ActualCheckOutDate, CheckOutDate))`, and **every**
+  capacity, slot, agenda, closure-conflict and active-status query uses those
+  exact expressions — `CreateBooking`, `CreateCustomBooking`,
+  `CreateNightStayBooking`, `GetBookingsForDate`, `GetAgendaForDate`,
+  `GetNightStayOccupancy`, both `Respond*Modification` sprocs,
+  `Provider.CreateClosures` and `Provider.SetProviderActiveStatus`. If you add
+  another one, use the same expression.
+
+  They are deliberately **NOT** part of what the booking cost or was agreed to
+  be: pricing (`Booking.BookingAmounts`, the booking-detail reads), the
+  creation-time term snapshots and every wire contract keep reading `EndTime` /
+  `CheckOutDate`, so finishing early frees the slot **without** re-pricing or
+  refunding a job the parent already agreed to. Making it also refund is a
+  product decision, not a capacity one.
+
+  CHECKs clamp them so an early finish can only ever *shrink* the window, never
+  extend or invert it (`ActualEndTime` between `StartTime` and `EndTime`
+  inclusive; `ActualCheckOutDate` strictly after `CheckInDate` and at most
+  `CheckOutDate`). NULL — the value on every pre-existing row — means "occupied
+  everything it booked", so the columns are behaviour-neutral until a job is
+  completed early.
 - `Status` — expanded "job" lifecycle: `CREATED` → `CONFIRMED` →
   `START_JOB` → `IN_PROGRESS` → `COMPLETED` → `PAID` (the provider taps "Start Job" →
   `START_JOB` (start-OTP issued to the parent), enters the parent's start-code →
@@ -764,9 +796,11 @@ create names a `PetId`; Custom walk-ins are unaffected. The night-stay twin uses
   address for `ProviderLocation`). Frozen so a later address edit never moves an
   existing booking; the detail read prefers these and falls back to live resolution
   only for legacy rows (all-NULL). NULL for Custom walk-ins.
-- `PayoutStatus` — `Pending` / `Processing` / `Paid` / `Failed` (CHECK),
-  default `Pending`. Capture-only for now — the actual provider-payout
-  execution leg is not built yet.
+- `PayoutStatus` — `Pending` / `Processing` / `Paid` / `Failed` / `NO_PAYOUT`
+  (CHECK), default `Pending`. Capture-only for now — the actual provider-payout
+  execution leg is not built yet. **`NO_PAYOUT` is terminal**: the job ended as
+  `PARENT_NO_SHOW` / `PROVIDER_NO_SHOW` / `EXPIRED`, so no money can ever move
+  on it.
 - `PayoutId` — external payout reference; NULL until a payout is issued.
 - Customer/pet detail for **App** bookings is NOT stored here (those columns
   are Custom-walk-in only) — the booking-detail read
@@ -857,6 +891,19 @@ payout namespace, exactly as they share this ledger. **Custom walk-ins are never
 stamped** — they are off-platform, carry no commission, and can never reach `PAID`,
 so a payout on one would sit "awaiting payment" forever.
 
+**`NO_PAYOUT` closes the other end (2026-08-09).** A job that ends as
+`PARENT_NO_SHOW` / `PROVIDER_NO_SHOW` / `EXPIRED` produces no money ever, but its
+`PayoutStatus` kept reading `Pending` — claiming a payout was on its way. Those
+three outcomes now settle it to the terminal `NO_PAYOUT`, written by the same four
+procedures that write the statuses: `UpdateBookingStatus` /
+`UpdateNightStayBookingStatus` (a party reports the no-show),
+`SettleUnstartedJobsAsNoShow` and `ExpireStaleCreatedBookings` (the sweep derives
+it). Both writers of a settled no-show must agree, so a manually reported one and
+an auto-settled one are indistinguishable in the column. Cancellations, declines
+and `OTP_MAX_ATTEMPTS_EXCEEDED` deliberately still read `Pending` — the refund /
+cancellation-fee flow is not built, so it is not yet settled whether money can
+move on those.
+
 `Booking.BookingAmounts` (inline TVF) is the **single definition of what a booking
 is worth**, read by all four earnings/spend sprocs so a provider's "earned" and a
 parent's "spent" on the same booking can never disagree. It unifies both booking
@@ -920,11 +967,15 @@ CreatedAtUtc, UpdatedAtUtc }`.
 - **Names are NOT denormalised here.** `Review.ListProviderReviews` joins
   `Parent.PetParents` live, so a parent who deletes their account correctly reads
   "Deleted User" rather than leaving their real name frozen in every review they wrote.
-- Two **filtered** indexes, one per direction:
+- Three **filtered** indexes:
   `IX_BookingReviews_Provider_Created` (`ProviderId`, `CreatedAtUtc DESC`)
   `WHERE ReviewerType = 'Parent'` drives the provider-reviews list and its summary;
   `IX_BookingReviews_PetParent` `WHERE ReviewerType = 'Provider'` drives the parent's
-  aggregate rating on the provider-facing customer card.
+  aggregate rating on the provider-facing customer card; and
+  `IX_BookingReviews_PetParent_Authored` `WHERE ReviewerType = 'Parent'` drives
+  `Review.ListPetParentBookingReviews`, the `review` block on the parent's two "my
+  bookings" lists. The last two sit on the same column but cannot be merged — each
+  is filtered to the opposite direction, which is the whole point.
 
 ### `Review.BookingReviewPhotos`
 `{ BookingReviewPhotoId, BookingReviewId FK → BookingReviews ON DELETE CASCADE,
@@ -967,6 +1018,7 @@ so the deploy script always reflects the latest version.
 | `Provider.DeactivateProviderService`| Flip `IsActive = 0` for one (ProviderId, ServiceType). |
 | `Provider.ListProviderServices`     | Returns active rows; `@IncludeInactive = 1` returns all. |
 | `Provider.GetProviderService`       | Point-read by `ServiceId`. |
+| `Provider.SetProviderActiveStatus`  | Flip the master `Providers.IsActive` switch. Deactivation collects the provider's future active bookings under `UPDLOCK + HOLDLOCK` (race-safe against `Booking.CreateBooking`) and returns them as a 10-column conflict result set **without writing**, unless `@AcknowledgeExistingBookings = 1` — "honour bookings & deactivate", which flips the switch anyway and reports the count on the 4-column success set. The honoured bookings are untouched: `IsActive` is read only by the three booking CREATE procedures, so they stay startable and completable. Throws `51100` if the provider is missing, `51115` if the account has been deleted. |
 | `Provider.SaveProviderWeeklyAvailability` | Atomic replace of all 7 day rows. |
 | `Provider.GetProviderWeeklyAvailability`  | Read all rows for a provider. |
 | `Provider.SaveProviderPayoutMethods` | Replace the junction rows. |

@@ -78,12 +78,20 @@ public interface IProviderOnboardingService
     /// Toggles the provider's master Active/Inactive switch. Deactivation is
     /// rejected (returns the <see cref="SetActiveStatusOutcome.BookingsExist"/>
     /// variant) when future confirmed bookings exist on any of the provider's
-    /// services — caller must move/cancel them and retry. Activation is always
-    /// applied. Throws <see cref="ProviderProfileNotFoundException"/> when the
-    /// provider row is missing.
+    /// services — caller shows the list, then either moves/cancels them or
+    /// retries with <paramref name="acknowledgeExistingBookings"/>. Activation
+    /// is always applied. Throws <see cref="ProviderProfileNotFoundException"/>
+    /// when the provider row is missing.
     /// </summary>
+    /// <param name="acknowledgeExistingBookings">
+    /// "Honour bookings &amp; deactivate": the provider has seen the future
+    /// bookings and commits to serving them, so the switch flips for NEW
+    /// bookings only and the existing ones are left alone — still startable,
+    /// still completable, since nothing in the job lifecycle reads the flag.
+    /// </param>
     Task<SetActiveStatusOutcome> SetActiveStatusAsync(
         Guid providerId,
         bool isActive,
+        bool acknowledgeExistingBookings,
         CancellationToken cancellationToken);
 }

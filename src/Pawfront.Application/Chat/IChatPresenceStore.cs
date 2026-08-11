@@ -1,10 +1,10 @@
-namespace Pawfront.Application.Chat;
+﻿namespace Pawfront.Application.Chat;
 
 /// <summary>
 /// Live connections, and which thread each has open.
 ///
 /// This drives exactly one decision: whether a message earns an FCM push. The
-/// read side of it is not here — it lives inside <c>Chat.AppendMessage</c>, which
+/// read side of it is not here — it lives inside <c>Chat.CommitMessageAppend</c>, which
 /// checks presence in the same transaction that writes the message, so presence
 /// cannot change between the decision and the write.
 /// </summary>

@@ -1,4 +1,4 @@
--- Per-side state on a conversation: how far this participant has read, how much
+﻿-- Per-side state on a conversation: how far this participant has read, how much
 -- they have not, and whether they have muted the thread.
 --
 -- A separate table rather than four more columns on [Chat].[Conversations]
@@ -6,7 +6,7 @@
 -- because every read and write of this state is symmetric — "advance the sender,
 -- increment the recipient" — and column pairs would force a
 -- CASE WHEN @ActorType = 'Provider' branch into every one of those statements.
--- With a row per side, [Chat].[AppendMessage] updates both sides in a single
+-- With a row per side, [Chat].[CommitMessageAppend] updates both sides in a single
 -- statement keyed on [ParticipantType].
 --
 -- Exactly two rows per conversation, guaranteed by the UNIQUE below and written

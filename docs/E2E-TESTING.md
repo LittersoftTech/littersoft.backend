@@ -5,9 +5,12 @@ Files:
 - [`Pawfront.E2E-Scenarios.postman_collection.json`](Pawfront.E2E-Scenarios.postman_collection.json) — the test suite (assertions + variable chaining)
 - [`Pawfront.E2E.postman_environment.json`](Pawfront.E2E.postman_environment.json) — environment template (URLs, Firebase keys, test-account credentials)
 
-This suite is different from the two *catalog* collections (`postman_collection_provider.json`,
-`Pawfront.PetParentApi.postman_collection.json`): those are one-request-per-endpoint references,
-while this one plays **real-life scenarios end-to-end across both hosts** and asserts on every step.
+This suite is different from the three *catalog* collections (`postman_collection_provider.json`,
+`Pawfront.PetParentApi.postman_collection.json`, `Pawfront.ChatApi.postman_collection.json`): those
+are one-request-per-endpoint references, while this one plays **real-life scenarios end-to-end
+across both hosts** and asserts on every step. The chat host has no scenario coverage here yet —
+its REST surface is scriptable (see its own collection), but proving the hub and push-suppression
+behaviour needs a real SignalR client and two Firebase tokens.
 
 ## What it covers
 

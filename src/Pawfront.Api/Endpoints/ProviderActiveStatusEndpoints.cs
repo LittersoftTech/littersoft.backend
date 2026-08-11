@@ -27,6 +27,7 @@ internal static class ProviderActiveStatusEndpoints
             var outcome = await onboardingService.SetActiveStatusAsync(
                 providerId,
                 request.IsActive,
+                request.AcknowledgeExistingBookings,
                 cancellationToken);
 
             return outcome switch
@@ -37,7 +38,13 @@ internal static class ProviderActiveStatusEndpoints
                     IsActive: updated.IsActive,
                     UpdatedAtUtc: updated.UpdatedAtUtc,
                     ConflictingBookings: null,
-                    WarningMessage: null)),
+                    // Confirmation, not a warning — but it rides the same field so
+                    // the app has one place to read the sentence it shows.
+                    WarningMessage: updated.HonouredBookingCount > 0
+                        ? $"Deactivated. {updated.HonouredBookingCount} existing booking(s) will go ahead as scheduled — " +
+                          "no new bookings will be accepted."
+                        : null,
+                    HonouredBookingCount: updated.HonouredBookingCount)),
 
                 SetActiveStatusOutcome.BookingsExist conflict => ApiResults.Ok(new SetProviderActiveStatusResponse(
                     Status: SetProviderActiveStatusResult.BookingsExist,
@@ -52,7 +59,9 @@ internal static class ProviderActiveStatusEndpoints
                         .ToArray(),
                     WarningMessage:
                         $"{conflict.Bookings.Count} future confirmed booking(s) exist across this provider's services. " +
-                        "Please move or cancel these bookings before deactivating.")),
+                        "Move or cancel them before deactivating, or resubmit with acknowledgeExistingBookings = true " +
+                        "to stop taking new bookings while still honouring these.",
+                    HonouredBookingCount: null)),
 
                 _ => throw new InvalidOperationException("Unknown SetActiveStatusOutcome variant.")
             };

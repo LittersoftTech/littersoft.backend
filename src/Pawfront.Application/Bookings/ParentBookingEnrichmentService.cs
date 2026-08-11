@@ -1,13 +1,15 @@
 using Pawfront.Application.Offerings;
 using Pawfront.Application.Providers;
+using Pawfront.Application.Reviews;
 using Pawfront.Domain.Services;
 
 namespace Pawfront.Application.Bookings;
 
 /// <summary>
 /// Enriches a pet parent's "my bookings" cards with the booked provider's
-/// summary (business name / image / city) and the service's price — per hour
-/// for single-day services, per night for NightStay. The price PREFERS the rate
+/// summary (business name / image / city), the service's price — per hour
+/// for single-day services, per night for NightStay — and the parent's own review
+/// state for the booking. The price PREFERS the rate
 /// frozen onto the booking at creation (price-lock) and falls back to the live
 /// offering only for legacy rows without a snapshot, so a later rate change by
 /// the provider never re-prices an existing card. Best-effort: a failed
@@ -18,12 +20,40 @@ namespace Pawfront.Application.Bookings;
 public interface IParentBookingEnrichmentService
 {
     Task<IReadOnlyList<EnrichedBookingCard>> EnrichAsync(
+        Guid petParentId,
         IReadOnlyList<BookingListItemResult> bookings,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<EnrichedNightStayBookingCard>> EnrichNightStayAsync(
+        Guid petParentId,
         IReadOnlyList<NightStayBookingListItemResult> bookings,
         CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// The parent's own review state for one booking on their "my bookings" list.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="CanReview"/> here means "offer the review prompt" and is therefore
+/// NOT the same predicate as the booking detail's <c>review.canReview</c>, which
+/// stays true after a review exists because a review can be edited. On a list the
+/// useful question is whether there is anything left to do, so this one goes false
+/// once <see cref="Rating"/> is populated — the two answers together say
+/// "reviewable and not yet reviewed", "already reviewed, here is the score", or
+/// "not reviewable".
+/// </para>
+/// <para>
+/// A booking is reviewable once it reaches COMPLETED or PAID — PAID sits
+/// downstream of COMPLETED, so gating on COMPLETED alone would close the window
+/// the moment the provider recorded payment. Custom walk-ins can never be
+/// reviewed, though none appear on a parent's list (they have no PetParentId).
+/// </para>
+/// </remarks>
+public sealed record ParentBookingReviewState(bool CanReview, int? Rating)
+{
+    /// <summary>A booking that is not reviewable and carries no review.</summary>
+    public static ParentBookingReviewState None { get; } = new(false, null);
 }
 
 /// <summary>
@@ -44,7 +74,8 @@ public sealed record EnrichedBookingCard(
     decimal? PricePerHour,
     int? CancellationPolicyHours,
     BookingLocationResult Location,
-    string? ServiceDescription = null);
+    string? ServiceDescription = null,
+    ParentBookingReviewState? Review = null);
 
 /// <summary>
 /// A night-stay booking plus its provider summary, per-night price
@@ -56,18 +87,22 @@ public sealed record EnrichedNightStayBookingCard(
     ProviderSummary? Provider,
     decimal? PricePerNight,
     int? CancellationPolicyHours,
-    BookingLocationResult Location);
+    BookingLocationResult Location,
+    ParentBookingReviewState? Review = null);
 
 internal sealed class ParentBookingEnrichmentService(
     IProviderDiscoveryService discovery,
     IProviderOfferingResolver offeringResolver,
-    IProviderNameReader providerNameReader) : IParentBookingEnrichmentService
+    IProviderNameReader providerNameReader,
+    IBookingReviewService reviewService) : IParentBookingEnrichmentService
 {
     public async Task<IReadOnlyList<EnrichedBookingCard>> EnrichAsync(
+        Guid petParentId,
         IReadOnlyList<BookingListItemResult> bookings,
         CancellationToken cancellationToken)
     {
         var providerCache = new Dictionary<(Guid, string), ProviderSummary?>();
+        var ratings = await GetRatingsAsync(petParentId, bookings.Count, cancellationToken);
         var cards = new List<EnrichedBookingCard>(bookings.Count);
         foreach (var item in bookings)
         {
@@ -83,7 +118,13 @@ internal sealed class ParentBookingEnrichmentService(
                 booking, provider, serviceType,
                 booking.PricePerHour ?? livePrice,
                 item.CancellationPolicyHours, item.Location,
-                description));
+                description,
+                ResolveReview(
+                    ratings,
+                    ReviewedBookingTypes.SingleDay,
+                    booking.BookingId,
+                    booking.Status,
+                    booking.Source)));
         }
 
         var names = await ResolveFreelancerNamesAsync(
@@ -94,10 +135,12 @@ internal sealed class ParentBookingEnrichmentService(
     }
 
     public async Task<IReadOnlyList<EnrichedNightStayBookingCard>> EnrichNightStayAsync(
+        Guid petParentId,
         IReadOnlyList<NightStayBookingListItemResult> bookings,
         CancellationToken cancellationToken)
     {
         var providerCache = new Dictionary<(Guid, string), ProviderSummary?>();
+        var ratings = await GetRatingsAsync(petParentId, bookings.Count, cancellationToken);
         var cards = new List<EnrichedNightStayBookingCard>(bookings.Count);
         foreach (var item in bookings)
         {
@@ -115,7 +158,15 @@ internal sealed class ParentBookingEnrichmentService(
             }
             cards.Add(new EnrichedNightStayBookingCard(
                 booking, provider, pricePerNight,
-                item.CancellationPolicyHours, item.Location));
+                item.CancellationPolicyHours, item.Location,
+                // Night stays are App-only (their PetParentId is NOT NULL), so
+                // there is no Custom walk-in case to exclude.
+                ResolveReview(
+                    ratings,
+                    ReviewedBookingTypes.NightStay,
+                    booking.NightStayBookingId,
+                    booking.Status,
+                    source: "App")));
         }
 
         var names = await ResolveFreelancerNamesAsync(
@@ -123,6 +174,61 @@ internal sealed class ParentBookingEnrichmentService(
         return cards
             .Select(c => c with { Provider = FillDisplayName(c.Provider, names) })
             .ToList();
+    }
+
+    /// <summary>
+    /// The parent's own ratings, in one read for the whole page. Skipped entirely
+    /// for an empty list, and best-effort like the rest of this enrichment: a
+    /// failed read leaves every card unreviewable rather than failing the list.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<(string, Guid), int>> GetRatingsAsync(
+        Guid petParentId,
+        int bookingCount,
+        CancellationToken cancellationToken)
+    {
+        if (bookingCount == 0)
+        {
+            return new Dictionary<(string, Guid), int>();
+        }
+
+        try
+        {
+            var ratings = await reviewService.ListRatingsByPetParentAsync(petParentId, cancellationToken);
+            return ratings.ToDictionary(r => (r.BookingType, r.BookingId), r => r.Rating);
+        }
+        catch
+        {
+            return new Dictionary<(string, Guid), int>();
+        }
+    }
+
+    /// <summary>
+    /// Combines "may this booking be reviewed at all" with "has it been already".
+    /// The eligibility half mirrors the gate in <c>Review.UpsertBookingReview</c> —
+    /// SQL remains the authority, this only decides whether to offer the prompt.
+    /// </summary>
+    private static ParentBookingReviewState ResolveReview(
+        IReadOnlyDictionary<(string, Guid), int> ratings,
+        string bookingType,
+        Guid bookingId,
+        string status,
+        string source)
+    {
+        if (ratings.TryGetValue((bookingType, bookingId), out var rating))
+        {
+            // Already reviewed: nothing left to prompt for, and the score is what
+            // the card shows instead. (The review is still editable — that route
+            // is the booking detail, which reports canReview differently.)
+            return new ParentBookingReviewState(CanReview: false, Rating: rating);
+        }
+
+        var isReviewable =
+            string.Equals(source, "App", StringComparison.OrdinalIgnoreCase)
+            && status is "COMPLETED" or "PAID";
+
+        return isReviewable
+            ? new ParentBookingReviewState(CanReview: true, Rating: null)
+            : ParentBookingReviewState.None;
     }
 
     /// <summary>

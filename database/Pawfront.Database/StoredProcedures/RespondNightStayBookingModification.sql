@@ -116,6 +116,10 @@ BEGIN
     IF @Accept = 1
     BEGIN
         -- Per-night capacity re-check on the proposed range, excluding this stay.
+        -- Other stays cover nights only up to
+        -- COALESCE([ActualCheckOutDate], [CheckOutDate]), so nights released by
+        -- an early pickup are available to a reschedule too — the same
+        -- expression [Booking].[CreateNightStayBooking] counts with.
         DECLARE @FullNight DATE;
         ;WITH [Nights] AS
         (
@@ -130,7 +134,7 @@ BEGIN
            AND b.[NightStayBookingId] <> @NightStayBookingId
            AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
            AND b.[CheckInDate] <= n.[Night]
-           AND b.[CheckOutDate] > n.[Night]
+           AND COALESCE(b.[ActualCheckOutDate], b.[CheckOutDate]) > n.[Night]
         GROUP BY n.[Night]
         HAVING COUNT(b.[NightStayBookingId]) >= @Capacity
         OPTION (MAXRECURSION 366);

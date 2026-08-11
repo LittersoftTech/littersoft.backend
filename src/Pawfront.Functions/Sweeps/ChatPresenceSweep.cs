@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using Microsoft.Data.SqlClient;
 
 namespace Pawfront.Functions.Sweeps;
@@ -14,7 +14,7 @@ internal sealed record ChatPresenceSweepResult(int PurgedCount)
 ///
 /// The hub deletes its own row in OnDisconnectedAsync, but that is best-effort:
 /// a crashed host, a killed process or a silently dropped socket never fires it.
-/// A leftover row is worse than clutter — <c>Chat.AppendMessage</c> reads presence
+/// A leftover row is worse than clutter — <c>Chat.CommitMessageAppend</c> reads presence
 /// to decide whether a message earns a push, so a stale row makes its owner look
 /// permanently present and silences their notifications indefinitely.
 ///

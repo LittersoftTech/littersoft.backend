@@ -280,6 +280,33 @@ internal sealed class SqlBookingReviewStore(
             AverageRating: reader.IsDBNull(1) ? null : reader.GetDecimal(1));
     }
 
+    public async Task<IReadOnlyList<PetParentBookingRating>> ListRatingsByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("[Review].[ListPetParentBookingReviews]", connection)
+        {
+            CommandType = System.Data.CommandType.StoredProcedure
+        };
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
+
+        var ratings = new List<PetParentBookingRating>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            ratings.Add(new PetParentBookingRating(
+                BookingType: reader.GetString(0),
+                BookingId: reader.GetGuid(1),
+                // TINYINT — see the class remarks; GetInt32 throws here.
+                Rating: reader.GetByte(2)));
+        }
+
+        return ratings;
+    }
+
     /// <summary>
     /// Reads the shared (review row, photos) two-result-set shape emitted by both
     /// <c>UpsertBookingReview</c> and <c>GetBookingReview</c>. An empty first result

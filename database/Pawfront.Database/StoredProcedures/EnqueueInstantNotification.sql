@@ -1,4 +1,4 @@
--- Enqueues a notification that the CALLER intends to send itself, right now,
+﻿-- Enqueues a notification that the CALLER intends to send itself, right now,
 -- instead of leaving it for the 1-minute NotificationDispatchFunction.
 --
 -- This exists for chat. Every other notification in the product is a side effect
@@ -39,7 +39,7 @@ CREATE OR ALTER PROCEDURE [Notification].[EnqueueInstantNotification]
     -- considers the row abandoned and takes it over. Generous relative to an FCM
     -- call, because a premature takeover means a duplicate push.
     @LeaseMinutes INT = 5,
-    -- Set by sproc-to-sproc callers ([Chat].[AppendMessage]), for the same reason
+    -- Set by sproc-to-sproc callers ([Chat].[CommitMessageAppend]), for the same reason
     -- [Notification].[EnqueueNotification] has it: a nested EXEC's result set
     -- propagates to the client and would corrupt the caller's own reader. Such a
     -- caller reads the id back through @NotificationId OUTPUT instead.

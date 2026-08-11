@@ -110,7 +110,7 @@ internal static class NightStayBookingEndpoints
             // publisher writes an outbox row and never throws, so a notification
             // problem can't fail a stay that has already been created.
             await bookingNotifications.NotifyNightStayBookingRequestedAsync(
-                result, pet.PetName, cancellationToken);
+                result, pet.PetName, pet.ParentName, cancellationToken);
 
             return ApiResults.Created(
                 $"/api/v1/pet-parents/{petParentId}/night-stay-bookings/{result.NightStayBookingId}",
@@ -185,7 +185,7 @@ internal static class NightStayBookingEndpoints
         CancellationToken cancellationToken)
     {
         var results = await bookingService.ListByPetParentAsync(petParentId, cancellationToken);
-        var enriched = await enrichment.EnrichNightStayAsync(results, cancellationToken);
+        var enriched = await enrichment.EnrichNightStayAsync(petParentId, results, cancellationToken);
         return ApiResults.Ok(enriched.Select(ToNightStayBookingCard).ToArray());
     }
 
@@ -218,7 +218,8 @@ internal static class NightStayBookingEndpoints
                 card.Location.City,
                 card.Location.ZipCode,
                 card.Location.Latitude,
-                card.Location.Longitude));
+                card.Location.Longitude),
+            PetParentEndpoints.ToReviewSection(card.Review));
     }
 
     private static async Task<IResult> GetBooking(

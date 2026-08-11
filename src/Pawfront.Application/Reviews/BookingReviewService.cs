@@ -78,6 +78,14 @@ public sealed class BookingReviewService(IBookingReviewStore store) : IBookingRe
         return store.ListForProviderAsync(query with { Skip = skip, Take = take }, cancellationToken);
     }
 
+    // Nothing to validate or cap: the parent is already established by the route
+    // this is read through, and the result is bounded by how many bookings they
+    // have reviewed.
+    public Task<IReadOnlyList<PetParentBookingRating>> ListRatingsByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+        => store.ListRatingsByPetParentAsync(petParentId, cancellationToken);
+
     /// <summary>
     /// A provider rates and says nothing more, so their comment is dropped rather
     /// than rejected — the provider-side endpoint has no comment field, so a value

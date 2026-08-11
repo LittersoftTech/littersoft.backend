@@ -1,4 +1,4 @@
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace Pawfront.Infrastructure.Cosmos.Documents;
 
@@ -27,7 +27,7 @@ public sealed class ChatMessageDocument
     public string ConversationId { get; set; } = string.Empty;
 
     /// <summary>
-    /// Assigned by <c>Chat.AppendMessage</c>. Orders the thread and is the paging
+    /// Assigned by <c>Chat.ReserveMessageSequence</c>. Orders the thread and is the paging
     /// cursor — ordering is by this and never by <see cref="CreatedAtUtc"/>,
     /// because two messages can share a millisecond but never a sequence.
     /// </summary>

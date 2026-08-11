@@ -86,6 +86,12 @@ between the user gets pushed for a thread they are reading.
 a dropped response returns the original instead of posting twice. Omit it and the
 server mints one — and every retry then duplicates.
 
+Uniqueness is enforced by a **primary key on `(conversationId, messageId)`**, so it
+holds across the hub and REST alike — send the same id over both and the second is
+a replay, not a second message. Retrying is therefore always safe, which is what
+makes an offline queue workable: resend the whole queue after a reconnect without
+tracking which ones got through.
+
 ---
 
 ## 3. REST
@@ -196,20 +202,38 @@ read, so a deleted account reads "Deleted Provider" / "Deleted User" instead of
 keeping its real name frozen in every thread. Same invariant the booking and
 review reads hold.
 
-**Why the message id comes from the client.** It is also the Cosmos document id.
-Cosmos enforces uniqueness on nothing but `id`, so this is the only way to get
-idempotency without a second index — and ids are partition-scoped, so two
+**Why the message id comes from the client.** It is also the Cosmos document id,
+and the second half of the primary key of `Chat.ConversationMessages`. One value
+therefore keys idempotency in both stores, and ids are partition-scoped so two
 conversations can never collide.
 
-**How push is instant without giving up durability.** `Chat.AppendMessage` writes
-the outbox row **already claimed** (status `Sending`, lease held), so the 1-minute
-`NotificationDispatchFunction` skips it while the chat host sends it directly. If
-the chat host dies mid-send, the lease lapses and the scheduled dispatcher takes
-it over. The outbox stops being the delivery path and becomes the retry backstop —
-there is no case where a message is stored and its notification is lost.
+**How a send is made atomic.** Three steps around one client call:
 
-**One accepted trade-off.** SQL is written before Cosmos, so a crash between them
-burns a sequence number and leaves a stale preview. The client's retry (same
-`clientMessageId`) heals it. The alternative costs an extra round trip on every
-message; sequence gaps are harmless, which is why there is deliberately no message
-count anywhere to be wrong.
+```
+Chat.ReserveMessageSequence   ->  Cosmos CreateItem  ->  Chat.CommitMessageAppend
+   sequence only,                   the body             preview, unread, push
+   nothing observable
+```
+
+Reserve authorises the sender, takes the sequence and writes nothing anybody can
+see. Every observable effect belongs to commit, which runs only once the body is
+durable. So a send either fully lands or leaves the thread exactly as it was —
+there is no state in which the recipient gets a message the sender was told had
+failed. The reservation is released if the body cannot be written, and neither
+call holds a lock across the other.
+
+The only residue of a failed send is a spent sequence number. Gaps are harmless,
+which is why there is deliberately no message count anywhere to be wrong.
+
+**Commit is idempotent**, and that is load-bearing rather than decorative: if a
+send dies after the body is written, the retry finds the body already there and
+comes straight back to commit, finishing the delivery that was missed. A second
+commit moves no counter and queues no second push.
+
+**How push is instant without giving up durability.** `Chat.CommitMessageAppend`
+writes the outbox row **already claimed** (status `Sending`, lease held), so the
+1-minute `NotificationDispatchFunction` skips it while the chat host sends it
+directly. If the chat host dies mid-send, the lease lapses and the scheduled
+dispatcher takes it over. The outbox stops being the delivery path and becomes the
+retry backstop — there is no case where a message is stored and its notification
+is lost.

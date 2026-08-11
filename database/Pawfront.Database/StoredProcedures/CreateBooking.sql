@@ -103,6 +103,9 @@ BEGIN
     -- under the SAME UPDLOCK + HOLDLOCK range as the capacity count below (fully
     -- race-safe: a concurrent duplicate serialises behind us and then sees our row).
     -- Only applies to App bookings that name a pet; Custom walk-ins carry no @PetId.
+    -- The existing booking's window ends at COALESCE([ActualEndTime], [EndTime]):
+    -- once its job has finished early the pet is demonstrably free again, so it
+    -- must not block a fresh booking in the time that was released.
     IF @PetId IS NOT NULL AND EXISTS (
         SELECT 1
         FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
@@ -111,7 +114,7 @@ BEGIN
           AND [BookingDate] = @BookingDate
           AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [StartTime] < @EndTime
-          AND [EndTime] > @StartTime
+          AND COALESCE([ActualEndTime], [EndTime]) > @StartTime
     )
     BEGIN
         THROW 51069, 'This pet already has a booking for this slot.', 1;
@@ -121,7 +124,12 @@ BEGIN
     -- the requested window FOR THIS SERVICE, holding UPDLOCK + HOLDLOCK so
     -- concurrent CreateBooking calls on the same service serialise. DayCare and
     -- NightStay each have their own capacity bucket. A booking holds its slot in
-    -- every status except the two cancelled ones.
+    -- every status except the two cancelled ones — and only up to
+    -- COALESCE([ActualEndTime], [EndTime]), so a job that finished early has
+    -- already handed its remaining hours back and does not count against them.
+    -- This is the gate the slot grid promises: [Booking].[GetBookingsForDate]
+    -- uses the identical expression, so what is shown as free is what is
+    -- admitted here.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
@@ -129,7 +137,7 @@ BEGIN
       AND [BookingDate] = @BookingDate
       AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
       AND [StartTime] < @EndTime
-      AND [EndTime] > @StartTime;
+      AND COALESCE([ActualEndTime], [EndTime]) > @StartTime;
 
     IF @Concurrent >= @Capacity
     BEGIN

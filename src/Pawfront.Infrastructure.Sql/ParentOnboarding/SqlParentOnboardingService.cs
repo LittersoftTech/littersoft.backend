@@ -309,19 +309,7 @@ internal sealed class SqlParentOnboardingService(
             {
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    pendingJobs.Add(new PendingParentJob(
-                        BookingId: reader.GetGuid(0),
-                        BookingType: reader.GetString(1),
-                        JobId: reader.GetString(2),
-                        ProviderId: reader.GetGuid(3),
-                        ProviderName: reader.IsDBNull(4) ? null : reader.GetString(4),
-                        ServiceCategory: reader.GetString(5),
-                        SubCategory: reader.GetString(6),
-                        Status: reader.GetString(7),
-                        ServiceDate: DateOnly.FromDateTime(reader.GetDateTime(8)),
-                        StartTime: reader.IsDBNull(9) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(9)),
-                        EndTime: reader.IsDBNull(10) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(10)),
-                        PetName: reader.IsDBNull(11) ? null : reader.GetString(11)));
+                    pendingJobs.Add(PendingJobReader.Read(reader));
                 }
             }
 

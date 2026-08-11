@@ -75,3 +75,14 @@ CREATE INDEX [IX_BookingReviews_PetParent]
     ON [Review].[BookingReviews] ([PetParentId])
     INCLUDE ([Rating])
     WHERE [ReviewerType] = N'Provider';
+
+GO
+
+-- The other direction on the same column: the reviews a parent has WRITTEN, which
+-- is what the `review` block on their two "my bookings" lists reads. The index
+-- above cannot serve it — that one is filtered to the provider direction — and a
+-- parent-authored scan would otherwise fall back to the clustered index.
+CREATE INDEX [IX_BookingReviews_PetParent_Authored]
+    ON [Review].[BookingReviews] ([PetParentId])
+    INCLUDE ([BookingType], [BookingId], [Rating])
+    WHERE [ReviewerType] = N'Parent';

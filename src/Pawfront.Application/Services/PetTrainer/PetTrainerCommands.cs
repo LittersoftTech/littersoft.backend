@@ -35,7 +35,9 @@ public sealed record SaveTrainingSchoolOfferingCommand(
     IReadOnlyCollection<string> ServiceLocations,
     IReadOnlyCollection<string> TrainingApproaches,
     IReadOnlyCollection<string>? PreviousExperience,
-    string PrivateTrainingDescription);
+    // Optional free text — the trainer's own words about the session they offer.
+    // Blank/omitted stores an empty string, same as Description / AboutYou.
+    string? PrivateTrainingDescription);
 
 public sealed record SaveFreelanceTrainerOfferingCommand(
     Guid ProviderId,
@@ -50,7 +52,9 @@ public sealed record SaveFreelanceTrainerOfferingCommand(
     IReadOnlyCollection<string> ServiceLocations,
     IReadOnlyCollection<string> TrainingApproaches,
     IReadOnlyCollection<string>? PreviousExperience,
-    string PrivateTrainingDescription);
+    // Optional free text — the trainer's own words about the session they offer.
+    // Blank/omitted stores an empty string, same as Description / AboutYou.
+    string? PrivateTrainingDescription);
 
 public sealed record TrainingSessionInput(
     decimal SessionDurationHours,

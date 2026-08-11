@@ -54,6 +54,11 @@ BEGIN
 
     UPDATE [Booking].[Bookings]
     SET [Status] = N'EXPIRED',
+        -- The booking was never accepted, so no money can ever move on it. This
+        -- job is the ONLY writer of EXPIRED (the status-engine sprocs reject a
+        -- late transition without writing), which makes it the only place the
+        -- payout needs settling for this outcome.
+        [PayoutStatus] = N'NO_PAYOUT',
         [UpdatedAtUtc] = @Now
     OUTPUT inserted.[BookingId],
            CASE WHEN deleted.[CreatedAtUtc] <= @PendingCutoff THEN N'Pending' ELSE N'LeadTime' END
@@ -71,6 +76,7 @@ BEGIN
 
     UPDATE [Booking].[NightStayBookings]
     SET [Status] = N'EXPIRED',
+        [PayoutStatus] = N'NO_PAYOUT',
         [UpdatedAtUtc] = @Now
     OUTPUT inserted.[NightStayBookingId],
            CASE WHEN deleted.[CreatedAtUtc] <= @PendingCutoff THEN N'Pending' ELSE N'LeadTime' END

@@ -121,6 +121,36 @@ public sealed record ChatBlock(
     DateTimeOffset CreatedAtUtc);
 
 /// <summary>
+/// Phase one of a send: the sequence SQL assigned, and whether this message has
+/// been seen before.
+/// </summary>
+/// <param name="CreatedAtUtc">
+/// When the send was accepted. It is stamped on the Cosmos document, which is
+/// written between the two phases — so the timestamp has to come from here rather
+/// than from the commit that follows.
+/// </param>
+/// <param name="IsReplay">
+/// True when this message id was already reserved. A retry therefore reuses the
+/// ORIGINAL sequence instead of taking a new one, which is what stops a duplicate
+/// send from becoming a second message. Enforced by a primary key on
+/// <c>(ConversationId, MessageId)</c>, so it holds across the hub and REST alike
+/// and does not depend on Cosmos being reachable.
+/// </param>
+/// <param name="IsCommitted">
+/// True when the earlier attempt also finished — body written, recipient
+/// notified. The caller returns the stored message and delivers nothing further.
+/// A reservation that is a replay but NOT committed is a send that died partway;
+/// completing it is exactly what the retry is for.
+/// </param>
+public sealed record ChatMessageReservation(
+    Guid ConversationId,
+    Guid MessageId,
+    long Sequence,
+    DateTimeOffset CreatedAtUtc,
+    bool IsReplay,
+    bool IsCommitted);
+
+/// <summary>
 /// The SQL side of appending a message: the sequence it was given, and everything
 /// needed to deliver it.
 /// </summary>

@@ -49,9 +49,11 @@ public static class NotificationLocalTime
     /// </summary>
     private const string DefaultWindowsTimeZoneId = "W. Europe Standard Time";
 
-    // "5 Aug" / "14:00" / "5 Aug 14:00". Invariant culture so the wording is
-    // deterministic regardless of the host's locale — these reach users as copy.
+    // "5 Aug" / "5 Aug 2026" / "14:00" / "5 Aug 14:00". Invariant culture so the
+    // wording is deterministic regardless of the host's locale — these reach
+    // users as copy.
     private const string DateFormat = "d MMM";
+    private const string DateWithYearFormat = "d MMM yyyy";
     private const string TimeFormat = @"HH\:mm";
     private const string DateAndTimeFormat = @"d MMM HH\:mm";
 
@@ -84,6 +86,14 @@ public static class NotificationLocalTime
     /// <summary>"5 Aug" — the local calendar date the instant falls on.</summary>
     public static string FormatDate(DateTimeOffset instantUtc, TimeZoneInfo timeZone) =>
         ToLocal(instantUtc, timeZone).ToString(DateFormat, CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// "5 Aug 2026" — the same date spelled out in full, for copy that asks the
+    /// reader to commit to something rather than reminding them about a date they
+    /// already have in front of them.
+    /// </summary>
+    public static string FormatDateWithYear(DateTimeOffset instantUtc, TimeZoneInfo timeZone) =>
+        ToLocal(instantUtc, timeZone).ToString(DateWithYearFormat, CultureInfo.InvariantCulture);
 
     /// <summary>"14:00" — the local clock time.</summary>
     public static string FormatTime(DateTimeOffset instantUtc, TimeZoneInfo timeZone) =>

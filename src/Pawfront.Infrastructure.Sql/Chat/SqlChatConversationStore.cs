@@ -145,9 +145,55 @@ internal sealed class SqlChatConversationStore(
         return cards;
     }
 
-    public async Task<ChatAppendResult> AppendMessageAsync(
+    public async Task<ChatMessageReservation> ReserveMessageAsync(
         Guid conversationId,
         ChatParticipant sender,
+        Guid messageId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = StoredProcedure(connection, "[Chat].[ReserveMessageSequence]");
+        command.Parameters.AddWithValue("@ConversationId", conversationId);
+        command.Parameters.AddWithValue("@SenderType", sender.Type.ToSqlValue());
+        command.Parameters.AddWithValue("@SenderId", sender.Id);
+        command.Parameters.AddWithValue("@MessageId", messageId);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException(
+                    "Chat.ReserveMessageSequence returned no reservation row.");
+            }
+
+            return new ChatMessageReservation(
+                ConversationId: conversationId,
+                MessageId: messageId,
+                Sequence: reader.GetInt64(2),
+                CreatedAtUtc: ReadUtc(reader, 3) ?? DateTimeOffset.UtcNow,
+                IsReplay: ReadFlag(reader, 4),
+                IsCommitted: ReadFlag(reader, 5));
+        }
+        catch (SqlException exception) when (exception.Number == 51325)
+        {
+            throw new ConversationNotFoundException(conversationId);
+        }
+        catch (SqlException exception) when (exception.Number == 51326)
+        {
+            throw new ChatForbiddenException(conversationId);
+        }
+        catch (SqlException exception) when (exception.Number == 51323)
+        {
+            throw new ChatBlockedException();
+        }
+    }
+
+    public async Task<ChatAppendResult> CommitMessageAsync(
+        Guid conversationId,
         Guid messageId,
         string preview,
         CancellationToken cancellationToken)
@@ -155,10 +201,8 @@ internal sealed class SqlChatConversationStore(
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = StoredProcedure(connection, "[Chat].[AppendMessage]");
+        await using var command = StoredProcedure(connection, "[Chat].[CommitMessageAppend]");
         command.Parameters.AddWithValue("@ConversationId", conversationId);
-        command.Parameters.AddWithValue("@SenderType", sender.Type.ToSqlValue());
-        command.Parameters.AddWithValue("@SenderId", sender.Id);
         command.Parameters.AddWithValue("@MessageId", messageId);
         command.Parameters.AddWithValue("@Preview", preview);
 
@@ -166,33 +210,25 @@ internal sealed class SqlChatConversationStore(
         {
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-            // Result set 1 — the sequence this message was given.
+            // Result set 1 — who to deliver to, and whether a push was queued.
             if (!await reader.ReadAsync(cancellationToken))
             {
-                throw new InvalidOperationException("Chat.AppendMessage returned no message row.");
-            }
-
-            var sequence = reader.GetInt64(1);
-            var createdAtUtc = ReadUtc(reader, 2) ?? DateTimeOffset.UtcNow;
-
-            // Result set 2 — who to deliver to, and whether a push was queued.
-            if (!await reader.NextResultAsync(cancellationToken)
-                || !await reader.ReadAsync(cancellationToken))
-            {
-                throw new InvalidOperationException("Chat.AppendMessage returned no recipient row.");
+                throw new InvalidOperationException("Chat.CommitMessageAppend returned no recipient row.");
             }
 
             var recipientType = ChatParticipantTypes.FromSqlValue(reader.GetString(0));
             var recipientId = reader.GetGuid(1);
             var recipientUnread = reader.GetInt32(2);
-            var recipientIsViewing = reader.GetBoolean(3);
-            var recipientIsMuted = reader.GetBoolean(4);
+            var recipientIsViewing = ReadFlag(reader, 3);
+            var recipientIsMuted = ReadFlag(reader, 4);
             var notificationId = reader.IsDBNull(5) ? (Guid?)null : reader.GetGuid(5);
             // The template parameters the enqueue wrote. Handed back so the push
             // can be rendered from the C# catalog without re-reading the row.
             var notificationDataJson = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var sequence = reader.GetInt64(7);
+            var createdAtUtc = ReadUtc(reader, 8) ?? DateTimeOffset.UtcNow;
 
-            // Result set 3 — the devices to push to. Empty when no notification
+            // Result set 2 — the devices to push to. Empty when no notification
             // was queued, so no branch is needed here.
             var tokens = new List<string>();
             if (await reader.NextResultAsync(cancellationToken))
@@ -220,18 +256,27 @@ internal sealed class SqlChatConversationStore(
                 tokens,
                 notificationDataJson);
         }
-        catch (SqlException exception) when (exception.Number == 51325)
+        catch (SqlException exception) when (exception.Number is 51325 or 51328)
         {
             throw new ConversationNotFoundException(conversationId);
         }
-        catch (SqlException exception) when (exception.Number == 51326)
-        {
-            throw new ChatForbiddenException(conversationId);
-        }
-        catch (SqlException exception) when (exception.Number == 51323)
-        {
-            throw new ChatBlockedException();
-        }
+    }
+
+    public async Task ReleaseMessageReservationAsync(
+        Guid conversationId,
+        Guid messageId,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = StoredProcedure(connection, "[Chat].[ReleaseMessageReservation]");
+        command.Parameters.AddWithValue("@ConversationId", conversationId);
+        command.Parameters.AddWithValue("@MessageId", messageId);
+
+        // The procedure never THROWs and its one result set is diagnostic only —
+        // whether a row was there to release changes nothing the caller does.
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task<ChatParticipantState?> MarkReadAsync(
@@ -431,6 +476,27 @@ internal sealed class SqlChatConversationStore(
         var value = reader.GetString(ordinal).Trim();
         return value.Length == 0 ? null : value;
     }
+
+    /// <summary>
+    /// Reads a boolean flag without caring whether SQL typed the column
+    /// <c>BIT</c> or <c>INT</c>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SqlDataReader.GetBoolean"/> is exact: on an <c>INT</c> column it
+    /// throws <see cref="InvalidCastException"/> rather than coercing. That is how
+    /// the retired <c>Chat.AppendMessage</c> broke every send in the product — it
+    /// projected <c>COALESCE(@RecipientIsMuted, 0)</c>, and because <c>INT</c>
+    /// outranks <c>BIT</c> in data type precedence, a flag that reads as a
+    /// perfectly ordinary <c>0</c> came back typed <c>INT</c> and this reader threw
+    /// AFTER the procedure had committed.
+    ///
+    /// The procedures now <c>CAST(... AS BIT)</c>, which is the real fix. This
+    /// exists so that the same slip can never again take down a write path: a
+    /// widened flag costs a coercion here instead of a 500 with the work already
+    /// done.
+    /// </remarks>
+    private static bool ReadFlag(SqlDataReader reader, int ordinal) =>
+        !reader.IsDBNull(ordinal) && Convert.ToBoolean(reader.GetValue(ordinal));
 
     /// <summary>
     /// Pins the offset to zero. The column is <c>DATETIME2</c> and carries none,

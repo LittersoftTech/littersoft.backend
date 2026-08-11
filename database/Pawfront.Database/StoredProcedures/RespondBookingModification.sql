@@ -128,6 +128,10 @@ BEGIN
     IF @Accept = 1
     BEGIN
         -- Race-safe capacity re-check on the proposed window, excluding this booking.
+        -- Other bookings occupy only up to COALESCE([ActualEndTime], [EndTime]),
+        -- so hours released by a job that finished early are available to a
+        -- reschedule too — the same expression [Booking].[CreateBooking] counts
+        -- with, since a modification competes for exactly the same capacity.
         DECLARE @Concurrent INT;
         SELECT @Concurrent = COUNT(*)
         FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
@@ -136,7 +140,7 @@ BEGIN
           AND [BookingId] <> @BookingId
           AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [StartTime] < @PEnd
-          AND [EndTime] > @PStart;
+          AND COALESCE([ActualEndTime], [EndTime]) > @PStart;
 
         IF @Concurrent >= @Capacity
         BEGIN

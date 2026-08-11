@@ -40,21 +40,53 @@ public interface IChatConversationStore
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Assigns the message its sequence, refreshes the inbox cache, moves both
-    /// sides' read state, and — when the recipient is not looking at the thread —
-    /// queues their push and returns its id with their device tokens.
+    /// Phase one of a send: authorises the sender and assigns the message its
+    /// sequence. Deliberately changes NOTHING a client can observe — the inbox
+    /// cache, the unread count and the push all belong to
+    /// <see cref="CommitMessageAsync"/>, which runs only once the body is durable.
+    /// That is what makes a failed send leave no trace.
     ///
-    /// The message BODY is written separately, after this returns. See
-    /// <c>Chat.AppendMessage</c> for why that ordering is the accepted trade-off.
+    /// Idempotent on <paramref name="messageId"/>: a duplicate is handed the
+    /// original sequence back rather than taking a new one. See
+    /// <see cref="ChatMessageReservation.IsReplay"/>.
     /// </summary>
     /// <exception cref="ConversationNotFoundException">No such thread.</exception>
     /// <exception cref="ChatForbiddenException">The sender is not a party to it.</exception>
     /// <exception cref="ChatBlockedException">One party has blocked the other.</exception>
-    Task<ChatAppendResult> AppendMessageAsync(
+    Task<ChatMessageReservation> ReserveMessageAsync(
         Guid conversationId,
         ChatParticipant sender,
         Guid messageId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Phase two: refreshes the inbox cache, moves both sides' read state, and —
+    /// when the recipient is not looking at the thread — queues their push and
+    /// returns its id with their device tokens. Call only after the body is
+    /// written.
+    ///
+    /// Idempotent. Committing the same message twice moves no counter and queues
+    /// no second push, which is what makes retrying a send that failed after the
+    /// body landed both safe and necessary.
+    /// </summary>
+    /// <exception cref="ConversationNotFoundException">
+    /// No such thread, or no reservation for this message.
+    /// </exception>
+    Task<ChatAppendResult> CommitMessageAsync(
+        Guid conversationId,
+        Guid messageId,
         string preview,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Releases an uncommitted reservation after the body failed to write, so a
+    /// retry starts clean. Best-effort: leaving the row behind is harmless, since
+    /// a retry of the same id would simply reuse its sequence and finish the send.
+    /// A committed reservation is never released — it describes a real message.
+    /// </summary>
+    Task ReleaseMessageReservationAsync(
+        Guid conversationId,
+        Guid messageId,
         CancellationToken cancellationToken);
 
     /// <summary>

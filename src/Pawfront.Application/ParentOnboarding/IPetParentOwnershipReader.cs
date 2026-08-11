@@ -30,15 +30,24 @@ public interface IPetParentOwnershipReader
 
     /// <summary>
     /// Returns the owning <c>PetParentId</c> together with the pet's type
-    /// (Dog | Cat | Hamster | GuineaPig) and name in one point read, or null if
-    /// the pet row doesn't exist. Used by provider discovery's petId filter,
-    /// which needs both the ownership check and the animal type, and by the
-    /// parent booking creates, which additionally name the pet in the
-    /// provider's "New Service Booking" notification.
+    /// (Dog | Cat | Hamster | GuineaPig), the pet's name and its owner's name in
+    /// one point read, or null if the pet row doesn't exist. Used by provider
+    /// discovery's petId filter, which needs both the ownership check and the
+    /// animal type, and by the parent booking creates, which additionally name
+    /// both the pet and the customer in the provider's "New Service Booking"
+    /// notification.
     /// </summary>
     Task<PetOwnershipLookup?> GetPetLookupAsync(
         Guid petId,
         CancellationToken cancellationToken);
 }
 
-public sealed record PetOwnershipLookup(Guid OwningPetParentId, string PetType, string PetName);
+/// <param name="ParentName">
+/// The owner's display name. Empty when the owning profile row can't be read —
+/// the ownership answer must not depend on a name being resolvable.
+/// </param>
+public sealed record PetOwnershipLookup(
+    Guid OwningPetParentId,
+    string PetType,
+    string PetName,
+    string ParentName);

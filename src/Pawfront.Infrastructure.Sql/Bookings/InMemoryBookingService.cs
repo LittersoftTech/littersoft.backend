@@ -254,7 +254,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
             PricePerHour: row.PricePerHour,
             JobNotes: row.JobNotes,
             PetId: row.PetId,
-            PayoutStatus: "Pending",
+            PayoutStatus: PayoutStatuses.ForBookingStatus(row.Status),
             PayoutId: null,
             ParentFirstName: null,
             ParentLastName: null,

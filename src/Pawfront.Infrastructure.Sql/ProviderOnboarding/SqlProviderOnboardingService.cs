@@ -267,6 +267,7 @@ internal sealed class SqlProviderOnboardingService(
     public async Task<SetActiveStatusOutcome> SetActiveStatusAsync(
         Guid providerId,
         bool isActive,
+        bool acknowledgeExistingBookings,
         CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
@@ -277,11 +278,13 @@ internal sealed class SqlProviderOnboardingService(
             "Provider.SetProviderActiveStatus");
         command.Parameters.AddWithValue("@ProviderId", providerId);
         command.Parameters.AddWithValue("@IsActive", isActive);
+        command.Parameters.AddWithValue("@AcknowledgeExistingBookings", acknowledgeExistingBookings);
 
         try
         {
             // The sproc emits exactly one result set:
-            //   - on success: 3 cols (ProviderId, IsActive, UpdatedAtUtc)
+            //   - on success: 4 cols (ProviderId, IsActive, UpdatedAtUtc,
+            //                         HonouredBookingCount)
             //   - on conflict: 10 cols (BookingId, ServiceId, ServiceCategory,
             //                           SubCategory, PetParentId, Source, CustomerName,
             //                           BookingDate, StartTime, EndTime)
@@ -316,7 +319,8 @@ internal sealed class SqlProviderOnboardingService(
             return new SetActiveStatusOutcome.Updated(
                 reader.GetGuid(0),
                 reader.GetBoolean(1),
-                new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero));
+                new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero),
+                reader.GetInt32(3));
         }
         catch (SqlException exception) when (exception.Number == 51100)
         {

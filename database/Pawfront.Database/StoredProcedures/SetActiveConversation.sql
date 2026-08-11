@@ -1,7 +1,7 @@
--- Records which thread a connection currently has open — or NULL when the client
+﻿-- Records which thread a connection currently has open — or NULL when the client
 -- has navigated away.
 --
--- This one column is the whole of presence-gated push: [Chat].[AppendMessage]
+-- This one column is the whole of presence-gated push: [Chat].[CommitMessageAppend]
 -- sends an FCM push only when the recipient has no connection whose
 -- [ActiveConversationId] matches. Without it the choice would be to buzz someone
 -- for a message they are reading, or to leave an offline recipient silent.

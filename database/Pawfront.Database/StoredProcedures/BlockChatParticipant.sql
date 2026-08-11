@@ -1,10 +1,10 @@
--- Blocks the counterparty, in the caller's direction.
+﻿-- Blocks the counterparty, in the caller's direction.
 --
 -- Idempotent: blocking somebody already blocked returns the existing row rather
 -- than failing or duplicating, so a double-tap is harmless.
 --
 -- A block stops new messages BOTH ways and stops the thread being reopened
--- ([Chat].[GetOrCreateConversation] and [Chat].[AppendMessage] both consult this
+-- ([Chat].[GetOrCreateConversation] and [Chat].[ReserveMessageSequence] both consult this
 -- table, in either direction). It deliberately leaves existing history in place:
 -- what was already said is part of both parties' record, and deleting it would
 -- also destroy what a blocked user might need in order to report the exchange.

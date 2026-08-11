@@ -1,4 +1,4 @@
-using System.Data;
+﻿using System.Data;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Chat;
 using Pawfront.Application.Configuration;
@@ -9,7 +9,7 @@ namespace Pawfront.Infrastructure.Sql.Chat;
 /// Live connections, through the <c>Chat</c> schema's presence procedures.
 ///
 /// Only the WRITE side is here. Whether a message earns a push is read inside
-/// <c>Chat.AppendMessage</c>, in the same transaction as the message itself, so
+/// <c>Chat.CommitMessageAppend</c>, in the same transaction as the message itself, so
 /// presence cannot change between the decision and the write.
 /// </summary>
 internal sealed class SqlChatPresenceStore(

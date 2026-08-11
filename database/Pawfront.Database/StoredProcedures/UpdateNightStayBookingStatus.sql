@@ -58,6 +58,7 @@ BEGIN
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @CheckInDate DATE;
+    DECLARE @CheckOutDate DATE;
     DECLARE @DropOffTime TIME(0);
     DECLARE @CreatedAtUtc DATETIME2(7);
 
@@ -67,6 +68,7 @@ BEGIN
            @ProviderId = [ProviderId],
            @PetParentId = [PetParentId],
            @CheckInDate = [CheckInDate],
+           @CheckOutDate = [CheckOutDate],
            @DropOffTime = [DropOffTime],
            @CreatedAtUtc = [CreatedAtUtc]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
@@ -171,9 +173,35 @@ BEGIN
         END
     END
 
+    -- COMPLETED is reachable here through the legacy /status shim as well as
+    -- through [Booking].[CompleteNightStayBooking], so an early pickup must
+    -- release the remaining nights from BOTH paths — otherwise which endpoint
+    -- the provider happened to tap would decide whether the nights came back.
+    -- Same rule and clamps as the dedicated sproc; see it for the reasoning.
+    DECLARE @Today DATE = CAST(@Now AS DATE);
+    DECLARE @ActualCheckOutDate DATE = NULL;
+
+    IF @NewStatus = N'COMPLETED' AND @Today < @CheckOutDate
+    BEGIN
+        SET @ActualCheckOutDate =
+            CASE WHEN @Today <= @CheckInDate THEN DATEADD(DAY, 1, @CheckInDate) ELSE @Today END;
+    END
+
     UPDATE [Booking].[NightStayBookings]
     SET [Status] = @NewStatus,
         [UpdatedAtUtc] = @Now,
+        -- Only ever written on the COMPLETED transition; every other status
+        -- leaves whatever is there alone.
+        [ActualCheckOutDate] = CASE
+            WHEN @NewStatus = N'COMPLETED' THEN @ActualCheckOutDate
+            ELSE [ActualCheckOutDate]
+        END,
+        -- Mirror of Booking.UpdateBookingStatus: a no-show settles the payout as
+        -- 'NO_PAYOUT' instead of leaving it reading 'Pending' forever.
+        [PayoutStatus] = CASE
+            WHEN @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW') THEN N'NO_PAYOUT'
+            ELSE [PayoutStatus]
+        END,
         [CancelledAtUtc] = CASE
             WHEN @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') THEN @Now
             ELSE [CancelledAtUtc]

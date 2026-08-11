@@ -1,4 +1,4 @@
--- One chat thread between a provider and a pet parent.
+﻿-- One chat thread between a provider and a pet parent.
 --
 -- The UNIQUE on ([ProviderId], [PetParentId]) is the load-bearing constraint: it
 -- makes "one thread per pair" a database fact rather than an application
@@ -15,7 +15,7 @@
 --
 -- The last-message columns are a denormalised cache of the newest message, kept
 -- so the inbox list is one indexed read per participant instead of a fan-out of
--- Cosmos queries. They are written by [Chat].[AppendMessage] in the same
+-- Cosmos queries. They are written by [Chat].[CommitMessageAppend] in the same
 -- transaction that advances [LastSequence].
 CREATE TABLE [Chat].[Conversations]
 (
@@ -25,7 +25,7 @@ CREATE TABLE [Chat].[Conversations]
     [ProviderId] UNIQUEIDENTIFIER NOT NULL,
     [PetParentId] UNIQUEIDENTIFIER NOT NULL,
 
-    -- Monotonic per conversation, assigned by [Chat].[AppendMessage]. It orders
+    -- Monotonic per conversation, assigned by [Chat].[ReserveMessageSequence]. It orders
     -- the thread and is the cursor the history read pages back through
     -- (?beforeSequence=), which is why ordering is by sequence and not by
     -- timestamp: two messages can share a millisecond, but never a sequence.

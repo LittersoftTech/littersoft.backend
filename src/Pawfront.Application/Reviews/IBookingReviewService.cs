@@ -78,6 +78,20 @@ public interface IBookingReviewService
     Task<ProviderReviewListResult> ListForProviderAsync(
         ProviderReviewQuery query,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Every rating a pet parent has authored, keyed by booking. One call serves a
+    /// whole "my bookings" page — the alternative, a per-booking
+    /// <see cref="GetAsync"/>, would be a lookup per card for a figure that is one
+    /// small indexed read for all of them.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately returns ONLY the parent's own reviews. The provider's private
+    /// rating of this parent is never surfaced on the parent host.
+    /// </remarks>
+    Task<IReadOnlyList<PetParentBookingRating>> ListRatingsByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -86,6 +100,10 @@ public interface IBookingReviewService
 /// </summary>
 public interface IBookingReviewStore
 {
+    Task<IReadOnlyList<PetParentBookingRating>> ListRatingsByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken);
+
     Task<BookingReviewRecord> UpsertAsync(
         SubmitBookingReviewCommand command,
         CancellationToken cancellationToken);

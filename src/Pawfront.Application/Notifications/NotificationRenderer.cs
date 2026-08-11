@@ -46,11 +46,13 @@ public static class NotificationRenderer
             [NotificationDataKeys.ParentName] = "A customer",
             [NotificationDataKeys.EventTitle] = "your event",
             [NotificationDataKeys.ServiceDate] = "the booked date",
+            [NotificationDataKeys.ServiceDateWithYear] = "the booked date",
             [NotificationDataKeys.StartTime] = "the booked time",
             [NotificationDataKeys.CheckInDate] = "the check-in date",
             [NotificationDataKeys.DropOffTime] = "the drop-off time",
             [NotificationDataKeys.ServiceName] = "a service",
             [NotificationDataKeys.AcceptBy] = "the deadline shown in the app",
+            [NotificationDataKeys.RespondWithin] = "the time shown in the app",
             [NotificationDataKeys.AbsentParty] = "the other party",
             [NotificationDataKeys.Amount] = "the agreed amount",
             [NotificationDataKeys.TicketCount] = "some",
@@ -99,6 +101,7 @@ public static class NotificationRenderer
 
         data = WithLocalTimes(data, timeZone ?? NotificationLocalTime.Default);
         data = WithDerivedServiceName(data);
+        data = WithDerivedResponseWindow(data);
 
         return new RenderedNotification(
             Truncate(Substitute(template.TitleTemplate, data), MaxTitleLength),
@@ -143,6 +146,9 @@ public static class NotificationRenderer
         if (TryReadInstant(data, NotificationDataKeys.ServiceStartUtc, out var serviceStart))
         {
             Set(NotificationDataKeys.ServiceDate, NotificationLocalTime.FormatDate(serviceStart, timeZone));
+            Set(
+                NotificationDataKeys.ServiceDateWithYear,
+                NotificationLocalTime.FormatDateWithYear(serviceStart, timeZone));
             Set(NotificationDataKeys.StartTime, NotificationLocalTime.FormatTime(serviceStart, timeZone));
 
             // A stay's service starts at drop-off on the check-in day, so the two
@@ -241,6 +247,45 @@ public static class NotificationRenderer
         return new Dictionary<string, string>(data, StringComparer.Ordinal)
         {
             [NotificationDataKeys.ServiceName] = BookingServiceLabel.Resolve(serviceType, serviceItemCode)
+        };
+    }
+
+    /// <summary>
+    /// Derives <c>respondWithin</c> — how long the provider has to answer a
+    /// booking request — from the deadline and the moment the booking was made.
+    ///
+    /// <b>Why the window is measured from CREATION, not from now.</b> The two
+    /// rules that expire an unaccepted booking both run off the creation instant
+    /// (BR-17) or the service start (BR-53), and quoting the window they actually
+    /// grant is what makes the common case read as a clean "24 hours". Measuring
+    /// against send time would render that same window as "23 hours 59 minutes",
+    /// which is technically closer and reads like a mistake. The push leaves
+    /// within about a minute of the booking, so the difference is not one a
+    /// provider can act on — and <c>acceptByUtc</c> travels alongside for an app
+    /// that wants an exact live countdown.
+    ///
+    /// Absent when either instant is missing (a row enqueued before this shipped)
+    /// or the span has already run out; the renderer's fallback covers it.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string>? WithDerivedResponseWindow(
+        IReadOnlyDictionary<string, string>? data)
+    {
+        if (data is null
+            || !TryReadInstant(data, NotificationDataKeys.AcceptByUtc, out var acceptBy)
+            || !TryReadInstant(data, NotificationDataKeys.CreatedAtUtc, out var createdAt))
+        {
+            return data;
+        }
+
+        var window = NotificationDuration.Humanise(acceptBy - createdAt);
+        if (window is null)
+        {
+            return data;
+        }
+
+        return new Dictionary<string, string>(data, StringComparer.Ordinal)
+        {
+            [NotificationDataKeys.RespondWithin] = window
         };
     }
 

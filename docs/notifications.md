@@ -1,4 +1,4 @@
-# Push notifications — mobile integration contract
+﻿# Push notifications — mobile integration contract
 
 Status: **engine built; every booking trigger in the Notifications V3 spec is
 wired.** `MESSAGE_RECEIVED` was wired on 2026-08-09 with the chat module (see
@@ -46,37 +46,55 @@ must not recompute for itself.
 |---|---|---|
 | `type` | `BOOKING_REQUESTED` | `NIGHT_STAY_BOOKING_REQUESTED` |
 | Title | `New Service Booking` | `New Service Booking` |
-| Body | `Max · 10 Aug at 14:00. Please accept by 3 Aug 09:00, else the booking will be removed.` | `Rocky · 5 Aug at 09:00. Please accept by 3 Aug 09:00, else the booking will be removed.` |
+| Body | `John has requested Bath & Dry for Bruno on 5 Aug 2026. Respond within 24 hours.` | `John has requested Night Stay (3 nights) for Bruno on 5 Aug 2026. Respond within 24 hours.` |
 | `entityType` | `Booking` | `NightStayBooking` |
 | `bookingType` | `SingleDay` | `NightStay` |
-| Time shown | booking start time | drop-off time on the check-in day |
+| Date shown | the service date | the check-in date |
 
-### The accept-by deadline
+### The response window
 
-`acceptBy` is **not simply "created + 24 hours"**. Two rules expire an unaccepted
-booking and the deadline is whichever fires **first**:
+The body quotes **how long the provider has**, not the deadline instant — that is
+the one number they act on, and it is **not always 24 hours**:
+
+- `Respond within 24 hours.` — the ordinary case.
+- `Respond within 2 hours 15 minutes.` — a booking made close to its own service
+  time, where the window is cut short.
+
+**Why it varies.** Two rules expire an unaccepted booking and the deadline is
+whichever fires **first**:
 
 - **BR-17** — 24 hours after the booking was created.
 - **BR-53** — when the service is less than 2 hours away, however recently it was
   made.
 
-So a booking made at 09:00 for a service at 14:00 **the same day** must be
-accepted by **12:00 that day**, not 09:00 tomorrow. Anything the app displays
-should use these values rather than recomputing from a 24-hour assumption.
+So a booking made at 09:45 for a service at 14:00 **the same day** must be
+accepted by **12:00 that day**, not 09:45 tomorrow — a window of 2 hours 15
+minutes. A flat "24 hours" would be a promise the server does not keep.
 
-`acceptByUtc` carries the same instant as an ISO 8601 string, so the app can run a
-live countdown rather than only showing the rendered `acceptBy` text.
+`respondWithin` is measured from the moment the booking was **created**, which is
+what makes the ordinary case read as a clean "24 hours" rather than "23 hours 59
+minutes"; the push leaves within about a minute of the booking. **For an exact
+live countdown use `acceptByUtc`**, which carries the deadline itself as an
+instant — the rendered strings are frozen at send time.
 
 ### `data` keys on these two
 
-`petName`, `acceptBy`, `acceptByUtc`, `serviceName`, `serviceStartUtc`, plus
-`serviceDate` + `startTime` (single-day) or `checkInDate` + `dropOffTime` +
-`checkOutDate` + `checkOutUtc` (night-stay).
+`parentName`, `petName`, `serviceName`, `respondWithin`, `acceptBy`,
+`acceptByUtc`, `createdAtUtc`, `serviceStartUtc`, plus `serviceDate` +
+`serviceDateWithYear` + `startTime` (single-day) or those three plus `checkInDate`
++ `dropOffTime` + `checkOutDate` + `checkOutUtc` (night-stay).
 
-`serviceName` is **no longer shown in the body** but is still sent, so the app can
-label the booking in its own UI: the specific grooming menu item when the booking
-names one (`Nails Clipping`, `Bath & Dry`), otherwise the bookable service
-(`Day Care`, `Vet Appointment`, `Training Session`, `Night Stay (3 nights)`).
+`serviceDateWithYear` (`5 Aug 2026`) is what the body uses here; `serviceDate`
+(`5 Aug`) carries the same date in the short form the rest of the copy uses. Both
+are sent.
+
+`serviceName` is the specific grooming menu item when the booking names one
+(`Nails Clipping`, `Bath & Dry`), otherwise the bookable service (`Day Care`,
+`Vet Appointment`, `Training Session`, `Night Stay (3 nights)`) — for a stay the
+number of nights is folded in, since the copy shows only the check-in date.
+
+`parentName` is the customer's name; `A customer` is substituted if it cannot be
+resolved, and `your pet` for a missing `petName`.
 
 **Not fired** for provider-created bookings or Custom walk-ins — a provider
 shouldn't be notified about their own action, and a walk-in has no parent.
@@ -315,7 +333,7 @@ against them now. **Nothing enqueues them**, because the backend has no such
 feature yet.
 
 > `MESSAGE_RECEIVED` used to be listed here. It is now wired — enqueued by
-> `Chat.AppendMessage`, and only when the recipient has no live connection viewing
+> `Chat.CommitMessageAppend`, and only when the recipient has no live connection viewing
 > that thread, so an open chat never buzzes. It is also the one type normally sent
 > by an API host rather than the scheduled dispatcher: its outbox row is written
 > pre-claimed so the timer skips it, and the dispatcher only takes over if the

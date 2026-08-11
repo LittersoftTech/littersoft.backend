@@ -133,7 +133,8 @@ public sealed record NightStayBookingDetailsSection(
 /// is minted when the stay COMPLETES and <c>PayoutStatus</c> flips from 'Pending'
 /// to 'Paid' when the provider records the payment; <c>PayoutMethod</c> ('Cash' /
 /// 'Digital') and <c>PaidAtUtc</c> come from the payment ledger row and are null
-/// until then.</summary>
+/// until then. 'NO_PAYOUT' is likewise terminal once the stay ends as
+/// PARENT_NO_SHOW / PROVIDER_NO_SHOW / EXPIRED.</summary>
 public sealed record NightStayPaymentDetailsSection(
     decimal? PricePerNight,
     decimal? TotalAmount,

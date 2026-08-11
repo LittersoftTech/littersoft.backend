@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using Pawfront.Application.Bookings;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Earnings;
 
@@ -119,7 +120,7 @@ internal sealed class SqlProviderEarningsStore(
             // provider sees one id for a job across both screens.
             JobId: $"PF-{jobNumber:D6}",
             PayoutId: reader.IsDBNull(3) ? null : reader.GetString(3),
-            PayoutStatus: reader.IsDBNull(4) ? "Pending" : reader.GetString(4),
+            PayoutStatus: reader.IsDBNull(4) ? PayoutStatuses.Pending : reader.GetString(4),
             Status: reader.GetString(5),
             ServiceCategory: reader.GetString(6),
             SubCategory: reader.GetString(7),

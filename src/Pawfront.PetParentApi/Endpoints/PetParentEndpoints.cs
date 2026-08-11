@@ -168,7 +168,7 @@ internal static class PetParentEndpoints
         CancellationToken cancellationToken)
     {
         var results = await bookingService.ListByPetParentAsync(petParentId, cancellationToken);
-        var enriched = await enrichment.EnrichAsync(results, cancellationToken);
+        var enriched = await enrichment.EnrichAsync(petParentId, results, cancellationToken);
         return ApiResults.Ok(enriched.Select(ToServiceBookingCard).ToArray());
     }
 
@@ -202,8 +202,17 @@ internal static class PetParentEndpoints
                 card.Location.City,
                 card.Location.ZipCode,
                 card.Location.Latitude,
-                card.Location.Longitude));
+                card.Location.Longitude),
+            ToReviewSection(card.Review));
     }
+
+    /// <summary>
+    /// The card's review block. A null state means the enrichment could not read
+    /// the parent's reviews; "not reviewable, no rating" is the safe rendering —
+    /// it hides the prompt rather than offering one the server would reject.
+    /// </summary>
+    internal static ParentBookingReviewSection ToReviewSection(ParentBookingReviewState? review)
+        => new(review?.CanReview ?? false, review?.Rating);
 
     /// <summary>
     /// Parent-initiated service booking ("book now" from a search result /
@@ -270,7 +279,7 @@ internal static class PetParentEndpoints
             // publisher writes an outbox row and never throws, so a notification
             // problem can't fail a booking that has already been created.
             await bookingNotifications.NotifyBookingRequestedAsync(
-                result, service.ServiceType, pet.PetType, cancellationToken);
+                result, service.ServiceType, pet.PetName, pet.ParentName, cancellationToken);
 
             return ApiResults.Ok(ToBookingResponse(result));
         }
@@ -830,6 +839,7 @@ internal static class PetParentEndpoints
     private static async Task<IResult> DeleteAccount(
         Guid petParentId,
         IParentAccountService accountService,
+        IPendingJobEnricher pendingJobEnricher,
         CancellationToken cancellationToken)
     {
         try
@@ -847,28 +857,48 @@ internal static class PetParentEndpoints
         // deactivation and closure flows.
         catch (PetParentPendingJobsException exception)
         {
+            var jobs = await pendingJobEnricher.EnrichAsync(exception.PendingJobs, cancellationToken);
             return ApiResults.Conflict(
                 "PendingJobsExist",
                 exception.Message,
                 new PendingParentJobsResponse(
                     exception.PetParentId,
-                    exception.PendingJobs.Select(ToPendingJobResponse).ToArray()));
+                    jobs.Select(ToPendingJobResponse).ToArray()));
         }
     }
 
+    /// <summary>
+    /// Maps one enriched pending job to the wire. Shared by both refusals — the
+    /// account delete and the per-pet delete return the identical job shape.
+    /// </summary>
+    /// <remarks>
+    /// The price block is never null on the wire: an unenriched job (which should
+    /// not reach here) reports a per-hour unit with null amounts rather than a
+    /// missing section, so the app has one shape to render.
+    /// </remarks>
     private static PendingParentJobResponse ToPendingJobResponse(PendingParentJob job) =>
         new(job.BookingId,
             job.BookingType,
             job.JobId,
             job.ProviderId,
             job.ProviderName,
+            job.ProviderProfilePhotoUrl,
             job.ServiceCategory,
             job.SubCategory,
             job.Status,
             job.ServiceDate,
+            job.CheckOutDate,
             job.StartTime,
             job.EndTime,
-            job.PetName);
+            job.PetName,
+            job.ServiceId,
+            job.ServiceItemCode,
+            new PendingJobPriceResponse(
+                job.Price?.PricePerUnit,
+                job.Price?.PriceUnit ?? PendingJobPriceUnits.PerHour,
+                job.Price?.TotalAmount,
+                job.Price?.PawfrontFee,
+                job.Price?.FeePercentage ?? 0m));
 
     private static async Task<IResult> SendMobileOtp(
         Guid petParentId,
@@ -1136,6 +1166,7 @@ internal static class PetParentEndpoints
     private static async Task<IResult> DeletePet(
         Guid petId,
         IParentPetService petService,
+        IPendingJobEnricher pendingJobEnricher,
         CancellationToken cancellationToken)
     {
         // Ownership is already enforced by RequireOwnedPet on the group — the
@@ -1149,6 +1180,19 @@ internal static class PetParentEndpoints
         catch (PetNotFoundException exception)
         {
             return ApiResults.NotFound("PetNotFound", exception.Message);
+        }
+        // Unfinished jobs block the delete. Nothing was changed — the pet is
+        // untouched — so the list goes back in the body for the parent to settle
+        // first. Same posture as the account delete: no force override.
+        catch (PetPendingJobsException exception)
+        {
+            var jobs = await pendingJobEnricher.EnrichAsync(exception.PendingJobs, cancellationToken);
+            return ApiResults.Conflict(
+                "PendingJobsExist",
+                exception.Message,
+                new PendingPetJobsResponse(
+                    exception.PetId,
+                    jobs.Select(ToPendingJobResponse).ToArray()));
         }
     }
 

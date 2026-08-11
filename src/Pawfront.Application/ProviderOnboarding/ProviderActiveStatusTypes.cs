@@ -21,13 +21,23 @@ public sealed record ActiveStatusConflictingBooking(
 /// Result of <see cref="IProviderOnboardingService.SetActiveStatusAsync"/>.
 /// Discriminated: either the flag was applied, or there are existing future
 /// confirmed bookings blocking deactivation — caller surfaces the list so the
-/// provider can move or cancel them before retrying.
+/// provider can move or cancel them, or resubmit acknowledging that they will
+/// honour them.
 /// </summary>
 public abstract record SetActiveStatusOutcome
 {
     private SetActiveStatusOutcome() { }
 
-    public sealed record Updated(Guid ProviderId, bool IsActive, DateTimeOffset UpdatedAtUtc)
+    /// <param name="HonouredBookingCount">
+    /// Future bookings the provider has just committed to serving — non-zero
+    /// only on a deactivation that carried the acknowledgement. Zero on
+    /// activation and on a deactivation with nothing outstanding.
+    /// </param>
+    public sealed record Updated(
+        Guid ProviderId,
+        bool IsActive,
+        DateTimeOffset UpdatedAtUtc,
+        int HonouredBookingCount)
         : SetActiveStatusOutcome;
 
     public sealed record BookingsExist(IReadOnlyList<ActiveStatusConflictingBooking> Bookings)

@@ -109,7 +109,17 @@ public sealed record DeleteProviderAccountResponse(
     int RetainedEventCount,
     int RetainedPaymentCount);
 
-public sealed record SetProviderActiveStatusRequest(bool IsActive);
+/// <param name="AcknowledgeExistingBookings">
+/// "Honour bookings &amp; deactivate". Omitted/false keeps the historic
+/// behaviour: a deactivation with future bookings is refused and they come back
+/// as <c>conflictingBookings</c>. True says the provider has seen that list and
+/// commits to serving those jobs — the switch flips for NEW bookings only and
+/// the existing ones carry on as normal. Ignored when activating.
+/// Carries a C# default so it stays out of the OpenAPI <c>required</c> list.
+/// </param>
+public sealed record SetProviderActiveStatusRequest(
+    bool IsActive,
+    bool AcknowledgeExistingBookings = false);
 
 public enum SetProviderActiveStatusResult
 {
@@ -130,10 +140,16 @@ public sealed record ActiveStatusConflictingBookingSummary(
     TimeOnly StartTime,
     TimeOnly EndTime);
 
+/// <param name="HonouredBookingCount">
+/// How many future bookings the provider just committed to serving — non-zero
+/// only on a deactivation that carried <c>acknowledgeExistingBookings</c>. Null
+/// on the <c>BookingsExist</c> outcome (nothing was flipped).
+/// </param>
 public sealed record SetProviderActiveStatusResponse(
     SetProviderActiveStatusResult Status,
     Guid ProviderId,
     bool? IsActive,
     DateTimeOffset? UpdatedAtUtc,
     IReadOnlyList<ActiveStatusConflictingBookingSummary>? ConflictingBookings,
-    string? WarningMessage);
+    string? WarningMessage,
+    int? HonouredBookingCount);

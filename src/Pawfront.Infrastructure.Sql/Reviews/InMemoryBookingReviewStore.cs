@@ -182,6 +182,14 @@ internal sealed class InMemoryBookingReviewStore : IBookingReviewStore, IPetPare
             Summarize(all), items, query.Skip, query.Take));
     }
 
+    public Task<IReadOnlyList<PetParentBookingRating>> ListRatingsByPetParentAsync(
+        Guid petParentId,
+        CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<PetParentBookingRating>>(
+            [.. reviews.Values
+                .Where(r => r.ReviewerType == ReviewerTypes.Parent && r.PetParentId == petParentId)
+                .Select(r => new PetParentBookingRating(r.BookingType, r.BookingId, r.Rating))]);
+
     public Task<PetParentRatingSummary> GetAsync(Guid petParentId, CancellationToken cancellationToken)
     {
         var ratings = reviews.Values

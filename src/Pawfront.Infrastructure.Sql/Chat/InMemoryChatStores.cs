@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using Pawfront.Application.Chat;
 
 namespace Pawfront.Infrastructure.Sql.Chat;
@@ -83,12 +83,158 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
         return Task.FromResult(cards);
     }
 
-    public async Task<ChatAppendResult> AppendMessageAsync(
+    /// <summary>
+    /// Phase one, mirroring <c>Chat.ReserveMessageSequence</c>: take the sequence
+    /// and record the reservation, and touch nothing a caller could observe.
+    /// </summary>
+    public Task<ChatMessageReservation> ReserveMessageAsync(
         Guid conversationId,
         ChatParticipant sender,
         Guid messageId,
+        CancellationToken cancellationToken)
+    {
+        var entry = RequireSendable(conversationId, sender);
+
+        lock (gate)
+        {
+            // The dictionary key stands in for the SQL primary key on
+            // (ConversationId, MessageId), so a duplicate id gets the original
+            // sequence back here too.
+            if (entry.Reservations.TryGetValue(messageId, out var existing))
+            {
+                return Task.FromResult(new ChatMessageReservation(
+                    conversationId,
+                    messageId,
+                    existing.Sequence,
+                    existing.ReservedAtUtc,
+                    IsReplay: true,
+                    IsCommitted: existing.IsCommitted));
+            }
+
+            var reservation = new MessageReservation(
+                ++entry.LastSequence, sender.Type, DateTimeOffset.UtcNow);
+
+            entry.Reservations[messageId] = reservation;
+
+            return Task.FromResult(new ChatMessageReservation(
+                conversationId,
+                messageId,
+                reservation.Sequence,
+                reservation.ReservedAtUtc,
+                IsReplay: false,
+                IsCommitted: false));
+        }
+    }
+
+    /// <summary>
+    /// Phase two, mirroring <c>Chat.CommitMessageAppend</c>: everything a caller
+    /// can observe, applied once and only once.
+    /// </summary>
+    public Task<ChatAppendResult> CommitMessageAsync(
+        Guid conversationId,
+        Guid messageId,
         string preview,
         CancellationToken cancellationToken)
+    {
+        var entry = conversations.TryGetValue(conversationId, out var found)
+            ? found
+            : throw new ConversationNotFoundException(conversationId);
+
+        long sequence;
+        DateTimeOffset createdAtUtc;
+        int recipientUnread;
+        bool recipientIsMuted;
+        ChatParticipantType senderType;
+
+        lock (gate)
+        {
+            if (!entry.Reservations.TryGetValue(messageId, out var reservation))
+            {
+                throw new ConversationNotFoundException(conversationId);
+            }
+
+            sequence = reservation.Sequence;
+            createdAtUtc = reservation.ReservedAtUtc;
+            senderType = reservation.SenderType;
+
+            if (!reservation.IsCommitted)
+            {
+                reservation.IsCommitted = true;
+
+                // Only when nothing newer has committed, so an out-of-order commit
+                // cannot pull the inbox card back to an older message.
+                if (!entry.Reservations.Values.Any(r => r.IsCommitted && r.Sequence > sequence))
+                {
+                    entry.LastMessageAtUtc = createdAtUtc;
+                    entry.LastMessagePreview = preview;
+                    entry.LastMessageSenderType = senderType.ToSqlValue();
+                }
+
+                var senderState = entry.StateFor(senderType);
+                if (sequence > senderState.LastReadSequence)
+                {
+                    senderState.LastReadSequence = sequence;
+                }
+
+                senderState.UnreadCount = 0;
+                entry.StateFor(senderType.Counterparty()).UnreadCount++;
+            }
+
+            var recipientState = entry.StateFor(senderType.Counterparty());
+            recipientUnread = recipientState.UnreadCount;
+            recipientIsMuted = recipientState.IsMuted;
+        }
+
+        var recipientType = senderType.Counterparty();
+        var recipientId = recipientType == ChatParticipantType.Provider
+            ? entry.ProviderId
+            : entry.PetParentId;
+
+        var isViewing = presenceStore is InMemoryChatPresenceStore inMemoryPresence
+                        && inMemoryPresence.IsViewing(recipientType, recipientId, conversationId);
+
+        _ = cancellationToken;
+
+        return Task.FromResult(new ChatAppendResult(
+            conversationId,
+            messageId,
+            sequence,
+            createdAtUtc,
+            recipientType,
+            recipientId,
+            recipientUnread,
+            isViewing,
+            recipientIsMuted,
+            // No outbox here — see the class remarks.
+            NotificationId: null,
+            RecipientTokens: [],
+            NotificationDataJson: null));
+    }
+
+    public Task ReleaseMessageReservationAsync(
+        Guid conversationId,
+        Guid messageId,
+        CancellationToken cancellationToken)
+    {
+        if (conversations.TryGetValue(conversationId, out var entry))
+        {
+            lock (gate)
+            {
+                // A committed reservation describes a real message and is never
+                // released — same rule as the procedure.
+                if (entry.Reservations.TryGetValue(messageId, out var reservation)
+                    && !reservation.IsCommitted)
+                {
+                    entry.Reservations.Remove(messageId);
+                }
+            }
+        }
+
+        _ = cancellationToken;
+        return Task.CompletedTask;
+    }
+
+    private ConversationEntry RequireSendable(Guid conversationId, ChatParticipant sender)
     {
         var entry = conversations.TryGetValue(conversationId, out var found)
             ? found
@@ -104,53 +250,7 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
             throw new ChatBlockedException();
         }
 
-        long sequence;
-        DateTimeOffset now;
-        int recipientUnread;
-        bool recipientIsMuted;
-        var recipientType = sender.Type.Counterparty();
-        var recipientId = recipientType == ChatParticipantType.Provider
-            ? entry.ProviderId
-            : entry.PetParentId;
-
-        lock (gate)
-        {
-            now = DateTimeOffset.UtcNow;
-            sequence = ++entry.LastSequence;
-            entry.LastMessageAtUtc = now;
-            entry.LastMessagePreview = preview;
-            entry.LastMessageSenderType = sender.Type.ToSqlValue();
-
-            var senderState = entry.StateFor(sender.Type);
-            senderState.LastReadSequence = sequence;
-            senderState.UnreadCount = 0;
-
-            var recipientState = entry.StateFor(recipientType);
-            recipientState.UnreadCount++;
-            recipientUnread = recipientState.UnreadCount;
-            recipientIsMuted = recipientState.IsMuted;
-        }
-
-        var isViewing = presenceStore is InMemoryChatPresenceStore inMemoryPresence
-                        && inMemoryPresence.IsViewing(recipientType, recipientId, conversationId);
-
-        _ = cancellationToken;
-        await Task.CompletedTask;
-
-        return new ChatAppendResult(
-            conversationId,
-            messageId,
-            sequence,
-            now,
-            recipientType,
-            recipientId,
-            recipientUnread,
-            isViewing,
-            recipientIsMuted,
-            // No outbox here — see the class remarks.
-            NotificationId: null,
-            RecipientTokens: [],
-            NotificationDataJson: null);
+        return entry;
     }
 
     public Task<ChatParticipantState?> MarkReadAsync(
@@ -281,6 +381,13 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
         public string? LastMessagePreview;
         public string? LastMessageSenderType;
 
+        /// <summary>
+        /// Stands in for <c>Chat.ConversationMessages</c>: the key is the client's
+        /// message id, so it enforces the same one-message-per-id rule the
+        /// primary key does against SQL. Guarded by the store's own lock.
+        /// </summary>
+        public readonly Dictionary<Guid, MessageReservation> Reservations = [];
+
         private readonly ParticipantState providerState = new();
         private readonly ParticipantState parentState = new();
 
@@ -316,6 +423,22 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
         }
     }
 
+    /// <summary>
+    /// One row of <c>Chat.ConversationMessages</c>: a sequence claimed by a
+    /// message id, and whether its send ever finished.
+    /// </summary>
+    private sealed class MessageReservation(
+        long sequence,
+        ChatParticipantType senderType,
+        DateTimeOffset reservedAtUtc)
+    {
+        public long Sequence { get; } = sequence;
+        public ChatParticipantType SenderType { get; } = senderType;
+        public DateTimeOffset ReservedAtUtc { get; } = reservedAtUtc;
+
+        public bool IsCommitted;
+    }
+
     private sealed class ParticipantState
     {
         public long LastReadSequence;
@@ -334,7 +457,7 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
 /// In-memory presence for the development configuration. Also readable by
 /// <see cref="InMemoryChatConversationStore"/>, which needs the same
 /// "is the recipient looking at this thread" answer that
-/// <c>Chat.AppendMessage</c> computes inside its transaction against SQL.
+/// <c>Chat.CommitMessageAppend</c> computes inside its transaction against SQL.
 /// </summary>
 internal sealed class InMemoryChatPresenceStore : IChatPresenceStore
 {

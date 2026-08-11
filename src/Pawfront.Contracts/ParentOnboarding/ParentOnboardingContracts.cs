@@ -166,6 +166,17 @@ public sealed record DeletePetParentAccountResponse(
 /// no id space. For a night stay <see cref="ServiceDate"/> is the check-in date
 /// and the two times are drop-off / pick-up.
 /// </summary>
+/// <param name="ProviderProfilePhotoUrl">
+/// The provider's photo — the business image for a shop / hotel / clinic, the
+/// freelancer's own image otherwise. It comes from the provider's service
+/// document rather than their profile row, so it is null when that document
+/// cannot be read (a deregistered provider), same as elsewhere.
+/// </param>
+/// <param name="CheckOutDate">
+/// The stay's checkout day, which is NOT itself a stayed night. Null for a
+/// single-day booking.
+/// </param>
+/// <param name="Price">What the job costs — see <see cref="PendingJobPriceResponse"/>.</param>
 public sealed record PendingParentJobResponse(
     Guid BookingId,
     string BookingType,
@@ -173,13 +184,50 @@ public sealed record PendingParentJobResponse(
     string JobId,
     Guid ProviderId,
     string? ProviderName,
+    string? ProviderProfilePhotoUrl,
     string ServiceCategory,
     string SubCategory,
     string Status,
     DateOnly ServiceDate,
+    DateOnly? CheckOutDate,
     TimeOnly? StartTime,
     TimeOnly? EndTime,
-    string? PetName);
+    string? PetName,
+    Guid ServiceId,
+    string? ServiceItemCode,
+    PendingJobPriceResponse Price);
+
+/// <summary>
+/// What a pending job costs, in the same shape and by the same arithmetic as the
+/// booking detail's <c>paymentDetails</c> — so the figure a parent sees while
+/// clearing a blocked delete matches the one on the job itself.
+/// </summary>
+/// <param name="PricePerUnit">
+/// The rate, frozen onto the booking when it was created (a later change by the
+/// provider never re-prices an existing job) and read live from their current
+/// offering only for older bookings that froze none. Null when neither can be
+/// resolved — an old booking whose service has since been deactivated — in which
+/// case the amounts below are null too.
+/// </param>
+/// <param name="PriceUnit">
+/// <c>PerHour</c> | <c>PerNight</c> | <c>PerService</c> | <c>PerAppointment</c> |
+/// <c>PerSession</c>. Always present, even when the amounts are not.
+/// </param>
+/// <param name="TotalAmount">
+/// The rate times the hours or nights booked for the two services billed that
+/// way; the flat fee for the rest.
+/// </param>
+/// <param name="PawfrontFee">
+/// The platform commission included in <see cref="TotalAmount"/>. Never zero-rated
+/// here the way a private walk-in is on a booking detail: every job that can block
+/// a delete belongs to a pet parent, so it is a platform booking by definition.
+/// </param>
+public sealed record PendingJobPriceResponse(
+    decimal? PricePerUnit,
+    string PriceUnit,
+    decimal? TotalAmount,
+    decimal? PawfrontFee,
+    decimal FeePercentage);
 
 /// <summary>
 /// Body of the <c>409 PendingJobsExist</c> response from
@@ -190,6 +238,17 @@ public sealed record PendingParentJobResponse(
 /// </summary>
 public sealed record PendingParentJobsResponse(
     Guid PetParentId,
+    IReadOnlyList<PendingParentJobResponse> PendingJobs);
+
+/// <summary>
+/// Body of the <c>409 PendingJobsExist</c> response from
+/// <c>DELETE /api/v1/pets/{petId}</c>. The twin of
+/// <see cref="PendingParentJobsResponse"/>, carrying the identical job shape:
+/// nothing was changed, and the listed jobs — the ones booked for THIS pet — must
+/// be cancelled or seen through first. No force override.
+/// </summary>
+public sealed record PendingPetJobsResponse(
+    Guid PetId,
     IReadOnlyList<PendingParentJobResponse> PendingJobs);
 
 public sealed record PetParentOnboardingStatusResponse(

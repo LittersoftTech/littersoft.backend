@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using Microsoft.Azure.Cosmos;
 using Pawfront.Application.Chat;
 using Pawfront.Infrastructure.Cosmos.Documents;
@@ -41,7 +41,7 @@ internal sealed class CosmosChatMessageStore(
         {
             // A concurrent duplicate that slipped past the caller's pre-check.
             // The FIRST write wins deliberately: its sequence is the one
-            // Chat.AppendMessage recorded on the conversation, so overwriting it
+            // Chat.ReserveMessageSequence assigned it, so overwriting it
             // would leave the stored message disagreeing with the thread's cache.
             var existing = await TryReadAsync(
                 container, message.ConversationId, message.MessageId, cancellationToken);
@@ -68,15 +68,32 @@ internal sealed class CosmosChatMessageStore(
         // millisecond, so a timestamp cursor could skip or repeat one.
         // Over-fetch by one to learn whether another page exists without a
         // second query or a count.
+        //
+        // The cursor predicate is APPENDED rather than written as
+        // "(@beforeSequence IS NULL OR ...)". Cosmos NoSQL has no IS NULL
+        // operator — only the IS_NULL() function — so that form is a syntax error
+        // (SC1001) the service rejects with 400 before it ever looks at the
+        // parameter. It therefore failed every history read, first page included,
+        // which is why the whole endpoint 500'd whatever the client sent.
+        // Building the clause only when there is a cursor also keeps the first
+        // page's plan a plain ranged scan.
+        var cursorClause = beforeSequence.HasValue
+            ? "AND c.sequence < @beforeSequence "
+            : string.Empty;
+
         var query = new QueryDefinition(
                 "SELECT TOP @take c.id, c.conversationId, c.sequence, c.senderType, c.senderId, " +
                 "c.kind, c.text, c.attachment, c.createdAtUtc, c.editedAtUtc, c.deletedAtUtc " +
                 "FROM c WHERE c.conversationId = @conversationId " +
-                "AND (@beforeSequence IS NULL OR c.sequence < @beforeSequence) " +
+                cursorClause +
                 "ORDER BY c.sequence DESC")
             .WithParameter("@take", take + 1)
-            .WithParameter("@conversationId", conversationId.ToString())
-            .WithParameter("@beforeSequence", beforeSequence);
+            .WithParameter("@conversationId", conversationId.ToString());
+
+        if (beforeSequence.HasValue)
+        {
+            query = query.WithParameter("@beforeSequence", beforeSequence.Value);
+        }
 
         using var iterator = container.GetItemQueryIterator<ChatMessageDocument>(
             query,

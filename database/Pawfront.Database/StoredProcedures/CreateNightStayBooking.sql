@@ -103,7 +103,10 @@ BEGIN
     -- (non-cancelled) stay on THIS service whose date range overlaps
     -- [@CheckInDate, @CheckOutDate), block it — a pet can't board in two places at
     -- once. Ranges overlap when existing.CheckInDate < @CheckOutDate AND
-    -- existing.CheckOutDate > @CheckInDate (checkout day is not a stayed night).
+    -- existing effective checkout > @CheckInDate (checkout day is not a stayed
+    -- night). The existing stay's range ends at
+    -- COALESCE([ActualCheckOutDate], [CheckOutDate]): once the pet has actually
+    -- gone home it is free to board again on the nights that were released.
     -- Enforced under UPDLOCK + HOLDLOCK so a concurrent duplicate serialises.
     IF @PetId IS NOT NULL AND EXISTS (
         SELECT 1
@@ -112,7 +115,7 @@ BEGIN
           AND [PetId] = @PetId
           AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [CheckInDate] < @CheckOutDate
-          AND [CheckOutDate] > @CheckInDate
+          AND COALESCE([ActualCheckOutDate], [CheckOutDate]) > @CheckInDate
     )
     BEGIN
         THROW 51239, 'This pet already has a booking for these dates.', 1;
@@ -120,7 +123,11 @@ BEGIN
 
     -- Per-night capacity check. Enumerate every stayed night in
     -- [@CheckInDate, @CheckOutDate) and count active bookings whose range
-    -- covers that night (existing.CheckInDate <= night < existing.CheckOutDate).
+    -- covers that night (existing.CheckInDate <= night < existing effective
+    -- checkout). A stay that ended EARLY covers nights only up to
+    -- COALESCE([ActualCheckOutDate], [CheckOutDate]), so the nights it gave back
+    -- are genuinely bookable here — matching what
+    -- [Booking].[GetNightStayOccupancy] showed the parent.
     -- UPDLOCK + HOLDLOCK serialises concurrent creates on this service so the
     -- (N+1)-th overlapping stay is rejected once a night is full.
     DECLARE @FullNight DATE;
@@ -139,7 +146,7 @@ BEGIN
         ON b.[ServiceId] = @ServiceId
        AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
        AND b.[CheckInDate] <= n.[Night]
-       AND b.[CheckOutDate] > n.[Night]
+       AND COALESCE(b.[ActualCheckOutDate], b.[CheckOutDate]) > n.[Night]
     GROUP BY n.[Night]
     HAVING COUNT(b.[NightStayBookingId]) >= @Capacity
     OPTION (MAXRECURSION 366);

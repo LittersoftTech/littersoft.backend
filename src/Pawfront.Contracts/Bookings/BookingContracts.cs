@@ -408,7 +408,12 @@ public sealed record PetDetailsSection(
 /// come from the payment ledger row and are null until that happens — cash is
 /// handed over off-platform, so nothing can be asserted about the method before
 /// the provider confirms it. A Custom walk-in never reaches PAID (off-platform,
-/// no commission), so its payout fields stay unset.</summary>
+/// no commission), so its payout fields stay unset.
+///
+/// <c>PayoutStatus</c> is 'NO_PAYOUT' — terminal — once the job ends as
+/// PARENT_NO_SHOW / PROVIDER_NO_SHOW / EXPIRED. Nobody performed and nobody
+/// owes, so 'Pending' would be claiming money is on its way that never can be.
+/// Clients should treat it as an end state, not a stage.</summary>
 public sealed record PaymentDetailsSection(
     decimal? PricePerHour,
     decimal? TotalAmount,

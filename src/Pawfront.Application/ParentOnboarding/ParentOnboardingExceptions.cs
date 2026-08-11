@@ -53,6 +53,28 @@ public sealed class PetParentPendingJobsException(
 }
 
 /// <summary>
+/// The per-pet delete was refused: this pet still has unfinished jobs. Twin of
+/// <see cref="PetParentPendingJobsException"/> and modelled the same way, for the
+/// same reason — the refusal is decided inside the SQL delete, so an exception is
+/// what carries it out without every layer in between having to thread a
+/// success-shaped result that isn't one.
+///
+/// A provider is holding a slot for this animal, or has it in their care right
+/// now; anonymising it out from under them is not something the parent can undo.
+/// </summary>
+public sealed class PetPendingJobsException(
+    Guid petId,
+    IReadOnlyList<PendingParentJob> pendingJobs)
+    : Exception(
+        $"Pet '{petId}' still has {pendingJobs.Count} unfinished job(s). " +
+        "Cancel or complete them before deleting the pet.")
+{
+    public Guid PetId { get; } = petId;
+
+    public IReadOnlyList<PendingParentJob> PendingJobs { get; } = pendingJobs;
+}
+
+/// <summary>
 /// The account has been deleted — anonymised and permanently disabled by
 /// <c>Parent.DeletePetParent</c>. Raised by the flows that would undo that
 /// (today, the profile edit). The delete is not reversible: signing up again

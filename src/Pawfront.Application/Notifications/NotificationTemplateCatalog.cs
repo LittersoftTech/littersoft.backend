@@ -189,21 +189,27 @@ public static class NotificationTemplateCatalog
             // To the PROVIDER — the parent acted (V3 cards V-U*)
             // ================================================================
 
-            // V-S1. Copy predates the V3 spec and is deliberately kept: it quotes the
-            // real accept-by deadline, which is the EARLIER of BR-17 (24h) and BR-53
-            // (2h before the service). The spec's "Respond within 24 hours" would be
-            // wrong for a same-day booking. See BookingAcceptanceDeadline.
+            // V-S1. {respondWithin} is the LENGTH of the window, not the deadline
+            // instant: it reads "24 hours" in the ordinary case and the real,
+            // shorter figure ("2 hours 15 minutes") once BR-53 has bitten, which is
+            // the distinction this card exists to make. The renderer derives it
+            // from {acceptByUtc} - {createdAtUtc} — see BookingAcceptanceDeadline
+            // for why quoting a flat 24 hours would be wrong for a same-day
+            // booking, and NotificationRenderer.WithDerivedResponseWindow for why
+            // the window is measured from creation.
             [NotificationTypes.BookingRequested] = new(
                 "New Service Booking",
-                "{petName} · {serviceDate} at {startTime}. Please accept by {acceptBy}, else the booking will be removed.",
+                "{parentName} has requested {serviceName} for {petName} on {serviceDateWithYear}. Respond within {respondWithin}.",
                 NotificationRoutes.BookingRequests,
                 Booking),
 
-            // Night-stay twin: a stay has no start time, so the "time" slot is
-            // the drop-off on the check-in day.
+            // Night-stay twin. The date is the check-in day — which is also what
+            // {serviceDateWithYear} holds, a stay's service starting at drop-off on
+            // it — so the shared key serves both and the length of the stay travels
+            // in {serviceName} ("Night Stay (3 nights)").
             [NotificationTypes.NightStayBookingRequested] = new(
                 "New Service Booking",
-                "{petName} · {checkInDate} at {dropOffTime}. Please accept by {acceptBy}, else the booking will be removed.",
+                "{parentName} has requested {serviceName} for {petName} on {serviceDateWithYear}. Respond within {respondWithin}.",
                 NotificationRoutes.BookingRequests,
                 Booking),
 

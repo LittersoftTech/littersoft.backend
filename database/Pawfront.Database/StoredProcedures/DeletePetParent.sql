@@ -84,6 +84,14 @@ BEGIN
 
     -- Unfinished jobs blocking the delete. Populated only when the parent still
     -- has some; the caller surfaces them so they can be cancelled or seen through.
+    --
+    -- The last four columns are pricing inputs, not display fields: SQL cannot
+    -- reach the Cosmos offering, so it hands over the price-locked unit rate it
+    -- DOES have (plus what is needed to turn a rate into a total) and the caller
+    -- computes the money block — falling back to the live offering for a legacy
+    -- row that froze no rate, exactly as the booking-detail read does. The
+    -- provider's photo lives in that same Cosmos document and is resolved there
+    -- too, which is why there is no photo column here.
     DECLARE @PendingJobs TABLE
     (
         [BookingId] UNIQUEIDENTIFIER NOT NULL,
@@ -97,7 +105,15 @@ BEGIN
         [ServiceDate] DATE NOT NULL,
         [StartTime] TIME(0) NULL,
         [EndTime] TIME(0) NULL,
-        [PetName] NVARCHAR(100) NULL
+        [PetName] NVARCHAR(100) NULL,
+        [ServiceId] UNIQUEIDENTIFIER NOT NULL,
+        [ServiceItemCode] NVARCHAR(64) NULL,
+        -- Checkout day of a stay (exclusive — not a stayed night); NULL for a
+        -- single-day booking, whose duration comes from Start/EndTime instead.
+        [CheckOutDate] DATE NULL,
+        -- The unit rate frozen onto the booking at creation (per hour, or per
+        -- night for a stay). NULL on a legacy row created before price-locking.
+        [SnapshotUnitPrice] DECIMAL(10, 2) NULL
     );
 
     BEGIN TRANSACTION;
@@ -144,7 +160,8 @@ BEGIN
         INSERT INTO @PendingJobs
             ([BookingId], [BookingType], [JobId], [ProviderId], [ProviderName],
              [ServiceCategory], [SubCategory], [Status], [ServiceDate],
-             [StartTime], [EndTime], [PetName])
+             [StartTime], [EndTime], [PetName], [ServiceId], [ServiceItemCode],
+             [CheckOutDate], [SnapshotUnitPrice])
         SELECT b.[BookingId],
                N'SingleDay',
                N'PF-' + FORMAT(b.[JobNumber], N'D6'),
@@ -156,7 +173,11 @@ BEGIN
                b.[BookingDate],
                b.[StartTime],
                b.[EndTime],
-               pet.[PetName]
+               pet.[PetName],
+               b.[ServiceId],
+               b.[ServiceItemCode],
+               NULL,
+               b.[PricePerHour]
         FROM [Booking].[Bookings] AS b
         LEFT JOIN [Provider].[Providers] AS pr ON pr.[ProviderId] = b.[ProviderId]
         LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = b.[PetId]
@@ -177,7 +198,11 @@ BEGIN
                n.[CheckInDate],
                n.[DropOffTime],
                n.[PickUpTime],
-               pet.[PetName]
+               pet.[PetName],
+               n.[ServiceId],
+               NULL,
+               n.[CheckOutDate],
+               n.[PricePerNight]
         FROM [Booking].[NightStayBookings] AS n
         LEFT JOIN [Provider].[Providers] AS pr ON pr.[ProviderId] = n.[ProviderId]
         LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = n.[PetId]
@@ -333,7 +358,8 @@ BEGIN
     -- one before anything else.
     SELECT [BookingId], [BookingType], [JobId], [ProviderId], [ProviderName],
            [ServiceCategory], [SubCategory], [Status], [ServiceDate],
-           [StartTime], [EndTime], [PetName]
+           [StartTime], [EndTime], [PetName], [ServiceId], [ServiceItemCode],
+           [CheckOutDate], [SnapshotUnitPrice]
     FROM @PendingJobs
     ORDER BY [ServiceDate] ASC, [StartTime] ASC;
 

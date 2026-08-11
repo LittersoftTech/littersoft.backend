@@ -15,6 +15,7 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
         BookingResult booking,
         string? serviceType,
         string? petName,
+        string? parentName,
         CancellationToken cancellationToken)
     {
         var serviceStartUtc = BookingLeadTime.ServiceStartUtc(booking.BookingDate, booking.StartTime);
@@ -24,15 +25,15 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
             [NotificationDataKeys.BookingId] = booking.BookingId.ToString(),
             [NotificationDataKeys.BookingType] = "SingleDay",
             [NotificationDataKeys.ServiceStartUtc] = NotificationLocalTime.ToIso(serviceStartUtc),
-            // Not shown in the body any more, but still handed to the app so it
-            // can label the booking in its own UI without a second lookup.
             [NotificationDataKeys.ServiceName] = BookingServiceLabel.Resolve(serviceType, booking.ServiceItemCode)
         };
 
         AddCanonicalIds(data, booking.ProviderId, booking.PetParentId, booking.PetId, isNightStay: false);
-        AddPetName(data, petName);
+        AddName(data, NotificationDataKeys.PetName, petName);
+        AddName(data, NotificationDataKeys.ParentName, parentName);
         AddAcceptByDeadline(
             data,
+            booking.CreatedAtUtc,
             BookingAcceptanceDeadline.Compute(booking.CreatedAtUtc, serviceStartUtc));
 
         return publisher.PublishAsync(
@@ -50,6 +51,7 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
     public Task NotifyNightStayBookingRequestedAsync(
         NightStayBookingResult booking,
         string? petName,
+        string? parentName,
         CancellationToken cancellationToken)
     {
         // A stay's service begins at drop-off on the check-in day — the same
@@ -63,16 +65,16 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
             [NotificationDataKeys.BookingType] = "NightStay",
             [NotificationDataKeys.ServiceStartUtc] = NotificationLocalTime.ToIso(serviceStartUtc),
             [NotificationDataKeys.CheckOutUtc] = NotificationLocalTime.ToIso(checkOutUtc),
-            // Not shown in the body any more, but still handed to the app so it
-            // can label the booking in its own UI without a second lookup.
             [NotificationDataKeys.ServiceName] =
                 BookingServiceLabel.ResolveNightStay(booking.CheckInDate, booking.CheckOutDate)
         };
 
         AddCanonicalIds(data, booking.ProviderId, booking.PetParentId, booking.PetId, isNightStay: true);
-        AddPetName(data, petName);
+        AddName(data, NotificationDataKeys.PetName, petName);
+        AddName(data, NotificationDataKeys.ParentName, parentName);
         AddAcceptByDeadline(
             data,
+            booking.CreatedAtUtc,
             BookingAcceptanceDeadline.Compute(booking.CreatedAtUtc, serviceStartUtc));
 
         return publisher.PublishAsync(
@@ -88,12 +90,22 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
     }
 
     /// <summary>
-    /// Adds the accept-by deadline as a UTC instant. The renderer turns it into the
-    /// <c>acceptBy</c> string shown in the body, in the recipient's timezone; the
-    /// instant itself also reaches the app, which needs it to run a countdown.
+    /// Adds the accept-by deadline and the booking's creation instant, both raw.
+    ///
+    /// The body quotes the LENGTH of the window ("Respond within 24 hours"), which
+    /// is the difference between the two — derived by the renderer rather than
+    /// formatted here, so a producer never ships user-facing copy. The instants
+    /// themselves also reach the app: <c>acceptByUtc</c> is what an exact live
+    /// countdown has to run off, since the rendered text is frozen at send time.
     /// </summary>
-    private static void AddAcceptByDeadline(IDictionary<string, string> data, DateTimeOffset deadlineUtc) =>
+    private static void AddAcceptByDeadline(
+        IDictionary<string, string> data,
+        DateTimeOffset createdAtUtc,
+        DateTimeOffset deadlineUtc)
+    {
+        data[NotificationDataKeys.CreatedAtUtc] = NotificationLocalTime.ToIso(createdAtUtc);
         data[NotificationDataKeys.AcceptByUtc] = NotificationLocalTime.ToIso(deadlineUtc);
+    }
 
     /// <summary>
     /// Adds the canonical id block the mobile apps read on every notification.
@@ -133,13 +145,13 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
     /// <summary>
     /// Only set the key when there is a real name — an empty value would render
     /// as a blank gap, whereas an absent one lets the renderer substitute its
-    /// "your pet" fallback.
+    /// "your pet" / "A customer" fallback.
     /// </summary>
-    private static void AddPetName(IDictionary<string, string> data, string? petName)
+    private static void AddName(IDictionary<string, string> data, string key, string? name)
     {
-        if (!string.IsNullOrWhiteSpace(petName))
+        if (!string.IsNullOrWhiteSpace(name))
         {
-            data[NotificationDataKeys.PetName] = petName.Trim();
+            data[key] = name.Trim();
         }
     }
 }

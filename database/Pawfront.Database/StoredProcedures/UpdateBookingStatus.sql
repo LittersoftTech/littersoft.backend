@@ -61,6 +61,7 @@ BEGIN
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @BookingDate DATE;
     DECLARE @StartTime TIME(0);
+    DECLARE @EndTime TIME(0);
     DECLARE @CreatedAtUtc DATETIME2(7);
 
     BEGIN TRANSACTION;
@@ -70,6 +71,7 @@ BEGIN
            @PetParentId = [PetParentId],
            @BookingDate = [BookingDate],
            @StartTime = [StartTime],
+           @EndTime = [EndTime],
            @CreatedAtUtc = [CreatedAtUtc]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
@@ -171,9 +173,44 @@ BEGIN
         END
     END
 
+    -- COMPLETED is reachable here through the legacy /status shim as well as
+    -- through [Booking].[CompleteBooking], so an early finish must release the
+    -- rest of the booked window from BOTH paths — otherwise which endpoint the
+    -- provider happened to tap would decide whether the slot came back. Same
+    -- rule and the same clamps as the dedicated sproc; see it for the reasoning.
+    DECLARE @ActualEndTime TIME(0) = NULL;
+
+    IF @NewStatus = N'COMPLETED' AND CAST(@Now AS DATE) = @BookingDate
+    BEGIN
+        DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
+        IF @NowTime < @EndTime
+        BEGIN
+            SET @ActualEndTime = CASE WHEN @NowTime < @StartTime THEN @StartTime ELSE @NowTime END;
+        END
+    END
+
     UPDATE [Booking].[Bookings]
     SET [Status] = @NewStatus,
         [UpdatedAtUtc] = @Now,
+        -- Only ever written on the COMPLETED transition; every other status
+        -- leaves whatever is there alone (it is NULL for all of them anyway,
+        -- since COMPLETED is terminal apart from the move to PAID).
+        [ActualEndTime] = CASE
+            WHEN @NewStatus = N'COMPLETED' THEN @ActualEndTime
+            ELSE [ActualEndTime]
+        END,
+        -- A no-show ends the job with nobody having performed and nobody owing,
+        -- so the payout is settled as 'NO_PAYOUT' rather than left reading
+        -- 'Pending' forever. Terminal, and safe to overwrite unconditionally
+        -- here: the from-state guards above only admit a no-show from a
+        -- confirmed-equivalent status or START_JOB, none of which can already
+        -- have been paid (PAID is only reachable from COMPLETED, and is itself
+        -- terminal). EXPIRED is settled the same way by the sweep, which is its
+        -- only writer.
+        [PayoutStatus] = CASE
+            WHEN @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW') THEN N'NO_PAYOUT'
+            ELSE [PayoutStatus]
+        END,
         [CancelledAtUtc] = CASE
             WHEN @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') THEN @Now
             ELSE [CancelledAtUtc]

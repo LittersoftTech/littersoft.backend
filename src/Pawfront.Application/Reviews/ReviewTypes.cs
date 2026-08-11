@@ -162,6 +162,20 @@ public sealed record ProviderReviewQuery(
     int Take);
 
 /// <summary>
+/// One rating a pet parent has given, identified by the booking it belongs to.
+/// Backs the <c>review</c> block on their two "my bookings" lists.
+/// </summary>
+/// <remarks>
+/// <see cref="BookingType"/> travels with <see cref="BookingId"/> because the two
+/// booking kinds live in separate tables and share no id space — the id alone
+/// cannot say which list row a rating belongs to.
+/// </remarks>
+public sealed record PetParentBookingRating(
+    string BookingType,
+    Guid BookingId,
+    int Rating);
+
+/// <summary>
 /// A pet parent's aggregate rating as given BY providers. The count travels with the
 /// average because the two together are the honest claim: "5.0" off one rating and
 /// "4.6" off forty mean very different things.

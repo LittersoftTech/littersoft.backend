@@ -221,7 +221,7 @@ internal sealed class CosmosPetTrainerServiceRegistry(
         IReadOnlyCollection<string> serviceLocations,
         IReadOnlyCollection<string> trainingApproaches,
         IReadOnlyCollection<string>? previousExperience,
-        string privateTrainingDescription)
+        string? privateTrainingDescription)
     {
         if (session is null)
         {
@@ -257,7 +257,13 @@ internal sealed class CosmosPetTrainerServiceRegistry(
             ServiceLocations = locations,
             TrainingApproaches = approaches,
             PreviousExperience = experience,
-            PrivateTrainingDescription = Required(privateTrainingDescription, nameof(privateTrainingDescription))
+            // Optional, like the descriptive fields on the basic registration
+            // (Description / AboutYou): omitted or blank stores an empty string.
+            // The two parent-facing surfaces that show it — the top-level
+            // serviceDescription on GET /providers/{providerId} and the trainers
+            // search card — already collapse blank to null, so an unwritten
+            // description is absent there rather than an empty block.
+            PrivateTrainingDescription = Trim(privateTrainingDescription) ?? string.Empty
         };
 
         return (license, offering);

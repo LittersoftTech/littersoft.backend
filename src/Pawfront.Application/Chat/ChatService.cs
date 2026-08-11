@@ -64,48 +64,85 @@ public sealed class ChatService(
         var text = NormalizeText(command.Text);
         ValidateBody(command.Kind, text, command.Attachment);
 
-        // Idempotent replay. The message id is client-supplied and is also the
-        // Cosmos document id, so a retry after a dropped response finds the
-        // original here and never reaches the sequence assignment below.
-        var existing = await messageStore.TryGetAsync(
-            command.ConversationId, command.MessageId, cancellationToken);
+        // ---- Phase 1: reserve ------------------------------------------------
+        // Authorises the sender and takes the sequence, and does NOTHING a client
+        // can observe — no preview, no unread count, no push. Those are phase 2,
+        // which runs only once the body is durable, so a send that fails at the
+        // Cosmos write leaves the thread exactly as it was.
+        //
+        // This is also where a duplicate is caught. (ConversationId, MessageId) is
+        // a primary key, so the same client id arriving twice — over the hub, over
+        // REST, or one of each — reuses the ORIGINAL sequence instead of taking a
+        // second one. It costs no extra round trip overall: this replaces the
+        // Cosmos point read that used to do the same job less reliably, since that
+        // read could not help in the one case that matters, where the Cosmos write
+        // is what failed.
+        var reservation = await conversationStore.ReserveMessageAsync(
+            command.ConversationId, command.Sender, command.MessageId, cancellationToken);
 
-        if (existing is not null)
+        if (reservation.IsCommitted)
         {
-            logger.LogDebug(
-                "Message {MessageId} already exists on conversation {ConversationId}; returning it unchanged.",
+            var replayed = await messageStore.TryGetAsync(
+                command.ConversationId, command.MessageId, cancellationToken);
+
+            if (replayed is not null)
+            {
+                logger.LogDebug(
+                    "Message {MessageId} on conversation {ConversationId} was already sent; returning it unchanged.",
+                    command.MessageId, command.ConversationId);
+
+                // No delivery envelope: the original send already did that, and
+                // repeating it would push the recipient twice for one message.
+                return new ChatSendResult(replayed, NoFurtherDelivery(replayed));
+            }
+
+            // Committed with no body: a send torn apart before the two-phase write
+            // existed. Fall through and write the body under its original sequence
+            // rather than leaving the thread with a message nobody can read.
+            logger.LogWarning(
+                "Message {MessageId} on conversation {ConversationId} is committed but has no stored body; rewriting it.",
                 command.MessageId, command.ConversationId);
-
-            // No delivery envelope: the original send already did that, and
-            // repeating it would push the recipient twice for one message.
-            return new ChatSendResult(existing, NoFurtherDelivery(existing));
         }
-
-        // SQL first: this is what assigns the sequence, and the sequence has to be
-        // on the document. The window it opens — a crash before the Cosmos write
-        // leaves a burnt sequence and a stale preview — is documented on
-        // Chat.AppendMessage, and self-heals when the client retries.
-        var append = await conversationStore.AppendMessageAsync(
-            command.ConversationId,
-            command.Sender,
-            command.MessageId,
-            BuildPreview(command.Kind, text),
-            cancellationToken);
 
         var message = new ChatMessage(
             MessageId: command.MessageId,
             ConversationId: command.ConversationId,
-            Sequence: append.Sequence,
+            Sequence: reservation.Sequence,
             SenderType: command.Sender.Type,
             SenderId: command.Sender.Id,
             Kind: command.Kind,
             Text: text,
             Attachment: command.Attachment,
-            CreatedAtUtc: append.CreatedAtUtc,
+            CreatedAtUtc: reservation.CreatedAtUtc,
             EditedAtUtc: null,
             DeletedAtUtc: null);
 
-        var stored = await messageStore.CreateAsync(message, cancellationToken);
+        ChatMessage stored;
+        try
+        {
+            stored = await messageStore.CreateAsync(message, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            // Nothing observable was ever written, so undoing the send is just
+            // freeing the reservation. Best-effort: if this fails too, a retry of
+            // the same id finds the reservation uncommitted, reuses its sequence
+            // and completes — which is the right outcome anyway.
+            await ReleaseReservationAsync(command, exception, cancellationToken);
+            throw;
+        }
+
+        // ---- Phase 2: commit -------------------------------------------------
+        // The body is durable, so the message may now become visible: inbox cache,
+        // read state, and the recipient's push. Idempotent, which is what lets a
+        // caller retry a send that died here — the retry finds the body already in
+        // Cosmos, comes straight back to this call, and finishes the delivery that
+        // was missed.
+        var append = await conversationStore.CommitMessageAsync(
+            command.ConversationId,
+            command.MessageId,
+            BuildPreview(command.Kind, text),
+            cancellationToken);
 
         // Best-effort, and deliberately after the message is durable. A socket
         // fan-out must never fail a send that is already stored — the client
@@ -127,8 +164,8 @@ public sealed class ChatService(
         }
 
         // Queue the push, if the recipient earned one. The row is already written
-        // and leased by Chat.AppendMessage, so this only decides whether it goes
-        // out in a second or in a minute — never whether it goes out at all.
+        // and leased by Chat.CommitMessageAppend, so this only decides whether it
+        // goes out in a second or in a minute — never whether it goes out at all.
         if (append.NotificationId is { } notificationId && append.RecipientTokens.Count > 0)
         {
             pushDispatcher.Enqueue(new ChatPushWorkItem(
@@ -248,6 +285,35 @@ public sealed class ChatService(
         CancellationToken cancellationToken)
     {
         return conversationStore.ListBlocksAsync(blocker, cancellationToken);
+    }
+
+    /// <summary>
+    /// Rolls back phase one after the body failed to write. Never throws: the
+    /// caller is already failing the send with the real cause, and replacing that
+    /// with a cleanup error would hide why the message did not go.
+    /// </summary>
+    private async Task ReleaseReservationAsync(
+        SendChatMessageCommand command,
+        Exception cause,
+        CancellationToken cancellationToken)
+    {
+        logger.LogError(
+            cause,
+            "Storing the body of message {MessageId} on conversation {ConversationId} failed; releasing its reservation so the send leaves no trace.",
+            command.MessageId, command.ConversationId);
+
+        try
+        {
+            await conversationStore.ReleaseMessageReservationAsync(
+                command.ConversationId, command.MessageId, cancellationToken);
+        }
+        catch (Exception releaseException)
+        {
+            logger.LogError(
+                releaseException,
+                "Could not release the reservation for message {MessageId} on conversation {ConversationId}. Harmless: a retry of the same id reuses its sequence and completes the send.",
+                command.MessageId, command.ConversationId);
+        }
     }
 
     private static string? NormalizeText(string? text)

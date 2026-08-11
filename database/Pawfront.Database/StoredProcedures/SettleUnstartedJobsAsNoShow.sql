@@ -69,6 +69,11 @@ BEGIN
     -- BookingDate and the booking's own EndTime.
     UPDATE b
     SET [Status] = CASE WHEN b.[Status] = N'START_JOB' THEN N'PARENT_NO_SHOW' ELSE N'PROVIDER_NO_SHOW' END,
+        -- Nobody performed and nobody owes, so the payout is settled terminally
+        -- rather than left reading 'Pending'. Same value the manual report writes
+        -- in Booking.UpdateBookingStatus — a settled no-show must look identical
+        -- whether a party tapped it or this job derived it.
+        [PayoutStatus] = N'NO_PAYOUT',
         [UpdatedAtUtc] = @Now
     OUTPUT inserted.[BookingId], deleted.[Status], inserted.[Status] INTO @NoShowBookings
     FROM [Booking].[Bookings] b
@@ -105,6 +110,7 @@ BEGIN
             WHEN [Status] = N'START_JOB' THEN N'PARENT_NO_SHOW'
             ELSE N'PROVIDER_NO_SHOW'
         END,
+        [PayoutStatus] = N'NO_PAYOUT',
         [UpdatedAtUtc] = @Now
     OUTPUT inserted.[NightStayBookingId], deleted.[Status], inserted.[Status] INTO @NoShowNightStays
     WHERE [Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',

@@ -1,4 +1,4 @@
-using Pawfront.Application.Chat;
+﻿using Pawfront.Application.Chat;
 using Pawfront.Application.Notifications;
 
 namespace Pawfront.ChatApi.Delivery;
@@ -7,7 +7,7 @@ namespace Pawfront.ChatApi.Delivery;
 /// Drains <see cref="ChatPushQueue"/>: render, send, report.
 ///
 /// This is the half of the instant-push design that runs in C#. The row was
-/// already written pre-claimed by <c>Chat.AppendMessage</c>, so all that is left
+/// already written pre-claimed by <c>Chat.CommitMessageAppend</c>, so all that is left
 /// is to do what the 1-minute dispatcher would have done — using the SAME
 /// renderer, the SAME payload builder and the SAME push sender, which is what
 /// stops chat notifications drifting from every other notification in the

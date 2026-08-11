@@ -1,4 +1,4 @@
-namespace Pawfront.Application.Notifications;
+﻿namespace Pawfront.Application.Notifications;
 
 /// <summary>
 /// The stable machine keys carried as <c>data.type</c> in every push. The mobile
@@ -134,7 +134,7 @@ public static class NotificationTypes
 
     /// <summary>
     /// Chat message (P-U14 / V-U5). <b>Wired 2026-08-09.</b> Enqueued by
-    /// <c>Chat.AppendMessage</c> — and only when the recipient has no live
+    /// <c>Chat.CommitMessageAppend</c> — and only when the recipient has no live
     /// connection viewing that thread, so an open chat never buzzes.
     ///
     /// Unlike every other type here it is normally sent by <c>Pawfront.ChatApi</c>
@@ -289,6 +289,15 @@ public static class NotificationDataKeys
     /// <summary>Local date of <see cref="ServiceStartUtc"/> ("5 Aug").</summary>
     public const string ServiceDate = "serviceDate";
 
+    /// <summary>
+    /// Local date of <see cref="ServiceStartUtc"/> carrying its year
+    /// ("5 Aug 2026"). Used by the two booking-request notifications, which are
+    /// the provider's decision prompt rather than a nudge about something they
+    /// already know is coming — the rest of the copy stays on the shorter
+    /// <see cref="ServiceDate"/>.
+    /// </summary>
+    public const string ServiceDateWithYear = "serviceDateWithYear";
+
     /// <summary>Local time of <see cref="ServiceStartUtc"/> ("14:00").</summary>
     public const string StartTime = "startTime";
 
@@ -317,6 +326,21 @@ public static class NotificationDataKeys
     /// countdown rather than only the rendered <see cref="AcceptBy"/> string.
     /// </summary>
     public const string AcceptByUtc = "acceptByUtc";
+
+    /// <summary>
+    /// When the booking was created, as a UTC instant. Emitted so the renderer
+    /// can derive <see cref="RespondWithin"/> — the length of the window, which
+    /// is what a provider acts on — from the same pair of instants the app has.
+    /// </summary>
+    public const string CreatedAtUtc = "createdAtUtc";
+
+    /// <summary>
+    /// How long the provider has to answer, as human copy ("24 hours",
+    /// "2 hours 15 minutes"). Derived from <see cref="AcceptByUtc"/> minus
+    /// <see cref="CreatedAtUtc"/>, so it collapses to a clean "24 hours" when
+    /// BR-17 governs and reports the real, shorter window when BR-53 does.
+    /// </summary>
+    public const string RespondWithin = "respondWithin";
     /// <summary>
     /// What was booked, as a customer-facing name — the specific grooming menu
     /// item where the category has one ("Nails Clipping"), otherwise the bookable

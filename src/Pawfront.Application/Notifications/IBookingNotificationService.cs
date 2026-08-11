@@ -22,17 +22,25 @@ public interface IBookingNotificationService
     /// booking carries no grooming menu-item code.
     /// </param>
     /// <param name="petName">The pet the booking is for; may be null/blank.</param>
+    /// <param name="parentName">
+    /// Who is asking — the provider's decision starts with this. May be
+    /// null/blank, in which case the copy falls back to "A customer".
+    /// </param>
     Task NotifyBookingRequestedAsync(
         BookingResult booking,
         string? serviceType,
         string? petName,
+        string? parentName,
         CancellationToken cancellationToken);
 
     /// <summary>
     /// Tells the provider a parent has booked a multi-night boarding stay.
     /// </summary>
+    /// <param name="petName">The pet the stay is for; may be null/blank.</param>
+    /// <param name="parentName">Who is asking; may be null/blank.</param>
     Task NotifyNightStayBookingRequestedAsync(
         NightStayBookingResult booking,
         string? petName,
+        string? parentName,
         CancellationToken cancellationToken);
 }

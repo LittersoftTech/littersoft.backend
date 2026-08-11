@@ -103,6 +103,13 @@ public interface IParentPetService
     /// (left for a future sweep). Idempotent — a second call reports
     /// <c>WasAlreadyDeleted</c> with the original timestamp. Throws
     /// <see cref="PetNotFoundException"/> when the pet row is missing.
+    ///
+    /// REFUSED while the pet still has unfinished jobs — any booking of either
+    /// kind that is neither finished nor cancelled — with
+    /// <see cref="ParentOnboarding.PetPendingJobsException"/> carrying the list.
+    /// Nothing is scrubbed in that case. Same rule and posture as the account
+    /// delete: a provider is holding a slot for this animal, or has it in their
+    /// care, and there is deliberately no force override.
     /// </summary>
     Task<DeletePetResponse> DeletePetAsync(
         Guid petId,

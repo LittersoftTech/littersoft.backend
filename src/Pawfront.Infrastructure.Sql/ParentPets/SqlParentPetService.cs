@@ -5,6 +5,7 @@ using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
 using Pawfront.Contracts.ParentPets;
 using Pawfront.Domain.Vocabularies;
+using Pawfront.Infrastructure.Sql.ParentOnboarding;
 
 namespace Pawfront.Infrastructure.Sql.ParentPets;
 
@@ -342,6 +343,8 @@ internal sealed class SqlParentPetService(
 
         try
         {
+            // Two result sets: the summary, then the unfinished jobs that refused
+            // the delete (empty on the normal path).
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
             if (!await reader.ReadAsync(cancellationToken))
@@ -349,11 +352,33 @@ internal sealed class SqlParentPetService(
                 throw new InvalidOperationException("Delete confirmation row was not returned.");
             }
 
-            return new DeletePetResponse(
+            // Read the refusal flag first: when it is set the pet was NOT touched
+            // and the timestamp on this row is meaningless.
+            var blockedByPendingJobs = reader.GetBoolean(4);
+
+            var summary = new DeletePetResponse(
                 PetId: reader.GetGuid(0),
                 PetParentId: reader.GetGuid(1),
                 DeletedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero),
                 WasAlreadyDeleted: reader.GetBoolean(3));
+
+            if (!blockedByPendingJobs)
+            {
+                return summary;
+            }
+
+            // Drain result set 2 before throwing so the reader isn't abandoned
+            // mid-stream.
+            var pendingJobs = new List<PendingParentJob>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pendingJobs.Add(PendingJobReader.Read(reader));
+                }
+            }
+
+            throw new PetPendingJobsException(petId, pendingJobs);
         }
         catch (SqlException exception) when (exception.Number == 51214)
         {

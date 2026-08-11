@@ -36,6 +36,10 @@ public static class ApplicationServiceRegistration
         services.TryAddScoped<IProviderAccountService, ProviderAccountService>();
         // The pet-parent twin — SQL + Blob only (a parent owns no Cosmos doc).
         services.TryAddScoped<IParentAccountService, ParentAccountService>();
+        // Fills in the provider photo (Cosmos) and price block on the unfinished
+        // jobs that refuse an account or per-pet delete — neither is reachable
+        // from the sproc that decides the refusal.
+        services.TryAddScoped<IPendingJobEnricher, PendingJobEnricher>();
         services.TryAddScoped<IEventService, EventService>();
         services.TryAddScoped<IEventBookingService, EventBookingService>();
         services.TryAddScoped<IProviderOfferingResolver, ProviderOfferingResolver>();
