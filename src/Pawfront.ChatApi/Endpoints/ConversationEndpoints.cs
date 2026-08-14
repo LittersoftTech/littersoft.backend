@@ -63,10 +63,20 @@ internal static class ConversationEndpoints
         // ability to block.
         .RequireRateLimiting(ChatRateLimiting.OpenConversationPolicy);
 
+        // The inbox, and its search bar — one endpoint, because searching an inbox
+        // returns inbox cards. `?search=` filters on the counterparty's name and
+        // the thread's last-message preview, both of which this read already has,
+        // so the filtered and unfiltered lists cannot page or sort differently.
+        //
+        // It is deliberately NOT full message-history search: bodies live in
+        // Cosmos partitioned by conversation, so matching every one of them would
+        // be a cross-partition scan per keystroke. That wants a search index, not
+        // a query.
         group.MapGet("/", async (
             ICurrentChatParticipant currentParticipant,
             IChatService chatService,
             CancellationToken cancellationToken,
+            string? search,
             int? skip,
             int? take) =>
         {
@@ -78,6 +88,7 @@ internal static class ConversationEndpoints
 
             var cards = await chatService.ListConversationsAsync(
                 me!.Value,
+                search,
                 skip ?? 0,
                 take ?? ChatLimits.MaxConversationPageSize,
                 cancellationToken);
@@ -119,6 +130,76 @@ internal static class ConversationEndpoints
             {
                 var detail = await chatService.GetConversationAsync(conversationId, me!.Value, cancellationToken);
                 return ApiResults.Ok(ChatMapping.ToResponse(detail));
+            }
+            catch (Exception exception)
+            {
+                return ChatMapping.ToProblem(exception);
+            }
+        });
+
+        // "Delete this chat" — for the caller ONLY. The counterparty keeps every
+        // message and their place in the thread, which is both the requirement and
+        // the only thing the storage allows: a message body is one Cosmos document
+        // read by both sides, so clearing it for one would clear it for both.
+        //
+        // Not permanent, and deliberately so. The thread leaves this caller's
+        // inbox now and comes back the moment the counterparty writes again,
+        // carrying on without the cleared history. A delete that stopped you
+        // receiving messages would not be a delete, it would be a broken
+        // conversation.
+        group.MapDelete("/{conversationId:guid}", async (
+            Guid conversationId,
+            ICurrentChatParticipant currentParticipant,
+            IChatService chatService,
+            CancellationToken cancellationToken) =>
+        {
+            var (me, failure) = await ChatMapping.ResolveAsync(currentParticipant, cancellationToken);
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            try
+            {
+                var state = await chatService.DeleteConversationAsync(
+                    conversationId, me!.Value, cancellationToken);
+
+                return ApiResults.Ok(ChatMapping.ToDeleteResponse(conversationId, state));
+            }
+            catch (Exception exception)
+            {
+                return ChatMapping.ToProblem(exception);
+            }
+        });
+
+        // The jobs behind the thread — the chat screen's "View Jobs". Works from
+        // either side: the conversation id IS the provider/parent pair, so the
+        // caller names nobody and there is nothing extra to authorise beyond the
+        // participant check every other route here makes.
+        group.MapGet("/{conversationId:guid}/bookings", async (
+            Guid conversationId,
+            ICurrentChatParticipant currentParticipant,
+            IChatService chatService,
+            CancellationToken cancellationToken,
+            int? skip,
+            int? take) =>
+        {
+            var (me, failure) = await ChatMapping.ResolveAsync(currentParticipant, cancellationToken);
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            try
+            {
+                var jobs = await chatService.GetConversationJobsAsync(
+                    conversationId,
+                    me!.Value,
+                    skip ?? 0,
+                    take ?? ChatLimits.MaxJobsPageSize,
+                    cancellationToken);
+
+                return ApiResults.Ok(ChatMapping.ToResponse(jobs));
             }
             catch (Exception exception)
             {

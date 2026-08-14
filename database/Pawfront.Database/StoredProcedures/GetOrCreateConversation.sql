@@ -116,6 +116,27 @@ BEGIN
             (@ConversationId, N'Provider', @ProviderId, @Now, @Now),
             (@ConversationId, N'PetParent', @PetParentId, @Now, @Now);
     END
+    ELSE
+    BEGIN
+        -- Re-opening a thread the caller had DELETED puts it back on their inbox.
+        -- They have deliberately navigated into it, so leaving it hidden would
+        -- mean opening a conversation you then cannot find.
+        --
+        -- [ClearedUpToSequence] is deliberately NOT reset: they deleted that
+        -- history and re-entering the room is not a request to have it back. The
+        -- thread resumes empty and fills from here — which is exactly what every
+        -- messaging app does.
+        --
+        -- Conditional, so the ordinary open (the overwhelmingly common case)
+        -- writes nothing.
+        UPDATE [Chat].[ConversationParticipants]
+        SET [DeletedAtUtc] = NULL,
+            [UpdatedAtUtc] = @Now
+        WHERE [ConversationId] = @ConversationId
+          AND [ParticipantType] = @ActorType
+          AND [ParticipantId] = @ActorId
+          AND [DeletedAtUtc] IS NOT NULL;
+    END
 
     SELECT [ConversationId],
            [ProviderId],

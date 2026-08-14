@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Events;
@@ -15,6 +15,7 @@ using Pawfront.Contracts.ParentOnboarding;
 using Pawfront.Contracts.ParentPets;
 using Pawfront.Contracts.ParentPhotos;
 using Pawfront.PetParentApi.Auth;
+using Pawfront.Contracts.Support;
 
 namespace Pawfront.PetParentApi.Endpoints;
 
@@ -60,6 +61,10 @@ internal static class PetParentEndpoints
         group.MapGet("/event-bookings", ListEventBookings);
         group.MapPost("/bookings", CreateServiceBooking);
         group.MapGet("/bookings", ListServiceBookings);
+        // Batch cancellation. Spans BOTH booking kinds — each item names its own
+        // bookingType — because "my bookings" mixes them on one screen, so a
+        // multi-select there naturally contains both.
+        group.MapPost("/bookings/bulk-cancel", BulkCancelBookings);
         // Single booking read — issues the start-OTP into the response when the
         // booking is in a startable (confirmed-equivalent) state.
         group.MapGet("/bookings/{bookingId:guid}", GetServiceBookingDetail);
@@ -455,6 +460,61 @@ internal static class PetParentEndpoints
     private static Task<IResult> ParentCancelServiceBooking(
         Guid petParentId, Guid bookingId, IBookingService s, CancellationToken ct)
         => SetParentBookingStatusAsync(petParentId, bookingId, BookingStatuses.ParentCancelled, s, ct);
+
+    /// <summary>
+    /// Cancels several of the caller's bookings — single-day and night-stay mixed
+    /// — in one call. Each one takes the ordinary cancel transition, so the party
+    /// check, the terminal / job-underway guards, the audit row, the freed
+    /// capacity and the provider's notification are all exactly as they are for a
+    /// single cancellation (a batch of five therefore sends five pushes, one per
+    /// affected provider).
+    /// </summary>
+    /// <remarks>
+    /// Always 200 for a well-formed batch: one booking being un-cancellable must
+    /// not stop the others, so the per-booking verdict is in the payload rather
+    /// than the status code. 400 only when the batch itself is unusable. The
+    /// ownership filter on this group is what restricts it to the caller's own
+    /// bookings — the parent id never comes from the body.
+    /// </remarks>
+    private static async Task<IResult> BulkCancelBookings(
+        Guid petParentId,
+        BulkCancelBookingsRequest? request,
+        IBulkBookingCancellationService bulkCancellationService,
+        CancellationToken cancellationToken)
+    {
+        if (request?.Bookings is null || request.Bookings.Count == 0)
+        {
+            return ApiResults.BadRequest("InvalidRequest", "At least one booking is required.");
+        }
+
+        try
+        {
+            var result = await bulkCancellationService.CancelAsync(
+                new BulkCancelBookingsCommand(
+                    request.Bookings
+                        .Select(b => new BulkCancelBookingItem(b.BookingId, b.BookingType))
+                        .ToList(),
+                    BookingStatusActor.Parent,
+                    petParentId,
+                    request.Note),
+                cancellationToken);
+
+            return ApiResults.Ok(ToBulkCancelResponse(result));
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static BulkCancelBookingsResponse ToBulkCancelResponse(BulkCancelBookingsResult result) =>
+        new(result.RequestedCount,
+            result.CancelledCount,
+            result.FailedCount,
+            result.Results
+                .Select(o => new BulkCancelBookingItemResponse(
+                    o.BookingId, o.BookingType, o.Cancelled, o.Status, o.CancelledAtUtc, o.ErrorCode, o.Message))
+                .ToList());
 
     /// <summary>
     /// The parent reports that the provider never showed up. Only allowed
@@ -865,6 +925,19 @@ internal static class PetParentEndpoints
                     exception.PetParentId,
                     jobs.Select(ToPendingJobResponse).ToArray()));
         }
+        // An open support ticket blocks the delete too — part of the legal hold, since
+        // anonymising one party mid-investigation would erase what the ticket is about.
+        // Unlike unfinished jobs the parent cannot clear this themselves; only support
+        // closing the ticket lifts it, which is why the message says so.
+        catch (PetParentOpenTicketsException exception)
+        {
+            return ApiResults.Conflict(
+                "OpenTicketsExist",
+                exception.Message,
+                new OpenTicketsForPetParentResponse(
+                    exception.PetParentId,
+                    [.. exception.OpenTickets.Select(SupportTicketMapping.ToResponse)]));
+        }
     }
 
     /// <summary>
@@ -1193,6 +1266,17 @@ internal static class PetParentEndpoints
                 new PendingPetJobsResponse(
                     exception.PetId,
                     jobs.Select(ToPendingJobResponse).ToArray()));
+        }
+        // An open booking incident naming this pet blocks the delete — the pet is the
+        // subject of the job under investigation. A chat incident never holds a pet.
+        catch (PetOpenTicketsException exception)
+        {
+            return ApiResults.Conflict(
+                "OpenTicketsExist",
+                exception.Message,
+                new OpenTicketsForPetResponse(
+                    exception.PetId,
+                    [.. exception.OpenTickets.Select(SupportTicketMapping.ToResponse)]));
         }
     }
 

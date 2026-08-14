@@ -86,6 +86,14 @@ BEGIN
         @NotificationType = N'BOOKING_PAID',
         @Amount = @AmountText;
 
+    -- ...and the provider's invoice (V-S14). Mirror of Booking.MarkBookingPaid.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = N'Provider',
+        @NotificationType = N'INVOICE_ISSUED',
+        @Amount = @AmountText;
+
     SELECT [NightStayBookingId],
            [ProviderId],
            [PetParentId],

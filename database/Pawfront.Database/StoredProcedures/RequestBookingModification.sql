@@ -141,12 +141,35 @@ BEGIN
         DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @ProposedStartTime),
                 CAST(@ProposedBookingDate AS DATETIME2(0)));
 
+    -- HOW LONG THE COUNTERPARTY ACTUALLY HAS. Two deadlines can end this proposal
+    -- and [Booking].[RevertExpiredModificationRequests] enforces whichever arrives
+    -- FIRST, so the notification has to quote the same one:
+    --   * the 24-hour review window   — this request + 24h
+    --   * the 2-hour pre-service cutoff — @StartsAtUtc - 2h
+    -- Telling a provider "review within 24 hours" about a booking that starts in
+    -- five hours promises a window that outlives the service; the proposal in fact
+    -- dies in three. Both readings are on the SAME clock and derived from the same
+    -- @Now the row is stamped with, so the span between them is exact whatever that
+    -- clock turns out to be — which is what keeps this honest without dragging the
+    -- product-wide UTC-vs-wall-clock question into it.
+    --
+    -- Sent as the PAIR, not a pre-computed span: the renderer owns user-facing copy
+    -- (see NotificationDuration), and the app gets the deadline instant for a live
+    -- countdown, which frozen text could never give it.
+    DECLARE @RequestedAtUtc DATETIME2(0) = @Now;
+    DECLARE @ReviewByUtc DATETIME2(0) =
+        CASE WHEN DATEADD(HOUR, 24, @Now) < DATEADD(HOUR, -2, @StartsAtUtc)
+             THEN DATEADD(HOUR, 24, @Now)
+             ELSE DATEADD(HOUR, -2, @StartsAtUtc) END;
+
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @BookingId,
         @IsNightStay = 0,
         @Audience = @ReqAudience,
         @NotificationType = @ReqType,
         @NewServiceStartUtc = @ProposedStartUtc,
+        @ReviewByUtc = @ReviewByUtc,
+        @RequestedAtUtc = @RequestedAtUtc,
         @DedupeSuffix = @ReqDedupe;
 
     SELECT [BookingId],

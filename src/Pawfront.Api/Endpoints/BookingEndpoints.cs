@@ -1,4 +1,4 @@
-using Pawfront.Application.Bookings;
+﻿using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Reviews;
 using Pawfront.Application.Storage;
@@ -14,6 +14,10 @@ internal static class BookingEndpoints
         providerScoped.MapPost("/", CreateBooking);
         providerScoped.MapPost("/custom", CreateCustomBooking);
         providerScoped.MapGet("/", ListByProvider);
+        // Batch cancellation. Lives on the single-day group but spans BOTH kinds —
+        // each item names its own bookingType — because the provider's selection
+        // comes off one screen that mixes them.
+        providerScoped.MapPost("/bulk-cancel", BulkCancelBookings);
         // Legacy generic status setter — kept as a back-compat shim. The discrete
         // per-transition endpoints below are the preferred surface.
         providerScoped.MapPost("/{bookingId:guid}/status", UpdateStatus);
@@ -316,6 +320,59 @@ internal static class BookingEndpoints
             return ApiResults.Conflict("BookingAlreadyCancelled", exception.Message);
         }
     }
+
+    /// <summary>
+    /// Cancels several of this provider's bookings — single-day and night-stay
+    /// mixed — in one call. Each one takes the ordinary cancel transition, so the
+    /// party check, the terminal / job-underway guards, the audit row, the freed
+    /// capacity and the parent's notification are all exactly as they are for a
+    /// single cancellation (a batch of five therefore sends five pushes, one per
+    /// affected parent).
+    /// </summary>
+    /// <remarks>
+    /// Always 200 for a well-formed batch: one booking being un-cancellable must
+    /// not stop the others, so the per-booking verdict is in the payload rather
+    /// than the status code. 400 only when the batch itself is unusable.
+    /// </remarks>
+    private static async Task<IResult> BulkCancelBookings(
+        Guid providerId,
+        BulkCancelBookingsRequest? request,
+        IBulkBookingCancellationService bulkCancellationService,
+        CancellationToken cancellationToken)
+    {
+        if (request?.Bookings is null || request.Bookings.Count == 0)
+        {
+            return ApiResults.BadRequest("InvalidRequest", "At least one booking is required.");
+        }
+
+        try
+        {
+            var result = await bulkCancellationService.CancelAsync(
+                new BulkCancelBookingsCommand(
+                    request.Bookings
+                        .Select(b => new BulkCancelBookingItem(b.BookingId, b.BookingType))
+                        .ToList(),
+                    BookingStatusActor.Provider,
+                    providerId,
+                    request.Note),
+                cancellationToken);
+
+            return ApiResults.Ok(ToBulkCancelResponse(result));
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static BulkCancelBookingsResponse ToBulkCancelResponse(BulkCancelBookingsResult result) =>
+        new(result.RequestedCount,
+            result.CancelledCount,
+            result.FailedCount,
+            result.Results
+                .Select(o => new BulkCancelBookingItemResponse(
+                    o.BookingId, o.BookingType, o.Cancelled, o.Status, o.CancelledAtUtc, o.ErrorCode, o.Message))
+                .ToList());
 
     private static async Task<IResult> UpdateStatus(
         Guid providerId,

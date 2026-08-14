@@ -48,15 +48,20 @@
 -- re-running on an already-deleted parent is a no-op that returns the original
 -- DeletedAtUtc (@WasAlreadyDeleted = 1) instead of churning new values.
 --
--- Returns three result sets, since SQL cannot reach Blob Storage:
+-- Returns four result sets, since SQL cannot reach Blob Storage:
 --   1. summary — PetParentId, DeletedAtUtc, WasAlreadyDeleted, the number of pets
 --                anonymised + retained counts (the retained counts document, in
 --                the response, that history survived), plus BlockedByPendingJobs
+--                and BlockedByOpenTickets
 --   2. blob URLs — profile photo, parent gallery, identity document, pet profile
 --      photos and pet galleries. Booking evidence and event banners are NOT
 --      returned: those belong to records that are being kept.
 --   3. pending jobs — empty unless BlockedByPendingJobs = 1, in which case
 --      NOTHING was scrubbed and result sets 1 and 2 describe an untouched account.
+--   4. open support tickets — empty unless BlockedByOpenTickets = 1, same
+--      all-or-nothing meaning. Either flag alone refuses the delete, and both are
+--      collected on the same pass so the caller can report everything outstanding
+--      at once rather than one blocker at a time.
 --
 -- THROW 51223 = pet parent not found (account delete).
 CREATE OR ALTER PROCEDURE [Parent].[DeletePetParent]
@@ -74,6 +79,20 @@ BEGIN
     DECLARE @WasAlreadyDeleted BIT = 0;
     DECLARE @AnonymisedPetCount INT = 0;
     DECLARE @BlockedByPendingJobs BIT = 0;
+    DECLARE @BlockedByOpenTickets BIT = 0;
+
+    -- Open support tickets blocking the delete. Only the identifying columns: the
+    -- narrative lives in the ticket's Cosmos document and the caller is being told
+    -- "settle these first", not being shown the case.
+    DECLARE @OpenTickets TABLE
+    (
+        [TicketId] UNIQUEIDENTIFIER NOT NULL,
+        [TicketNumber] INT NOT NULL,
+        [TicketType] NVARCHAR(24) NOT NULL,
+        [RaisedByType] NVARCHAR(16) NOT NULL,
+        [Status] NVARCHAR(48) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+    );
 
     -- Captured before the scrub so the caller can clean Blob Storage.
     DECLARE @BlobUrls TABLE
@@ -216,10 +235,31 @@ BEGIN
         BEGIN
             SET @BlockedByPendingJobs = 1;
         END
+
+        -- An open support ticket refuses the delete too — part of the legal hold.
+        -- Anonymising a party mid-investigation destroys the account support is
+        -- still asking questions of, and unlike the pending-job refusal there is
+        -- nothing the parent can do to clear it themselves: it lifts when the
+        -- ticket closes.
+        --
+        -- Collected even when jobs already block, so the response names EVERYTHING
+        -- standing in the way. Discovering the ticket only after cancelling every
+        -- booking would be a second dead end.
+        INSERT INTO @OpenTickets
+            ([TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc])
+        SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
+        FROM [Support].[Tickets]
+        WHERE [PetParentId] = @PetParentId
+          AND [Status] <> N'CLOSED';
+
+        IF EXISTS (SELECT 1 FROM @OpenTickets)
+        BEGIN
+            SET @BlockedByOpenTickets = 1;
+        END
     END
 
     -- Everything below only runs when the account is live AND unblocked.
-    IF @IsDeleted = 0 AND @BlockedByPendingJobs = 0
+    IF @IsDeleted = 0 AND @BlockedByPendingJobs = 0 AND @BlockedByOpenTickets = 0
     BEGIN
         INSERT INTO @BlobUrls ([BlobUrl], [Kind])
         SELECT [ProfilePhotoUrl], N'ParentProfilePhoto'
@@ -348,7 +388,11 @@ BEGIN
            (SELECT COUNT(*) FROM [Event].[Events] WHERE [PetParentId] = @PetParentId)
                AS [RetainedEventCount],
            (SELECT COUNT(*) FROM [Booking].[BookingPayments] WHERE [PetParentId] = @PetParentId)
-               AS [RetainedPaymentCount];
+               AS [RetainedPaymentCount],
+           -- Appended LAST on purpose: inserting it next to BlockedByPendingJobs,
+           -- where it reads better, would shift every retained-count ordinal and
+           -- break a reader deployed against the older procedure.
+           @BlockedByOpenTickets AS [BlockedByOpenTickets];
 
     -- Result set 2: blob URLs to delete best-effort.
     SELECT [BlobUrl], [Kind] FROM @BlobUrls;
@@ -362,6 +406,13 @@ BEGIN
            [CheckOutDate], [SnapshotUnitPrice]
     FROM @PendingJobs
     ORDER BY [ServiceDate] ASC, [StartTime] ASC;
+
+    -- Result set 4: the open support tickets that refused the delete. Empty on the
+    -- normal path. Oldest-first — the one that has been waiting longest is the one
+    -- to chase.
+    SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
+    FROM @OpenTickets
+    ORDER BY [CreatedAtUtc] ASC;
 
     COMMIT TRANSACTION;
 END;

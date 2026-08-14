@@ -1,10 +1,11 @@
-using System.Data;
+﻿using System.Data;
 using System.Globalization;
 using System.Security.Cryptography;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Contracts.ProviderOnboarding;
+using Pawfront.Infrastructure.Sql.Support;
 
 namespace Pawfront.Infrastructure.Sql.ProviderOnboarding;
 
@@ -185,14 +186,21 @@ internal sealed class SqlProviderOnboardingService(
 
         try
         {
-            // Three result sets: summary, Cosmos listing partition keys, blob
-            // URLs. See the sproc's header for what is retained vs cleared.
+            // Four result sets: summary, Cosmos listing partition keys, blob URLs,
+            // then the open support tickets that refused the delete. See the sproc's
+            // header for what is retained vs cleared.
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
             if (!await reader.ReadAsync(cancellationToken))
             {
                 throw new InvalidOperationException("Provider delete summary was not returned.");
             }
+
+            // Read the refusal flag before anything else: when it is set the account
+            // was NOT touched and the rest of this row is meaningless. It is ordinal
+            // 8 because the sproc appends it LAST, deliberately, so the
+            // retained-count ordinals below did not shift.
+            var blockedByOpenTickets = reader.GetBoolean(8);
 
             var summary = new DeleteProviderAccountResponse(
                 reader.GetGuid(0),
@@ -220,6 +228,17 @@ internal sealed class SqlProviderOnboardingService(
                 {
                     blobUrls.Add(reader.GetString(0));
                 }
+            }
+
+            // Result set 4 only carries rows on the refusal path, but is drained
+            // either way so the reader isn't abandoned mid-stream.
+            var openTickets = await reader.NextResultAsync(cancellationToken)
+                ? await BlockingSupportTicketReader.ReadAllAsync(reader, cancellationToken)
+                : [];
+
+            if (blockedByOpenTickets)
+            {
+                throw new ProviderOpenTicketsException(providerId, openTickets);
             }
 
             return new ProviderAccountDeletionResult(summary, serviceCategories, blobUrls);

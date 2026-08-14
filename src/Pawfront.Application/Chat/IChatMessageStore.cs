@@ -30,9 +30,19 @@ public interface IChatMessageStore
     /// A page of history, newest first, ending just before
     /// <paramref name="beforeSequence"/> (null starts at the newest).
     /// </summary>
+    /// <param name="afterSequence">
+    /// An EXCLUSIVE floor: nothing at or below it is returned. This is the
+    /// caller's "delete chat" watermark, and it has to be applied here rather than
+    /// by the caller, because filtering a page after the fact would return short
+    /// pages and a cursor that walks into cleared history forever.
+    ///
+    /// 0 — the value for anyone who has never cleared the thread — filters
+    /// nothing, since sequences start at 1.
+    /// </param>
     Task<ChatMessagePage> ListAsync(
         Guid conversationId,
         long? beforeSequence,
+        long afterSequence,
         int take,
         CancellationToken cancellationToken);
 

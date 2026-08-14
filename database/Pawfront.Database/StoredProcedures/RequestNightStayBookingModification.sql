@@ -141,6 +141,16 @@ BEGIN
         DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PickUpTime),
                 CAST(@ProposedCheckOutDate AS DATETIME2(0)));
 
+    -- How long the counterparty actually has, as the pair of readings the renderer
+    -- turns into a length. Mirror of Booking.RequestBookingModification — see the
+    -- note there for why a flat "24 hours" is wrong; the only difference is that a
+    -- stay's service starts at drop-off on the check-in day.
+    DECLARE @RequestedAtUtc DATETIME2(0) = @Now;
+    DECLARE @ReviewByUtc DATETIME2(0) =
+        CASE WHEN DATEADD(HOUR, 24, @Now) < DATEADD(HOUR, -2, @StartsAtUtc)
+             THEN DATEADD(HOUR, 24, @Now)
+             ELSE DATEADD(HOUR, -2, @StartsAtUtc) END;
+
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @NightStayBookingId,
         @IsNightStay = 1,
@@ -148,6 +158,8 @@ BEGIN
         @NotificationType = @ReqType,
         @NewServiceStartUtc = @ProposedStartUtc,
         @NewCheckOutUtc = @ProposedCheckOutUtc,
+        @ReviewByUtc = @ReviewByUtc,
+        @RequestedAtUtc = @RequestedAtUtc,
         @DedupeSuffix = @ReqDedupe;
 
     SELECT [NightStayBookingId],

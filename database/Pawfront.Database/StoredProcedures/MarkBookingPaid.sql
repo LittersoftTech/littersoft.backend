@@ -100,6 +100,22 @@ BEGIN
         @NotificationType = N'BOOKING_PAID',
         @Amount = @AmountText;
 
+    -- ...and the PROVIDER gets their invoice (V-S14). This is the moment it is
+    -- settled: the job is COMPLETED, the cash is recorded, the payout above just
+    -- flipped to 'Paid'. Both parties are notified because both did something —
+    -- the relevance rule that suppresses a notification about your own action does
+    -- not apply when the action closes out the other side's money too.
+    --
+    -- Same amount text as the receipt, from the ledger row rather than a second
+    -- derivation: a provider's invoice and a parent's receipt for one payment
+    -- disagreeing about the figure would be the worst possible bug here.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = N'Provider',
+        @NotificationType = N'INVOICE_ISSUED',
+        @Amount = @AmountText;
+
     SELECT [BookingId],
            [ProviderId],
            [PetParentId],

@@ -59,6 +59,7 @@ internal sealed class CosmosChatMessageStore(
     public async Task<ChatMessagePage> ListAsync(
         Guid conversationId,
         long? beforeSequence,
+        long afterSequence,
         int take,
         CancellationToken cancellationToken)
     {
@@ -81,11 +82,25 @@ internal sealed class CosmosChatMessageStore(
             ? "AND c.sequence < @beforeSequence "
             : string.Empty;
 
+        // The reader's own "delete chat" watermark, appended for the same reason
+        // and in the same way as the cursor: built only when it bites, so the
+        // ordinary read (afterSequence 0 — nobody has cleared anything) keeps a
+        // plain ranged plan, and never written with an IS NULL comparison, which
+        // Cosmos NoSQL has no operator for.
+        //
+        // It belongs in the QUERY, not in a filter over the results: removing
+        // rows afterwards would return short pages and hand back a cursor that
+        // walks down through cleared history one empty page at a time.
+        var clearedClause = afterSequence > 0
+            ? "AND c.sequence > @afterSequence "
+            : string.Empty;
+
         var query = new QueryDefinition(
                 "SELECT TOP @take c.id, c.conversationId, c.sequence, c.senderType, c.senderId, " +
                 "c.kind, c.text, c.attachment, c.createdAtUtc, c.editedAtUtc, c.deletedAtUtc " +
                 "FROM c WHERE c.conversationId = @conversationId " +
                 cursorClause +
+                clearedClause +
                 "ORDER BY c.sequence DESC")
             .WithParameter("@take", take + 1)
             .WithParameter("@conversationId", conversationId.ToString());
@@ -93,6 +108,11 @@ internal sealed class CosmosChatMessageStore(
         if (beforeSequence.HasValue)
         {
             query = query.WithParameter("@beforeSequence", beforeSequence.Value);
+        }
+
+        if (afterSequence > 0)
+        {
+            query = query.WithParameter("@afterSequence", afterSequence);
         }
 
         using var iterator = container.GetItemQueryIterator<ChatMessageDocument>(

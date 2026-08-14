@@ -27,6 +27,21 @@ public interface IChatRealtimePublisher
         int recipientUnreadCount,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Tells everyone on the thread that a message has been retracted, so the
+    /// other side's open conversation stops showing it.
+    ///
+    /// The counterpart to <see cref="PublishMessageAsync"/>, and needed for the
+    /// same reason: without it a deleted message stays on the recipient's screen
+    /// until they next re-fetch, which for a delete is the one outcome that
+    /// matters. The counterparty's personal group is notified too, because the
+    /// inbox preview may have become "This message was deleted".
+    /// </summary>
+    Task PublishMessageDeletedAsync(
+        ChatMessage message,
+        ChatParticipant counterparty,
+        CancellationToken cancellationToken);
+
     /// <summary>Tells the counterparty how far the caller has now read.</summary>
     Task PublishReadAsync(
         Guid conversationId,
@@ -68,6 +83,19 @@ public sealed class NullChatRealtimePublisher(ILogger<NullChatRealtimePublisher>
         logger.LogDebug(
             "No realtime publisher is registered; message {MessageId} on conversation {ConversationId} " +
             "was stored but not pushed over a socket.",
+            message.MessageId, message.ConversationId);
+
+        return Task.CompletedTask;
+    }
+
+    public Task PublishMessageDeletedAsync(
+        ChatMessage message,
+        ChatParticipant counterparty,
+        CancellationToken cancellationToken)
+    {
+        logger.LogDebug(
+            "No realtime publisher is registered; the retraction of message {MessageId} on conversation " +
+            "{ConversationId} was stored but not pushed over a socket.",
             message.MessageId, message.ConversationId);
 
         return Task.CompletedTask;

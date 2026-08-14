@@ -108,10 +108,14 @@ public static class NotificationTemplateCatalog
                 NotificationRoutes.BookingDetail,
                 Booking),
 
-            // P-U4
+            // P-U4. {reviewWithin} is the LENGTH of the window, not a fixed 24
+            // hours: a proposal dies at the EARLIER of its 24-hour review window
+            // and the 2-hour pre-service cutoff, so on a short-notice booking the
+            // real figure is "3 hours 20 minutes". Same treatment, and the same
+            // reasoning, as {respondWithin} on the booking-request card.
             [NotificationTypes.BookingModificationRequestedByProvider] = new(
                 "Provider requested a modification",
-                "{providerName} has proposed a new timing for {petName}'s {serviceName} booking. Review it within 24 hours.",
+                "{providerName} has proposed a new timing for {petName}'s {serviceName} booking. Review it within {reviewWithin}.",
                 NotificationRoutes.BookingModification,
                 Booking),
 
@@ -228,10 +232,10 @@ public static class NotificationTemplateCatalog
                 NotificationRoutes.IgnoredJobs,
                 Booking),
 
-            // V-U2
+            // V-U2. See the note on the provider-side twin above for {reviewWithin}.
             [NotificationTypes.BookingModificationRequestedByParent] = new(
                 "Customer requested a modification",
-                "{parentName} has proposed a new timing for {petName}'s {serviceName}. Review it within 24 hours.",
+                "{parentName} has proposed a new timing for {petName}'s {serviceName}. Review it within {reviewWithin}.",
                 NotificationRoutes.BookingModification,
                 Booking),
 
@@ -366,9 +370,10 @@ public static class NotificationTemplateCatalog
                 NotificationRoutes.Conversation,
                 NotificationCategories.Messaging),
 
-            // P-S16 / V-S14. No invoicing exists. {issuedBy} is what differs
-            // between the two apps: the provider's name on the parent's copy,
-            // "Littersoft / Pawfront" on the provider's — so one template serves both.
+            // P-S16. The PARENT's half is still contract-only — there is no
+            // invoicing module to issue them a document. The PROVIDER's half
+            // (V-S14) IS wired, off the mark-paid transition; see the override
+            // below, which is also where its route diverges.
             [NotificationTypes.InvoiceIssued] = new(
                 "Invoice ready",
                 "Your invoice {invoiceId} for {petName}'s {serviceName} is ready. Issued by {issuedBy} · {amount}. Tap to view.",
@@ -466,6 +471,24 @@ public static class NotificationTemplateCatalog
                 [(NotificationTypes.BookingModificationExpired, NotificationAudience.PetParent)] = new(
                     "Modification request expired",
                     "Your modification request for {petName}'s {serviceName} has expired — modifications close 2 hours before the service is due. Your booking stays as originally scheduled: {serviceDate} at {startTime}.",
+                    NotificationRoutes.BookingDetail,
+                    Booking),
+
+                // V-S14 — the provider confirmed the cash, so their invoice for the
+                // job is settled. Enqueued by Booking.MarkBookingPaid and its
+                // night-stay twin, alongside the parent's BOOKING_PAID receipt.
+                //
+                // TWO things differ from the shared template, and both are the
+                // reason this override exists rather than a second type. The ROUTE
+                // goes to the booking, not /invoices/detail: there is no invoicing
+                // module and therefore no document to open, and the spec asks for
+                // the job's summary anyway. And the COPY drops {invoiceId} —
+                // {payoutId} is the reference this booking actually carries, minted
+                // at COMPLETED, so quoting it means the notification names something
+                // the provider can find.
+                [(NotificationTypes.InvoiceIssued, NotificationAudience.Provider)] = new(
+                    "Invoice issued",
+                    "Your invoice for {petName}'s {serviceName} is settled — {amount} received in cash from {parentName}. Tap to view the booking summary.",
                     NotificationRoutes.BookingDetail,
                     Booking)
             };

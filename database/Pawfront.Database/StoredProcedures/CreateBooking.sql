@@ -67,6 +67,11 @@ BEGIN
         THROW 51060, 'Pet parent was not found.', 1;
     END
 
+    -- No block check here, deliberately. A support ticket does not sever the pair
+    -- — reporting somebody is a report to support, not a sanction — and a plain
+    -- user block is what it has always been, a CHAT remedy, so somebody who muted
+    -- a conversation does not silently lose the ability to book.
+    --
     -- Defense-in-depth: the API validates pet ownership before calling, but a
     -- direct sproc caller must not be able to pin someone else's pet on a booking.
     IF @PetId IS NOT NULL AND NOT EXISTS (

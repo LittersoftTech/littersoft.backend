@@ -70,6 +70,9 @@ BEGIN
         THROW 51232, 'Pet parent was not found.', 1;
     END
 
+    -- No block check here, mirroring [Booking].[CreateBooking] — see there for why
+    -- neither a report nor a user block stands between these two and a booking.
+    --
     -- Defense-in-depth: the API validates pet ownership before calling, but a
     -- direct sproc caller must not be able to pin someone else's pet on a stay.
     IF @PetId IS NOT NULL AND NOT EXISTS (

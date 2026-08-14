@@ -44,6 +44,34 @@ CREATE TABLE [Chat].[ConversationParticipants]
     [IsMuted] BIT NOT NULL
         CONSTRAINT [DF_ConversationParticipants_IsMuted] DEFAULT 0,
 
+    -- "Delete this chat", for THIS side only.
+    --
+    -- Message bodies are shared: one Cosmos document per message, read by both
+    -- parties. So one participant clearing their copy can only ever be a
+    -- WATERMARK — everything at or below this sequence is hidden from this side's
+    -- history, while the counterparty's thread is untouched. That is exactly the
+    -- requirement ("if the parent deletes the chat it is deleted for the parent,
+    -- not the provider"), and it is also the only thing shared storage permits.
+    --
+    -- Same anonymise-rather-than-remove rule the account, pet and message deletes
+    -- follow: nothing is destroyed, one side simply stops seeing it.
+    [ClearedUpToSequence] BIGINT NOT NULL
+        CONSTRAINT [DF_ConversationParticipants_ClearedUpToSequence] DEFAULT 0,
+
+    -- When this side last cleared the thread; NULL means they never have.
+    --
+    -- Load-bearing beyond being an audit stamp: it is what distinguishes a
+    -- cleared thread from a brand-new one. Both have
+    -- ClearedUpToSequence >= LastSequence (0 >= 0 on a thread nobody has spoken
+    -- in yet), so the watermark alone would hide a conversation the moment it was
+    -- opened. The inbox hides a thread only when this is set AND the watermark
+    -- still covers the last message — which is also what makes a cleared thread
+    -- come BACK the instant the counterparty writes again, since their message
+    -- pushes LastSequence past it. Without that, one side deleting a chat would
+    -- silently stop them receiving from the other, which is not a delete but a
+    -- broken conversation.
+    [DeletedAtUtc] DATETIME2(7) NULL,
+
     [CreatedAtUtc] DATETIME2(7) NOT NULL
         CONSTRAINT [DF_ConversationParticipants_CreatedAtUtc] DEFAULT SYSUTCDATETIME(),
     [UpdatedAtUtc] DATETIME2(7) NOT NULL

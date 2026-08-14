@@ -47,6 +47,13 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
                 entry = new ConversationEntry(Guid.NewGuid(), providerId, petParentId, DateTimeOffset.UtcNow);
                 conversations[entry.ConversationId] = entry;
             }
+            else
+            {
+                // Re-opening a thread the caller had cleared puts it back on their
+                // inbox, exactly as the procedure does. The watermark stays: they
+                // deleted that history and walking back in is not a request for it.
+                entry.StateFor(actor.Type).DeletedAtUtc = null;
+            }
 
             return Task.FromResult(entry.ToDetail(actor));
         }
@@ -63,12 +70,21 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
 
     public Task<IReadOnlyList<ChatConversationCard>> ListAsync(
         ChatParticipant participant,
+        string? search,
         int skip,
         int take,
         CancellationToken cancellationToken)
     {
         IReadOnlyList<ChatConversationCard> cards = conversations.Values
             .Where(c => c.Involves(participant))
+            // Mirrors the procedure's visibility rule: a thread this side has
+            // cleared stays hidden until the counterparty writes again.
+            .Where(c => !c.StateFor(participant.Type).IsCleared(c.LastSequence))
+            // Only the preview is searchable here — this store cannot see the
+            // profile tables, so it has no counterparty name to match on (the same
+            // gap that leaves the card unnamed). Against SQL both are matched.
+            .Where(c => string.IsNullOrWhiteSpace(search)
+                        || (c.LastMessagePreview?.Contains(search, StringComparison.OrdinalIgnoreCase) ?? false))
             .OrderByDescending(c => c.LastMessageAtUtc ?? DateTimeOffset.MinValue)
             .ThenByDescending(c => c.ConversationId)
             .Skip(skip)
@@ -81,6 +97,40 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
             .ToList();
 
         return Task.FromResult(cards);
+    }
+
+    public Task<ChatParticipantState?> DeleteForParticipantAsync(
+        Guid conversationId,
+        ChatParticipant participant,
+        CancellationToken cancellationToken)
+    {
+        var entry = Find(conversationId, participant);
+        if (entry is null)
+        {
+            return Task.FromResult<ChatParticipantState?>(null);
+        }
+
+        lock (gate)
+        {
+            var state = entry.StateFor(participant.Type);
+
+            state.ClearedUpToSequence = entry.LastSequence;
+            state.DeletedAtUtc = DateTimeOffset.UtcNow;
+            state.UnreadCount = 0;
+            if (state.LastReadSequence < entry.LastSequence)
+            {
+                state.LastReadSequence = entry.LastSequence;
+            }
+
+            return Task.FromResult<ChatParticipantState?>(new ChatParticipantState(
+                participant.Type,
+                participant.Id,
+                state.LastReadSequence,
+                state.UnreadCount,
+                state.IsMuted,
+                state.ClearedUpToSequence,
+                state.DeletedAtUtc));
+        }
     }
 
     /// <summary>
@@ -226,6 +276,29 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
                     && !reservation.IsCommitted)
                 {
                     entry.Reservations.Remove(messageId);
+                }
+            }
+        }
+
+        _ = cancellationToken;
+        return Task.CompletedTask;
+    }
+
+    public Task RefreshDeletedMessagePreviewAsync(
+        Guid conversationId,
+        long sequence,
+        string preview,
+        CancellationToken cancellationToken)
+    {
+        if (conversations.TryGetValue(conversationId, out var entry))
+        {
+            lock (gate)
+            {
+                // Same guard as the procedure: only while this is still the last
+                // message, so a send that raced the delete keeps its preview.
+                if (entry.LastSequence == sequence)
+                {
+                    entry.LastMessagePreview = preview;
                 }
             }
         }
@@ -411,7 +484,9 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
 
             return new ChatConversationDetail(
                 conversation,
-                new ChatParticipantState(me.Type, me.Id, state.LastReadSequence, state.UnreadCount, state.IsMuted),
+                new ChatParticipantState(
+                    me.Type, me.Id, state.LastReadSequence, state.UnreadCount, state.IsMuted,
+                    state.ClearedUpToSequence, state.DeletedAtUtc),
                 // No name: this store cannot see the profile tables, so the
                 // counterparty is identified but unnamed. Against SQL it is a live
                 // join, which is what makes deleted accounts read "Deleted User".
@@ -443,6 +518,19 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
     {
         public long LastReadSequence;
         public int UnreadCount;
+
+        // "Delete chat", this side only. See the column comments on
+        // [Chat].[ConversationParticipants] for why both are needed.
+        public long ClearedUpToSequence;
+        public DateTimeOffset? DeletedAtUtc;
+
+        /// <summary>
+        /// Hidden from this side's inbox: they cleared it, and nothing has been
+        /// said since. The same two-part test the procedure makes — the watermark
+        /// alone would hide a brand-new thread, where both are 0.
+        /// </summary>
+        public bool IsCleared(long lastSequence) =>
+            DeletedAtUtc is not null && lastSequence <= ClearedUpToSequence;
 
         // Read by the append path (a muted thread queues no push) but never
         // written anywhere: muting is modelled end to end — column, procedures,

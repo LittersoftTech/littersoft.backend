@@ -62,6 +62,9 @@ api.MapParentSpendEndpoints();
 // Parent reviews a provider after a finished booking (rating + comment + photos),
 // plus the public read of a provider's reviews.
 api.MapParentReviewEndpoints();
+// Support tickets: "Report Incident" on a booking and "Report Chat" on a
+// conversation. One open ticket per subject; reporting does not block anybody.
+api.MapParentSupportTicketEndpoints();
 api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapNightStayBookingEndpoints();

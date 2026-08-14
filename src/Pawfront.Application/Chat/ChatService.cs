@@ -1,4 +1,7 @@
 using Microsoft.Extensions.Logging;
+using Pawfront.Application.Bookings;
+using Pawfront.Application.ParentOnboarding;
+using Pawfront.Application.Providers;
 
 namespace Pawfront.Application.Chat;
 
@@ -12,9 +15,21 @@ public sealed class ChatService(
     IChatMessageStore messageStore,
     IChatRealtimePublisher realtimePublisher,
     IChatPushDispatcher pushDispatcher,
+    // Only for the counterparty avatar — a provider's image lives in Cosmos, so
+    // SQL cannot return it with the thread. See WithProviderPhotoAsync.
+    IProviderDiscoveryService providerDiscovery,
+    // The thread's "View Jobs" list. Chat owns the question ("what have we two
+    // done together?"); the booking tables own the answer.
+    IParentProviderBookingReader parentProviderBookings,
+    IPendingJobEnricher pendingJobEnricher,
+    // The legal hold on a reported thread. Only the MESSAGE delete needs it here:
+    // clearing a thread is a T-SQL write and Chat.DeleteConversationForParticipant
+    // checks the hold inline (THROW 51352), but a retraction is a Cosmos document
+    // replace with no SQL statement in its path to hang the check on.
+    Support.ISupportLegalHoldReader legalHoldReader,
     ILogger<ChatService> logger) : IChatService
 {
-    public Task<ChatConversationDetail> OpenConversationAsync(
+    public async Task<ChatConversationDetail> OpenConversationAsync(
         ChatParticipant actor,
         ChatParticipantType counterpartyType,
         Guid counterpartyId,
@@ -32,7 +47,13 @@ public sealed class ChatService(
             ? (actor.Id, counterpartyId)
             : (counterpartyId, actor.Id);
 
-        return conversationStore.GetOrCreateAsync(providerId, petParentId, actor, cancellationToken);
+        var detail = await conversationStore.GetOrCreateAsync(
+            providerId, petParentId, actor, cancellationToken);
+
+        return detail with
+        {
+            Counterparty = await WithProviderPhotoAsync(detail.Counterparty, cancellationToken)
+        };
     }
 
     public async Task<ChatConversationDetail> GetConversationAsync(
@@ -40,21 +61,205 @@ public sealed class ChatService(
         ChatParticipant participant,
         CancellationToken cancellationToken)
     {
-        return await conversationStore.GetForParticipantAsync(conversationId, participant, cancellationToken)
+        var detail = await conversationStore.GetForParticipantAsync(conversationId, participant, cancellationToken)
+            ?? throw new ConversationNotFoundException(conversationId);
+
+        return detail with
+        {
+            Counterparty = await WithProviderPhotoAsync(detail.Counterparty, cancellationToken)
+        };
+    }
+
+    public async Task<IReadOnlyList<ChatConversationCard>> ListConversationsAsync(
+        ChatParticipant participant,
+        string? search,
+        int skip,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        var cards = await conversationStore.ListAsync(
+            participant,
+            NormalizeSearch(search),
+            skip < 0 ? 0 : skip,
+            Math.Clamp(take, 1, ChatLimits.MaxConversationPageSize),
+            cancellationToken);
+
+        return await WithProviderPhotosAsync(cards, cancellationToken);
+    }
+
+    /// <summary>
+    /// Blank is the same as absent — an empty search box must return the whole
+    /// inbox, not nothing — and an over-long term is truncated to the column's
+    /// width rather than rejected, since a search box is not a place to fail a
+    /// request over length.
+    /// </summary>
+    private static string? NormalizeSearch(string? search)
+    {
+        var trimmed = search?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return null;
+        }
+
+        return trimmed.Length <= ChatLimits.MaxSearchLength
+            ? trimmed
+            : trimmed[..ChatLimits.MaxSearchLength];
+    }
+
+    public async Task<ChatParticipantState> DeleteConversationAsync(
+        Guid conversationId,
+        ChatParticipant participant,
+        CancellationToken cancellationToken)
+    {
+        // The store scopes the write to the caller's own participant row, so
+        // "no such thread" and "not yours" arrive as the same null — the
+        // non-disclosure every other chat read holds.
+        return await conversationStore.DeleteForParticipantAsync(
+            conversationId, participant, cancellationToken)
             ?? throw new ConversationNotFoundException(conversationId);
     }
 
-    public Task<IReadOnlyList<ChatConversationCard>> ListConversationsAsync(
+    public async Task<ChatConversationJobs> GetConversationJobsAsync(
+        Guid conversationId,
         ChatParticipant participant,
         int skip,
         int take,
         CancellationToken cancellationToken)
     {
-        return conversationStore.ListAsync(
-            participant,
-            skip < 0 ? 0 : skip,
-            Math.Clamp(take, 1, ChatLimits.MaxConversationPageSize),
+        // Authorise first, and take the pair FROM the thread. The caller never
+        // names a provider or a parent — the conversation id is the only handle,
+        // and it already encodes both, so there is nothing extra to re-authorise.
+        var detail = await conversationStore.GetForParticipantAsync(
+            conversationId, participant, cancellationToken)
+            ?? throw new ConversationNotFoundException(conversationId);
+
+        var normalizedSkip = skip < 0 ? 0 : skip;
+        var normalizedTake = Math.Clamp(take, 1, ChatLimits.MaxJobsPageSize);
+
+        var page = await parentProviderBookings.ListAsync(
+            detail.Conversation.ProviderId,
+            detail.Conversation.PetParentId,
+            normalizedSkip,
+            normalizedTake,
             cancellationToken);
+
+        // The provider photo and the money block cannot come from SQL — one lives
+        // in Cosmos, the other needs the fee percentage and a live-offering
+        // fallback. Best-effort inside, so a job list never fails over a missing
+        // offering document.
+        var jobs = await pendingJobEnricher.EnrichAsync(page.Jobs, cancellationToken);
+
+        return new ChatConversationJobs(
+            conversationId,
+            detail.Conversation.ProviderId,
+            detail.Conversation.PetParentId,
+            jobs,
+            page.TotalCount,
+            normalizedSkip,
+            normalizedTake);
+    }
+
+    /// <summary>
+    /// Fills in the counterparty avatars SQL could not supply.
+    ///
+    /// A provider's image lives in their Cosmos offering document — the business
+    /// image for a shop / hotel / clinic, the freelancer's own photo otherwise —
+    /// because <c>Provider.Providers</c> has no photo column. That is the same
+    /// split the booking detail's <c>providerPhotoUrl</c> and the pending-job
+    /// card's <c>providerProfilePhotoUrl</c> live with, and the avatar here is
+    /// resolved from the same source deliberately: the face beside a thread should
+    /// be the face beside the booking it is about.
+    ///
+    /// ONE point read per DISTINCT provider on the page, issued together — a
+    /// parent's inbox is very often several threads with the same few providers,
+    /// and a page is capped at <see cref="ChatLimits.MaxConversationPageSize"/>.
+    ///
+    /// Best-effort, like every other enrichment of this shape: an inbox that
+    /// renders with a missing avatar is a far better outcome than one that 500s
+    /// because a Cosmos read failed, and a provider legitimately has no document
+    /// until they save an offering.
+    /// </summary>
+    private async Task<IReadOnlyList<ChatConversationCard>> WithProviderPhotosAsync(
+        IReadOnlyList<ChatConversationCard> cards,
+        CancellationToken cancellationToken)
+    {
+        var pending = cards
+            .Select(card => card.Counterparty)
+            .Where(NeedsProviderPhoto)
+            .Select(counterparty => (counterparty.ParticipantId, counterparty.ServiceCategory!))
+            .Distinct()
+            .ToList();
+
+        if (pending.Count == 0)
+        {
+            return cards;
+        }
+
+        var photos = new Dictionary<Guid, string?>();
+
+        var lookups = pending.Select(async entry =>
+            (entry.ParticipantId, Photo: await ReadProviderPhotoAsync(
+                entry.ParticipantId, entry.Item2, cancellationToken)));
+
+        foreach (var (providerId, photo) in await Task.WhenAll(lookups))
+        {
+            photos[providerId] = photo;
+        }
+
+        return cards
+            .Select(card =>
+                photos.TryGetValue(card.Counterparty.ParticipantId, out var photo) && photo is not null
+                    ? card with { Counterparty = card.Counterparty with { PhotoUrl = photo } }
+                    : card)
+            .ToList();
+    }
+
+    /// <summary>Single-thread twin of <see cref="WithProviderPhotosAsync"/>.</summary>
+    private async Task<ChatCounterparty> WithProviderPhotoAsync(
+        ChatCounterparty counterparty,
+        CancellationToken cancellationToken)
+    {
+        if (!NeedsProviderPhoto(counterparty))
+        {
+            return counterparty;
+        }
+
+        var photo = await ReadProviderPhotoAsync(
+            counterparty.ParticipantId, counterparty.ServiceCategory!, cancellationToken);
+
+        return photo is null ? counterparty : counterparty with { PhotoUrl = photo };
+    }
+
+    /// <summary>
+    /// A provider counterparty with no photo yet and a category to look one up in.
+    /// A pet parent's photo already came from SQL, so they are never touched.
+    /// </summary>
+    private static bool NeedsProviderPhoto(ChatCounterparty counterparty) =>
+        counterparty.ParticipantType == ChatParticipantType.Provider
+        && string.IsNullOrWhiteSpace(counterparty.PhotoUrl)
+        && !string.IsNullOrWhiteSpace(counterparty.ServiceCategory);
+
+    private async Task<string?> ReadProviderPhotoAsync(
+        Guid providerId,
+        string serviceCategory,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var summary = await providerDiscovery.GetSummaryAsync(
+                providerId, serviceCategory, cancellationToken);
+
+            return summary?.ImageUrl;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                exception,
+                "Could not resolve the chat avatar for provider {ProviderId}; the thread is returned without one.",
+                providerId);
+
+            return null;
+        }
     }
 
     public async Task<ChatSendResult> SendMessageAsync(
@@ -190,12 +395,18 @@ public sealed class ChatService(
         // Authorise against SQL before touching Cosmos. The message store has no
         // idea who may read a thread — partitioning by conversation makes the
         // query cheap, not safe.
-        _ = await conversationStore.GetForParticipantAsync(conversationId, participant, cancellationToken)
+        var detail = await conversationStore.GetForParticipantAsync(conversationId, participant, cancellationToken)
             ?? throw new ConversationNotFoundException(conversationId);
 
         return await messageStore.ListAsync(
             conversationId,
             beforeSequence,
+            // The caller's own "delete chat" watermark. It has to be pushed into
+            // the query rather than filtered out of the result: the bodies are
+            // shared with the counterparty, who still sees all of them, so this is
+            // the only place the two views diverge. 0 for anyone who never cleared
+            // the thread, which filters nothing.
+            detail.Me.ClearedUpToSequence,
             Math.Clamp(take, 1, ChatLimits.MaxPageSize),
             cancellationToken);
     }
@@ -253,13 +464,80 @@ public sealed class ChatService(
         ChatParticipant sender,
         CancellationToken cancellationToken)
     {
-        _ = await conversationStore.GetForParticipantAsync(conversationId, sender, cancellationToken)
+        var detail = await conversationStore.GetForParticipantAsync(conversationId, sender, cancellationToken)
             ?? throw new ConversationNotFoundException(conversationId);
+
+        // The legal hold. An open ticket on this thread freezes it for BOTH parties,
+        // not just the reporter — the accused is the one with a motive to erase, so a
+        // hold binding only the person who raised it would be decorative.
+        //
+        // Checked BEFORE the retraction, unlike the two best-effort legs below: this
+        // one must be able to refuse, and a soft delete is not undoable once the
+        // Cosmos document has been replaced. A failure to read the hold therefore
+        // propagates rather than being swallowed — treating "I could not tell" as
+        // "not held" would let the check be defeated by an outage.
+        var hold = await legalHoldReader.GetConversationHoldAsync(conversationId, cancellationToken);
+        if (hold is not null)
+        {
+            throw new Support.ConversationUnderLegalHoldException(conversationId, hold.TicketNumber);
+        }
 
         // Scoped to the sender inside the store, so "not yours" and "no such
         // message" come back as the same null and cannot be told apart.
-        return await messageStore.SoftDeleteAsync(conversationId, messageId, sender, cancellationToken)
+        var deleted = await messageStore.SoftDeleteAsync(conversationId, messageId, sender, cancellationToken)
             ?? throw new ConversationNotFoundException(conversationId);
+
+        // The content is gone from Cosmos, but the inbox preview is a denormalised
+        // copy in SQL and still holds it — so the retracted text would go on being
+        // legible on the conversation card. The store's sequence guard decides
+        // whether this message is still the one the card describes.
+        //
+        // Best-effort, and deliberately after the retraction rather than before:
+        // the delete has already succeeded, so failing the request here would tell
+        // the caller their message is still there when it is not. A stale preview
+        // is the lesser fault, it is visible only until the next message, and the
+        // alternative ordering is worse — a preview reading "deleted" over a
+        // message that then failed to delete.
+        try
+        {
+            await conversationStore.RefreshDeletedMessagePreviewAsync(
+                conversationId, deleted.Sequence, ChatLimits.DeletedPreviewLabel, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            logger.LogWarning(
+                exception,
+                "Message {MessageId} was retracted but conversation {ConversationId}'s inbox preview " +
+                "could not be updated; it will still show the deleted text until the next message.",
+                messageId,
+                conversationId);
+        }
+
+        // Tell the other side. Without this the retracted message sits on their
+        // open screen until they happen to re-fetch — for a delete, the one
+        // outcome nobody forgives. Best-effort and after the fact for the same
+        // reason the send's fan-out is: the retraction is already durable, and a
+        // socket failure must not report a delete that happened as failed. The
+        // client reconciles on reconnect, where the message reads isDeleted.
+        try
+        {
+            await realtimePublisher.PublishMessageDeletedAsync(
+                deleted,
+                new ChatParticipant(
+                    detail.Counterparty.ParticipantType,
+                    detail.Counterparty.ParticipantId),
+                cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(
+                exception,
+                "Realtime fan-out failed for the retraction of message {MessageId}; it is stored and will be " +
+                "picked up on reconnect.",
+                messageId);
+        }
+
+        return deleted;
     }
 
     public Task<ChatBlock> BlockAsync(

@@ -110,6 +110,48 @@ public sealed record ConversationReadStateResponse(
     int UnreadCount,
     bool IsMuted);
 
+/// <summary>
+/// The result of clearing a chat for yourself
+/// (<c>DELETE /conversations/{conversationId}</c>).
+/// </summary>
+/// <param name="ClearedUpToSequence">
+/// Everything at or below this is now hidden from the caller — their history
+/// starts again after it. The counterparty's copy is untouched; they still see
+/// every message.
+/// </param>
+/// <param name="DeletedAtUtc">When it was cleared.</param>
+/// <remarks>
+/// The thread is NOT gone for good. It drops off the caller's inbox now, and
+/// reappears the moment the counterparty sends something — carrying on from
+/// there, without the cleared history. That is deliberate: the alternative is a
+/// "delete" that silently stops you receiving messages.
+/// </remarks>
+public sealed record DeleteConversationResponse(
+    Guid ConversationId,
+    long ClearedUpToSequence,
+    DateTimeOffset? DeletedAtUtc);
+
+/// <summary>
+/// The jobs behind a thread — <c>GET /conversations/{conversationId}/bookings</c>,
+/// the chat screen's "View Jobs".
+/// </summary>
+/// <param name="Jobs">
+/// Every booking of either kind between these two, newest first by service date.
+/// <c>bookingType</c> discriminates ("SingleDay" | "NightStay") and the other
+/// kind's fields are null — the same job-card shape the account and pet deletes
+/// return when they are refused, so one card renders it everywhere.
+/// </param>
+/// <param name="TotalCount">All of the pair's jobs, not just this page.</param>
+public sealed record ConversationJobsResponse(
+    Guid ConversationId,
+    Guid ProviderId,
+    Guid PetParentId,
+    IReadOnlyList<ParentOnboarding.PendingParentJobResponse> Jobs,
+    int TotalCount,
+    int Skip,
+    int Take,
+    bool HasMore);
+
 /// <param name="UnreadConversationCount">
 /// How many threads have anything unread — a different figure from the message
 /// total, and the one "3 conversations need you" is built from.

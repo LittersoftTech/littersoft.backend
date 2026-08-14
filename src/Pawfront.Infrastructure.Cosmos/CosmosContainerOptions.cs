@@ -13,4 +13,11 @@ public sealed class CosmosContainerOptions
     /// thread index and the counters; this holds the volume.
     /// </summary>
     public string ChatMessages { get; init; } = "ChatMessages";
+
+    /// <summary>
+    /// Support ticket narratives — the reporter's account and the clarification thread —
+    /// partitioned by <c>/ticketId</c>. SQL owns the ticket row and every rule that has to
+    /// be a T-SQL predicate; this holds the words, which can grow without bound.
+    /// </summary>
+    public string SupportTickets { get; init; } = "SupportTickets";
 }

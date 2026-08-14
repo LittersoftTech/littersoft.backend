@@ -35,10 +35,10 @@
 -- re-running on an already-deleted provider is a no-op that returns the original
 -- DeletedAtUtc (@WasAlreadyDeleted = 1) instead of churning new placeholders.
 --
--- Returns three result sets, since SQL cannot reach Cosmos or Blob Storage:
+-- Returns four result sets, since SQL cannot reach Cosmos or Blob Storage:
 --   1. summary — ProviderId, DeletedAtUtc, WasAlreadyDeleted + deactivated /
 --                retained counts (the retained counts document, in the response,
---                that history survived)
+--                that history survived), plus BlockedByOpenTickets
 --   2. service categories — partition key(s) of the Cosmos [ProviderServices]
 --      offering doc to remove. That document is the provider's public service
 --      LISTING (business name, prices, photos, address) and is what makes them
@@ -48,6 +48,9 @@
 --   3. blob URLs — provider banner, gallery photos, per-service banners. Event
 --      banners and booking evidence are NOT returned: those belong to records
 --      that are being kept.
+--   4. open support tickets — empty on the normal path. When non-empty NOTHING
+--      was scrubbed: an open ticket refuses the delete as part of the legal hold,
+--      and result sets 1-3 describe an untouched account.
 --
 -- THROW 51114 = provider profile not found (account delete).
 CREATE OR ALTER PROCEDURE [Provider].[DeleteProvider]
@@ -62,6 +65,20 @@ BEGIN
     DECLARE @IsDeleted BIT;
     DECLARE @DeletedAtUtc DATETIME2(7);
     DECLARE @WasAlreadyDeleted BIT = 0;
+    DECLARE @BlockedByOpenTickets BIT = 0;
+
+    -- Open support tickets blocking the delete. Only the identifying columns: the
+    -- narrative lives in the ticket's Cosmos document and the caller is being told
+    -- "settle these first", not being shown the case.
+    DECLARE @OpenTickets TABLE
+    (
+        [TicketId] UNIQUEIDENTIFIER NOT NULL,
+        [TicketNumber] INT NOT NULL,
+        [TicketType] NVARCHAR(24) NOT NULL,
+        [RaisedByType] NVARCHAR(16) NOT NULL,
+        [Status] NVARCHAR(48) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+    );
 
     -- Captured before the scrub so the caller can clean the other stores.
     DECLARE @ServiceCategories TABLE ([ServiceCategory] NVARCHAR(64) NOT NULL);
@@ -97,6 +114,31 @@ BEGIN
         SET @Now = ISNULL(@DeletedAtUtc, @Now);
     END
     ELSE
+    BEGIN
+        -- An open support ticket refuses the delete — part of the legal hold.
+        -- Anonymising a party mid-investigation destroys the account support is
+        -- still asking questions of. This is the provider delete's FIRST refusal
+        -- path (unlike the parent's, which already refuses on unfinished jobs), so
+        -- callers that assumed it always succeeds must now read the flag.
+        --
+        -- Unlike every other refusal in this codebase there is nothing the
+        -- provider can do to clear it themselves: it lifts when support closes the
+        -- ticket, and that is the intent.
+        INSERT INTO @OpenTickets
+            ([TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc])
+        SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
+        FROM [Support].[Tickets]
+        WHERE [ProviderId] = @ProviderId
+          AND [Status] <> N'CLOSED';
+
+        IF EXISTS (SELECT 1 FROM @OpenTickets)
+        BEGIN
+            SET @BlockedByOpenTickets = 1;
+        END
+    END
+
+    -- Everything below only runs when the account is live AND unblocked.
+    IF @IsDeleted = 0 AND @BlockedByOpenTickets = 0
     BEGIN
         INSERT INTO @ServiceCategories ([ServiceCategory])
         SELECT [ServiceCategory]
@@ -184,7 +226,9 @@ BEGIN
     END
 
     -- Result set 1: summary. The retained counts are reported so the caller can
-    -- see that history survived the delete.
+    -- see that history survived the delete. When BlockedByOpenTickets = 1 the
+    -- account is UNTOUCHED and every other column here is meaningless — the caller
+    -- reads that flag first and goes to result set 4.
     SELECT @ProviderId AS [ProviderId],
            @Now AS [DeletedAtUtc],
            @WasAlreadyDeleted AS [WasAlreadyDeleted],
@@ -196,13 +240,24 @@ BEGIN
            (SELECT COUNT(*) FROM [Event].[Events] WHERE [ProviderId] = @ProviderId)
                AS [RetainedEventCount],
            (SELECT COUNT(*) FROM [Booking].[BookingPayments] WHERE [ProviderId] = @ProviderId)
-               AS [RetainedPaymentCount];
+               AS [RetainedPaymentCount],
+           -- Appended LAST on purpose: inserting it next to WasAlreadyDeleted,
+           -- where it reads better, would shift every retained-count ordinal and
+           -- break a reader deployed against the older procedure.
+           @BlockedByOpenTickets AS [BlockedByOpenTickets];
 
     -- Result set 2: Cosmos [ProviderServices] partition keys (the public listing).
     SELECT [ServiceCategory] FROM @ServiceCategories;
 
     -- Result set 3: blob URLs to delete best-effort.
     SELECT [BlobUrl], [Kind] FROM @BlobUrls;
+
+    -- Result set 4: the open support tickets that refused the delete. Empty on the
+    -- normal path, in which case result sets 1-3 describe a completed delete.
+    -- Oldest-first — the one that has been waiting longest is the one to chase.
+    SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
+    FROM @OpenTickets
+    ORDER BY [CreatedAtUtc] ASC;
 
     COMMIT TRANSACTION;
 END;

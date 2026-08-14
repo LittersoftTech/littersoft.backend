@@ -61,6 +61,41 @@ internal sealed class SignalRChatRealtimePublisher(
             message.MessageId, message.ConversationId, recipient.Type, recipient.Id);
     }
 
+    public async Task PublishMessageDeletedAsync(
+        ChatMessage message,
+        ChatParticipant counterparty,
+        CancellationToken cancellationToken)
+    {
+        var payload = new
+        {
+            conversationId = message.ConversationId,
+            messageId = message.MessageId,
+            sequence = message.Sequence,
+            deletedAtUtc = message.DeletedAtUtc
+        };
+
+        // Same two fan-outs as a new message, for the same two reasons.
+        //
+        // The thread group is everyone with the conversation OPEN — the recipient
+        // staring at the message that has just been retracted, and the sender's
+        // own other devices.
+        await hubContext.Clients
+            .Group(ChatGroups.Conversation(message.ConversationId))
+            .SendAsync(ChatHubEvents.MessageDeleted, payload, cancellationToken);
+
+        // The counterparty's personal group covers the case that matters almost
+        // as much: they are somewhere else in the app with the inbox on screen,
+        // and its preview line may have just become "This message was deleted".
+        await hubContext.Clients
+            .Group(ChatGroups.User(counterparty))
+            .SendAsync(ChatHubEvents.MessageDeleted, payload, cancellationToken);
+
+        logger.LogDebug(
+            "Published the retraction of message {MessageId} on conversation {ConversationId} to " +
+            "{CounterpartyType} {CounterpartyId}.",
+            message.MessageId, message.ConversationId, counterparty.Type, counterparty.Id);
+    }
+
     public Task PublishReadAsync(
         Guid conversationId,
         ChatParticipant reader,

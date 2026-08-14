@@ -37,4 +37,23 @@
     <PackageReference Include="OpenTelemetry.Instrumentation.SqlClient" Version="1.15.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Firebase service-account JSON for LOCAL DEVELOPMENT, mirroring
+         Pawfront.Functions. The files are gitignored (**/Secrets/*.json), and
+         CredentialsFilePath resolves a relative path against
+         AppContext.BaseDirectory, so "Secrets/x.json" works.
+
+         This host needs them for the same reason the Functions app does: it
+         sends chat pushes itself. Without them every instant send fails, the
+         outbox row is left for the 1-minute dispatcher, and chat silently
+         inherits the batch latency it exists to avoid.
+
+         DEPLOYED environments must use CredentialsSecretName + Key Vault
+         instead: anything copied to the output directory ships inside the
+         deployment payload, and these files contain a private key. -->
+    <None Update="Secrets\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

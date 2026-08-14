@@ -32,11 +32,44 @@ public interface IChatConversationStore
         ChatParticipant participant,
         CancellationToken cancellationToken);
 
-    /// <summary>The caller's inbox, most recently active first.</summary>
+    /// <summary>
+    /// The caller's inbox, most recently active first, optionally filtered by
+    /// <paramref name="search"/>.
+    /// </summary>
+    /// <param name="search">
+    /// Free text from the inbox search bar, matched against the counterparty's
+    /// name and the thread's last-message preview. Null or blank returns the
+    /// unfiltered inbox.
+    ///
+    /// Both are columns the inbox read already has, so searching is the same one
+    /// indexed query rather than a second store. It is deliberately NOT full
+    /// message-history search: bodies live in Cosmos partitioned by conversation,
+    /// so matching them all would be a cross-partition scan per keystroke.
+    /// </param>
     Task<IReadOnlyList<ChatConversationCard>> ListAsync(
         ChatParticipant participant,
+        string? search,
         int skip,
         int take,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// "Delete this chat", for the caller ONLY. Records their clear watermark at
+    /// the thread's current last sequence, hides it from their inbox, and zeroes
+    /// their unread count. The counterparty's copy — messages, unread, read
+    /// pointer — is untouched, and so is the conversation itself.
+    ///
+    /// Reversible in the way that matters: one new message from the counterparty
+    /// pushes the thread past the watermark and it reappears, carrying on from
+    /// there. Without that a delete would silently stop the caller receiving,
+    /// which is a broken conversation rather than a cleared one.
+    ///
+    /// Returns null when the thread is unknown OR not the caller's — one case, so
+    /// an id cannot be probed.
+    /// </summary>
+    Task<ChatParticipantState?> DeleteForParticipantAsync(
+        Guid conversationId,
+        ChatParticipant participant,
         CancellationToken cancellationToken);
 
     /// <summary>
@@ -87,6 +120,26 @@ public interface IChatConversationStore
     Task ReleaseMessageReservationAsync(
         Guid conversationId,
         Guid messageId,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Rewrites the inbox preview after the newest message has been retracted.
+    ///
+    /// The preview is a denormalised cache on <c>Chat.Conversations</c> — that is
+    /// what lets the inbox render without a Cosmos query per thread — so clearing
+    /// a message's content in Cosmos does not touch it, and the deleted text goes
+    /// on being shown on the card until something else is sent.
+    ///
+    /// <paramref name="sequence"/> is a GUARD, not just an argument: the write
+    /// applies only while that sequence is still the thread's last. A message
+    /// arriving between the delete and this call has already moved the preview
+    /// on, and must not be pulled back to a retraction notice. Deleting an older
+    /// message therefore no-ops here, which is correct — it was never on the card.
+    /// </summary>
+    Task RefreshDeletedMessagePreviewAsync(
+        Guid conversationId,
+        long sequence,
+        string preview,
         CancellationToken cancellationToken);
 
     /// <summary>

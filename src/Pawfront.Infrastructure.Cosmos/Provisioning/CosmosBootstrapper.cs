@@ -103,6 +103,10 @@ internal sealed class CosmosBootstrapper(
             options.Containers.ChatMessages,
             ChatMessageDocument.PartitionKeyPath);
 
+        yield return new CosmosContainerSpec(
+            options.Containers.SupportTickets,
+            SupportTicketDocument.PartitionKeyPath);
+
         // Future containers (uncomment as their features land):
         // yield return new CosmosContainerSpec(options.Containers.PetProfiles,        "/customerId");
         // yield return new CosmosContainerSpec(options.Containers.VisitNotes,         "/providerId");

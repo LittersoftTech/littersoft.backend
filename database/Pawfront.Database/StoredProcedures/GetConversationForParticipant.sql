@@ -35,7 +35,14 @@ BEGIN
            c.[UpdatedAtUtc],
            p.[LastReadSequence],
            p.[UnreadCount],
-           p.[IsMuted]
+           CAST(p.[IsMuted] AS BIT) AS [IsMuted],
+           -- The caller's "delete chat" watermark, appended LAST so the existing
+           -- ordinals stay put. The history read needs it: message bodies are
+           -- shared with the counterparty, so hiding a cleared thread's messages
+           -- can only be done by filtering below this sequence on the way out.
+           -- 0 on a thread that was never cleared, which filters nothing.
+           p.[ClearedUpToSequence],
+           p.[DeletedAtUtc]
     FROM [Chat].[Conversations] c
     INNER JOIN [Chat].[ConversationParticipants] p
         ON p.[ConversationId] = c.[ConversationId]
@@ -60,7 +67,13 @@ BEGIN
            CASE WHEN @ParticipantType = N'Provider' THEN pp.[ProfilePhotoUrl] END
                AS [CounterpartyPhotoUrl],
            CASE WHEN @ParticipantType = N'Provider' THEN pp.[IsDeleted] ELSE pr.[IsDeleted] END
-               AS [CounterpartyIsDeleted]
+               AS [CounterpartyIsDeleted],
+           -- The provider's Cosmos partition key, so the caller can point-read the
+           -- offering document their image lives in. Appended LAST so the existing
+           -- ordinals the reader uses stay put. See Chat.ListConversations for the
+           -- full note.
+           CASE WHEN @ParticipantType = N'PetParent' THEN reg.[ServiceCategory] END
+               AS [CounterpartyServiceCategory]
     FROM [Chat].[Conversations] c
     INNER JOIN [Chat].[ConversationParticipants] p
         ON p.[ConversationId] = c.[ConversationId]
@@ -68,5 +81,6 @@ BEGIN
        AND p.[ParticipantId] = @ParticipantId
     LEFT JOIN [Provider].[Providers] pr ON pr.[ProviderId] = c.[ProviderId]
     LEFT JOIN [Parent].[PetParents] pp ON pp.[PetParentId] = c.[PetParentId]
+    LEFT JOIN [Provider].[ProviderServiceRegistrations] reg ON reg.[ProviderId] = c.[ProviderId]
     WHERE c.[ConversationId] = @ConversationId;
 END;

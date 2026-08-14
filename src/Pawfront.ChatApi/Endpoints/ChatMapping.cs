@@ -1,6 +1,9 @@
-using Pawfront.Application.Chat;
+﻿using Pawfront.Application.Chat;
+using Pawfront.Application.ParentOnboarding;
 using Pawfront.ChatApi.Auth;
 using Pawfront.Contracts.Chat;
+using Pawfront.Contracts.ParentOnboarding;
+using Pawfront.Application.Support;
 
 namespace Pawfront.ChatApi.Endpoints;
 
@@ -78,6 +81,56 @@ internal static class ChatMapping
     public static ChatUnreadSummaryResponse ToResponse(ChatUnreadSummary summary) =>
         new(summary.UnreadMessageCount, summary.UnreadConversationCount);
 
+    public static DeleteConversationResponse ToDeleteResponse(
+        Guid conversationId, ChatParticipantState state) =>
+        new(conversationId, state.ClearedUpToSequence, state.DeletedAtUtc);
+
+    /// <summary>
+    /// The thread's job list. Reuses <see cref="PendingParentJobResponse"/> rather
+    /// than declaring a near-identical eighteen-field twin: it is already the
+    /// product's job card, the app already parses it from the two delete
+    /// refusals, and a second shape would be one more thing to keep in step. Read
+    /// the name as "a parent's job card" — nothing here is necessarily pending.
+    /// </summary>
+    public static ConversationJobsResponse ToResponse(ChatConversationJobs jobs) =>
+        new(
+            jobs.ConversationId,
+            jobs.ProviderId,
+            jobs.PetParentId,
+            jobs.Jobs.Select(ToResponse).ToList(),
+            jobs.TotalCount,
+            jobs.Skip,
+            jobs.Take,
+            jobs.HasMore);
+
+    private static PendingParentJobResponse ToResponse(PendingParentJob job) =>
+        new(
+            job.BookingId,
+            job.BookingType,
+            job.JobId,
+            job.ProviderId,
+            job.ProviderName,
+            job.ProviderProfilePhotoUrl,
+            job.ServiceCategory,
+            job.SubCategory,
+            job.Status,
+            job.ServiceDate,
+            job.CheckOutDate,
+            job.StartTime,
+            job.EndTime,
+            job.PetName,
+            job.ServiceId,
+            job.ServiceItemCode,
+            new PendingJobPriceResponse(
+                job.Price?.PricePerUnit,
+                // The unit follows from the booking kind and category, so it is
+                // known even when the amount is not; per-hour is the neutral
+                // fallback the parent host's copy of this mapping uses too.
+                job.Price?.PriceUnit ?? PendingJobPriceUnits.PerHour,
+                job.Price?.TotalAmount,
+                job.Price?.PawfrontFee,
+                job.Price?.FeePercentage ?? 0m));
+
     public static ChatBlockResponse ToResponse(ChatBlock block) =>
         new(
             block.ChatBlockId,
@@ -135,6 +188,13 @@ internal static class ChatMapping
 
         ChatInvalidBlockException =>
             ApiResults.BadRequest("InvalidRequest", "A conversation runs between a provider and a pet parent."),
+
+        // The legal hold on a reported thread. The message NAMES the holding ticket,
+        // which is the point — "TK-000123 is open on this chat" is actionable in a way
+        // "you cannot delete this" is not. It binds BOTH parties, not just the
+        // reporter: the accused is the one with a motive to erase.
+        ConversationUnderLegalHoldException hold =>
+            ApiResults.Conflict("ConversationUnderLegalHold", hold.Message),
 
         ArgumentException argument =>
             ApiResults.BadRequest("InvalidRequest", argument.Message),

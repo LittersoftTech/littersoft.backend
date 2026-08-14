@@ -7,13 +7,18 @@ namespace Pawfront.Application.Notifications;
 /// its recipient reads — the ONE place a notification's timezone and its date /
 /// time formats are decided.
 ///
-/// <b>Why it exists.</b> Everything in this codebase is stored and computed in
-/// UTC (see the UTC convention in CLAUDE.md), and until 2026-08-06 notifications
-/// were also *rendered* in UTC: a booking at 14:00 UTC was announced as "14:00"
-/// to a provider whose clock said 16:00. Every consumer of both apps is in
-/// Switzerland, so a UTC body is simply the wrong time by one or two hours,
-/// depending on the season — which is exactly the kind of error a reminder must
-/// not make.
+/// <b>Why it exists.</b> A notification has to name a date and a time, and those
+/// strings are copy: they need one owner, one format, and one rule about which
+/// clock they are on. This is it.
+///
+/// <b>The rule, corrected 2026-08-11.</b> A booking's schedule is a WALL-CLOCK
+/// READING, not an instant — see <see cref="ToDisplay"/> for the full argument.
+/// It is therefore rendered exactly as stored, which is exactly what
+/// `/availability/slots`, the agenda and every booking read already return. The
+/// 2026-08-06 change shifted these into Swiss local on the theory that the stored
+/// values were true UTC; they are not, and QA reported the consequence — right
+/// date, time one or two hours late, drifting with DST. The shift is retained only
+/// for a recipient genuinely in another zone, where it becomes correct.
 ///
 /// <b>Why here and not in T-SQL.</b> Booking notifications are enqueued from
 /// three processes, one of which (the Pawfront.Functions sweeps) is pure T-SQL,
@@ -83,9 +88,9 @@ public static class NotificationLocalTime
         return FindFirst(recipientTimeZoneId.Trim()) ?? Default;
     }
 
-    /// <summary>"5 Aug" — the local calendar date the instant falls on.</summary>
+    /// <summary>"5 Aug" — the calendar date the reading falls on.</summary>
     public static string FormatDate(DateTimeOffset instantUtc, TimeZoneInfo timeZone) =>
-        ToLocal(instantUtc, timeZone).ToString(DateFormat, CultureInfo.InvariantCulture);
+        ToDisplay(instantUtc, timeZone).ToString(DateFormat, CultureInfo.InvariantCulture);
 
     /// <summary>
     /// "5 Aug 2026" — the same date spelled out in full, for copy that asks the
@@ -93,18 +98,18 @@ public static class NotificationLocalTime
     /// already have in front of them.
     /// </summary>
     public static string FormatDateWithYear(DateTimeOffset instantUtc, TimeZoneInfo timeZone) =>
-        ToLocal(instantUtc, timeZone).ToString(DateWithYearFormat, CultureInfo.InvariantCulture);
+        ToDisplay(instantUtc, timeZone).ToString(DateWithYearFormat, CultureInfo.InvariantCulture);
 
-    /// <summary>"14:00" — the local clock time.</summary>
+    /// <summary>"14:00" — the clock time, exactly as the booking screens show it.</summary>
     public static string FormatTime(DateTimeOffset instantUtc, TimeZoneInfo timeZone) =>
-        ToLocal(instantUtc, timeZone).ToString(TimeFormat, CultureInfo.InvariantCulture);
+        ToDisplay(instantUtc, timeZone).ToString(TimeFormat, CultureInfo.InvariantCulture);
 
     /// <summary>
     /// "5 Aug 14:00" — for a deadline, which can fall on a different day from the
     /// thing it applies to and therefore has to carry its date.
     /// </summary>
     public static string FormatDateAndTime(DateTimeOffset instantUtc, TimeZoneInfo timeZone) =>
-        ToLocal(instantUtc, timeZone).ToString(DateAndTimeFormat, CultureInfo.InvariantCulture);
+        ToDisplay(instantUtc, timeZone).ToString(DateAndTimeFormat, CultureInfo.InvariantCulture);
 
     /// <summary>
     /// Reads an instant out of a notification's data parameters.
@@ -147,8 +152,59 @@ public static class NotificationLocalTime
     public static string ToIso(DateTimeOffset instantUtc) =>
         instantUtc.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture);
 
-    private static DateTime ToLocal(DateTimeOffset instantUtc, TimeZoneInfo timeZone) =>
-        TimeZoneInfo.ConvertTime(instantUtc, timeZone).DateTime;
+    /// <summary>
+    /// The zone the stored readings are already expressed in. Identical to
+    /// <see cref="Default"/> today — the two are separate concepts that happen to
+    /// coincide: this one is where the DATA is, that one is where the READER is.
+    /// They only diverge once a recipient has a timezone of their own.
+    /// </summary>
+    private static TimeZoneInfo OperatingTimeZone => Default;
+
+    /// <summary>
+    /// Turns a stored reading into the wall clock its reader should see.
+    ///
+    /// <b>A booking's time is not an instant — it is a reading.</b>
+    /// <c>BookingDate + StartTime</c> is assembled from a DATE and a bare TIME that
+    /// the provider typed into their availability screen and the parent picked off
+    /// a slot grid. "09:00" there means nine o'clock where they both are; it is
+    /// never converted on the way in, and `/availability/slots`, the agenda and
+    /// every booking read hand it straight back out again. So the reading IS the
+    /// display value, and a notification that shifts it disagrees with every other
+    /// surface in the product — which is precisely what was reported: the date came
+    /// out right and the time came out one or two hours late, the gap changing with
+    /// DST. Formatting the reading as-is is what makes a reminder say the same
+    /// thing as the booking screen it is reminding you about.
+    ///
+    /// The conversion is kept, not deleted, because it becomes correct the moment a
+    /// recipient is somewhere else: then the reading is interpreted as
+    /// <see cref="OperatingTimeZone"/> local and moved to theirs. Today every
+    /// caller resolves to the operating zone, so this is a straight pass-through.
+    /// </summary>
+    private static DateTime ToDisplay(DateTimeOffset reading, TimeZoneInfo timeZone)
+    {
+        var wallClock = reading.UtcDateTime;
+
+        if (timeZone.Equals(OperatingTimeZone))
+        {
+            return wallClock;
+        }
+
+        try
+        {
+            var instant = TimeZoneInfo.ConvertTimeToUtc(
+                DateTime.SpecifyKind(wallClock, DateTimeKind.Unspecified),
+                OperatingTimeZone);
+
+            return TimeZoneInfo.ConvertTimeFromUtc(instant, timeZone);
+        }
+        catch (ArgumentException)
+        {
+            // A reading inside a DST spring-forward gap names no real instant.
+            // Showing it unconverted beats failing the send over an hour that
+            // does not exist.
+            return wallClock;
+        }
+    }
 
     private static TimeZoneInfo? FindFirst(params string[] timeZoneIds)
     {

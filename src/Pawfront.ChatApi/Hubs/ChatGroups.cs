@@ -41,6 +41,21 @@ internal static class ChatHubEvents
     /// <summary>A new message on a thread the client has joined.</summary>
     public const string MessageReceived = "MessageReceived";
 
+    /// <summary>
+    /// A message on a joined thread has been retracted by its sender. Payload
+    /// <c>{ conversationId, messageId, sequence, deletedAtUtc }</c>.
+    ///
+    /// The counterpart to <see cref="MessageReceived"/>, and delivered the same
+    /// two ways: to the thread group so an open conversation drops it live, and to
+    /// the counterparty's personal group so an inbox elsewhere in the app can
+    /// refresh a preview that may now read "This message was deleted".
+    ///
+    /// Clients should render the message as deleted in place rather than removing
+    /// the row — it keeps its sequence, and history returns it with
+    /// <c>isDeleted: true</c>.
+    /// </summary>
+    public const string MessageDeleted = "MessageDeleted";
+
     /// <summary>The counterparty has read up to a sequence.</summary>
     public const string MessageRead = "MessageRead";
 

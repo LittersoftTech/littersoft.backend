@@ -99,22 +99,31 @@ resolved, and `your pet` for a missing `petName`.
 **Not fired** for provider-created bookings or Custom walk-ins — a provider
 shouldn't be notified about their own action, and a walk-in has no parent.
 
-> ⚠️ **Every date and time in the copy is SWISS local time** (`Europe/Zurich`),
-> converted from UTC at send time — including across DST, so 14:00 UTC reads
-> `16:00` in August and `15:00` in January. Until 2026-08-06 these strings were
-> raw UTC and were therefore an hour or two wrong for every user.
+> ⚠️ **Times in the copy are the SAME readings the API returns — show them as-is,
+> and do NOT convert them** (corrected 2026-08-11).
 >
-> Alongside each display string the payload also carries the underlying **UTC
-> instant** — `serviceStartUtc`, `checkOutUtc`, `newServiceStartUtc`,
-> `newCheckOutUtc`, `closingAtUtc`, `acceptByUtc` — in
-> `yyyy-MM-ddTHH:mm:ss` (UTC, no offset suffix) or ISO 8601 with an explicit
-> offset. **Prefer the instant** whenever the app formats a time itself: the
-> display strings are frozen at send time in the recipient's zone, whereas the
-> instant lets the device render in whatever zone it is actually in.
+> A booking's schedule is a wall-clock reading, not an instant: `bookingDate` +
+> `startTime` are exactly what `/availability/slots`, the agenda and every booking
+> read hand you, and what the provider typed into their availability screen. So
+> `startTime` in a notification is the same string as `startTime` on the booking
+> detail, always.
 >
-> Every user is in Switzerland today, so the server applies one zone to everybody.
-> When a per-user timezone lands on the profile, these strings will follow it
-> automatically and the wire contract will not change.
+> Between 2026-08-06 and 2026-08-11 the server shifted these into Swiss local on
+> the theory that the stored values were UTC. They are not, so a 14:00 job was
+> announced as `16:00` — right date, wrong time, and the error changed size with
+> DST. **If your app added an offset of its own to compensate, remove it**: doing
+> both is how you land two hours out in the other direction.
+>
+> Alongside each display string the payload still carries the same reading in
+> `yyyy-MM-ddTHH:mm:ss` form — `serviceStartUtc`, `checkOutUtc`,
+> `newServiceStartUtc`, `newCheckOutUtc`, `closingAtUtc`, `acceptByUtc`,
+> `reviewByUtc`, `requestedAtUtc`. Use those when you need to compute with a value
+> (sort, diff, count down) rather than print it; treat them as the same clock the
+> rest of the API is on. The `Utc` in the key names is historical.
+>
+> Every user is in Switzerland today, so one clock serves everybody. If a per-user
+> timezone ever lands on the profile, the server will convert into it and the wire
+> contract will not change.
 
 ---
 
@@ -158,9 +167,9 @@ Every push is a **hybrid `notification` + `data`** message.
     "bookingType": "SingleDay",                 // legacy twin of isNightStay
     "providerName": "Anna",
     "petName": "Max",
-    "serviceStartUtc": "2026-08-05T12:00:00",   // UTC instant — format it yourself
-    "serviceDate": "5 Aug",                     // already Swiss local
-    "startTime": "14:00"                        // already Swiss local
+    "serviceStartUtc": "2026-08-05T14:00:00",   // same reading, computable form
+    "serviceDate": "5 Aug",                     // print as-is
+    "startTime": "14:00"                        // print as-is — matches the booking detail
   },
   "android": {
     "notification": {
@@ -190,10 +199,11 @@ Every push is a **hybrid `notification` + `data`** message.
    event with ONE `type`, rendered per audience: the parent is told to bring
    cash, the provider to ask for the OTP. Do not assume identical copy on both
    sides, and do not treat the two as different events.
-6. **Display times are already Swiss local; the `*Utc` keys are not.** Show
-   `startTime` / `serviceDate` as-is, but if you reformat a time yourself, read
-   `serviceStartUtc` (and friends) and convert on the device — do not convert a
-   display string, and do not treat one as UTC.
+6. **Never convert a time.** `startTime` / `serviceDate` are the same readings the
+   booking endpoints return — print them. The `*Utc` twins carry the same reading
+   in a sortable form for when you need to compute rather than print. Applying a
+   timezone offset to either one is what puts a notification an hour or two out of
+   step with the screen it links to.
 7. **`v` will only change on a breaking payload change.** Guard on it if you
    want; today it is always `"1"`.
 
@@ -288,7 +298,7 @@ Notifications V3 spec, so the two documents can be checked against each other.
 | `BOOKING_REQUESTED` | Parent booked a single-day service | V-S1 |
 | `NIGHT_STAY_BOOKING_REQUESTED` | Parent booked a multi-night stay | V-S1 |
 | `BOOKING_CANCELLED_BY_PARENT` | Parent cancelled | V-U1 |
-| `BOOKING_MODIFICATION_REQUESTED_BY_PARENT` | Parent proposed a new time | V-U2 |
+| `BOOKING_MODIFICATION_REQUESTED_BY_PARENT` | Parent proposed a new time — carries `reviewWithin`, see §3.6 | V-U2 |
 | `BOOKING_MODIFICATION_ACCEPTED_BY_PARENT` | Your proposal was accepted | V-U3 |
 | `BOOKING_MODIFICATION_DECLINED_BY_PARENT` | Your proposal was declined | V-U4 |
 | `BOOKING_START_OTP_NOT_ENTERED` | You still haven't entered the customer's code | V-S10 |
@@ -305,7 +315,7 @@ one `type`, two renderings (see rule 5 in §1).
 | `BOOKING_EXPIRED_FOR_PROVIDER` | Provider | Ran out of time to accept — job lost | V-S2 |
 | `BOOKING_MODIFICATION_TIMED_OUT` | Both | Proposal unanswered for 24 hours | P-S2 / V-S3 |
 | `BOOKING_MODIFICATION_EXPIRED` | Both | Proposal hit the 2h-before-service cutoff | P-S3 / V-S4 |
-| `BOOKING_REMINDER_DAY_BEFORE` | Both | T-24h before the service | P-S4 / V-S5 |
+| `BOOKING_REMINDER_DAY_BEFORE` | Both | The service is on **tomorrow's calendar day**, from T-24h | P-S4 / V-S5 |
 | `BOOKING_REMINDER_STARTING_SOON` | Both | T-5min before the service | P-S5 / V-S6 |
 | `BOOKING_NOT_STARTED_HALFWAY` | Both | Half-way through the window, not started | P-S6 / V-S7 |
 | `BOOKING_NOT_STARTED_WINDOW_ENDED` | Both | Whole window elapsed, not started | P-S7 / V-S8 |
@@ -342,14 +352,21 @@ feature yet.
 
 | `type` | `category` | Blocked on | V3 card |
 |---|---|---|---|
-| `INVOICE_ISSUED` | `BOOKING` | No invoicing | P-S16 / V-S14 |
 | `DISPUTE_RESOLVED` | `BOOKING` | No Helpline / ticket module | P-S15 / V-S13 |
 | `PROMOTIONAL_MESSAGE` | `PROMOTIONAL` | No campaign module | *(not in V3)* |
 
-`INVOICE_ISSUED` carries `issuedBy`, which is what differs between the two apps:
-the provider's name on the parent's copy, "Littersoft / Pawfront" on the
-provider's. `PROMOTIONAL_MESSAGE` takes its `title`/`body` from the caller rather
-than a template, since campaign wording is the point of a campaign.
+> `INVOICE_ISSUED` is **half-wired as of 2026-08-11**. The **provider** side
+> (V-S14) now fires from `Booking.MarkBookingPaid` and its night-stay twin — the
+> moment the provider records the cash on a COMPLETED job, which is when their
+> invoice for it is settled. It arrives alongside the parent's `BOOKING_PAID`
+> receipt for the same event, carries the same `amount`, and **routes to
+> `/bookings/detail`, not `/invoices/detail`**: there is no invoicing module and
+> therefore no document to open, and the booking summary is what the spec asks for.
+> The **parent** side (P-S16) is still unwired — issuing them an invoice needs that
+> module. Their receipt for the same moment is `BOOKING_PAID`.
+
+`PROMOTIONAL_MESSAGE` takes its `title`/`body` from the caller rather than a
+template, since campaign wording is the point of a campaign.
 
 ### 3.5 Event tickets
 
@@ -385,6 +402,33 @@ plus `eventBookingId`, `eventTitle`, `parentName` (the buyer's name, free text) 
 strings — this is not a service booking.
 
 ---
+
+### 3.6 The modification review window — `reviewWithin`
+
+The two "requested a modification" cards
+(`BOOKING_MODIFICATION_REQUESTED_BY_PARENT` / `..._BY_PROVIDER`) quote **how long
+the counterparty has to answer**, and — exactly like `respondWithin` in §0 — it is
+**not always 24 hours**:
+
+- `Review it within 24 hours.` — the ordinary case.
+- `Review it within 3 hours 20 minutes.` — a proposal made close to the service.
+
+**Why it varies.** Two deadlines end an open proposal and
+`Booking.RevertExpiredModificationRequests` enforces whichever arrives **first**:
+
+- the **24-hour review window** — 24 hours after the proposal was made;
+- the **2-hour pre-service cutoff** — modifications close at `serviceStart − 2h`.
+
+So a proposal made at 08:40 on a booking that starts at 14:00 the same day dies at
+**12:00**, three hours and twenty minutes later — not the following morning. Until
+2026-08-11 the copy said a flat "24 hours" in every case, which on a short-notice
+booking promised a review window outliving the service itself.
+
+`data` carries `reviewByUtc` (the deadline) and `requestedAtUtc` (when it was
+proposed); `reviewWithin` is the span between them. **For a live countdown use
+`reviewByUtc`** — the rendered string is frozen at send time. A notification
+enqueued before this shipped carries neither key and falls back to "the time shown
+in the app".
 
 ## 4. In-app inbox
 

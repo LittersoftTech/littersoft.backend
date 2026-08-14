@@ -13,12 +13,32 @@ public sealed record ChatConversation(
     DateTimeOffset UpdatedAtUtc);
 
 /// <summary>One side's state on a thread.</summary>
+/// <param name="ClearedUpToSequence">
+/// This side's "delete chat" watermark: messages at or below it are not returned
+/// to them. 0 — the value on every row that has never been cleared — hides
+/// nothing.
+///
+/// It is a watermark rather than a delete because a message body is ONE Cosmos
+/// document read by both parties. Clearing it for one side would clear it for the
+/// other, which is the opposite of what a per-side delete means.
+/// </param>
+/// <param name="DeletedAtUtc">
+/// When this side last cleared the thread, or null if never. Distinguishes a
+/// cleared thread from a brand-new one, which the watermark alone cannot: both sit
+/// at sequence 0.
+/// </param>
+/// <remarks>
+/// The last two carry defaults because most read paths do not project them — only
+/// the single-thread read, which is the one the history filter needs.
+/// </remarks>
 public sealed record ChatParticipantState(
     ChatParticipantType ParticipantType,
     Guid ParticipantId,
     long LastReadSequence,
     int UnreadCount,
-    bool IsMuted);
+    bool IsMuted,
+    long ClearedUpToSequence = 0,
+    DateTimeOffset? DeletedAtUtc = null);
 
 /// <summary>
 /// The other party, resolved LIVE at read time — never denormalised onto the
@@ -26,16 +46,26 @@ public sealed record ChatParticipantState(
 /// "Deleted User" instead of keeping its real name frozen in the thread.
 /// </summary>
 /// <param name="PhotoUrl">
-/// Populated for a pet-parent counterparty from their SQL row. NULL for a
-/// provider: <c>Provider.Providers</c> has no photo column — a provider's image
-/// lives in their Cosmos offering document — so the caller resolves that one
-/// separately, exactly as the booking detail's <c>providerPhotoUrl</c> has to.
+/// For a pet parent this comes straight off their SQL row. For a PROVIDER it
+/// cannot: <c>Provider.Providers</c> has no photo column — a provider's image
+/// lives in their Cosmos offering document — so <c>ChatService</c> fills it in
+/// after the store returns, exactly as the booking detail's
+/// <c>providerPhotoUrl</c> has to. Null out of the store for a provider, and
+/// still null after enrichment when they have no offering document yet.
+/// </param>
+/// <param name="ServiceCategory">
+/// The provider's Cosmos partition key, carried purely so that enrichment can
+/// point-read the right partition — a chat thread, unlike a booking, has no
+/// service to derive it from. NOT part of the wire contract; the endpoint
+/// mapping ignores it. Null for a pet-parent counterparty and for a provider who
+/// has not registered a service yet.
 /// </param>
 public sealed record ChatCounterparty(
     ChatParticipantType ParticipantType,
     Guid ParticipantId,
     string? Name,
-    string? PhotoUrl);
+    string? PhotoUrl,
+    string? ServiceCategory = null);
 
 /// <summary>A thread plus the caller's own state and the other party — the header.</summary>
 public sealed record ChatConversationDetail(

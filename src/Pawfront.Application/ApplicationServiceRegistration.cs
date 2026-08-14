@@ -13,6 +13,7 @@ using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ProviderOnboarding;
 using Pawfront.Application.Providers;
 using Pawfront.Application.Reviews;
+using Pawfront.Application.Support;
 
 namespace Pawfront.Application;
 
@@ -65,6 +66,11 @@ public static class ApplicationServiceRegistration
         // Enriches a parent's "my bookings" cards with provider + service details.
         services.TryAddScoped<IParentBookingEnrichmentService, ParentBookingEnrichmentService>();
 
+        // Cancels several bookings of either kind in one call. Pure orchestration
+        // over the two booking services — every item takes the ordinary
+        // per-booking transition, so there is no bulk SQL path to drift from it.
+        services.TryAddScoped<IBulkBookingCancellationService, BulkBookingCancellationService>();
+
         // Diffs a booking's frozen-at-creation terms against the provider's current
         // ones, for the "these changed since you booked" confirmation sheet.
         services.TryAddScoped<IBookingTermsChangeService, BookingTermsChangeService>();
@@ -80,6 +86,14 @@ public static class ApplicationServiceRegistration
         // correct party, App booking) is enforced in Review.UpsertBookingReview, so
         // this layer only validates input and caps the page size.
         services.TryAddScoped<IBookingReviewService, BookingReviewService>();
+
+        // Support tickets — "Report Incident" on a booking and "Report Chat" on a
+        // conversation, both directions. Composes the SQL row (parties, subject,
+        // status, and therefore the legal holds) with the Cosmos narrative; the
+        // party check and the one-open-ticket-per-subject rule are enforced in
+        // Support.CreateTicket, so this layer validates input and sequences the two
+        // stores.
+        services.TryAddScoped<ISupportTicketService, SupportTicketService>();
 
         // Composes booking push notifications (who to tell, with what parameters).
         // The copy itself lives in NotificationTemplateCatalog and is rendered by

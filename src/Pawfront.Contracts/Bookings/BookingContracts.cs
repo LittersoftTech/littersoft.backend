@@ -61,6 +61,67 @@ public sealed record CreateCustomBookingRequest(
 public sealed record CancelBookingRequest(Guid PetParentId);
 
 /// <summary>
+/// Body for the batch cancellation endpoints
+/// (<c>POST /providers/{providerId}/bookings/bulk-cancel</c> and
+/// <c>POST /pet-parents/{petParentId}/bookings/bulk-cancel</c>). The acting party
+/// and its id come from the authenticated route, not the body — so a batch can
+/// only ever cancel the caller's own bookings.
+/// </summary>
+/// <param name="Bookings">
+/// One entry per booking, each naming its own kind. At least one, at most 50.
+/// </param>
+/// <param name="Note">
+/// Optional free text recorded on every cancelled booking's audit row. One note
+/// covers the whole batch.
+/// </param>
+public sealed record BulkCancelBookingsRequest(
+    IReadOnlyList<BulkCancelBookingItemRequest>? Bookings,
+    string? Note = null);
+
+/// <summary>
+/// One booking in a batch. <paramref name="BookingType"/> is required and is
+/// either "SingleDay" (<c>Booking.Bookings</c>) or "NightStay" (multi-night
+/// boarding) — the two kinds live in separate tables and share no id space, so
+/// the id alone cannot say which one it is.
+/// </summary>
+public sealed record BulkCancelBookingItemRequest(Guid BookingId, string? BookingType);
+
+/// <summary>
+/// The batch's outcome. Always returned with <b>200</b> when the batch itself was
+/// well-formed, even if every booking in it was refused — the per-booking verdict
+/// is in <paramref name="Results"/>, not in the HTTP status. A 400 means the batch
+/// was unusable (no bookings, or more than 50).
+/// </summary>
+/// <param name="RequestedCount">
+/// Distinct bookings processed, after duplicate ids in the request are collapsed.
+/// Always equals <paramref name="Results"/>.length, and
+/// <paramref name="CancelledCount"/> + <paramref name="FailedCount"/>.
+/// </param>
+public sealed record BulkCancelBookingsResponse(
+    int RequestedCount,
+    int CancelledCount,
+    int FailedCount,
+    IReadOnlyList<BulkCancelBookingItemResponse> Results);
+
+/// <summary>
+/// What happened to one booking. A cancelled booking carries its new
+/// <paramref name="Status"/> and <paramref name="CancelledAtUtc"/>; a refused one
+/// carries <paramref name="ErrorCode"/> and <paramref name="Message"/> instead.
+/// The error codes are the same ones the single-booking cancel endpoints return
+/// (BookingNotFound / NightStayBookingNotFound / Forbidden / BookingStatusTerminal
+/// / BookingStatusUnchanged / BookingInProgress / BookingExpired /
+/// UnsupportedBookingType / InvalidRequest).
+/// </summary>
+public sealed record BulkCancelBookingItemResponse(
+    Guid BookingId,
+    string BookingType,
+    bool Cancelled,
+    string? Status,
+    DateTimeOffset? CancelledAtUtc,
+    string? ErrorCode,
+    string? Message);
+
+/// <summary>
 /// Body for the booking status-change endpoints
 /// (<c>POST /providers/{providerId}/bookings/{bookingId}/status</c> and
 /// <c>POST /pet-parents/{petParentId}/bookings/{bookingId}/status</c>). The

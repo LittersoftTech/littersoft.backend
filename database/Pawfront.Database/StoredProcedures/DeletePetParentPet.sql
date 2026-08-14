@@ -42,11 +42,18 @@
 -- DeletedAtUtc with WasAlreadyDeleted = 1 rather than re-scrubbing, and skips the
 -- pending-job check (there is nothing left to refuse).
 --
--- Returns TWO result sets:
+-- The scrub is ALSO refused while an open support ticket names this pet — part of
+-- the legal hold. The pet is the subject of the job under investigation, so
+-- anonymising it out from under support would erase what the ticket is about.
+--
+-- Returns THREE result sets:
 --   1. summary — PetId, PetParentId, DeletedAtUtc, WasAlreadyDeleted, plus
---                BlockedByPendingJobs
+--                BlockedByPendingJobs and BlockedByOpenTickets
 --   2. pending jobs — empty unless BlockedByPendingJobs = 1, in which case NOTHING
 --      was scrubbed and result set 1 describes an untouched pet.
+--   3. open support tickets — empty unless BlockedByOpenTickets = 1, same shape and
+--      same ordering the two account deletes return, so one C# reader serves all
+--      three.
 --
 -- THROW 51214 = pet not found (pet delete).
 CREATE OR ALTER PROCEDURE [Parent].[DeletePetParentPet]
@@ -63,6 +70,19 @@ BEGIN
     DECLARE @DeletedAtUtc DATETIME2(7);
     DECLARE @WasAlreadyDeleted BIT = 0;
     DECLARE @BlockedByPendingJobs BIT = 0;
+    DECLARE @BlockedByOpenTickets BIT = 0;
+
+    -- Open support tickets blocking the delete. Same shape and same ordering as
+    -- the two account deletes return, so one C# reader serves all three.
+    DECLARE @OpenTickets TABLE
+    (
+        [TicketId] UNIQUEIDENTIFIER NOT NULL,
+        [TicketNumber] INT NOT NULL,
+        [TicketType] NVARCHAR(24) NOT NULL,
+        [RaisedByType] NVARCHAR(16) NOT NULL,
+        [Status] NVARCHAR(48) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+    );
 
     -- Unfinished jobs blocking the delete. Same shape as the account delete's
     -- third result set, so both refusals hand the caller the identical payload —
@@ -185,10 +205,32 @@ BEGIN
         BEGIN
             SET @BlockedByPendingJobs = 1;
         END
+
+        -- An open BOOKING incident naming this pet refuses the delete too — part
+        -- of the legal hold. The pet is the subject of the job under
+        -- investigation, so anonymising it out from under support would erase
+        -- what the ticket is about.
+        --
+        -- Matched on [Support].[Tickets].[PetId], denormalised from the booking at
+        -- ticket creation, so this is one indexed seek rather than a UNION back
+        -- across both booking tables. A CHAT incident never carries a PetId and
+        -- therefore never holds a pet — it is about what was said, not about an
+        -- animal.
+        INSERT INTO @OpenTickets
+            ([TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc])
+        SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
+        FROM [Support].[Tickets]
+        WHERE [PetId] = @PetId
+          AND [Status] <> N'CLOSED';
+
+        IF EXISTS (SELECT 1 FROM @OpenTickets)
+        BEGIN
+            SET @BlockedByOpenTickets = 1;
+        END
     END
 
     -- Only scrub when the pet is live AND unblocked.
-    IF @IsDeleted = 0 AND @BlockedByPendingJobs = 0
+    IF @IsDeleted = 0 AND @BlockedByPendingJobs = 0 AND @BlockedByOpenTickets = 0
     BEGIN
         UPDATE [Parent].[Pets]
         SET [PetName] = N'Deleted Pet',
@@ -208,14 +250,15 @@ BEGIN
         DELETE FROM [Parent].[PetNextConsultations] WHERE [PetId] = @PetId;
     END
 
-    -- Result set 1: summary. When BlockedByPendingJobs = 1 the pet is UNTOUCHED
+    -- Result set 1: summary. When either Blocked* flag is 1 the pet is UNTOUCHED
     -- and [DeletedAtUtc] carries @Now only to keep the column non-nullable for the
     -- reader; it is never surfaced in that case.
     SELECT @PetId AS [PetId],
            @PetParentId AS [PetParentId],
            @Now AS [DeletedAtUtc],
            @WasAlreadyDeleted AS [WasAlreadyDeleted],
-           @BlockedByPendingJobs AS [BlockedByPendingJobs];
+           @BlockedByPendingJobs AS [BlockedByPendingJobs],
+           @BlockedByOpenTickets AS [BlockedByOpenTickets];
 
     -- Result set 2: the unfinished jobs that refused the delete. Empty on the
     -- normal path. Ordered soonest-first — the parent has to deal with the next
@@ -226,6 +269,13 @@ BEGIN
            [CheckOutDate], [SnapshotUnitPrice]
     FROM @PendingJobs
     ORDER BY [ServiceDate] ASC, [StartTime] ASC;
+
+    -- Result set 3: the open support tickets that refused the delete. Empty on the
+    -- normal path. Oldest-first — the one that has been waiting longest is the one
+    -- to chase. Same columns and same order as the two account deletes emit.
+    SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
+    FROM @OpenTickets
+    ORDER BY [CreatedAtUtc] ASC;
 
     COMMIT TRANSACTION;
 END;

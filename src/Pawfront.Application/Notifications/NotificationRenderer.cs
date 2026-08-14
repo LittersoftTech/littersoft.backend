@@ -53,6 +53,7 @@ public static class NotificationRenderer
             [NotificationDataKeys.ServiceName] = "a service",
             [NotificationDataKeys.AcceptBy] = "the deadline shown in the app",
             [NotificationDataKeys.RespondWithin] = "the time shown in the app",
+            [NotificationDataKeys.ReviewWithin] = "the time shown in the app",
             [NotificationDataKeys.AbsentParty] = "the other party",
             [NotificationDataKeys.Amount] = "the agreed amount",
             [NotificationDataKeys.TicketCount] = "some",
@@ -102,6 +103,7 @@ public static class NotificationRenderer
         data = WithLocalTimes(data, timeZone ?? NotificationLocalTime.Default);
         data = WithDerivedServiceName(data);
         data = WithDerivedResponseWindow(data);
+        data = WithDerivedReviewWindow(data);
 
         return new RenderedNotification(
             Truncate(Substitute(template.TitleTemplate, data), MaxTitleLength),
@@ -286,6 +288,42 @@ public static class NotificationRenderer
         return new Dictionary<string, string>(data, StringComparer.Ordinal)
         {
             [NotificationDataKeys.RespondWithin] = window
+        };
+    }
+
+    /// <summary>
+    /// Derives <c>reviewWithin</c> — how long the counterparty has to answer a
+    /// modification proposal — from the deadline and the moment it was proposed.
+    ///
+    /// The twin of <see cref="WithDerivedResponseWindow"/>, and for the same
+    /// reason: the window is NOT always 24 hours. A proposal on a booking that
+    /// starts in five hours dies at the 2-hour pre-service cutoff, three hours
+    /// after it was made, so copy promising a day to review it is simply false.
+    /// The producer computes which deadline bites — it is the one holding both
+    /// readings — and this turns the span into words.
+    ///
+    /// Absent when either reading is missing (a row enqueued before this shipped)
+    /// or the window has already run out; the fallback covers it.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string>? WithDerivedReviewWindow(
+        IReadOnlyDictionary<string, string>? data)
+    {
+        if (data is null
+            || !TryReadInstant(data, NotificationDataKeys.ReviewByUtc, out var reviewBy)
+            || !TryReadInstant(data, NotificationDataKeys.RequestedAtUtc, out var requestedAt))
+        {
+            return data;
+        }
+
+        var window = NotificationDuration.Humanise(reviewBy - requestedAt);
+        if (window is null)
+        {
+            return data;
+        }
+
+        return new Dictionary<string, string>(data, StringComparer.Ordinal)
+        {
+            [NotificationDataKeys.ReviewWithin] = window
         };
     }
 

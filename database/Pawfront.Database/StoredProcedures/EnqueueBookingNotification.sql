@@ -53,6 +53,12 @@ CREATE OR ALTER PROCEDURE [Notification].[EnqueueBookingNotification]
     @NewServiceStartUtc DATETIME2(0) = NULL,
     @NewCheckOutUtc DATETIME2(0) = NULL,
     @AbsentParty NVARCHAR(32) = NULL,
+    -- The modification review window, as the pair of instants the renderer needs
+    -- to express it as a LENGTH ("24 hours", "3 hours 20 minutes"). Supplied by the
+    -- two request-modification sprocs, which are the only callers that know which
+    -- of the two deadlines bites — see the note where they compute it.
+    @ReviewByUtc DATETIME2(0) = NULL,
+    @RequestedAtUtc DATETIME2(0) = NULL,
     @Location NVARCHAR(500) = NULL,
     -- When the provider closes on the service date. An instant, not a bare TIME:
     -- converting a clock time to the recipient's zone needs the date it falls on.
@@ -229,6 +235,8 @@ BEGIN
             CONVERT(NVARCHAR(19), @NewServiceStartUtc, 126) AS [newServiceStartUtc],
             CONVERT(NVARCHAR(19), @NewCheckOutUtc, 126)   AS [newCheckOutUtc],
             @AbsentParty                                 AS [absentParty],
+            CONVERT(NVARCHAR(19), @ReviewByUtc, 126)      AS [reviewByUtc],
+            CONVERT(NVARCHAR(19), @RequestedAtUtc, 126)   AS [requestedAtUtc],
             COALESCE(@Location, @SnapshotAddressLine)     AS [location],
             CONVERT(NVARCHAR(19), @ClosingAtUtc, 126)     AS [closingAtUtc]
         FOR JSON PATH, WITHOUT_ARRAY_WRAPPER

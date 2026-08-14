@@ -23,4 +23,5 @@ public sealed class BlobStorageFolderOptions
     public string ProviderBanners { get; init; } = "provider-banners";
     public string ReviewPhotos { get; init; } = "review-photos";
     public string ChatAttachments { get; init; } = "chat-attachments";
+    public string IncidentPhotos { get; init; } = "incident-photos";
 }

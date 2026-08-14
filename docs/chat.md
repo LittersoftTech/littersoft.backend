@@ -67,10 +67,21 @@ the hub will drop the connection.
 | Event | Payload |
 |---|---|
 | `MessageReceived` | the full message |
+| `MessageDeleted` | `{ conversationId, messageId, sequence, deletedAtUtc }` |
 | `MessageRead` | `{ conversationId, participantType, participantId, lastReadSequence }` |
 | `TypingChanged` | `{ conversationId, participantType, participantId, isTyping }` |
 | `ConversationUpdated` | `{ conversationId, lastSequence, lastMessageAtUtc, unreadCount }` |
 | `UnreadCountChanged` | `{ conversationId, unreadCount }` |
+
+**`MessageDeleted` arrives the same two ways `MessageReceived` does** — to the
+thread group (you have the conversation open) and to your personal group (you are
+elsewhere in the app with the inbox on screen, and its preview line may have just
+become "This message was deleted").
+
+**Render it in place, do not remove the row.** The message keeps its sequence and
+its timestamp; only its content is gone. Re-fetching history returns it with
+`isDeleted: true` and a null `text`, so removing it on the event and restoring it
+on the next fetch would make the thread flicker.
 
 ### Three things that matter more than they look
 
@@ -98,9 +109,11 @@ tracking which ones got through.
 
 ```
 POST   /api/v1/conversations                              { counterpartyId }
-GET    /api/v1/conversations                              ?skip= &take=  (max 20)
+GET    /api/v1/conversations                              ?search= &skip= &take=  (max 20)
 GET    /api/v1/conversations/unread-summary
 GET    /api/v1/conversations/{id}
+DELETE /api/v1/conversations/{id}
+GET    /api/v1/conversations/{id}/bookings                ?skip= &take=  (max 20)
 GET    /api/v1/conversations/{id}/messages                ?beforeSequence= &take=  (max 50)
 POST   /api/v1/conversations/{id}/messages
 POST   /api/v1/conversations/{id}/read                    { upToSequence }
@@ -118,6 +131,71 @@ wrong or contradict.
 
 Sending exists as REST as well as a hub method so a client whose socket has
 dropped can still send. Both go through identical server logic.
+
+### Searching the inbox
+
+`GET /conversations?search=anna` returns inbox cards — the same shape, sorting and
+paging as the unfiltered list, so the search results screen is the inbox screen
+with a filter.
+
+It matches the **counterparty's name** and the **last message's preview**. It is
+deliberately not a full message-history search: bodies are partitioned per
+conversation, so matching all of them would be a cross-partition scan per
+keystroke. If searching whole threads is needed, say so — it wants a search index
+rather than a bigger query.
+
+Case-insensitive, trimmed, and `%` / `_` in the term are matched literally rather
+than as wildcards. A blank term returns the whole inbox.
+
+### Deleting a whole chat
+
+`DELETE /conversations/{id}` clears the thread **for you only**. The other side
+keeps every message, their unread count and their place in the conversation —
+that is the point, and it is also the only thing the storage allows: a message is
+one document read by both of you.
+
+```json
+{ "conversationId": "…", "clearedUpToSequence": 42, "deletedAtUtc": "…" }
+```
+
+What actually happens:
+
+* the thread leaves **your** inbox and your history restarts after
+  `clearedUpToSequence`;
+* **the counterparty notices nothing** — no event, no change to their thread;
+* **it comes back** the moment they send something, carrying on from there
+  without the cleared history. A delete that stopped you receiving messages would
+  not be a delete, it would be a broken conversation, so plan for a thread you
+  deleted to reappear;
+* re-opening it yourself (`POST /conversations` with the same counterparty) also
+  puts it back on your inbox — the history stays cleared, since walking back into
+  the room is not a request to undo the delete.
+
+404 `ConversationNotFound` for a thread that does not exist and for one that is
+not yours — one answer, as everywhere else here.
+
+### The jobs behind a thread ("View Jobs")
+
+`GET /conversations/{id}/bookings` returns every booking between the two of you,
+newest first by service date — past and present, cancelled and completed included.
+Works from either side, and takes no provider or parent id: the conversation id
+*is* the pair.
+
+```json
+{
+  "conversationId": "…", "providerId": "…", "petParentId": "…",
+  "totalCount": 7, "skip": 0, "take": 20, "hasMore": false,
+  "jobs": [ { "bookingId": "…", "bookingType": "SingleDay", "jobId": "PF-000123", … } ]
+}
+```
+
+**`jobs[]` is the same job card the two delete-refusal payloads use** (the 409
+`PendingJobsExist` body on `DELETE /pet-parents/{id}` and `DELETE /pets/{id}`), so
+if you already render that, you already render this. `bookingType` discriminates
+`"SingleDay"` from `"NightStay"` — the two kinds share no id space, so `bookingId`
+alone cannot say which detail screen to open — and the other kind's fields are
+null. `price` and `providerProfilePhotoUrl` are filled in best-effort and can be
+null for an old booking whose service has since been deactivated.
 
 ### Sending an image
 
@@ -149,6 +227,13 @@ is the only delivery guarantee — the socket does not replay what you missed.
 A retracted message keeps its place with `isDeleted: true` and no content. Render
 "This message was deleted"; do not remove the row, or your sequence numbering will
 disagree with the server's.
+
+**The inbox follows it.** When the retracted message was the thread's newest, its
+`lastMessagePreview` on `GET /conversations` becomes `"This message was deleted"` —
+already composed server-side, so render it as-is like any other preview. Deleting
+an older message changes nothing on the card, and `lastMessageAtUtc` never moves in
+either case: the message is still the thread's last activity, only its content is
+gone. Until 2026-08-11 the card went on showing the deleted text.
 
 ---
 
@@ -237,3 +322,16 @@ directly. If the chat host dies mid-send, the lease lapses and the scheduled
 dispatcher takes it over. The outbox stops being the delivery path and becomes the
 retry backstop — there is no case where a message is stored and its notification
 is lost.
+
+> ⚠️ **That backstop is also the failure mode to watch for.** The chat host needs
+> its own working Firebase credentials — it is the one API host that sends. With
+> none usable, every instant send fails, each row falls to the scheduled
+> dispatcher, and chat messages arrive a minute or more late while *appearing* to
+> work. Nothing surfaces as an error to the client. This was a real reported bug
+> (fixed 2026-08-11): the host had only a `CredentialsSecretName`, which resolves
+> through Key Vault — and with `AzureKeyVault:Enabled = false` the local provider
+> looks for `LocalSecrets:<name>` in config and throws when it is absent. A
+> populated-looking `Notifications` section is therefore not evidence the host can
+> send. Confirm with `Firebase initialisation failed` in the host log, or
+> `LastError` on `Notification.NotificationOutbox`; a healthy chat row reaches
+> `Sent` with `AttemptCount = 1` within a second or two of the message.

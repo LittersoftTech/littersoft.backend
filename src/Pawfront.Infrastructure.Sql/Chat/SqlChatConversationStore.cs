@@ -1,7 +1,8 @@
-using System.Data;
+﻿using System.Data;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Chat;
 using Pawfront.Application.Configuration;
+using Pawfront.Application.Support;
 
 namespace Pawfront.Infrastructure.Sql.Chat;
 
@@ -93,6 +94,7 @@ internal sealed class SqlChatConversationStore(
 
     public async Task<IReadOnlyList<ChatConversationCard>> ListAsync(
         ChatParticipant participant,
+        string? search,
         int skip,
         int take,
         CancellationToken cancellationToken)
@@ -105,6 +107,10 @@ internal sealed class SqlChatConversationStore(
         command.Parameters.AddWithValue("@ParticipantId", participant.Id);
         command.Parameters.AddWithValue("@Skip", skip);
         command.Parameters.AddWithValue("@Take", take);
+        // DBNull, not null: AddWithValue(null) sends no value at all, which would
+        // silently take the parameter's default rather than the intended "no
+        // filter" — here they agree, but relying on that is how the two drift.
+        command.Parameters.AddWithValue("@Search", (object?)search ?? DBNull.Value);
 
         var cards = new List<ChatConversationCard>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -137,13 +143,63 @@ internal sealed class SqlChatConversationStore(
                 ChatParticipantTypes.FromSqlValue(reader.GetString(11)),
                 reader.GetGuid(12),
                 Name: NullIfBlank(reader, 13),
-                PhotoUrl: NullIfBlank(reader, 14));
+                PhotoUrl: NullIfBlank(reader, 14),
+                ServiceCategory: NullIfBlank(reader, 15));
 
             cards.Add(new ChatConversationCard(conversation, me, counterparty));
         }
 
         return cards;
     }
+
+    public async Task<ChatParticipantState?> DeleteForParticipantAsync(
+        Guid conversationId,
+        ChatParticipant participant,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = StoredProcedure(connection, "[Chat].[DeleteConversationForParticipant]");
+        command.Parameters.AddWithValue("@ConversationId", conversationId);
+        command.Parameters.AddWithValue("@ParticipantType", participant.Type.ToSqlValue());
+        command.Parameters.AddWithValue("@ParticipantId", participant.Id);
+
+        SqlDataReader reader;
+        try
+        {
+            reader = await command.ExecuteReaderAsync(cancellationToken);
+        }
+        catch (SqlException exception) when (exception.Number == 51352)
+        {
+            // Under legal hold by an open ticket. The procedure checks this only
+            // after confirming the caller is a party, so a stranger still gets the
+            // "not found" null below rather than learning a thread exists.
+            throw new ConversationUnderLegalHoldException(conversationId);
+        }
+
+        await using (reader)
+        {
+            // No row = unknown conversation OR not the caller's. The procedure does
+            // not distinguish them and neither does this.
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            return ReadParticipantState(reader);
+        }
+    }
+
+    private static ChatParticipantState ReadParticipantState(SqlDataReader reader)
+        => new ChatParticipantState(
+            ChatParticipantTypes.FromSqlValue(reader.GetString(1)),
+            reader.GetGuid(2),
+            LastReadSequence: reader.GetInt64(3),
+            UnreadCount: reader.GetInt32(4),
+            IsMuted: ReadFlag(reader, 5),
+            ClearedUpToSequence: reader.GetInt64(6),
+            DeletedAtUtc: ReadUtc(reader, 7));
 
     public async Task<ChatMessageReservation> ReserveMessageAsync(
         Guid conversationId,
@@ -279,6 +335,25 @@ internal sealed class SqlChatConversationStore(
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task RefreshDeletedMessagePreviewAsync(
+        Guid conversationId,
+        long sequence,
+        string preview,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = StoredProcedure(connection, "[Chat].[RefreshDeletedMessagePreview]");
+        command.Parameters.AddWithValue("@ConversationId", conversationId);
+        command.Parameters.AddWithValue("@Sequence", sequence);
+        command.Parameters.AddWithValue("@Preview", preview);
+
+        // No result set: the guarded UPDATE either applied or a newer message had
+        // already moved the preview on, and neither changes what the caller does.
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task<ChatParticipantState?> MarkReadAsync(
         Guid conversationId,
         ChatParticipant participant,
@@ -373,13 +448,18 @@ internal sealed class SqlChatConversationStore(
         command.Parameters.AddWithValue("@BlockerType", blocker.Type.ToSqlValue());
         command.Parameters.AddWithValue("@BlockerId", blocker.Id);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        // No guard on the way in: a block is always the blocker's to lift. A support
+        // ticket does not freeze one, because raising a ticket never placed one.
+        var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        // No rows means unknown id OR somebody else's block — one case by design,
-        // so a block id cannot be probed for existence.
-        return await reader.ReadAsync(cancellationToken)
-            ? ReadBlock(reader, hasNameColumns: false)
-            : null;
+        await using (reader)
+        {
+            // No rows means unknown id OR somebody else's block — one case by
+            // design, so a block id cannot be probed for existence.
+            return await reader.ReadAsync(cancellationToken)
+                ? ReadBlock(reader, hasNameColumns: false)
+                : null;
+        }
     }
 
     public async Task<IReadOnlyList<ChatBlock>> ListBlocksAsync(
@@ -438,7 +518,12 @@ internal sealed class SqlChatConversationStore(
             participant.Id,
             LastReadSequence: reader.GetInt64(9),
             UnreadCount: reader.GetInt32(10),
-            IsMuted: reader.GetBoolean(11));
+            IsMuted: ReadFlag(reader, 11),
+            // The caller's "delete chat" watermark. This is the ONLY read that
+            // projects it, and it is the one the history filter runs off — see
+            // ChatService.GetHistoryAsync.
+            ClearedUpToSequence: reader.GetInt64(12),
+            DeletedAtUtc: ReadUtc(reader, 13));
 
         var counterparty = new ChatCounterparty(participant.Type.Counterparty(), Guid.Empty, null, null);
 
@@ -449,7 +534,9 @@ internal sealed class SqlChatConversationStore(
                 ChatParticipantTypes.FromSqlValue(reader.GetString(0)),
                 reader.GetGuid(1),
                 Name: NullIfBlank(reader, 2),
-                PhotoUrl: NullIfBlank(reader, 3));
+                PhotoUrl: NullIfBlank(reader, 3),
+                // Ordinal 4 is CounterpartyIsDeleted, which this reader does not use.
+                ServiceCategory: NullIfBlank(reader, 5));
         }
 
         return new ChatConversationDetail(conversation, me, counterparty);

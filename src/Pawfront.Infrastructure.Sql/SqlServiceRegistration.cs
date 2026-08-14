@@ -23,6 +23,7 @@ using Pawfront.Application.ProviderServiceBanners;
 using Pawfront.Application.Providers;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Reviews;
+using Pawfront.Application.Support;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
@@ -44,6 +45,7 @@ using Pawfront.Infrastructure.Sql.ProviderServiceBanners;
 using Pawfront.Infrastructure.Sql.Providers;
 using Pawfront.Infrastructure.Sql.ProviderServices;
 using Pawfront.Infrastructure.Sql.Reviews;
+using Pawfront.Infrastructure.Sql.Support;
 
 namespace Pawfront.Infrastructure.Sql;
 
@@ -87,6 +89,11 @@ public static class SqlServiceRegistration
             // rather than 500ing the reporting screens.
             services.AddSingleton<IProviderEarningsStore, NullProviderEarningsStore>();
             services.AddSingleton<IParentSpendStore, NullParentSpendStore>();
+            // The chat thread's "View Jobs" list reads the two booking tables the
+            // in-memory stores do not keep in a form this can query — report an
+            // empty history rather than 500ing the screen, the same posture as
+            // earnings above.
+            services.AddSingleton<IParentProviderBookingReader, NullParentProviderBookingReader>();
             // No outbox table to write to — log and drop, same posture as the
             // booking sweeps having no in-memory equivalent.
             services.AddSingleton<INotificationPublisher, NullNotificationPublisher>();
@@ -99,6 +106,15 @@ public static class SqlServiceRegistration
             services.AddSingleton<InMemoryBookingReviewStore>();
             services.AddSingleton<IBookingReviewStore>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
             services.AddSingleton<IPetParentRatingReader>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
+
+            // Support tickets, functional for the same reason. Two things it cannot do,
+            // both for want of the other tables: derive the counterparty from the
+            // booking or conversation, and enforce the party check. The
+            // one-open-ticket-per-subject rule and the photo cap ARE enforced, since
+            // both are answerable from what it holds.
+            services.AddSingleton<InMemorySupportTicketStore>();
+            services.AddSingleton<ISupportTicketStore>(sp => sp.GetRequiredService<InMemorySupportTicketStore>());
+            services.AddSingleton<ISupportLegalHoldReader>(sp => sp.GetRequiredService<InMemorySupportTicketStore>());
 
             // Chat works in-memory for the same reason reviews do — it is a write
             // flow, and a store that swallowed messages would make it untestable
@@ -233,6 +249,13 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            // The jobs behind a chat thread — every booking of either kind
+            // between one provider and one pet parent.
+            services.AddScoped<IParentProviderBookingReader>(provider =>
+                new SqlParentProviderBookingReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             services.AddScoped<IProviderNameReader>(provider =>
                 new SqlProviderNameReader(
                     sqlConnectionString,
@@ -275,6 +298,16 @@ public static class SqlServiceRegistration
                     provider.GetService<IPawfrontSecretProvider>()));
             services.AddScoped<IBookingReviewStore>(sp => sp.GetRequiredService<SqlBookingReviewStore>());
             services.AddScoped<IPetParentRatingReader>(sp => sp.GetRequiredService<SqlBookingReviewStore>());
+
+            // Support tickets. One store serves both interfaces: the chat host's legal
+            // hold check asks Support.Tickets one question, and giving it a second
+            // store would only let the two drift apart on what "open" means.
+            services.AddScoped(provider =>
+                new SqlSupportTicketStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+            services.AddScoped<ISupportTicketStore>(sp => sp.GetRequiredService<SqlSupportTicketStore>());
+            services.AddScoped<ISupportLegalHoldReader>(sp => sp.GetRequiredService<SqlSupportTicketStore>());
 
             // Push notifications are enqueued onto Notification.NotificationOutbox
             // here and dispatched to FCM by Pawfront.Functions — neither API host

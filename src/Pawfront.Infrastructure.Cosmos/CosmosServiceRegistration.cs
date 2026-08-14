@@ -10,6 +10,7 @@ using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.PetSitter;
 using Pawfront.Application.Services.PetTrainer;
 using Pawfront.Application.Services.Vet;
+using Pawfront.Application.Support;
 using Pawfront.Infrastructure.Cosmos.Chat;
 using Pawfront.Infrastructure.Cosmos.Events;
 using Pawfront.Infrastructure.Cosmos.ProviderDiscovery;
@@ -20,6 +21,7 @@ using Pawfront.Infrastructure.Cosmos.Services.PetGroomer;
 using Pawfront.Infrastructure.Cosmos.Services.PetSitter;
 using Pawfront.Infrastructure.Cosmos.Services.PetTrainer;
 using Pawfront.Infrastructure.Cosmos.Services.Vet;
+using Pawfront.Infrastructure.Cosmos.Support;
 
 namespace Pawfront.Infrastructure.Cosmos;
 
@@ -34,6 +36,7 @@ public static class CosmosServiceRegistration
         services.TryAddSingleton<IProviderServicesContainerAccessor, ProviderServicesContainerAccessor>();
         services.TryAddSingleton<IEventsContainerAccessor, EventsContainerAccessor>();
         services.TryAddSingleton<IChatMessagesContainerAccessor, ChatMessagesContainerAccessor>();
+        services.TryAddSingleton<ISupportTicketsContainerAccessor, SupportTicketsContainerAccessor>();
 
         services.TryAddSingleton<IPetSitterServiceRegistry, CosmosPetSitterServiceRegistry>();
         services.TryAddSingleton<IPetGroomerServiceRegistry, CosmosPetGroomerServiceRegistry>();
@@ -43,6 +46,7 @@ public static class CosmosServiceRegistration
         services.TryAddSingleton<IEventCosmosStore, CosmosEventStore>();
         services.TryAddSingleton<IProviderServiceCosmosStore, CosmosProviderServiceStore>();
         services.TryAddSingleton<IChatMessageStore, CosmosChatMessageStore>();
+        services.TryAddSingleton<ISupportTicketNarrativeStore, CosmosSupportTicketNarrativeStore>();
 
         // Discovery is registered WRAPPED, so nothing can resolve the raw Cosmos
         // reader by interface. The wrapper drops providers whose SQL master

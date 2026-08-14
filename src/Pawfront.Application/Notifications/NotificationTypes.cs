@@ -145,9 +145,16 @@ public static class NotificationTypes
     public const string MessageReceived = "MESSAGE_RECEIVED";
 
     /// <summary>
-    /// Invoice ready (P-S16 / V-S14). <b>No trigger</b> — invoicing is not built.
-    /// The issuer differs per audience: the parent's is issued under the provider's
-    /// name, the provider's under Littersoft / Pawfront's.
+    /// Invoice ready (P-S16 / V-S14).
+    ///
+    /// <b>The PROVIDER half is wired (2026-08-11)</b> — enqueued by
+    /// <c>Booking.MarkBookingPaid</c> and its night-stay twin when the provider
+    /// records the cash, which is the moment their invoice for the job is settled.
+    /// It deep-links to the booking rather than to a document, since there is none.
+    ///
+    /// <b>The PARENT half has no trigger</b>: issuing them an invoice needs an
+    /// invoicing module, which does not exist. Their receipt for the same event is
+    /// <see cref="BookingPaid"/>.
     /// </summary>
     public const string InvoiceIssued = "INVOICE_ISSUED";
 
@@ -341,6 +348,34 @@ public static class NotificationDataKeys
     /// BR-17 governs and reports the real, shorter window when BR-53 does.
     /// </summary>
     public const string RespondWithin = "respondWithin";
+
+    /// <summary>
+    /// When an open modification proposal stops being answerable, as an instant.
+    /// The EARLIER of the two deadlines
+    /// <c>Booking.RevertExpiredModificationRequests</c> enforces: the 24-hour
+    /// review window, and the 2-hour pre-service cutoff. Quoting a flat 24 hours
+    /// would promise a review window that outlives the service itself on a
+    /// short-notice booking.
+    /// </summary>
+    public const string ReviewByUtc = "reviewByUtc";
+
+    /// <summary>
+    /// When the proposal was made. Emitted so <see cref="ReviewWithin"/> can be
+    /// derived from the same pair of readings the app has, and measured from the
+    /// request rather than from send time — see
+    /// <see cref="CreatedAtUtc"/> for why that reads better.
+    /// </summary>
+    public const string RequestedAtUtc = "requestedAtUtc";
+
+    /// <summary>
+    /// How long the counterparty has to answer a modification, as human copy
+    /// ("24 hours", "3 hours 20 minutes"). Derived from <see cref="ReviewByUtc"/>
+    /// minus <see cref="RequestedAtUtc"/>, so it collapses to a clean "24 hours"
+    /// whenever the service is far enough out and reports the real, shorter window
+    /// when the 2-hour cutoff governs.
+    /// </summary>
+    public const string ReviewWithin = "reviewWithin";
+
     /// <summary>
     /// What was booked, as a customer-facing name — the specific grooming menu
     /// item where the category has one ("Nails Clipping"), otherwise the bookable

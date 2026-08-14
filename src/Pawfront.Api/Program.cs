@@ -65,6 +65,9 @@ api.MapProviderEarningsEndpoints();
 // Provider rates the parent after a finished job (rating only) + reads the reviews
 // parents have left for them.
 api.MapProviderReviewEndpoints();
+// Support tickets: "Report Incident" on a booking and "Report Chat" on a
+// conversation. One open ticket per subject; reporting does not block anybody.
+api.MapProviderSupportTicketEndpoints();
 api.MapPetParentLookupEndpoints();
 api.MapProviderNightStayBookingEndpoints();
 api.MapBlobImageEndpoints();

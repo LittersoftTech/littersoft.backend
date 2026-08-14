@@ -82,3 +82,49 @@ public sealed class PetPendingJobsException(
 /// </summary>
 public sealed class PetParentAccountDeletedException(Guid petParentId)
     : Exception($"Pet parent account '{petParentId}' has been deleted and can no longer be changed.");
+
+/// <summary>
+/// The account delete was refused: an open support ticket names this parent. Part of the
+/// legal hold — an open ticket is a live dispute, and anonymising one of its two parties
+/// while support is still looking at it would erase what the ticket is about (and would
+/// let a reporter, or the person reported, disappear mid-investigation).
+/// </summary>
+/// <remarks>
+/// Modelled exactly like <see cref="PetParentPendingJobsException"/>, and for the same
+/// reason: the refusal is decided inside the SQL delete, so an exception is what carries
+/// it out without every layer between having to thread a success-shaped result that isn't
+/// one. Unlike the pending-jobs refusal the parent cannot clear this themselves — only
+/// support closing the ticket lifts it — so the message says so rather than telling them
+/// to go and settle something.
+/// </remarks>
+public sealed class PetParentOpenTicketsException(
+    Guid petParentId,
+    IReadOnlyList<Support.BlockingSupportTicket> openTickets)
+    : Exception(
+        $"Pet parent '{petParentId}' has {openTickets.Count} open support ticket(s). " +
+        "The account cannot be deleted until support closes them.")
+{
+    public Guid PetParentId { get; } = petParentId;
+
+    public IReadOnlyList<Support.BlockingSupportTicket> OpenTickets { get; } = openTickets;
+}
+
+/// <summary>
+/// The per-pet delete was refused: an open BOOKING incident names this pet. Twin of
+/// <see cref="PetParentOpenTicketsException"/>.
+/// </summary>
+/// <remarks>
+/// A chat incident never holds a pet — it is about what was said, not about an animal —
+/// so only a booking incident can raise this.
+/// </remarks>
+public sealed class PetOpenTicketsException(
+    Guid petId,
+    IReadOnlyList<Support.BlockingSupportTicket> openTickets)
+    : Exception(
+        $"Pet '{petId}' is named by {openTickets.Count} open support ticket(s). " +
+        "It cannot be deleted until support closes them.")
+{
+    public Guid PetId { get; } = petId;
+
+    public IReadOnlyList<Support.BlockingSupportTicket> OpenTickets { get; } = openTickets;
+}

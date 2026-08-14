@@ -11,10 +11,20 @@
 -- already said is part of both parties' record, and removing it would also remove
 -- the evidence a blocked user might later need to report.
 --
--- Reporting is NOT modelled here. A report has to terminate in a support
--- workflow, and this backend has no Helpline / ticket module (see the
--- DISPUTE_RESOLVED notification type, which has copy and route but no trigger for
--- exactly the same reason). It belongs with that module, not ahead of it.
+-- Reporting somebody does NOT write here. Raising a support ticket is a report to
+-- support, not a sanction the reporter applies themselves, so the two parties stay
+-- able to message, book and find each other while the case is looked at. Every row
+-- in this table was put here by a user tapping Block, and is theirs alone to lift
+-- — [Chat].[UnblockChatParticipant] refuses nobody.
+--
+-- A block is a CHAT remedy and stops there: the booking creates deliberately do
+-- not consult this table, so blocking a conversation never quietly takes away the
+-- ability to book.
+--
+-- There is therefore no [Source] discriminator and no [TicketId] here: every row
+-- has one origin and one owner. If support ever needs to sever a pair from the
+-- admin panel, that is a different thing from a user's block and wants its own
+-- shape rather than a flag on this one.
 --
 -- NO FK to either party, same reasoning as [Chat].[Conversations]: [BlockerId]
 -- and [BlockedId] are polymorphic and an anonymised account must not cascade its
@@ -29,8 +39,7 @@ CREATE TABLE [Chat].[BlockedParticipants]
     [BlockedType] NVARCHAR(16) NOT NULL,
     [BlockedId] UNIQUEIDENTIFIER NOT NULL,
 
-    -- Free text the blocker may supply. Kept for a future report flow to quote;
-    -- never shown to the blocked party.
+    -- Free text the blocker may supply. Never shown to the blocked party.
     [Reason] NVARCHAR(500) NULL,
 
     [CreatedAtUtc] DATETIME2(7) NOT NULL

@@ -28,6 +28,7 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @Today DATE = CAST(@Now AS DATE);
+    DECLARE @Tomorrow DATE = DATEADD(DAY, 1, @Today);
 
     -- Every rule below concerns a booking within a couple of days of now: the
     -- earliest is the T-24h reminder (tomorrow) and the latest the closing-time
@@ -66,6 +67,10 @@ BEGIN
     DECLARE @SingleDay TABLE (
         [BookingId] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
         [Status] NVARCHAR(48) NOT NULL,
+        -- The booked calendar day. Carried alongside [StartsAtUtc] rather than
+        -- re-derived from it, because the day-before arm is a statement ABOUT the
+        -- calendar and reads better tested against one.
+        [ServiceDate] DATE NOT NULL,
         [StartsAtUtc] DATETIME2(7) NOT NULL,
         [EndsAtUtc] DATETIME2(7) NOT NULL,
         -- The provider's closing time on the booking date, when they have saved
@@ -75,9 +80,10 @@ BEGIN
         -- no separate display column is kept.
         [ClosesAtUtc] DATETIME2(7) NULL);
 
-    INSERT INTO @SingleDay ([BookingId], [Status], [StartsAtUtc], [EndsAtUtc], [ClosesAtUtc])
+    INSERT INTO @SingleDay ([BookingId], [Status], [ServiceDate], [StartsAtUtc], [EndsAtUtc], [ClosesAtUtc])
     SELECT b.[BookingId],
            b.[Status],
+           b.[BookingDate],
            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[StartTime]),
                    CAST(b.[BookingDate] AS DATETIME2(7))),
            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[EndTime]),
@@ -97,24 +103,38 @@ BEGIN
            OR b.[Status] IN (N'START_JOB', N'IN_PROGRESS'));
 
     -- ================================================================
-    -- 1. T-24h "service tomorrow"  (P-S4 / V-S5) — both parties
-    -- Fires from 24h before the start until the start itself. The window is open
-    -- rather than instantaneous because a tick can be missed; the dedupe key is
-    -- what keeps it to one send.
+    -- 1. "service tomorrow"  (P-S4 / V-S5) — both parties
+    --
+    -- THE SERVICE MUST BE ON TOMORROW'S CALENDAR DAY. That gate is the whole rule,
+    -- and its absence was a reported bug: the arm used to test only "is the start
+    -- within the next 24 hours", which is a DIFFERENT statement — a job booked at
+    -- 10:00 for 16:00 the SAME day satisfies it the instant it is created, so the
+    -- provider got a card reading "tomorrow at 16:00" about a job later that
+    -- afternoon. Anything under a day away is not tomorrow; it is today, and the
+    -- T-5min arm below is what covers it.
+    --
+    -- The 24-hour floor is KEPT on top of the date gate, so the card still lands
+    -- roughly a day ahead (09:00 today for a 09:00 job tomorrow) rather than the
+    -- instant the clock rolls past midnight. Between them the window is open rather
+    -- than instantaneous, because a tick can be missed; the dedupe key is what
+    -- keeps it to one send.
     -- ================================================================
     INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience])
     SELECT s.[BookingId], 0, N'BOOKING_REMINDER_DAY_BEFORE', a.[Audience]
     FROM @SingleDay s
     CROSS JOIN (VALUES (N'PetParent'), (N'Provider')) AS a([Audience])
     WHERE s.[Status] IN (SELECT [Status] FROM @Live)
+      AND s.[ServiceDate] = @Tomorrow
       AND @Now >= DATEADD(HOUR, -24, s.[StartsAtUtc])
       AND @Now < s.[StartsAtUtc];
 
+    -- A stay's "service" is the drop-off on the check-in day, so the same gate
+    -- applies to that date.
     INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience])
     SELECT n.[NightStayBookingId], 1, N'BOOKING_REMINDER_DAY_BEFORE', a.[Audience]
     FROM [Booking].[NightStayBookings] n
     CROSS JOIN (VALUES (N'PetParent'), (N'Provider')) AS a([Audience])
-    WHERE n.[CheckInDate] BETWEEN @WindowFrom AND @WindowTo
+    WHERE n.[CheckInDate] = @Tomorrow
       AND n.[Status] IN (SELECT [Status] FROM @Live)
       AND @Now >= DATEADD(HOUR, -24,
               DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), n.[DropOffTime]),
