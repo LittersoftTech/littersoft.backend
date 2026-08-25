@@ -1,4 +1,6 @@
-﻿using Microsoft.Extensions.Configuration;
+﻿using Pawfront.Application.Blocks;
+using Pawfront.Infrastructure.Sql.Blocks;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -76,6 +78,9 @@ public static class SqlServiceRegistration
             services.AddSingleton<IBookingSqlStore, InMemoryBookingStore>();
             services.AddSingleton<INightStayBookingSqlStore>(sp => sp.GetRequiredService<InMemoryNightStayBookingStore>());
             services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
+            // No location-event table to write to. Validates the fix and drops it,
+            // so the flows that now carry one stay usable without a database.
+            services.AddSingleton<IBookingLocationService, NullBookingLocationService>();
             services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
             services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
             services.AddSingleton<IProviderNameReader, NullProviderNameReader>();
@@ -107,14 +112,22 @@ public static class SqlServiceRegistration
             services.AddSingleton<IBookingReviewStore>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
             services.AddSingleton<IPetParentRatingReader>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
 
-            // Support tickets, functional for the same reason. Two things it cannot do,
-            // both for want of the other tables: derive the counterparty from the
-            // booking or conversation, and enforce the party check. The
-            // one-open-ticket-per-subject rule and the photo cap ARE enforced, since
-            // both are answerable from what it holds.
+            // Support tickets, functional for the same reason. Three things it cannot do,
+            // all for want of the other tables: derive the counterparty from the
+            // booking or conversation, enforce the party check, and check that a
+            // reported event exists. The one-open-ticket-per-subject rules and the photo
+            // cap ARE enforced, since all of them are answerable from what it holds.
             services.AddSingleton<InMemorySupportTicketStore>();
             services.AddSingleton<ISupportTicketStore>(sp => sp.GetRequiredService<InMemorySupportTicketStore>());
             services.AddSingleton<ISupportLegalHoldReader>(sp => sp.GetRequiredService<InMemorySupportTicketStore>());
+            services.AddSingleton<IMySupportTicketLookup>(sp => sp.GetRequiredService<InMemorySupportTicketStore>());
+
+            // Blocking, functional for the same reason. It cannot return the pair's
+            // unfinished jobs, having no sight of the booking tables, so a block placed
+            // here severs the pair but cancels nothing.
+            services.AddSingleton<InMemoryBlockStore>();
+            services.AddSingleton<IBlockStore>(sp => sp.GetRequiredService<InMemoryBlockStore>());
+            services.AddSingleton<IMyBlockLookup>(sp => sp.GetRequiredService<InMemoryBlockStore>());
 
             // Chat works in-memory for the same reason reviews do — it is a write
             // flow, and a store that swallowed messages would make it untestable
@@ -123,7 +136,9 @@ public static class SqlServiceRegistration
             services.AddSingleton<InMemoryChatPresenceStore>();
             services.AddSingleton<IChatPresenceStore>(sp => sp.GetRequiredService<InMemoryChatPresenceStore>());
             services.AddSingleton<IChatConversationStore>(sp =>
-                new InMemoryChatConversationStore(sp.GetRequiredService<IChatPresenceStore>()));
+                new InMemoryChatConversationStore(
+                    sp.GetRequiredService<IChatPresenceStore>(),
+                    sp.GetRequiredService<IBlockStore>()));
 
             // Both hosts' token services share one store here; each host only ever
             // resolves its own interface, so they never actually mix.
@@ -176,6 +191,14 @@ public static class SqlServiceRegistration
 
             services.AddScoped<INightStayBookingSqlStore>(provider =>
                 new SqlNightStayBookingStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Only the standalone geolocation writes come through here — every fix
+            // taken at a status transition is written by that transition's own
+            // procedure, so it cannot be lost after the transition commits.
+            services.AddScoped<IBookingLocationService>(provider =>
+                new SqlBookingLocationService(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
@@ -299,15 +322,28 @@ public static class SqlServiceRegistration
             services.AddScoped<IBookingReviewStore>(sp => sp.GetRequiredService<SqlBookingReviewStore>());
             services.AddScoped<IPetParentRatingReader>(sp => sp.GetRequiredService<SqlBookingReviewStore>());
 
-            // Support tickets. One store serves both interfaces: the chat host's legal
-            // hold check asks Support.Tickets one question, and giving it a second
-            // store would only let the two drift apart on what "open" means.
+            // Support tickets. One store serves all three interfaces: the chat host's
+            // legal-hold check and the "have I already reported this?" lookup each ask
+            // Support.Tickets one narrow question, and giving either its own store would
+            // only let them drift apart on what "open" means.
             services.AddScoped(provider =>
                 new SqlSupportTicketStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
             services.AddScoped<ISupportTicketStore>(sp => sp.GetRequiredService<SqlSupportTicketStore>());
             services.AddScoped<ISupportLegalHoldReader>(sp => sp.GetRequiredService<SqlSupportTicketStore>());
+            services.AddScoped<IMySupportTicketLookup>(sp => sp.GetRequiredService<SqlSupportTicketStore>());
+
+            // Blocking. One store serves the write side and the per-request
+            // "who am I blocked from" lookup: they are two questions about one table,
+            // and separating them would only duplicate the connection plumbing and let
+            // them drift on what a block means.
+            services.AddScoped(provider =>
+                new SqlBlockStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+            services.AddScoped<IBlockStore>(sp => sp.GetRequiredService<SqlBlockStore>());
+            services.AddScoped<IMyBlockLookup>(sp => sp.GetRequiredService<SqlBlockStore>());
 
             // Push notifications are enqueued onto Notification.NotificationOutbox
             // here and dispatched to FCM by Pawfront.Functions — neither API host

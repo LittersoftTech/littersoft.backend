@@ -28,7 +28,8 @@ namespace Pawfront.Application.Support;
 public interface ISupportTicketService
 {
     /// <summary>
-    /// Raises a ticket against the counterparty on one booking or one conversation.
+    /// Raises a ticket: against the counterparty on one booking or one conversation, or —
+    /// for the two kinds that have no counterparty — about one event, or about the app.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -36,7 +37,9 @@ public interface ISupportTicketService
     /// throwing when that SUBJECT already has one open — the conflict carries the ticket
     /// the caller needs to name, the same posture <c>Provider.SetProviderActiveStatus</c>
     /// and <c>Provider.CreateClosures</c> take. Note the scope: another booking with the
-    /// same counterparty is a separate incident and is reported separately.
+    /// same counterparty is a separate incident and is reported separately; an event is
+    /// scoped per REPORTER, since each attendee's account is its own; and an app issue is
+    /// never refused.
     /// </para>
     /// <para>
     /// The SQL row is written FIRST and the narrative immediately after, because the
@@ -49,6 +52,7 @@ public interface ISupportTicketService
     /// </remarks>
     /// <exception cref="SupportBookingNotFoundException">Unknown booking.</exception>
     /// <exception cref="SupportConversationNotFoundException">Unknown conversation.</exception>
+    /// <exception cref="SupportEventNotFoundException">Unknown event.</exception>
     /// <exception cref="SupportForbiddenException">Caller is not a party to the subject.</exception>
     /// <exception cref="SupportNotAppBookingException">Custom walk-in.</exception>
     /// <exception cref="ArgumentException">Missing or oversized comment, or a malformed subject.</exception>
@@ -57,9 +61,10 @@ public interface ISupportTicketService
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Raises a BOOKING incident and attaches its evidence in ONE call — the combined
-    /// form of <see cref="CreateAsync"/> + <see cref="AddPhotoAsync"/>, for a client that
-    /// has the report and the photos in hand at the same moment.
+    /// Raises a ticket AND attaches its evidence in ONE call — the combined form of
+    /// <see cref="CreateAsync"/> + <see cref="AddPhotoAsync"/>, for a client that has the
+    /// report and the photos in hand at the same moment. Every kind but a chat incident
+    /// can use it.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -120,7 +125,8 @@ public interface ISupportTicketService
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Attaches one uploaded photo to a booking incident, scoped to the ticket's CREATOR.
+    /// Attaches one uploaded photo to a ticket that can carry evidence — everything except
+    /// a chat incident — scoped to the ticket's CREATOR.
     /// </summary>
     /// <remarks>
     /// The evidence is the reporter's account of what happened, and the status vocabulary

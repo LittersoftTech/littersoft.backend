@@ -55,13 +55,20 @@ internal sealed class SqlProviderEarningsStore(
             AwaitingGross: reader.GetDecimal(8),
             AwaitingFee: reader.GetDecimal(9),
             PrivateJobCount: reader.GetInt32(10),
-            PrivateJobAmount: reader.GetDecimal(11));
+            PrivateJobAmount: reader.GetDecimal(11),
+            CancelledJobCount: reader.GetInt32(12),
+            CancelledJobAmount: reader.GetDecimal(13),
+            NoShowJobCount: reader.GetInt32(14),
+            NoShowJobAmount: reader.GetDecimal(15),
+            ExpiredJobCount: reader.GetInt32(16),
+            ExpiredJobAmount: reader.GetDecimal(17));
     }
 
     public async Task<(IReadOnlyList<ProviderEarningsBookingRow> Items, int TotalCount)> ListBookingsAsync(
         Guid providerId,
         DateOnly? fromDate,
         DateOnly? toDate,
+        IReadOnlyList<string> statuses,
         decimal feePercentage,
         EarningsSortBy sortBy,
         EarningsSortDirection sortDirection,
@@ -86,6 +93,13 @@ internal sealed class SqlProviderEarningsStore(
             "@SortDirection", sortDirection == EarningsSortDirection.Ascending ? "Asc" : "Desc");
         command.Parameters.AddWithValue("@Skip", skip);
         command.Parameters.AddWithValue("@Take", take);
+        // Empty list => DBNull, which the sproc reads as "earned rows only" — the
+        // behaviour callers had before the filter existed. Statuses are already
+        // validated against BookingStatuses by BookingStatusFilter.Expand, so no
+        // caller-supplied text reaches the CSV.
+        command.Parameters.AddWithValue(
+            "@Statuses",
+            statuses.Count == 0 ? (object)DBNull.Value : string.Join(',', statuses));
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
@@ -135,6 +149,9 @@ internal sealed class SqlProviderEarningsStore(
             PetName: reader.IsDBNull(16) ? null : reader.GetString(16),
             IsPaid: reader.GetBoolean(17),
             IsPrivate: reader.GetBoolean(18),
+            // Appended LAST to the sproc's projection on purpose, so none of the
+            // ordinals above moved.
+            IsEarned: reader.GetBoolean(23),
             GrossAmount: reader.IsDBNull(19) ? null : reader.GetDecimal(19),
             PawfrontFee: reader.IsDBNull(20) ? null : reader.GetDecimal(20),
             PaidAtUtc: reader.IsDBNull(21)

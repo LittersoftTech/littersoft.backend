@@ -53,6 +53,22 @@ public sealed record PagedEarningsResult<T>(
 /// and reported separately, so the provider sees the work without it distorting
 /// platform earnings.
 /// </para>
+/// <para>
+/// <c>CancelledJob*</c> / <c>NoShowJob*</c> / <c>ExpiredJob*</c> are the UNREALISED
+/// jobs: booked, then nothing. They are what a payouts screen needs to explain the
+/// gap between what was on the calendar and what was earned — a thin month reads
+/// very differently when three jobs were no-shows. They are deliberately NOT part
+/// of <see cref="GrossAmount"/> or <see cref="NetAmount"/>: no money moved, so
+/// folding them in would misstate what the provider holds. Each amount is what the
+/// job would have been worth, from its creation-time price-lock; no fee is
+/// reported, because a commission on money that never changed hands is not owed.
+/// The three buckets are disjoint, and their sum is <see cref="UnrealisedAmount"/>
+/// — the money behind a <c>status=Cancelled</c> query on the bookings list.
+/// </para>
+/// <para>
+/// Bookings still in flight are in neither set: they have not happened and have not
+/// failed, so counting them anywhere here would be a forecast rather than a figure.
+/// </para>
 /// </remarks>
 public sealed record ProviderEarningsTotals(
     int CompletedBookings,
@@ -66,7 +82,13 @@ public sealed record ProviderEarningsTotals(
     decimal AwaitingGross,
     decimal AwaitingFee,
     int PrivateJobCount,
-    decimal PrivateJobAmount)
+    decimal PrivateJobAmount,
+    int CancelledJobCount,
+    decimal CancelledJobAmount,
+    int NoShowJobCount,
+    decimal NoShowJobAmount,
+    int ExpiredJobCount,
+    decimal ExpiredJobAmount)
 {
     /// <summary>What the provider keeps: <see cref="GrossAmount"/> less <see cref="PawfrontFee"/>.</summary>
     public decimal NetAmount => GrossAmount - PawfrontFee;
@@ -77,9 +99,21 @@ public sealed record ProviderEarningsTotals(
     /// <summary>Net still owed to the provider on completed-but-unpaid bookings.</summary>
     public decimal AwaitingNet => AwaitingGross - AwaitingFee;
 
+    /// <summary>
+    /// Every unrealised job in range, counted once: cancelled + no-show + expired.
+    /// The three buckets are disjoint, so this is a plain sum.
+    /// </summary>
+    public int UnrealisedJobCount => CancelledJobCount + NoShowJobCount + ExpiredJobCount;
+
+    /// <summary>
+    /// What the unrealised jobs would have been worth. Reported so the provider can
+    /// see the money that did not arrive; never added to <see cref="GrossAmount"/>.
+    /// </summary>
+    public decimal UnrealisedAmount => CancelledJobAmount + NoShowJobAmount + ExpiredJobAmount;
+
     /// <summary>An all-zero total, for a provider with nothing in range.</summary>
     public static ProviderEarningsTotals Empty { get; } =
-        new(0, 0, 0, 0, 0m, 0m, 0m, 0m, 0m, 0m, 0, 0m);
+        new(0, 0, 0, 0, 0m, 0m, 0m, 0m, 0m, 0m, 0, 0m, 0, 0m, 0, 0m, 0, 0m);
 }
 
 /// <summary>Totals for one named period, with the resolved range they cover.</summary>
@@ -106,6 +140,9 @@ public sealed record ProviderEarningsOverview(
 /// <c>PF-000123</c> label; <c>PayoutId</c> the <c>PO-000123</c> reference minted
 /// when the job completed (null on a private job). <c>ServiceDate</c> is the date
 /// the earning is attributed to — the booking date, or the checkout date of a stay.
+/// <c>IsEarned</c> says whether this row produced money (COMPLETED / PAID) or is one
+/// of the unrealised ones a status filter can pull in; it is emitted rather than
+/// re-derived from <c>Status</c> in the app, so the rule lives in one place.
 /// </summary>
 public sealed record ProviderEarningsBookingRow(
     string BookingType,
@@ -127,6 +164,7 @@ public sealed record ProviderEarningsBookingRow(
     string? PetName,
     bool IsPaid,
     bool IsPrivate,
+    bool IsEarned,
     decimal? GrossAmount,
     decimal? PawfrontFee,
     DateTimeOffset? PaidAtUtc,
@@ -154,11 +192,18 @@ public enum EarningsSortDirection
 }
 
 /// <summary>Filter + paging arguments for the provider earnings breakdown.</summary>
+/// <remarks>
+/// <c>Statuses</c> is the expanded raw-status list from
+/// <see cref="BookingStatusFilter.Expand"/>; empty means "no status filter", which
+/// the store reads as the earned rows only — the behaviour every caller had before
+/// the filter existed.
+/// </remarks>
 public sealed record ProviderEarningsBookingQuery(
     Guid ProviderId,
     EarningsPeriod Period,
     DateOnly? FromDate,
     DateOnly? ToDate,
+    IReadOnlyList<string> Statuses,
     EarningsSortBy SortBy,
     EarningsSortDirection SortDirection,
     int Skip,

@@ -9,7 +9,11 @@ CREATE OR ALTER PROCEDURE [Event].[ListEvents]
     @AmenitiesJson   NVARCHAR(MAX) = NULL,
     -- Optional free-text title search. When supplied, only events whose Title
     -- CONTAINS the term (case-insensitive) are returned.
-    @Title           NVARCHAR(200) = NULL
+    @Title           NVARCHAR(200) = NULL,
+    -- The caller, so a blocked pair never see each other's events. Both NULL
+    -- for a legacy or unauthenticated caller, which filters nothing.
+    @ViewerType      NVARCHAR(16)     = NULL,
+    @ViewerId        UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -63,6 +67,19 @@ BEGIN
                     INNER JOIN @Amenities f ON f.[Amenity] = a.[Amenity]
                     WHERE a.[EventId] = e.[EventId])
               )
+          -- A block hides each party's events from the other, both ways. The
+          -- organiser is whichever of the two id columns is set (a CHECK enforces
+          -- exactly one), and GUIDs are globally unique, so matching on the id alone
+          -- is safe without branching on organiser type -- the same reasoning the
+          -- self-booking check uses.
+          AND (@ViewerId IS NULL OR NOT EXISTS (
+                SELECT 1
+                FROM [Block].[BlockedParticipants] bp
+                WHERE (bp.[BlockerType] = @ViewerType AND bp.[BlockerId] = @ViewerId
+                       AND bp.[BlockedId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+                   OR (bp.[BlockedType] = @ViewerType AND bp.[BlockedId] = @ViewerId
+                       AND bp.[BlockerId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+              ))
     )
     SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly],
            e.[Title], e.[Description], e.[BannerImageUrl], e.[EventType],
@@ -102,5 +119,18 @@ BEGIN
                 INNER JOIN @Amenities ff ON ff.[Amenity] = a2.[Amenity]
                 WHERE a2.[EventId] = e.[EventId])
           )
+      -- A block hides each party's events from the other, both ways. The
+      -- organiser is whichever of the two id columns is set (a CHECK enforces
+      -- exactly one), and GUIDs are globally unique, so matching on the id alone
+      -- is safe without branching on organiser type -- the same reasoning the
+      -- self-booking check uses.
+      AND (@ViewerId IS NULL OR NOT EXISTS (
+            SELECT 1
+            FROM [Block].[BlockedParticipants] bp
+            WHERE (bp.[BlockerType] = @ViewerType AND bp.[BlockerId] = @ViewerId
+                   AND bp.[BlockedId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+               OR (bp.[BlockedType] = @ViewerType AND bp.[BlockedId] = @ViewerId
+                   AND bp.[BlockerId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+          ))
     ORDER BY a.[EventId], a.[Amenity];
 END;

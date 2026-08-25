@@ -175,12 +175,17 @@ public sealed record NightStayBookingDetailResult(
 /// and actor rules as <see cref="UpdateBookingStatusCommand"/>; <see cref="ActorId"/>
 /// is the caller's ProviderId / PetParentId derived from the authenticated route.
 /// </summary>
+/// <param name="Location">
+/// The acting party's position — required for, and only stored on, the two NO-SHOW
+/// transitions. See <see cref="UpdateBookingStatusCommand.Location"/>.
+/// </param>
 public sealed record UpdateNightStayBookingStatusCommand(
     Guid NightStayBookingId,
     string NewStatus,
     BookingStatusActor Actor,
     Guid ActorId,
-    string? Note);
+    string? Note,
+    CapturedLocation? Location = null);
 
 /// <summary>
 /// Either party proposes a new check-in / check-out range for a night-stay

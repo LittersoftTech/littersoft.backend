@@ -73,7 +73,29 @@ BEGIN
            -- ordinals the reader uses stay put. See Chat.ListConversations for the
            -- full note.
            CASE WHEN @ParticipantType = N'PetParent' THEN reg.[ServiceCategory] END
-               AS [CounterpartyServiceCategory]
+               AS [CounterpartyServiceCategory],
+           -- A block closes the thread; the flag lets the app disable the
+           -- composer rather than let a send fail. TRUE in EITHER direction.
+           -- Appended LAST, like the category above, so the reader's existing
+           -- ordinals stay put.
+           CAST(CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM [Block].[BlockedParticipants] bp
+                    WHERE (bp.[BlockerType] = N'Provider' AND bp.[BlockerId] = c.[ProviderId]
+                           AND bp.[BlockedType] = N'PetParent' AND bp.[BlockedId] = c.[PetParentId])
+                       OR (bp.[BlockerType] = N'PetParent' AND bp.[BlockerId] = c.[PetParentId]
+                           AND bp.[BlockedType] = N'Provider' AND bp.[BlockedId] = c.[ProviderId])
+                ) THEN 1 ELSE 0 END AS BIT) AS [IsBlocked],
+           -- Only the caller's OWN block offers an Unblock button; one placed
+           -- against them is never named. See [Block].[ListMyBlockedCounterparties].
+           CAST(CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM [Block].[BlockedParticipants] bp
+                    WHERE bp.[BlockerType] = @ParticipantType
+                      AND bp.[BlockerId] = @ParticipantId
+                      AND bp.[BlockedId] = CASE WHEN @ParticipantType = N'Provider'
+                                                THEN c.[PetParentId] ELSE c.[ProviderId] END
+                ) THEN 1 ELSE 0 END AS BIT) AS [BlockedByMe]
     FROM [Chat].[Conversations] c
     INNER JOIN [Chat].[ConversationParticipants] p
         ON p.[ConversationId] = c.[ConversationId]

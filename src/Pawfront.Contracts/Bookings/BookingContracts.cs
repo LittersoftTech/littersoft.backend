@@ -1,4 +1,4 @@
-using Pawfront.Contracts.Reviews;
+﻿using Pawfront.Contracts.Reviews;
 
 namespace Pawfront.Contracts.Bookings;
 
@@ -44,6 +44,39 @@ public sealed record CreateParentBookingRequest(
 /// Counts against the same per-service capacity bucket as app bookings.
 /// </summary>
 public sealed record CreateCustomBookingRequest(
+    Guid ServiceId,
+    string CustomerName,
+    string CustomerMobileCountryCode,
+    string CustomerMobile,
+    string AnimalType,
+    string PetName,
+    DateOnly BookingDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    string ServiceLocation,
+    string? CustomerLocation,
+    decimal PricePerHour,
+    string? JobNotes);
+
+/// <summary>
+/// Provider edits a walk-in they recorded earlier. Same fields as
+/// <see cref="CreateCustomBookingRequest"/> — a FULL REPLACE, so send every field,
+/// including the ones you are not changing. A partial body would make "cleared the
+/// notes" and "left the notes alone" indistinguishable.
+/// </summary>
+/// <remarks>
+/// Walk-ins only. An App booking is a two-party agreement and changes go through
+/// the modification flow instead, where the parent accepts or declines.
+/// <para>
+/// <c>pricePerHour</c>, the customer/pet details, the location text and the notes
+/// stay editable through COMPLETED — correcting the money after the job is the main
+/// reason this exists, and a walk-in can never be marked paid, so no ledger row
+/// contradicts it. <c>serviceId</c>, <c>bookingDate</c>, <c>startTime</c> and
+/// <c>endTime</c> lock once the job starts; changing one after that is refused
+/// rather than silently dropped.
+/// </para>
+/// </remarks>
+public sealed record UpdateCustomBookingRequest(
     Guid ServiceId,
     string CustomerName,
     string CustomerMobileCountryCode,
@@ -131,7 +164,96 @@ public sealed record BulkCancelBookingItemResponse(
 /// permits the subset valid for its actor. <c>Note</c> is an optional free-text
 /// reason captured on the audit row.
 /// </summary>
-public sealed record UpdateBookingStatusRequest(string Status, string? Note);
+/// <summary>
+/// A geolocation fix captured on the device at the moment of the action. Sent on
+/// every booking action that has to be evidenced — arrival, job start, no-show, the
+/// parent showing their start code, cash received / not received, and evidence
+/// capture — and REQUIRED on all of them: the action is refused with 400
+/// <c>InvalidRequest</c> when it is missing or out of range.
+/// <para>
+/// Each app sends its OWN position. The server never derives one party's location
+/// from the other's, so for the moments the provider drives (no-show, cash, photo
+/// evidence) the parent app posts its own fix separately to
+/// <c>POST .../bookings/{bookingId}/location</c>.
+/// </para>
+/// </summary>
+/// <param name="AccuracyMetres">
+/// The device's reported horizontal accuracy. Optional, but worth sending — it is
+/// what separates "was at the address" from "was somewhere in the city".
+/// </param>
+/// <param name="CapturedAtUtc">
+/// When the device took the reading. Optional and untrusted (it is the handset's
+/// clock); the server stamps its own receipt time regardless.
+/// </param>
+public sealed record CapturedLocationRequest(
+    decimal? Latitude,
+    decimal? Longitude,
+    decimal? AccuracyMetres = null,
+    DateTimeOffset? CapturedAtUtc = null);
+
+/// <summary>
+/// Body for <c>POST .../bookings/{bookingId}/status</c> — the LEGACY generic status
+/// shim. <see cref="Location"/> is required when <see cref="Status"/> is one of the
+/// two no-show values and ignored otherwise; without it the shim would be a way to
+/// record a no-show with no position, which the dedicated route refuses.
+/// </summary>
+public sealed record UpdateBookingStatusRequest(
+    string Status,
+    string? Note,
+    CapturedLocationRequest? Location = null);
+
+/// <summary>
+/// Body for the two <c>POST .../bookings/{bookingId}/no-show</c> routes and for
+/// <c>POST .../bookings/{bookingId}/cash-not-received</c> — actions whose only
+/// payload is where the caller was when they took it.
+/// </summary>
+public sealed record BookingLocationOnlyRequest(CapturedLocationRequest? Location);
+
+/// <summary>
+/// Body for <c>POST .../bookings/{bookingId}/start-job</c> (provider). The provider
+/// reaches this by answering the arrival question — "have you arrived at the
+/// customer's location?" for a ParentLocation booking, "has the customer arrived?"
+/// for a ProviderLocation one. Which question was asked is derived server-side from
+/// the booking, so it is not part of the body.
+/// </summary>
+public sealed record StartJobRequest(CapturedLocationRequest? Location);
+
+/// <summary>
+/// Body for <c>POST /pet-parents/{petParentId}/bookings/{bookingId}/start-otp</c> —
+/// the parent asking to see their start code.
+/// <para>
+/// This route exists BECAUSE the fix is required: the code used to be handed out as
+/// a side effect of the booking-detail GET, and a GET cannot carry a body, so
+/// leaving it there would have left a way to obtain the code while supplying no
+/// position at all. The detail read no longer returns <c>startOtp</c>.
+/// </para>
+/// </summary>
+public sealed record IssueStartOtpRequest(CapturedLocationRequest? Location);
+
+/// <summary>
+/// Body for <c>POST .../bookings/{bookingId}/location</c> — a party recording their
+/// OWN position for a moment the COUNTERPARTY drove. <see cref="Trigger"/> is one of
+/// <c>NoShowMarked</c>, <c>CashReceived</c>, <c>CashNotReceived</c>,
+/// <c>EvidenceCaptured</c> (case-insensitive). The three triggers tied to a
+/// transition the caller performs themselves cannot be posted here — they are
+/// written by the transition itself.
+/// </summary>
+public sealed record RecordBookingLocationRequest(
+    string Trigger,
+    CapturedLocationRequest? Location);
+
+/// <summary>One recorded geolocation fix, as echoed back after it is stored.</summary>
+public sealed record BookingLocationEventResponse(
+    Guid BookingLocationEventId,
+    Guid BookingId,
+    string Trigger,
+    string CapturedByType,
+    Guid CapturedById,
+    decimal Latitude,
+    decimal Longitude,
+    decimal? AccuracyMetres,
+    DateTimeOffset? DeviceCapturedAtUtc,
+    DateTimeOffset RecordedAtUtc);
 
 /// <summary>
 /// Body for <c>POST .../bookings/{bookingId}/complete</c> (provider). Completion
@@ -157,7 +279,13 @@ public sealed record CompleteBookingRequest(
 /// server-side from the booking's price-locked total, so the only field is how
 /// the parent paid. <see cref="PaymentMethod"/> is 'Cash' or 'Digital'.
 /// </summary>
-public sealed record MarkBookingPaidRequest(string PaymentMethod);
+/// <param name="Location">
+/// Where the provider was when the cash changed hands. Required. The parent's own
+/// fix for the same moment is posted separately with the <c>CashReceived</c> trigger.
+/// </param>
+public sealed record MarkBookingPaidRequest(
+    string PaymentMethod,
+    CapturedLocationRequest? Location = null);
 
 /// <summary>
 /// The vet's per-visit prescription payload. Body for
@@ -196,7 +324,13 @@ public sealed record StartOtpResponse(string Code, DateTimeOffset ExpiresAtUtc);
 /// start-code the parent showed. Entering the correct code moves the booking
 /// START_JOB → IN_PROGRESS (6 wrong attempts cancel the job).
 /// </summary>
-public sealed record VerifyStartOtpRequest(string OtpCode);
+/// <param name="Location">
+/// Where the provider is as they tap "Proceed to start". Required on the request,
+/// but stored only when the job actually starts — a wrong code is not a job start.
+/// </param>
+public sealed record VerifyStartOtpRequest(
+    string OtpCode,
+    CapturedLocationRequest? Location = null);
 
 /// <summary>
 /// Body for a single-day modification request
@@ -336,7 +470,23 @@ public sealed record BookingDetailResponse(
     // parent's review of the provider, the provider host the provider's rating of
     // the parent. A provider's rating of a parent is never returned on the parent
     // host. Drives the "Rate your experience" prompt and its edit state.
-    BookingReviewDetailsSection? Review = null);
+    BookingReviewDetailsSection? Review = null,
+    // The caller's own open support ticket on this booking — see the trio's full
+    // note on BookingResponse. Mine only, open only; drives whether the screen
+    // offers "Report Incident" or a link to the ticket already raised.
+    bool IsTicketRaisedByMe = false,
+    Guid? TicketId = null,
+    string? TicketRef = null,
+    // Whether the OTHER party on this booking is blocked, in either direction.
+    // A booking outlives the block that severs the pair -- the history is real
+    // and both sides keep it -- so the flag exists to let the app label an
+    // existing booking rather than leave the user wondering why they can no
+    // longer message or rebook.
+    bool IsBlocked = false,
+    // True only when the CALLER placed it: the one case where an Unblock action
+    // belongs. A block placed against them reads true/false and should show a
+    // neutral state -- saying more would confirm the other party acted.
+    bool BlockedByMe = false);
 
 /// <summary>
 /// The resolved "where does the service happen" block on a booking-detail read.
@@ -523,4 +673,37 @@ public sealed record BookingResponse(
     string? JobNotes,
     // Which of the parent's pets the booking is for; null for Custom
     // walk-ins and legacy rows.
-    Guid? PetId = null);
+    Guid? PetId = null,
+    // The "have I already reported this?" trio, carried identically by every
+    // surface a Report button sits on — a booking (list + detail), an event
+    // (list + detail) and a conversation (inbox + thread).
+    //
+    // MINE ONLY: true when the CALLER has an open ticket on this booking, never
+    // when the counterparty does. One consequence to handle — the one-open-ticket
+    // rule runs in either direction, so a caller whose counterparty already
+    // reported the booking reads false here and is STILL refused with 409
+    // TicketAlreadyOpen. Treat that 409 as "already reported", not as an error.
+    //
+    // OPEN ONLY: it goes back to false once support closes the ticket, which is
+    // exactly when a fresh report is allowed again — so the flag always agrees
+    // with what the server will accept.
+    //
+    // Both ids travel because both are needed: TicketId is the GUID the
+    // .../support-tickets/{ticketId} routes take, TicketRef ("TK-000123") is what
+    // a screen shows. Both null when the flag is false.
+    //
+    // Populated on the read paths; left false/null on create and status
+    // responses, where it is false by construction anyway.
+    bool IsTicketRaisedByMe = false,
+    Guid? TicketId = null,
+    string? TicketRef = null,
+    // Whether the OTHER party on this booking is blocked, in either direction.
+    // A booking outlives the block that severs the pair -- the history is real
+    // and both sides keep it -- so the flag exists to let the app label an
+    // existing booking rather than leave the user wondering why they can no
+    // longer message or rebook.
+    bool IsBlocked = false,
+    // True only when the CALLER placed it: the one case where an Unblock action
+    // belongs. A block placed against them reads true/false and should show a
+    // neutral state -- saying more would confirm the other party acted.
+    bool BlockedByMe = false);

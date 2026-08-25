@@ -1,4 +1,4 @@
-using Pawfront.Api;
+﻿using Pawfront.Api;
 using Pawfront.Api.Auth;
 using Pawfront.Api.Endpoints;
 using Pawfront.Api.Telemetry;
@@ -68,6 +68,7 @@ api.MapProviderReviewEndpoints();
 // Support tickets: "Report Incident" on a booking and "Report Chat" on a
 // conversation. One open ticket per subject; reporting does not block anybody.
 api.MapProviderSupportTicketEndpoints();
+api.MapBlockEndpoints();
 api.MapPetParentLookupEndpoints();
 api.MapProviderNightStayBookingEndpoints();
 api.MapBlobImageEndpoints();

@@ -16,6 +16,18 @@ public sealed class SupportConversationNotFoundException(Guid conversationId)
     : Exception($"Conversation '{conversationId}' was not found.");
 
 /// <summary>
+/// The event named by an event report does not exist. Maps to <b>404 EventNotFound</b>.
+/// THROW 51355.
+/// </summary>
+/// <remarks>
+/// Existence is the ONLY check an event report makes. An event is public — anyone signed in
+/// can see one — so there is no attendance or ownership test to fail, and therefore no
+/// <see cref="SupportForbiddenException"/> path on this kind.
+/// </remarks>
+public sealed class SupportEventNotFoundException(Guid eventId)
+    : Exception($"Event '{eventId}' was not found.");
+
+/// <summary>
 /// The caller is not a party to the booking or conversation they are reporting. Maps to
 /// <b>403 Forbidden</b>, matching every other "you are not a party to this" case in the
 /// product. THROW 51341.
@@ -54,9 +66,11 @@ public sealed class SupportTicketPhotoLimitReachedException(Guid ticketId, int m
     : Exception($"Ticket '{ticketId}' already has the maximum of {maxPhotos} photos.");
 
 /// <summary>
-/// Photos were attached to a chat incident. Only booking incidents carry them — the images
-/// already in the thread are the evidence, and the whole conversation is under legal hold.
-/// Maps to <b>400 TicketPhotoNotBookingIncident</b>. THROW 51346.
+/// Photos were attached to a chat incident — the one kind that carries none, because the
+/// images already in the thread are the evidence and the whole conversation is under legal
+/// hold. Booking incidents, event incidents and app issues all take them. Maps to
+/// <b>400 TicketPhotoNotBookingIncident</b> (the code kept its original name so no client
+/// has to relearn it). THROW 51346.
 /// </summary>
 public sealed class SupportTicketPhotoNotBookingIncidentException(Guid ticketId)
     : Exception($"Ticket '{ticketId}' is a chat incident and cannot carry photos.");

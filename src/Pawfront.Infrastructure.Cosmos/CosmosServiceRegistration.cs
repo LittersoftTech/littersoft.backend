@@ -1,3 +1,4 @@
+﻿using Pawfront.Application.Blocks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -56,9 +57,17 @@ public static class CosmosServiceRegistration
         // ProviderInactive. Scoped, because the SQL reader it composes is.
         services.TryAddSingleton<CosmosProviderDiscoveryService>();
         services.TryAddScoped<IProviderDiscoveryService>(sp =>
-            new ActiveOnlyProviderDiscoveryService(
-                sp.GetRequiredService<CosmosProviderDiscoveryService>(),
-                sp.GetRequiredService<IProviderActiveStatusReader>()));
+            // Two wrappers, innermost first: drop the providers who switched
+            // themselves off, then drop the ones this caller is blocked from.
+            // Order is not load-bearing -- both are filters over the same list --
+            // but blocking sits outermost because it is the caller-specific one,
+            // and it is the layer that pages the result.
+            new BlockAwareProviderDiscoveryService(
+                new ActiveOnlyProviderDiscoveryService(
+                    sp.GetRequiredService<CosmosProviderDiscoveryService>(),
+                    sp.GetRequiredService<IProviderActiveStatusReader>()),
+                sp.GetRequiredService<ICurrentBlockParty>(),
+                sp.GetRequiredService<IMyBlockLookup>()));
 
         services.AddHostedService<CosmosBootstrapper>();
 

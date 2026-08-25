@@ -38,11 +38,11 @@ internal sealed class SupportTicketService(
         // EVERYTHING is validated before the ticket is created, so a caller who sent a
         // sixth photo is refused while that is still free rather than being left with a
         // raised report only half of their evidence reached.
-        if (photos.Count > 0 && normalised.TicketType != SupportTicketTypes.BookingIncident)
+        if (photos.Count > 0 && !SupportTicketTypes.AllowsPhotos(normalised.TicketType))
         {
             throw new ArgumentException(
-                "Only a reported booking incident can carry photos. The images already in the "
-                + "thread are the evidence for a chat report.",
+                "A reported chat cannot carry photos. The images already in the thread are "
+                + "the evidence, and the whole conversation is under legal hold.",
                 nameof(photos));
         }
 
@@ -160,7 +160,9 @@ internal sealed class SupportTicketService(
                 result.Ticket.TicketId,
                 normalised.RaisedByType,
                 normalised.ActorId,
-                normalised.Comment,
+                // Non-null by construction: Normalise either required a comment or fell
+                // back to the reason, and refused the report when it had neither.
+                normalised.Comment!,
                 cancellationToken);
         }
         catch (Exception exception)
@@ -198,15 +200,8 @@ internal sealed class SupportTicketService(
         }
 
         var comment = command.Comment?.Trim();
-        if (string.IsNullOrEmpty(comment))
-        {
-            // The comment is the substance of the report. A ticket without one gives
-            // support nothing to act on, so it is required here even though no column
-            // constrains it — the narrative lives in Cosmos.
-            throw new ArgumentException("A description of the incident is required.", nameof(command));
-        }
 
-        if (comment.Length > SupportTicketLimits.MaxCommentLength)
+        if (comment is { Length: > SupportTicketLimits.MaxCommentLength })
         {
             throw new ArgumentException(
                 $"The description must be {SupportTicketLimits.MaxCommentLength} characters or fewer.",
@@ -233,12 +228,31 @@ internal sealed class SupportTicketService(
                 nameof(command));
         }
 
+        if (string.IsNullOrEmpty(comment))
+        {
+            // The comment is the substance of a report AGAINST somebody, so those two kinds
+            // require it — a ticket accusing a person with no account of what they did gives
+            // support nothing to act on. An app issue or an event report is a different
+            // shape: its picker's Reason can carry the whole thing, and it opens the
+            // narrative in the comment's place. Neither ⇒ there is nothing to report at all.
+            if (SupportTicketTypes.RequiresComment(command.TicketType))
+            {
+                throw new ArgumentException(
+                    "A description of the incident is required.", nameof(command));
+            }
+
+            comment = reason
+                ?? throw new ArgumentException(
+                    "A description or a reason is required.", nameof(command));
+        }
+
         // Exactly one subject, matching the type — the same rule CK_Tickets_SubjectMatchesType
         // enforces on the row. Checked here so the caller gets a 400 naming the missing
         // field rather than a defensive 51343.
         string? bookingType = null;
         Guid? bookingId = null;
         Guid? conversationId = null;
+        Guid? eventId = null;
 
         if (command.TicketType == SupportTicketTypes.BookingIncident)
         {
@@ -255,7 +269,7 @@ internal sealed class SupportTicketService(
 
             bookingId = reportedBookingId;
         }
-        else
+        else if (command.TicketType == SupportTicketTypes.ChatIncident)
         {
             if (command.ConversationId is not { } reportedConversationId || reportedConversationId == Guid.Empty)
             {
@@ -264,9 +278,20 @@ internal sealed class SupportTicketService(
 
             conversationId = reportedConversationId;
         }
+        else if (command.TicketType == SupportTicketTypes.EventIncident)
+        {
+            if (command.EventId is not { } reportedEventId || reportedEventId == Guid.Empty)
+            {
+                throw new ArgumentException("An eventId is required to report an event.", nameof(command));
+            }
+
+            eventId = reportedEventId;
+        }
+
+        // AppIssue falls through with every subject left null — it has none.
 
         // Rebuilt rather than passed through, so the columns the type does NOT govern are
-        // sent as NULL whatever the caller supplied — a chat report carrying a stray
+        // sent as NULL whatever the caller supplied — an app-issue report carrying a stray
         // bookingId would otherwise trip CK_Tickets_SubjectMatchesType at the database.
         return command with
         {
@@ -275,7 +300,8 @@ internal sealed class SupportTicketService(
             Reason = reason,
             BookingType = bookingType,
             BookingId = bookingId,
-            ConversationId = conversationId
+            ConversationId = conversationId,
+            EventId = eventId
         };
     }
 

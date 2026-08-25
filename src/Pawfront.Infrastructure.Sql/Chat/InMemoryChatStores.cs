@@ -1,4 +1,5 @@
-﻿using System.Collections.Concurrent;
+﻿using Pawfront.Application.Blocks;
+using System.Collections.Concurrent;
 using Pawfront.Application.Chat;
 
 namespace Pawfront.Infrastructure.Sql.Chat;
@@ -19,20 +20,25 @@ namespace Pawfront.Infrastructure.Sql.Chat;
 ///   * it cannot check that a provider or pet parent actually exists, so opening
 ///     a thread with a made-up id succeeds here and would 404 against SQL.
 /// </summary>
-internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceStore)
+internal sealed class InMemoryChatConversationStore(
+    IChatPresenceStore presenceStore,
+    // Blocks are no longer this store's to hold -- they moved to InMemoryBlockStore
+    // with the rest of the feature. The dependency stays because a block still
+    // closes a thread, and dropping the check here would quietly make in-memory
+    // dev the one place a blocked pair can still message each other.
+    IBlockStore blockStore)
     : IChatConversationStore
 {
     private readonly ConcurrentDictionary<Guid, ConversationEntry> conversations = new();
-    private readonly ConcurrentDictionary<Guid, ChatBlock> blocks = new();
     private readonly Lock gate = new();
 
-    public Task<ChatConversationDetail> GetOrCreateAsync(
+    public async Task<ChatConversationDetail> GetOrCreateAsync(
         Guid providerId,
         Guid petParentId,
         ChatParticipant actor,
         CancellationToken cancellationToken)
     {
-        if (IsBlockedBetween(providerId, petParentId))
+        if (await IsBlockedBetweenAsync(providerId, petParentId, cancellationToken))
         {
             throw new ChatBlockedException();
         }
@@ -55,26 +61,46 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
                 entry.StateFor(actor.Type).DeletedAtUtc = null;
             }
 
-            return Task.FromResult(entry.ToDetail(actor));
+            return entry.ToDetail(actor);
         }
     }
 
-    public Task<ChatConversationDetail?> GetForParticipantAsync(
+    public async Task<ChatConversationDetail?> GetForParticipantAsync(
         Guid conversationId,
         ChatParticipant participant,
         CancellationToken cancellationToken)
     {
         var entry = Find(conversationId, participant);
-        return Task.FromResult(entry?.ToDetail(participant));
+        if (entry is null)
+        {
+            return null;
+        }
+
+        var detail = entry.ToDetail(participant);
+        return detail with
+        {
+            Block = await ReadBlockStateAsync(
+                participant, entry.CounterpartyIdFor(participant), cancellationToken)
+        };
     }
 
-    public Task<IReadOnlyList<ChatConversationCard>> ListAsync(
+    public async Task<IReadOnlyList<ChatConversationCard>> ListAsync(
         ChatParticipant participant,
         string? search,
         int skip,
         int take,
         CancellationToken cancellationToken)
     {
+        // One read for the whole page, as the procedure does it in one query.
+        var blockedIds = (await blockStore.ListMyBlockedCounterpartiesAsync(
+                new BlockParty(
+                    participant.Type == ChatParticipantType.Provider
+                        ? BlockPartyType.Provider
+                        : BlockPartyType.PetParent,
+                    participant.Id),
+                cancellationToken))
+            .ToDictionary(b => b.CounterpartyId, b => b.BlockedByMe);
+
         IReadOnlyList<ChatConversationCard> cards = conversations.Values
             .Where(c => c.Involves(participant))
             // Mirrors the procedure's visibility rule: a thread this side has
@@ -92,11 +118,41 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
             .Select(c =>
             {
                 var detail = c.ToDetail(participant);
-                return new ChatConversationCard(detail.Conversation, detail.Me, detail.Counterparty);
+                return new ChatConversationCard(
+                    detail.Conversation,
+                    detail.Me,
+                    detail.Counterparty,
+                    MyTicket: null,
+                    Block: blockedIds.TryGetValue(c.CounterpartyIdFor(participant), out var mine)
+                        ? new ChatBlockState(true, mine)
+                        : new ChatBlockState(false, false));
             })
             .ToList();
 
-        return Task.FromResult(cards);
+        return cards;
+    }
+
+    /// <summary>
+    /// The block state for one thread. Read from the block store rather than
+    /// assumed absent, so a developer working without SQL sees the same flags the
+    /// real thing returns -- which is the whole reason this store is functional
+    /// rather than a no-op.
+    /// </summary>
+    private async Task<ChatBlockState> ReadBlockStateAsync(
+        ChatParticipant participant, Guid counterpartyId, CancellationToken cancellationToken)
+    {
+        var blocked = await blockStore.ListMyBlockedCounterpartiesAsync(
+            new BlockParty(
+                participant.Type == ChatParticipantType.Provider
+                    ? BlockPartyType.Provider
+                    : BlockPartyType.PetParent,
+                participant.Id),
+            cancellationToken);
+
+        var match = blocked.FirstOrDefault(b => b.CounterpartyId == counterpartyId);
+        return match is null
+            ? new ChatBlockState(false, false)
+            : new ChatBlockState(true, match.BlockedByMe);
     }
 
     public Task<ChatParticipantState?> DeleteForParticipantAsync(
@@ -137,13 +193,13 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
     /// Phase one, mirroring <c>Chat.ReserveMessageSequence</c>: take the sequence
     /// and record the reservation, and touch nothing a caller could observe.
     /// </summary>
-    public Task<ChatMessageReservation> ReserveMessageAsync(
+    public async Task<ChatMessageReservation> ReserveMessageAsync(
         Guid conversationId,
         ChatParticipant sender,
         Guid messageId,
         CancellationToken cancellationToken)
     {
-        var entry = RequireSendable(conversationId, sender);
+        var entry = await RequireSendableAsync(conversationId, sender, cancellationToken);
 
         lock (gate)
         {
@@ -152,13 +208,13 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
             // sequence back here too.
             if (entry.Reservations.TryGetValue(messageId, out var existing))
             {
-                return Task.FromResult(new ChatMessageReservation(
+                return new ChatMessageReservation(
                     conversationId,
                     messageId,
                     existing.Sequence,
                     existing.ReservedAtUtc,
                     IsReplay: true,
-                    IsCommitted: existing.IsCommitted));
+                    IsCommitted: existing.IsCommitted);
             }
 
             var reservation = new MessageReservation(
@@ -166,13 +222,13 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
 
             entry.Reservations[messageId] = reservation;
 
-            return Task.FromResult(new ChatMessageReservation(
+            return new ChatMessageReservation(
                 conversationId,
                 messageId,
                 reservation.Sequence,
                 reservation.ReservedAtUtc,
                 IsReplay: false,
-                IsCommitted: false));
+                IsCommitted: false);
         }
     }
 
@@ -307,7 +363,8 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
         return Task.CompletedTask;
     }
 
-    private ConversationEntry RequireSendable(Guid conversationId, ChatParticipant sender)
+    private async Task<ConversationEntry> RequireSendableAsync(
+        Guid conversationId, ChatParticipant sender, CancellationToken cancellationToken)
     {
         var entry = conversations.TryGetValue(conversationId, out var found)
             ? found
@@ -318,7 +375,7 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
             throw new ChatForbiddenException(conversationId);
         }
 
-        if (IsBlockedBetween(entry.ProviderId, entry.PetParentId))
+        if (await IsBlockedBetweenAsync(entry.ProviderId, entry.PetParentId, cancellationToken))
         {
             throw new ChatBlockedException();
         }
@@ -371,72 +428,24 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
         return Task.FromResult(new ChatUnreadSummary(mine.Sum(), mine.Count(u => u > 0)));
     }
 
-    public Task<ChatBlock> BlockAsync(
-        ChatParticipant blocker,
-        ChatParticipantType blockedType,
-        Guid blockedId,
-        string? reason,
-        CancellationToken cancellationToken)
-    {
-        if (blocker.Type == blockedType)
-        {
-            throw new ChatInvalidBlockException();
-        }
-
-        var existing = blocks.Values.FirstOrDefault(
-            b => b.BlockerType == blocker.Type && b.BlockerId == blocker.Id
-                 && b.BlockedType == blockedType && b.BlockedId == blockedId);
-
-        if (existing is not null)
-        {
-            return Task.FromResult(existing);
-        }
-
-        var block = new ChatBlock(
-            Guid.NewGuid(), blocker.Type, blocker.Id, blockedType, blockedId,
-            reason, null, null, DateTimeOffset.UtcNow);
-
-        blocks[block.ChatBlockId] = block;
-        return Task.FromResult(block);
-    }
-
-    public Task<ChatBlock?> UnblockAsync(
-        Guid chatBlockId,
-        ChatParticipant blocker,
-        CancellationToken cancellationToken)
-    {
-        if (blocks.TryGetValue(chatBlockId, out var block)
-            && block.BlockerType == blocker.Type
-            && block.BlockerId == blocker.Id
-            && blocks.TryRemove(chatBlockId, out _))
-        {
-            return Task.FromResult<ChatBlock?>(block);
-        }
-
-        return Task.FromResult<ChatBlock?>(null);
-    }
-
-    public Task<IReadOnlyList<ChatBlock>> ListBlocksAsync(
-        ChatParticipant blocker,
-        CancellationToken cancellationToken)
-    {
-        IReadOnlyList<ChatBlock> mine = blocks.Values
-            .Where(b => b.BlockerType == blocker.Type && b.BlockerId == blocker.Id)
-            .OrderByDescending(b => b.CreatedAtUtc)
-            .ToList();
-
-        return Task.FromResult(mine);
-    }
-
     private ConversationEntry? Find(Guid conversationId, ChatParticipant participant) =>
         conversations.TryGetValue(conversationId, out var entry) && entry.Involves(participant)
             ? entry
             : null;
 
-    private bool IsBlockedBetween(Guid providerId, Guid petParentId) =>
-        blocks.Values.Any(b =>
-            (b.BlockerType == ChatParticipantType.Provider && b.BlockerId == providerId && b.BlockedId == petParentId)
-            || (b.BlockerType == ChatParticipantType.PetParent && b.BlockerId == petParentId && b.BlockedId == providerId));
+    /// <summary>
+    /// Either direction closes the thread. Reads the block store rather than a
+    /// local copy, so the same block a user placed through /blocks is the one
+    /// enforced here.
+    /// </summary>
+    private async Task<bool> IsBlockedBetweenAsync(
+        Guid providerId, Guid petParentId, CancellationToken cancellationToken)
+    {
+        var blocked = await blockStore.ListMyBlockedCounterpartiesAsync(
+            new BlockParty(BlockPartyType.Provider, providerId), cancellationToken);
+
+        return blocked.Any(b => b.CounterpartyId == petParentId);
+    }
 
     private sealed class ConversationEntry(
         Guid conversationId,
@@ -471,6 +480,10 @@ internal sealed class InMemoryChatConversationStore(IChatPresenceStore presenceS
             participant.Type == ChatParticipantType.Provider
                 ? participant.Id == ProviderId
                 : participant.Id == PetParentId;
+
+        /// <summary>The other party's id, from the caller's point of view.</summary>
+        public Guid CounterpartyIdFor(ChatParticipant participant) =>
+            participant.Type == ChatParticipantType.Provider ? PetParentId : ProviderId;
 
         public ChatConversationDetail ToDetail(ChatParticipant me)
         {

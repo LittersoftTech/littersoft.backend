@@ -1,3 +1,4 @@
+﻿using Pawfront.Application.Blocks;
 using System.Security.Claims;
 using Pawfront.Api.Auth;
 using Pawfront.Application.Events;
@@ -115,6 +116,14 @@ internal static class EventBookingEndpoints
         catch (EventBookingSelfBookingNotAllowedException exception)
         {
             return ApiResults.Forbidden("SelfBookingNotAllowed", exception.Message);
+        }
+        // Neutral by design, both directions. Unlike a service booking there is
+        // nothing useful to name here even for the caller's own block: they are
+        // not trying to deal with a person, they are trying to buy a ticket, and
+        // the event should not have been visible to them in the first place.
+        catch (EventBookingBlockedException exception)
+        {
+            return ApiResults.Forbidden("EventNotAvailable", exception.Message);
         }
         catch (EventBookingNotPhysicalException exception)
         {

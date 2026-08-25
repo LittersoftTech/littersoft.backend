@@ -20,6 +20,18 @@ namespace Pawfront.Contracts.Earnings;
 /// commission and can never be marked paid, so they are excluded from every other
 /// figure here and reported separately.
 /// </para>
+/// <para>
+/// <c>cancelledJob*</c> / <c>noShowJob*</c> / <c>expiredJob*</c> are the UNREALISED
+/// jobs — booked, then nothing — and <c>unrealisedAmount</c> is their sum. They
+/// account for the gap between what was on the calendar and what was earned, and
+/// are deliberately NOT part of <c>grossAmount</c> / <c>netAmount</c>: no money
+/// moved, so adding them would misstate what the provider holds. Each amount is
+/// what the job would have been worth; no fee is reported against them, because a
+/// commission on money that never changed hands is not owed. The three buckets are
+/// disjoint and map to the bookings list's <c>Cancelled</c> (all three),
+/// <c>NoShow</c> and <c>Expired</c> status groups. Bookings still in flight are in
+/// neither set — they have not happened and have not failed.
+/// </para>
 /// </remarks>
 public sealed record ProviderEarningsTotalsResponse(
     int CompletedBookings,
@@ -36,7 +48,15 @@ public sealed record ProviderEarningsTotalsResponse(
     decimal AwaitingFee,
     decimal AwaitingNet,
     int PrivateJobCount,
-    decimal PrivateJobAmount);
+    decimal PrivateJobAmount,
+    int CancelledJobCount,
+    decimal CancelledJobAmount,
+    int NoShowJobCount,
+    decimal NoShowJobAmount,
+    int ExpiredJobCount,
+    decimal ExpiredJobAmount,
+    int UnrealisedJobCount,
+    decimal UnrealisedAmount);
 
 /// <summary>
 /// Totals for one named period. <c>periodStart</c> / <c>periodEnd</c> are the
@@ -68,6 +88,11 @@ public sealed record ProviderEarningsOverviewResponse(
 /// checkout date for a stay) and is what the period filters and sorting use.
 /// <c>isPrivate</c> marks an off-platform Custom walk-in: it is listed because it
 /// is real work, but it is not part of the summary's platform totals.
+/// <c>isEarned</c> says whether the row produced money (COMPLETED / PAID) or is one
+/// of the unrealised ones a <c>status</c> filter pulls in — read it rather than
+/// re-deriving the rule from <c>status</c>. On an unrealised row <c>grossAmount</c>
+/// is what the job WOULD have been worth and <c>pawfrontFee</c> / <c>netAmount</c>
+/// are not money anybody owes.
 /// </summary>
 public sealed record ProviderEarningsBookingResponse(
     string BookingType,
@@ -89,6 +114,7 @@ public sealed record ProviderEarningsBookingResponse(
     string? PetName,
     bool IsPaid,
     bool IsPrivate,
+    bool IsEarned,
     decimal? GrossAmount,
     decimal? PawfrontFee,
     decimal? NetAmount,
@@ -97,12 +123,15 @@ public sealed record ProviderEarningsBookingResponse(
 
 /// <summary>
 /// A page of the earnings breakdown, with the filters that produced it echoed back
-/// and the unpaged <c>totalCount</c> so the client can page.
+/// and the unpaged <c>totalCount</c> so the client can page. <c>statuses</c> is the
+/// expanded raw-status list the page was actually built from — empty when no
+/// <c>status</c> was asked for, which means the earned rows only.
 /// </summary>
 public sealed record ProviderEarningsBookingsResponse(
     string Period,
     DateOnly? PeriodStart,
     DateOnly? PeriodEnd,
+    IReadOnlyList<string> Statuses,
     string SortBy,
     string SortDirection,
     int TotalCount,

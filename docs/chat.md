@@ -132,6 +132,29 @@ wrong or contradict.
 Sending exists as REST as well as a hub method so a client whose socket has
 dropped can still send. Both go through identical server logic.
 
+### "Have I already reported this chat?"
+
+`GET /conversations` and `GET /conversations/{id}` both carry, on every conversation:
+
+```json
+{ "isTicketRaisedByMe": true, "ticketId": "…", "ticketRef": "TK-000123" }
+```
+
+True when **you** have an open support ticket on that thread. Show the ticket instead of
+the Report option, and use `ticketId` to open it — `ticketRef` is the label. Both ids are
+null when the flag is false.
+
+Two things to handle:
+
+- **It is yours only.** A ticket the counterparty raised reads `false` — its existence is
+  not something we tell you.
+- **A thread admits one open ticket in either direction**, so when the flag is `false`
+  because *they* reported it, `POST .../support-tickets/report-chat` still answers
+  **409 `TicketAlreadyOpen`**. Treat that as "already reported", not as an error.
+
+It clears when support closes the ticket, which is exactly when reporting the thread again
+becomes possible — so the flag always agrees with what the server will accept from you.
+
 ### Searching the inbox
 
 `GET /conversations?search=anna` returns inbox cards — the same shape, sorting and

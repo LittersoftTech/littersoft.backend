@@ -3,7 +3,10 @@
 -- [@CheckInDate, @CheckOutDate) rather than by time-overlap on a single date.
 -- THROWs: 51230 provider not found, 51231 provider inactive, 51232 pet parent
 -- not found, 51233 pet not found / not owned, 51234 service unknown/inactive/
--- not owned/not a NightStay service, 51235 no capacity on one or more nights.
+-- not owned/not a NightStay service, 51235 no capacity on one or more nights,
+-- 51370 / 51371 one of the two has blocked the other (which code says which
+-- side placed it, so the API can name the caller's own block and stay neutral
+-- about one placed against them).
 CREATE OR ALTER PROCEDURE [Booking].[CreateNightStayBooking]
     @ProviderId UNIQUEIDENTIFIER,
     @PetParentId UNIQUEIDENTIFIER,
@@ -70,9 +73,49 @@ BEGIN
         THROW 51232, 'Pet parent was not found.', 1;
     END
 
-    -- No block check here, mirroring [Booking].[CreateBooking] — see there for why
-    -- neither a report nor a user block stands between these two and a booking.
+    -- Either party having blocked the other refuses the booking. A block is no
+    -- longer the chat-only remedy it began as: it severs the pair across the
+    -- product, and a new booking is the most consequential thing it has to stop.
     --
+    -- HOLDLOCK, not a plain read. [Block].[BlockParticipant] takes UPDLOCK +
+    -- HOLDLOCK over this same key range before it captures the unfinished jobs it
+    -- is about to cancel, so the range lock here is what makes the two serialise:
+    -- without it a booking created at that instant would commit after the block
+    -- and after the job list was taken, and would survive it.
+    --
+    -- The two directions THROW DIFFERENT codes so the API can word the refusal
+    -- without leaking. Only the caller's OWN block may be named ("unblock to
+    -- book"); one placed against them must read as a neutral "not available",
+    -- because naming it would confirm the other party acted -- the one thing a
+    -- block must never do. SQL reports which side acted and C# decides what this
+    -- actor is allowed to know, because this procedure is called by BOTH hosts and
+    -- has no actor of its own.
+    --
+    -- If the two have blocked each other, the parent's is reported. That is
+    -- deterministic rather than meaningful: the pair is severed either way, and
+    -- the only cost is that a provider in a mutual block reads the neutral wording
+    -- instead of being told about their own block.
+    DECLARE @BlockedByParent BIT = 0;
+    DECLARE @BlockedByProvider BIT = 0;
+
+    SELECT @BlockedByParent = MAX(CASE WHEN [BlockerType] = N'PetParent' THEN 1 ELSE 0 END),
+           @BlockedByProvider = MAX(CASE WHEN [BlockerType] = N'Provider' THEN 1 ELSE 0 END)
+    FROM [Block].[BlockedParticipants] WITH (HOLDLOCK)
+    WHERE ([BlockerType] = N'PetParent' AND [BlockerId] = @PetParentId
+           AND [BlockedType] = N'Provider' AND [BlockedId] = @ProviderId)
+       OR ([BlockerType] = N'Provider' AND [BlockerId] = @ProviderId
+           AND [BlockedType] = N'PetParent' AND [BlockedId] = @PetParentId);
+
+    IF @BlockedByParent = 1
+    BEGIN
+        THROW 51370, 'The pet parent has blocked this provider.', 1;
+    END
+
+    IF @BlockedByProvider = 1
+    BEGIN
+        THROW 51371, 'The provider has blocked this pet parent.', 1;
+    END
+
     -- Defense-in-depth: the API validates pet ownership before calling, but a
     -- direct sproc caller must not be able to pin someone else's pet on a stay.
     IF @PetId IS NOT NULL AND NOT EXISTS (

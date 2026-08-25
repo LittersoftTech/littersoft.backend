@@ -33,6 +33,7 @@ internal static class SupportTicketMapping
             BookingId: ticket.BookingId,
             PetId: ticket.PetId,
             ConversationId: ticket.ConversationId,
+            EventId: ticket.EventId,
             Status: ticket.Status,
             Category: ticket.Category,
             Reason: ticket.Reason,

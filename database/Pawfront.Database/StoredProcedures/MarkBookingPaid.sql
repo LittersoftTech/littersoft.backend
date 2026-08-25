@@ -6,12 +6,24 @@
 -- price-locked snapshot; @PaymentMethod is 'Cash' or 'Digital'.
 -- THROWs: 51160 not found, 51161 not the provider, 51162 not COMPLETED,
 -- 51163 Custom walk-in (App only), 51164 already paid.
+--
+-- This is the provider swiping "Cash Received", so their geolocation is written
+-- here, in the same transaction as the ledger row — the two records of the same
+-- moment must not be able to disagree about whether it happened. The PARENT's own
+-- fix for this moment arrives separately, on their app's own call to
+-- [Booking].[RecordBookingLocationEvent] with the same 'CashReceived' trigger.
 CREATE OR ALTER PROCEDURE [Booking].[MarkBookingPaid]
     @BookingId UNIQUEIDENTIFIER,
     @ProviderId UNIQUEIDENTIFIER,
     @Amount DECIMAL(10, 2),
     @PawfrontFee DECIMAL(10, 2),
-    @PaymentMethod NVARCHAR(16)
+    @PaymentMethod NVARCHAR(16),
+    -- The provider's position when the cash changed hands. See
+    -- [Booking].[StartBooking] for why these are defaulted to NULL.
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -86,6 +98,17 @@ BEGIN
         ([BookingType], [BookingId], [ProviderId], [PetParentId], [Amount], [PawfrontFee], [PaymentMethod], [PaidAtUtc])
     VALUES
         (N'SingleDay', @BookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
+
+    -- Where the provider was when they took the money.
+    IF @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[BookingLocationEvents]
+            ([BookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@BookingId, N'CashReceived', N'Provider', @ProviderId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
 
     -- The provider recorded the cash, so the parent gets the receipt. The amount
     -- is the one just written to the ledger, not a re-derivation — the two must

@@ -129,22 +129,12 @@ public interface IChatService
         ChatParticipant sender,
         CancellationToken cancellationToken);
 
-    Task<ChatBlock> BlockAsync(
-        ChatParticipant blocker,
-        ChatParticipantType blockedType,
-        Guid blockedId,
-        string? reason,
-        CancellationToken cancellationToken);
-
-    /// <summary>Returns null when the block is unknown or not the caller's.</summary>
-    Task<ChatBlock?> UnblockAsync(
-        Guid chatBlockId,
-        ChatParticipant blocker,
-        CancellationToken cancellationToken);
-
-    Task<IReadOnlyList<ChatBlock>> ListBlocksAsync(
-        ChatParticipant blocker,
-        CancellationToken cancellationToken);
+    // Blocking is NOT here any more. It moved to Pawfront.Application.Blocks
+    // when it stopped being a chat feature: one block now refuses bookings and
+    // hides events as well as closing the thread, so it cannot sensibly be
+    // reached through the chat service — the two API hosts need it too, and they
+    // have no conversation to hang it off. The chat host's /blocks endpoints call
+    // IBlockService directly.
 }
 
 /// <summary>Shared limits, so the endpoints, the hub and the stores agree on one set.</summary>

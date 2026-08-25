@@ -94,6 +94,16 @@ BEGIN
     ) AS [Cutoffs]
     WHERE b.[Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
                          N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION', N'START_JOB')
+      -- A Custom walk-in is NEVER settled here (2026-08-24). A no-show is a
+      -- statement that one PARTY failed to appear, and a walk-in has only one
+      -- party: the provider recording their own job. Settling it marked the
+      -- provider a no-show — and stamped NO_PAYOUT — for work they had actually
+      -- done, purely because the walk-in had no way to be started. (It now has
+      -- one: [Booking].[StartBooking] takes it straight to IN_PROGRESS.) A walk-in
+      -- the provider simply never finishes now rests at CONFIRMED, which is honest
+      -- — nobody was stood up — and stays out of every earnings figure until they
+      -- complete it.
+      AND b.[Source] <> N'Custom'
       AND @Now >= (CASE WHEN [Cutoffs].[BookingEndsAtUtc] >= [Cutoffs].[ProviderClosesAtUtc]
                         THEN [Cutoffs].[BookingEndsAtUtc] ELSE [Cutoffs].[ProviderClosesAtUtc] END);
 

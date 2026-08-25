@@ -1,23 +1,34 @@
-using Pawfront.Application.Chat;
+using Pawfront.Application.Blocks;
 using Pawfront.ChatApi.Auth;
-using Pawfront.Contracts.Chat;
+using Pawfront.Contracts.Blocks;
 
 namespace Pawfront.ChatApi.Endpoints;
 
 /// <summary>
-/// Blocking, which chat being OPEN makes non-optional: any parent can message any
-/// provider with no booking between them, so unsolicited contact is possible by
-/// design and a block is the user's own remedy for it.
-///
-/// A block stops new messages BOTH ways and stops the thread being reopened, but
-/// deliberately leaves existing history readable — it is part of both parties'
-/// record, and removing it would also remove what a blocked user might need in
-/// order to report the exchange.
-///
-/// Reporting is NOT here. It has to terminate in a support workflow and this
-/// backend has no Helpline / ticket module, so it belongs with that module rather
-/// than ahead of it.
+/// Blocking, from the chat host.
 /// </summary>
+/// <remarks>
+/// <para>
+/// These routes were the whole of blocking when it was a chat remedy: chat is
+/// OPEN, so any parent can message any provider with no booking between them, and
+/// a block was the user's answer to that. It is more than that now -- the same
+/// block refuses new bookings, hides each party's events from the other, and takes
+/// the provider out of browse and all five searches -- so the feature lives in
+/// <see cref="IBlockService"/> and the two API hosts carry the same three routes.
+/// This host keeps them because blocking somebody you are talking to is where the
+/// action naturally sits.
+/// </para>
+/// <para>
+/// <b>Placing a block cancels the pair's unfinished bookings</b>, which is why the
+/// response says how many. The one it cannot cancel is a job already underway --
+/// see <see cref="BlockParticipantResponse.UncancelledBookings"/>.
+/// </para>
+/// <para>
+/// Reporting is NOT here and is a different thing: a support ticket is a report to
+/// support, not a sanction the reporter applies, so it blocks nobody. The two are
+/// independent remedies.
+/// </para>
+/// </remarks>
 internal static class ChatBlockEndpoints
 {
     public static IEndpointRouteBuilder MapChatBlockEndpoints(this IEndpointRouteBuilder builder)
@@ -25,9 +36,9 @@ internal static class ChatBlockEndpoints
         var group = builder.MapGroup("/blocks");
 
         group.MapPost("/", async (
-            BlockChatParticipantRequest request,
+            BlockParticipantRequest request,
             ICurrentChatParticipant currentParticipant,
-            IChatService chatService,
+            IBlockService blockService,
             CancellationToken cancellationToken) =>
         {
             var (me, failure) = await ChatMapping.ResolveAsync(currentParticipant, cancellationToken);
@@ -43,26 +54,32 @@ internal static class ChatBlockEndpoints
 
             try
             {
-                // Always the opposite side, derived from the caller's token — a
-                // block only ever runs provider <-> parent.
-                var block = await chatService.BlockAsync(
-                    me!.Value,
-                    me.Value.Type.Counterparty(),
+                // The blocked side is derived from the caller's own — a block only
+                // ever runs provider <-> parent, so taking it from the body would
+                // only create a way to get it wrong.
+                var result = await blockService.BlockAsync(
+                    ToBlockParty(me!.Value),
                     request.CounterpartyId,
                     request.Reason,
                     cancellationToken);
 
-                return ApiResults.Ok(ChatMapping.ToResponse(block));
+                return ApiResults.Ok(BlockMapping.ToResponse(result));
             }
-            catch (Exception exception)
+            catch (InvalidBlockPairException exception)
             {
-                return ChatMapping.ToProblem(exception);
+                return ApiResults.BadRequest("InvalidRequest", exception.Message);
+            }
+            catch (ArgumentException exception)
+            {
+                return ApiResults.BadRequest("InvalidRequest", exception.Message);
             }
         });
 
         group.MapGet("/", async (
+            int? skip,
+            int? take,
             ICurrentChatParticipant currentParticipant,
-            IChatService chatService,
+            IBlockService blockService,
             CancellationToken cancellationToken) =>
         {
             var (me, failure) = await ChatMapping.ResolveAsync(currentParticipant, cancellationToken);
@@ -74,14 +91,19 @@ internal static class ChatBlockEndpoints
             // Only blocks the caller PLACED. Blocks against them are never
             // returned: telling someone they have been blocked confirms the other
             // party acted, which is exactly what a block is meant to end.
-            var blocks = await chatService.ListBlocksAsync(me!.Value, cancellationToken);
-            return ApiResults.Ok(blocks.Select(ChatMapping.ToResponse).ToList());
+            var page = await blockService.ListAsync(
+                ToBlockParty(me!.Value),
+                BlockListLimits.NormalizeSkip(skip),
+                BlockListLimits.NormalizeTake(take),
+                cancellationToken);
+
+            return ApiResults.Ok(BlockMapping.ToResponse(page));
         });
 
-        group.MapDelete("/{chatBlockId:guid}", async (
-            Guid chatBlockId,
+        group.MapDelete("/{blockId:guid}", async (
+            Guid blockId,
             ICurrentChatParticipant currentParticipant,
-            IChatService chatService,
+            IBlockService blockService,
             CancellationToken cancellationToken) =>
         {
             var (me, failure) = await ChatMapping.ResolveAsync(currentParticipant, cancellationToken);
@@ -90,15 +112,29 @@ internal static class ChatBlockEndpoints
                 return failure;
             }
 
-            var block = await chatService.UnblockAsync(chatBlockId, me!.Value, cancellationToken);
+            var block = await blockService.UnblockAsync(
+                blockId, ToBlockParty(me!.Value), cancellationToken);
 
             // Unknown id and somebody else's block are one case, so a block id
             // cannot be probed for existence.
             return block is null
-                ? ApiResults.NotFound("ChatBlockNotFound", "This block was not found.")
-                : ApiResults.Ok(ChatMapping.ToResponse(block));
+                ? ApiResults.NotFound("BlockNotFound", "This block was not found.")
+                : ApiResults.Ok(BlockMapping.ToResponse(block));
         });
 
         return builder;
     }
+
+    /// <summary>
+    /// The one place chat's participant vocabulary meets the block module's. The
+    /// two enums agree and probably always will, but they answer different
+    /// questions, and converting here is what keeps a block placed from the
+    /// bookings screen from having to name itself in chat's terms.
+    /// </summary>
+    private static BlockParty ToBlockParty(Application.Chat.ChatParticipant participant) =>
+        new(
+            participant.Type == Application.Chat.ChatParticipantType.Provider
+                ? BlockPartyType.Provider
+                : BlockPartyType.PetParent,
+            participant.Id);
 }

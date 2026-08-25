@@ -160,7 +160,16 @@ public sealed record EventResponse(
     // reads.
     IReadOnlyCollection<EventAttendeeSummaryResponse>? Attendees,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    // Whether the CALLER has an open support ticket on this event, and which one
+    // — see the trio's full note on BookingResponse. Mine only (another
+    // attendee's report of the same event is their own ticket, not this caller's)
+    // and open only. Populated on the catalog list, trending and the detail read;
+    // false/null on organiser-context reads (create / edit / my-events), which
+    // are not reporting surfaces — the same posture IsBookable takes.
+    bool IsTicketRaisedByMe = false,
+    Guid? TicketId = null,
+    string? TicketRef = null);
 
 /// <summary>
 /// Booking summary for an event. <see cref="MaxBookings"/> is the maximum

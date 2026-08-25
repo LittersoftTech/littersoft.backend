@@ -27,6 +27,10 @@ public sealed class ChatService(
     // checks the hold inline (THROW 51352), but a retraction is a Cosmos document
     // replace with no SQL statement in its path to hang the check on.
     Support.ISupportLegalHoldReader legalHoldReader,
+    // "Have I already reported this thread?" — one read per request, shared by the
+    // inbox and the thread header so a Report button is never offered on a
+    // conversation the caller already has an open ticket on.
+    Support.IMySupportTicketLookup myTicketLookup,
     ILogger<ChatService> logger) : IChatService
 {
     public async Task<ChatConversationDetail> OpenConversationAsync(
@@ -50,10 +54,7 @@ public sealed class ChatService(
         var detail = await conversationStore.GetOrCreateAsync(
             providerId, petParentId, actor, cancellationToken);
 
-        return detail with
-        {
-            Counterparty = await WithProviderPhotoAsync(detail.Counterparty, cancellationToken)
-        };
+        return await EnrichAsync(detail, actor, cancellationToken);
     }
 
     public async Task<ChatConversationDetail> GetConversationAsync(
@@ -64,10 +65,7 @@ public sealed class ChatService(
         var detail = await conversationStore.GetForParticipantAsync(conversationId, participant, cancellationToken)
             ?? throw new ConversationNotFoundException(conversationId);
 
-        return detail with
-        {
-            Counterparty = await WithProviderPhotoAsync(detail.Counterparty, cancellationToken)
-        };
+        return await EnrichAsync(detail, participant, cancellationToken);
     }
 
     public async Task<IReadOnlyList<ChatConversationCard>> ListConversationsAsync(
@@ -84,8 +82,51 @@ public sealed class ChatService(
             Math.Clamp(take, 1, ChatLimits.MaxConversationPageSize),
             cancellationToken);
 
-        return await WithProviderPhotosAsync(cards, cancellationToken);
+        var withPhotos = await WithProviderPhotosAsync(cards, cancellationToken);
+
+        // ONE read for the whole page, not one per card — the point of scoping the
+        // lookup to the caller rather than to a list of conversation ids.
+        var myTickets = await MyTicketsAsync(participant, cancellationToken);
+
+        return [.. withPhotos.Select(card => card with
+        {
+            MyTicket = myTickets.ForConversation(card.Conversation.ConversationId)
+        })];
     }
+
+    /// <summary>
+    /// Attaches what SQL could not return with the thread: the provider's Cosmos avatar and
+    /// the caller's own open support ticket on it. Both best-effort — a thread the caller
+    /// can see must render even when a decoration cannot be resolved.
+    /// </summary>
+    private async Task<ChatConversationDetail> EnrichAsync(
+        ChatConversationDetail detail,
+        ChatParticipant participant,
+        CancellationToken cancellationToken)
+    {
+        var myTickets = await MyTicketsAsync(participant, cancellationToken);
+
+        return detail with
+        {
+            Counterparty = await WithProviderPhotoAsync(detail.Counterparty, cancellationToken),
+            MyTicket = myTickets.ForConversation(detail.Conversation.ConversationId)
+        };
+    }
+
+    /// <summary>
+    /// The caller's open tickets, keyed by subject. The lookup contracts never to throw, so
+    /// the worst case here is a Report button offered on a thread already reported — which
+    /// the create path then refuses cleanly with 409.
+    /// </summary>
+    private Task<Support.MySupportTicketSubjects> MyTicketsAsync(
+        ChatParticipant participant,
+        CancellationToken cancellationToken)
+        => myTicketLookup.GetAsync(
+            participant.Type == ChatParticipantType.Provider
+                ? Support.SupportRaisedByTypes.Provider
+                : Support.SupportRaisedByTypes.PetParent,
+            participant.Id,
+            cancellationToken);
 
     /// <summary>
     /// Blank is the same as absent — an empty search box must return the whole
@@ -538,31 +579,6 @@ public sealed class ChatService(
         }
 
         return deleted;
-    }
-
-    public Task<ChatBlock> BlockAsync(
-        ChatParticipant blocker,
-        ChatParticipantType blockedType,
-        Guid blockedId,
-        string? reason,
-        CancellationToken cancellationToken)
-    {
-        return conversationStore.BlockAsync(blocker, blockedType, blockedId, reason, cancellationToken);
-    }
-
-    public Task<ChatBlock?> UnblockAsync(
-        Guid chatBlockId,
-        ChatParticipant blocker,
-        CancellationToken cancellationToken)
-    {
-        return conversationStore.UnblockAsync(chatBlockId, blocker, cancellationToken);
-    }
-
-    public Task<IReadOnlyList<ChatBlock>> ListBlocksAsync(
-        ChatParticipant blocker,
-        CancellationToken cancellationToken)
-    {
-        return conversationStore.ListBlocksAsync(blocker, cancellationToken);
     }
 
     /// <summary>

@@ -7,7 +7,7 @@
 --
 -- Nothing but the ticket's own status changes. Raising a ticket does not block
 -- anybody, so closing one has no severance to lift: whatever is in
--- [Chat].[BlockedParticipants] was put there by a user tapping Block, and is
+-- [Block].[BlockedParticipants] was put there by a user tapping Block, and is
 -- theirs alone to remove.
 --
 -- What closing DOES release are the three holds keyed off "is there an open
@@ -70,7 +70,8 @@ BEGIN
            -- Appended LAST, here and in every other procedure projecting this row,
            -- so adding them shifted no existing reader ordinal.
            [Category],
-           [Reason]
+           [Reason],
+           [EventId]
     FROM [Support].[Tickets]
     WHERE [TicketId] = @TicketId;
 

@@ -1,4 +1,5 @@
-﻿using System.Security.Claims;
+﻿using Pawfront.Application.Blocks;
+using System.Security.Claims;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Events;
@@ -16,6 +17,7 @@ using Pawfront.Contracts.ParentPets;
 using Pawfront.Contracts.ParentPhotos;
 using Pawfront.PetParentApi.Auth;
 using Pawfront.Contracts.Support;
+using Pawfront.Application.Support;
 
 namespace Pawfront.PetParentApi.Endpoints;
 
@@ -65,9 +67,11 @@ internal static class PetParentEndpoints
         // bookingType — because "my bookings" mixes them on one screen, so a
         // multi-select there naturally contains both.
         group.MapPost("/bookings/bulk-cancel", BulkCancelBookings);
-        // Single booking read — issues the start-OTP into the response when the
-        // booking is in a startable (confirmed-equivalent) state.
+        // Single booking read. It NO LONGER issues the start-OTP: showing the code
+        // is one of the evidenced moments and so must carry the parent's location,
+        // which a GET cannot. The code now comes from POST .../start-otp below.
         group.MapGet("/bookings/{bookingId:guid}", GetServiceBookingDetail);
+        group.MapPost("/bookings/{bookingId:guid}/start-otp", IssueServiceBookingStartOtp);
         // Legacy generic status setter — kept as a back-compat shim.
         group.MapPost("/bookings/{bookingId:guid}/status", UpdateBookingStatus);
         group.MapGet("/bookings/{bookingId:guid}/status-history", GetBookingStatusHistory);
@@ -81,6 +85,10 @@ internal static class PetParentEndpoints
         group.MapPost("/bookings/{bookingId:guid}/modifications/accept", AcceptServiceBookingModification);
         group.MapPost("/bookings/{bookingId:guid}/modifications/decline", DeclineServiceBookingModification);
         group.MapGet("/bookings/{bookingId:guid}/evidence", ListServiceBookingEvidence);
+        // The PARENT's own fix for a moment the PROVIDER drove (they were marked a
+        // no-show, cash was recorded as received or not, a photo was taken). Each
+        // app reports only where IT is, so the two halves arrive separately.
+        group.MapPost("/bookings/{bookingId:guid}/location", RecordServiceBookingLocation);
         group.MapGet("/onboarding-status", GetOnboardingStatus);
 
         var mobileVerification = group.MapGroup("/mobile-verification");
@@ -170,11 +178,25 @@ internal static class PetParentEndpoints
         Guid petParentId,
         IBookingService bookingService,
         IParentBookingEnrichmentService enrichment,
+        IMySupportTicketLookup ticketLookup,
+        IMyBlockLookup blockLookup,
         CancellationToken cancellationToken)
     {
         var results = await bookingService.ListByPetParentAsync(petParentId, cancellationToken);
         var enriched = await enrichment.EnrichAsync(petParentId, results, cancellationToken);
-        return ApiResults.Ok(enriched.Select(ToServiceBookingCard).ToArray());
+
+        // One read for the whole page — the caller's own open tickets, keyed by subject.
+        var myTickets = await MySupportTickets.ForParentAsync(
+            petParentId, ticketLookup, cancellationToken);
+        var myBlocks = await MyBlocks.ForPetParentAsync(
+            petParentId, blockLookup, cancellationToken);
+
+        return ApiResults.Ok(enriched
+            .Select(card => ToServiceBookingCard(
+                card,
+                myTickets.ForBooking(BookingTypes.SingleDay, card.Booking.BookingId),
+                myBlocks.ForCounterparty(card.Booking.ProviderId)))
+            .ToArray());
     }
 
     /// <summary>
@@ -182,11 +204,16 @@ internal static class PetParentEndpoints
     /// the booking, the booked provider's details, the service details + price, and
     /// the frozen-at-creation cancellation-policy + selected-location blocks.
     /// </summary>
-    private static ParentServiceBookingCardResponse ToServiceBookingCard(EnrichedBookingCard card)
+    private static ParentServiceBookingCardResponse ToServiceBookingCard(
+        EnrichedBookingCard card,
+        MySupportTicketRef? myTicket = null,
+        // Whether the booking's counterparty is blocked, and whose block it
+        // is. Default false/false on the write paths, where it cannot be true.
+        (bool IsBlocked, bool BlockedByMe) block = default)
     {
         var b = card.Booking;
         return new ParentServiceBookingCardResponse(
-            ToBookingResponse(b),
+            ToBookingResponse(b, myTicket, block),
             new BookingProviderDetailsSection(
                 b.ProviderId,
                 card.Provider?.DisplayName,
@@ -308,6 +335,19 @@ internal static class PetParentEndpoints
         {
             return ApiResults.Conflict("ProviderInactive", exception.Message);
         }
+        // Disclosure rule: name the caller's OWN block, stay neutral about one
+        // placed against them. Telling a parent that a provider blocked them
+        // would confirm the provider acted, which is the thing a block must not do.
+        catch (BookingBlockedException exception)
+        {
+            return exception.WasPlacedBy(BlockPartyType.PetParent)
+                ? ApiResults.Forbidden(
+                    "ParentBlockedProvider",
+                    "You have blocked this provider. Unblock them to book.")
+                : ApiResults.Forbidden(
+                    "BookingNotAvailable",
+                    "This booking is not available.");
+        }
         catch (BookingGroomingItemCodeRequiredException exception)
         {
             return ApiResults.BadRequest("ServiceItemCodeRequired", exception.Message);
@@ -382,7 +422,8 @@ internal static class PetParentEndpoints
                     request.Status,
                     BookingStatusActor.Parent,
                     petParentId,
-                    request.Note),
+                    request.Note,
+                    request.Location.ToCapturedLocation()),
                 cancellationToken);
             return ApiResults.Ok(ToBookingResponse(result));
         }
@@ -421,6 +462,8 @@ internal static class PetParentEndpoints
         Guid bookingId,
         IBookingService bookingService,
         IBookingReviewService reviewService,
+        IMySupportTicketLookup ticketLookup,
+        IMyBlockLookup blockLookup,
         CancellationToken cancellationToken)
     {
         var detail = await bookingService.GetDetailAsync(bookingId, cancellationToken);
@@ -429,15 +472,13 @@ internal static class PetParentEndpoints
             return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
         }
 
-        // The start-OTP is shown only while the booking is START_JOB (provider
-        // tapped "Start Job"). The parent reads it to the provider, who enters it
-        // to move the job to IN_PROGRESS. Absent in every other state.
+        // The start-OTP is deliberately NOT returned here any more. Showing the
+        // code is one of the moments whose geolocation has to be captured, and a
+        // GET carries no body — leaving it on this read would have left a way to
+        // obtain the code while supplying no position at all. The parent's app
+        // calls POST .../start-otp instead, which returns the same block.
+        // The field is kept on the response (always null) so the shape is stable.
         StartOtpResponse? startOtp = null;
-        if (detail.Row.Status == BookingStatuses.StartJob)
-        {
-            var otp = await bookingService.IssueStartOtpAsync(bookingId, cancellationToken);
-            startOtp = new StartOtpResponse(otp.OtpCode, otp.ExpiresAtUtc);
-        }
 
         BookingModificationResponse? pending = null;
         if (BookingStatuses.ModificationRequested.Contains(detail.Row.Status))
@@ -454,7 +495,95 @@ internal static class PetParentEndpoints
         var myReview = await reviewService.GetAsync(
             ReviewedBookingTypes.SingleDay, bookingId, ReviewerTypes.Parent, cancellationToken);
 
-        return ApiResults.Ok(ToBookingDetailResponse(detail, startOtp, pending, myReview));
+        var myTickets = await MySupportTickets.ForParentAsync(
+            petParentId, ticketLookup, cancellationToken);
+        var myBlocks = await MyBlocks.ForPetParentAsync(
+            petParentId, blockLookup, cancellationToken);
+
+        return ApiResults.Ok(ToBookingDetailResponse(
+            detail,
+            startOtp,
+            pending,
+            myReview,
+            myTickets.ForBooking(BookingTypes.SingleDay, bookingId),
+            myBlocks.ForCounterparty(detail.Row.ProviderId)));
+    }
+
+    /// <summary>
+    /// The parent taps "Show OTP": issues (or reuses) the start code and returns it,
+    /// recording where they were when it went on screen.
+    /// <para>
+    /// This replaces the code's old home on the booking-detail GET. It moved because
+    /// the capture is required and a GET has no body — leaving it there would have
+    /// left a way to read the code while supplying no position. The detail read's
+    /// <c>startOtp</c> block is now always null.
+    /// </para>
+    /// </summary>
+    private static async Task<IResult> IssueServiceBookingStartOtp(
+        Guid petParentId,
+        Guid bookingId,
+        IssueStartOtpRequest? request,
+        IBookingService bookingService,
+        CancellationToken cancellationToken)
+    {
+        // Scoped to the caller's own booking — same posture as the detail read, and
+        // 404 rather than 403 so a booking id can't be probed.
+        var booking = await bookingService.GetAsync(bookingId, cancellationToken);
+        if (booking is null || booking.PetParentId != petParentId)
+        {
+            return ApiResults.NotFound("BookingNotFound", $"Booking '{bookingId}' was not found.");
+        }
+
+        if (booking.Status != BookingStatuses.StartJob)
+        {
+            return ApiResults.Conflict(
+                "BookingNotStartable",
+                "A start code is only available once the provider has started the job.");
+        }
+
+        try
+        {
+            var otp = await bookingService.IssueStartOtpAsync(
+                bookingId, request?.Location.ToCapturedLocation(), cancellationToken);
+            return ApiResults.Ok(new StartOtpResponse(otp.OtpCode, otp.ExpiresAtUtc));
+        }
+        catch (Exception ex) when (IsBookingError(ex))
+        {
+            return MapBookingError(ex);
+        }
+    }
+
+    /// <summary>
+    /// The parent records their OWN position for a moment the PROVIDER drove — they
+    /// were marked a no-show, cash was recorded as received or not, or a completion
+    /// photo was taken. The server never copies the provider's fix onto the parent's
+    /// side, so a missing row here honestly reads as "we don't know where they were".
+    /// </summary>
+    private static async Task<IResult> RecordServiceBookingLocation(
+        Guid petParentId,
+        Guid bookingId,
+        RecordBookingLocationRequest? request,
+        IBookingLocationService locationService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            return ApiResults.BadRequest("InvalidRequest", "Request body is required.");
+        }
+
+        try
+        {
+            var result = await locationService.RecordAsync(
+                new RecordBookingLocationCommand(
+                    BookingTypes.SingleDay, bookingId, request.Trigger,
+                    BookingStatusActor.Parent, petParentId, request.Location.ToCapturedLocation()),
+                cancellationToken);
+            return ApiResults.Ok(BookingLocationMapping.ToResponse(result));
+        }
+        catch (Exception ex) when (IsBookingError(ex))
+        {
+            return MapBookingError(ex);
+        }
     }
 
     private static Task<IResult> ParentCancelServiceBooking(
@@ -520,17 +649,23 @@ internal static class PetParentEndpoints
     /// The parent reports that the provider never showed up. Only allowed
     /// 30+ minutes after the booking's scheduled start (409 NoShowTooEarly).
     /// </summary>
+    /// <remarks>Carries a body: the parent's position is required (400 LocationRequired).</remarks>
     private static Task<IResult> ReportProviderNoShow(
-        Guid petParentId, Guid bookingId, IBookingService s, CancellationToken ct)
-        => SetParentBookingStatusAsync(petParentId, bookingId, BookingStatuses.ProviderNoShow, s, ct);
+        Guid petParentId, Guid bookingId, BookingLocationOnlyRequest? request,
+        IBookingService s, CancellationToken ct)
+        => SetParentBookingStatusAsync(
+            petParentId, bookingId, BookingStatuses.ProviderNoShow, s, ct,
+            request?.Location.ToCapturedLocation());
 
     private static async Task<IResult> SetParentBookingStatusAsync(
-        Guid petParentId, Guid bookingId, string status, IBookingService bookingService, CancellationToken cancellationToken)
+        Guid petParentId, Guid bookingId, string status, IBookingService bookingService,
+        CancellationToken cancellationToken, CapturedLocation? location = null)
     {
         try
         {
             var result = await bookingService.UpdateStatusAsync(
-                new UpdateBookingStatusCommand(bookingId, status, BookingStatusActor.Parent, petParentId, null),
+                new UpdateBookingStatusCommand(
+                    bookingId, status, BookingStatusActor.Parent, petParentId, null, location),
                 cancellationToken);
             return ApiResults.Ok(ToBookingResponse(result));
         }
@@ -659,6 +794,8 @@ internal static class PetParentEndpoints
         or BookingNightStayUseDedicatedEndpointException or BookingStatusNotAllowedException
         or BookingStatusTerminalException or BookingStatusUnchangedException
         or BookingNoShowTooEarlyException or BookingExpiredException
+        or MissingCapturedLocationException or InvalidCapturedLocationException
+        or UnsupportedBookingLocationTriggerException
         or UnsupportedBookingStatusException or ArgumentException;
 
     private static IResult MapBookingError(Exception ex) => ex switch
@@ -691,6 +828,12 @@ internal static class PetParentEndpoints
         BookingNoShowTooEarlyException e => ApiResults.Conflict("NoShowTooEarly", e.Message),
         BookingExpiredException e => ApiResults.Conflict("BookingExpired", e.Message),
         UnsupportedBookingStatusException e => ApiResults.BadRequest("UnsupportedBookingStatus", e.Message),
+        // Distinct codes on purpose: "you sent no location" and "your location is
+        // nonsense" call for different things from the app — prompting for the
+        // permission versus retrying the fix.
+        MissingCapturedLocationException e => ApiResults.BadRequest("LocationRequired", e.Message),
+        InvalidCapturedLocationException e => ApiResults.BadRequest("InvalidLocation", e.Message),
+        UnsupportedBookingLocationTriggerException e => ApiResults.BadRequest("UnsupportedLocationTrigger", e.Message),
         _ => ApiResults.BadRequest("InvalidRequest", ex.Message)
     };
 
@@ -704,7 +847,16 @@ internal static class PetParentEndpoints
             entry.Note,
             entry.ChangedAtUtc);
 
-    private static BookingResponse ToBookingResponse(BookingResult result) =>
+    /// <param name="myTicket">
+    /// The caller's own open support ticket on this booking, when the read path resolved
+    /// one. Null on the write paths (create / status), where it is false by construction.
+    /// </param>
+    private static BookingResponse ToBookingResponse(
+        BookingResult result,
+        MySupportTicketRef? myTicket = null,
+        // Whether the booking's counterparty is blocked, and whose block it
+        // is. Default false/false on the write paths, where it cannot be true.
+        (bool IsBlocked, bool BlockedByMe) block = default) =>
         new(result.BookingId,
             result.ProviderId,
             result.PetParentId,
@@ -729,7 +881,12 @@ internal static class PetParentEndpoints
             result.CustomerLocation,
             result.PricePerHour,
             result.JobNotes,
-            result.PetId);
+            result.PetId,
+            IsTicketRaisedByMe: myTicket is not null,
+            TicketId: myTicket?.TicketId,
+            TicketRef: myTicket?.TicketRef,
+            IsBlocked: block.IsBlocked,
+            BlockedByMe: block.BlockedByMe);
 
     /// <summary>
     /// Maps the enriched booking-detail result into the four-section response.
@@ -740,7 +897,11 @@ internal static class PetParentEndpoints
         BookingDetailResult detail,
         StartOtpResponse? startOtp,
         BookingModificationResponse? pendingModification,
-        BookingReviewRecord? myReview = null)
+        BookingReviewRecord? myReview = null,
+        MySupportTicketRef? myTicket = null,
+        // Whether the booking's counterparty is blocked, and whose block it
+        // is. Default false/false on the write paths, where it cannot be true.
+        (bool IsBlocked, bool BlockedByMe) block = default)
     {
         var row = detail.Row;
         var isCustom = string.Equals(row.Source, "Custom", StringComparison.Ordinal);
@@ -817,7 +978,14 @@ internal static class PetParentEndpoints
             ToPrescriptionSection(row),
             // This host's side only: the parent's own review of the provider. The
             // provider's rating OF the parent is deliberately not returned here.
-            ReviewResponseMapping.ToDetailsSection(row.Status, row.Source, myReview));
+            ReviewResponseMapping.ToDetailsSection(row.Status, row.Source, myReview),
+            // Whether THIS caller already has an open incident on the booking, so the
+            // screen offers "Report Incident" or a link to the ticket, never both.
+            IsTicketRaisedByMe: myTicket is not null,
+            TicketId: myTicket?.TicketId,
+            TicketRef: myTicket?.TicketRef,
+            IsBlocked: block.IsBlocked,
+            BlockedByMe: block.BlockedByMe);
     }
 
     /// <summary>Builds the detail read's prescription block — null until a vet records one.</summary>

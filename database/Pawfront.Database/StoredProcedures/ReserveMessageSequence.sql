@@ -76,7 +76,7 @@ BEGIN
     -- already exists by then.
     IF EXISTS (
         SELECT 1
-        FROM [Chat].[BlockedParticipants]
+        FROM [Block].[BlockedParticipants]
         WHERE ([BlockerType] = N'Provider' AND [BlockerId] = @ProviderId
                AND [BlockedType] = N'PetParent' AND [BlockedId] = @PetParentId)
            OR ([BlockerType] = N'PetParent' AND [BlockerId] = @PetParentId

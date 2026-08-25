@@ -250,7 +250,14 @@ BEGIN
         SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
         FROM [Support].[Tickets]
         WHERE [PetParentId] = @PetParentId
-          AND [Status] <> N'CLOSED';
+          AND [Status] <> N'CLOSED'
+          -- Only the two kinds with a COUNTERPARTY block a delete. The guard
+          -- exists so a party cannot be anonymised while support is still asking
+          -- questions of them about somebody else; an app issue or an event
+          -- report is neither about the other party nor clearable by the user,
+          -- so leaving them in would strand an account delete behind an
+          -- unrelated bug report.
+          AND [TicketType] IN (N'BookingIncident', N'ChatIncident');
 
         IF EXISTS (SELECT 1 FROM @OpenTickets)
         BEGIN

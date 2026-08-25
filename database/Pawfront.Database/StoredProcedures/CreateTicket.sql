@@ -1,31 +1,45 @@
 -- Raises a support ticket against the counterparty.
 --
 -- Reporting somebody does NOT block them. Nothing here writes to
--- [Chat].[BlockedParticipants]: the pair stay able to message, book and find each
+-- [Block].[BlockedParticipants]: the pair stay able to message, book and find each
 -- other while support looks at the case, and blocking remains what it always was
 -- — the users' own remedy, placed by hand through the chat host and lifted the
 -- same way. A ticket is a report to support, not a sanction applied on the
 -- reporter's say-so.
 --
--- Handles BOTH kinds, because the only thing that differs between them is which
--- table supplies the two party ids:
+-- Handles ALL FOUR kinds, because the only thing that differs between them is
+-- where the party ids come from:
 --   @TicketType = 'BookingIncident' -> @BookingType + @BookingId name the job.
 --                                      Both party ids and the pet come off the
 --                                      booking row.
 --   @TicketType = 'ChatIncident'    -> @ConversationId names the thread. Both
 --                                      party ids come off the conversation row.
+--   @TicketType = 'EventIncident'   -> @EventId names the event. There is NO
+--                                      counterparty: only the reporter's own
+--                                      party column is set (see below).
+--   @TicketType = 'AppIssue'        -> no subject at all. Reporter only.
 --
 -- The reporter passes only their OWN id (@ActorId) and which side they are on.
--- The counterparty is DERIVED from the subject and never accepted from the
--- caller, which is what stops a report being filed against somebody who was
--- never party to the booking or thread.
+-- For the two counterparty kinds the OTHER party is DERIVED from the subject and
+-- never accepted from the caller, which is what stops a report being filed
+-- against somebody who was never party to the booking or thread.
 --
--- ONE open ticket per SUBJECT — per booking, or per conversation — not per
--- person. Two bookings with the same provider are two incidents and get two
--- tickets; the same booking cannot be reported twice while the first report is
--- open. The check and the insert share a transaction so the read cannot go stale
--- between them, with [UX_Tickets_OpenBooking] / [UX_Tickets_OpenConversation] as
--- the race-safe backstop underneath.
+-- An event report records no counterparty on purpose. The organiser is one join
+-- away through @EventId, and a parent-organised event reported by another parent
+-- could not be stored in the one-Provider / one-PetParent shape anyway. An event
+-- is public: anyone signed in can see one, so anyone signed in can report one —
+-- there is no attendance check.
+--
+-- ONE open ticket per SUBJECT, not per person:
+--   booking      -> per (BookingType, BookingId), either direction
+--   conversation -> per ConversationId, either direction
+--   event        -> per (EventId, REPORTER). An event has many attendees and each
+--                   of them reporting it is a separate account; what is refused
+--                   is the same person reporting it twice.
+--   app issue    -> no rule. Each bug report is a different bug.
+-- The check and the insert share a transaction so the read cannot go stale
+-- between them, with [UX_Tickets_OpenBooking] / [UX_Tickets_OpenConversation] /
+-- [UX_Tickets_OpenEventReporter] as the race-safe backstop underneath.
 --
 -- Returns TWO result sets:
 --   1. [Outcome] = 'Created' | 'TicketAlreadyOpen', followed by the ticket row.
@@ -40,7 +54,7 @@
 --
 -- THROWs: 51340 booking not found, 51341 caller is not a party to the subject,
 -- 51342 conversation not found, 51343 invalid request (defensive), 51348 Custom
--- walk-in (no pet parent to report or be reported).
+-- walk-in (no pet parent to report or be reported), 51355 event not found.
 CREATE OR ALTER PROCEDURE [Support].[CreateTicket]
     @TicketType NVARCHAR(24),
     @RaisedByType NVARCHAR(16),
@@ -49,7 +63,8 @@ CREATE OR ALTER PROCEDURE [Support].[CreateTicket]
     @BookingId UNIQUEIDENTIFIER = NULL,
     @ConversationId UNIQUEIDENTIFIER = NULL,
     @Category NVARCHAR(100) = NULL,
-    @Reason NVARCHAR(500) = NULL
+    @Reason NVARCHAR(500) = NULL,
+    @EventId UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -57,12 +72,13 @@ BEGIN
 
     -- Defensive: the API validates all of this first, so reaching these is a
     -- direct-caller error rather than something a client can provoke.
-    IF @TicketType NOT IN (N'BookingIncident', N'ChatIncident')
+    IF @TicketType NOT IN (N'BookingIncident', N'ChatIncident', N'EventIncident', N'AppIssue')
         OR @RaisedByType NOT IN (N'Provider', N'PetParent')
         OR @ActorId IS NULL
         OR (@TicketType = N'BookingIncident'
             AND (@BookingId IS NULL OR @BookingType NOT IN (N'SingleDay', N'NightStay')))
         OR (@TicketType = N'ChatIncident' AND @ConversationId IS NULL)
+        OR (@TicketType = N'EventIncident' AND @EventId IS NULL)
     BEGIN
         THROW 51343, 'Invalid support ticket request.', 1;
     END
@@ -129,7 +145,7 @@ BEGIN
             THROW 51348, 'Only app bookings can be reported.', 1;
         END
     END
-    ELSE
+    ELSE IF @TicketType = N'ChatIncident'
     BEGIN
         SELECT @ProviderId = [ProviderId],
                @PetParentId = [PetParentId],
@@ -142,8 +158,35 @@ BEGIN
             THROW 51342, 'Conversation was not found.', 1;
         END
     END
+    ELSE
+    BEGIN
+        -- 'EventIncident' and 'AppIssue': the reporter is the only party, so
+        -- their own column is set from @RaisedByType and the other stays NULL.
+        -- CK_Tickets_SubjectMatchesType enforces exactly that shape.
+        IF @RaisedByType = N'Provider'
+        BEGIN
+            SET @ProviderId = @ActorId;
+        END
+        ELSE
+        BEGIN
+            SET @PetParentId = @ActorId;
+        END
+
+        IF @TicketType = N'EventIncident'
+        BEGIN
+            -- Existence only. An event is public, so there is no attendance or
+            -- ownership test to apply — anyone who can see one can report it.
+            IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE [EventId] = @EventId)
+            BEGIN
+                THROW 51355, 'Event was not found.', 1;
+            END
+        END
+    END
 
     -- The caller must be the side they claim to be, on the subject they named.
+    -- Trivially satisfied for the two reporter-only kinds, where the column was
+    -- just set FROM @ActorId — deliberately left to fall through rather than
+    -- branched around, so there is one place this rule is stated.
     IF (@RaisedByType = N'Provider' AND @ProviderId <> @ActorId)
         OR (@RaisedByType = N'PetParent' AND @PetParentId <> @ActorId)
     BEGIN
@@ -167,17 +210,33 @@ BEGIN
           AND [BookingType] = @BookingType
           AND [Status] <> N'CLOSED';
     END
-    ELSE
+    ELSE IF @TicketType = N'ChatIncident'
     BEGIN
         SELECT @ExistingTicketId = [TicketId]
         FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [ConversationId] = @ConversationId
           AND [Status] <> N'CLOSED';
     END
+    ELSE IF @TicketType = N'EventIncident'
+    BEGIN
+        -- Scoped to the REPORTER as well as the event, unlike the two above: a
+        -- second attendee reporting the same event is a second account of it and
+        -- gets its own ticket. Matches [UX_Tickets_OpenEventReporter], which is
+        -- the backstop if two of this reporter's requests land together.
+        SELECT @ExistingTicketId = [TicketId]
+        FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [EventId] = @EventId
+          AND [Status] <> N'CLOSED'
+          AND ((@RaisedByType = N'Provider'  AND [ProviderId]  = @ActorId)
+            OR (@RaisedByType = N'PetParent' AND [PetParentId] = @ActorId));
+    END
+    -- 'AppIssue' has no subject, so nothing to collide with: every report is a
+    -- new ticket. @ExistingTicketId stays NULL and the insert below always runs.
 
     IF @ExistingTicketId IS NOT NULL
     BEGIN
-        -- One open ticket per booking / per conversation, in either direction.
+        -- One open ticket per booking / per conversation (either direction), or
+        -- per event per reporter.
         -- Nothing is written; the caller reports the conflict naming this ticket.
         SET @Outcome = N'TicketAlreadyOpen';
         SET @TicketId = @ExistingTicketId;
@@ -189,17 +248,17 @@ BEGIN
         DECLARE @Inserted TABLE ([TicketId] UNIQUEIDENTIFIER);
 
         -- The ticket row is the ONLY thing written. Nothing touches
-        -- [Chat].[BlockedParticipants]: a report is not a block, and the reported
+        -- [Block].[BlockedParticipants]: a report is not a block, and the reported
         -- party keeps every ability they had — messaging, booking, discovery —
         -- until support decides otherwise off-platform.
         INSERT INTO [Support].[Tickets]
             ([TicketType], [ProviderId], [PetParentId], [RaisedByType],
-             [BookingType], [BookingId], [PetId], [ConversationId],
+             [BookingType], [BookingId], [PetId], [ConversationId], [EventId],
              [Category], [Reason], [Status], [CreatedAtUtc], [UpdatedAtUtc])
         OUTPUT inserted.[TicketId] INTO @Inserted
         VALUES
             (@TicketType, @ProviderId, @PetParentId, @RaisedByType,
-             @BookingType, @BookingId, @PetId, @ConversationId,
+             @BookingType, @BookingId, @PetId, @ConversationId, @EventId,
              @Category, @Reason, N'OPENED', @Now, @Now);
 
         SELECT @TicketId = [TicketId] FROM @Inserted;
@@ -220,11 +279,12 @@ BEGIN
            t.[CreatedAtUtc],
            t.[UpdatedAtUtc],
            t.[ClosedAtUtc],
-           -- The reporter's two classifiers, appended LAST here and in the four
-           -- other procedures that project this row, so the existing reader
-           -- ordinals did not shift when they were added.
+           -- The reporter's two classifiers and the event subject, appended LAST
+           -- here and in the five other procedures that project this row, so
+           -- the existing reader ordinals did not shift when they were added.
            t.[Category],
-           t.[Reason]
+           t.[Reason],
+           t.[EventId]
     FROM [Support].[Tickets] AS t
     WHERE t.[TicketId] = @TicketId;
 

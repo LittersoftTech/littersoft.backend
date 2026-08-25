@@ -4,9 +4,12 @@
 -- against you is as much yours as one you raised, and both need answering. The
 -- row carries [RaisedByType] so the card can say which way round it is.
 --
--- BOTH ticket types come back in one list, discriminated by [TicketType]. A user
--- thinks "my tickets", not "my two kinds of tickets" — the same reasoning that
--- merges the two booking kinds in the parent's history feed.
+-- ALL FOUR ticket types come back in one list, discriminated by [TicketType]. A
+-- user thinks "my tickets", not "my four kinds of tickets" — the same reasoning
+-- that merges the two booking kinds in the parent's history feed. An 'AppIssue'
+-- or 'EventIncident' has only a reporter, so the caller matches on whichever of
+-- the two party columns is theirs and the other is NULL; the predicate below
+-- needs no change for that.
 --
 -- @Statuses is a plain CSV, expanded in C#. Keeping the vocabulary there rather
 -- than teaching this procedure about groups like "open" means adding a status is
@@ -45,11 +48,12 @@ BEGIN
            t.[UpdatedAtUtc],
            t.[ClosedAtUtc],
            -- Appended after [ClosedAtUtc] to keep the ticket block contiguous and
-           -- identical to the other four procedures — which pushes [TotalCount]
-           -- from ordinal 14 to 16. Its reader in SqlSupportTicketStore reads it
+           -- identical to the other five procedures — which pushes [TotalCount]
+           -- from ordinal 14 to 17. Its reader in SqlSupportTicketStore reads it
            -- positionally, so the two must move together.
            t.[Category],
            t.[Reason],
+           t.[EventId],
            COUNT(*) OVER () AS [TotalCount]
     FROM [Support].[Tickets] AS t
     WHERE ((@ActorType = N'Provider'  AND t.[ProviderId]  = @ActorId)

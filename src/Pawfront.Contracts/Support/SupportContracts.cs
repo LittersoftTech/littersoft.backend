@@ -53,6 +53,45 @@ public sealed record SupportTicketPhotoErrorResponse(
     string Message);
 
 /// <summary>
+/// Body for "Report an app issue" — <c>POST .../support-tickets/report-app-issue</c> on
+/// either host. Nothing is named but the problem: an app issue has no subject and no
+/// counterparty, so the ticket records only its reporter.
+/// </summary>
+/// <param name="Comment">
+/// What went wrong, in the reporter's own words. <b>Optional here</b>, unlike a report
+/// against a person: when it is absent <paramref name="Reason"/> opens the ticket's
+/// narrative instead. Sending neither is a 400 — there would be nothing to report.
+/// </param>
+/// <remarks>
+/// Unlimited: an app issue has no subject to key a "one open ticket" rule on, and each bug
+/// report is a different bug.
+/// </remarks>
+public sealed record ReportAppIssueRequest(
+    string? Comment = null,
+    string? Category = null,
+    string? Reason = null);
+
+/// <summary>
+/// Body for "Report an event" — <c>POST .../support-tickets/report-event</c> on either
+/// host.
+/// </summary>
+/// <param name="Comment">
+/// Optional, exactly as on <see cref="ReportAppIssueRequest"/> — <paramref name="Reason"/>
+/// stands in for it when absent.
+/// </param>
+/// <remarks>
+/// The organiser is NOT recorded as a counterparty and is never told. An event is public,
+/// so there is no attendance check either: the only refusal is 404 <c>EventNotFound</c>.
+/// One open ticket per event <i>per reporter</i> — a second attendee reporting the same
+/// event is a separate account of it and gets a separate ticket.
+/// </remarks>
+public sealed record ReportEventIncidentRequest(
+    Guid EventId,
+    string? Comment = null,
+    string? Category = null,
+    string? Reason = null);
+
+/// <summary>
 /// Body for "Report Chat" — <c>POST .../support-tickets/report-chat</c> on either host.
 /// The counterparty is derived from the conversation.
 /// </summary>
@@ -81,7 +120,17 @@ public sealed record SubmitTicketClarificationRequest(string Reply);
 /// idea as a booking's <c>jobId</c> (<c>PF-000123</c>) and a payout's <c>PO-000123</c>.
 /// <see cref="TicketId"/> stays the GUID the routes take.
 /// </param>
-/// <param name="TicketType"><c>BookingIncident</c> or <c>ChatIncident</c>.</param>
+/// <param name="TicketType">
+/// <c>BookingIncident</c>, <c>ChatIncident</c>, <c>EventIncident</c> or <c>AppIssue</c> —
+/// branch on this to know which subject field is populated.
+/// </param>
+/// <param name="ProviderId">
+/// Null when the ticket has no counterparty — an <c>AppIssue</c> or <c>EventIncident</c>
+/// raised by a pet parent records only their side. The two counterparty kinds always carry
+/// both.
+/// </param>
+/// <param name="PetParentId">The mirror of <paramref name="ProviderId"/>.</param>
+/// <param name="EventId">The reported event; set on <c>EventIncident</c> only.</param>
 /// <param name="RaisedByType">
 /// Which side raised it. The list is scoped by party rather than by direction — a ticket
 /// raised against you is as much yours as one you raised — so this is what lets the card
@@ -111,14 +160,15 @@ public sealed record SupportTicketResponse(
     Guid TicketId,
     string TicketRef,
     string TicketType,
-    Guid ProviderId,
-    Guid PetParentId,
+    Guid? ProviderId,
+    Guid? PetParentId,
     string RaisedByType,
     bool RaisedByMe,
     string? BookingType,
     Guid? BookingId,
     Guid? PetId,
     Guid? ConversationId,
+    Guid? EventId,
     string Status,
     string? Category,
     string? Reason,

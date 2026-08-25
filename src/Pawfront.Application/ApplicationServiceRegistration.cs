@@ -1,3 +1,4 @@
+﻿using Pawfront.Application.Blocks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Pawfront.Application.Availability;
@@ -70,6 +71,16 @@ public static class ApplicationServiceRegistration
         // over the two booking services — every item takes the ordinary
         // per-booking transition, so there is no bulk SQL path to drift from it.
         services.TryAddScoped<IBulkBookingCancellationService, BulkBookingCancellationService>();
+
+        // Blocking, product-wide. Depends on the bulk cancellation above rather
+        // than reimplementing a cancel, so a block ends the pair's unfinished jobs
+        // through the ordinary transitions -- party check, audit row, freed
+        // capacity and the counterparty's push all included.
+        services.TryAddScoped<IBlockService, BlockService>();
+        // Who the caller is, for the discovery block filter. TryAdd, so a host
+        // that registers its own BEFORE this call keeps it; a host with no
+        // discovery surface gets the no-op and filters nothing.
+        services.TryAddScoped<ICurrentBlockParty, NullCurrentBlockParty>();
 
         // Diffs a booking's frozen-at-creation terms against the provider's current
         // ones, for the "these changed since you booked" confirmation sheet.

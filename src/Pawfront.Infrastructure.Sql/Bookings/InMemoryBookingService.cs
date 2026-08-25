@@ -212,6 +212,136 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         }
     }
 
+    public async Task<BookingResult> UpdateCustomAsync(
+        Guid bookingId,
+        Guid providerId,
+        Guid serviceId,
+        string serviceCategory,
+        string subCategory,
+        string customerName,
+        string customerMobileCountryCode,
+        string customerMobile,
+        string animalType,
+        string petName,
+        DateOnly bookingDate,
+        TimeOnly startTime,
+        TimeOnly endTime,
+        string serviceLocation,
+        string? customerLocation,
+        decimal pricePerHour,
+        string? jobNotes,
+        int capacity,
+        CancellationToken cancellationToken)
+    {
+        var serviceLock = serviceLocks.GetOrAdd(serviceId, _ => new SemaphoreSlim(1, 1));
+        await serviceLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!bookings.TryGetValue(bookingId, out var row))
+            {
+                throw new BookingNotFoundException(bookingId);
+            }
+
+            if (row.ProviderId != providerId)
+            {
+                throw new BookingStatusForbiddenException(bookingId);
+            }
+
+            if (!string.Equals(row.Source, "Custom", StringComparison.Ordinal))
+            {
+                throw new BookingNotCustomException(bookingId);
+            }
+
+            if (BookingStatuses.Cancelled.Contains(row.Status))
+            {
+                throw new CustomBookingNotEditableException(bookingId, row.Status);
+            }
+
+            var scheduleChanged =
+                row.ServiceId != serviceId
+                || row.BookingDate != bookingDate
+                || row.StartTime != startTime
+                || row.EndTime != endTime;
+
+            if (scheduleChanged && !string.Equals(row.Status, BookingStatuses.Confirmed, StringComparison.Ordinal))
+            {
+                throw new CustomBookingScheduleLockedException(bookingId, row.Status);
+            }
+
+            // Same self-exclusion the sproc makes: a booking must not collide with
+            // itself when its window shifts by a few minutes.
+            if (scheduleChanged)
+            {
+                var concurrent = bookings.Values.Count(b =>
+                    b.ServiceId == serviceId
+                    && b.BookingDate == bookingDate
+                    && b.BookingId != bookingId
+                    && IsActive(b)
+                    && b.StartTime < endTime
+                    && b.EndTime > startTime);
+
+                if (concurrent >= capacity)
+                {
+                    throw new BookingCapacityExceededException(serviceId, bookingDate, startTime, endTime);
+                }
+            }
+
+            // BookingRow's editable fields are init-only, so the edit replaces the
+            // row rather than mutating it. Identity, lifecycle and the location
+            // snapshot are carried across untouched — this endpoint rewrites the
+            // job's terms, not what has happened to it.
+            var updated = new BookingRow
+            {
+                BookingId = row.BookingId,
+                JobNumber = row.JobNumber,
+                ProviderId = row.ProviderId,
+                PetParentId = row.PetParentId,
+                PetId = row.PetId,
+                ServiceItemCode = row.ServiceItemCode,
+                Status = row.Status,
+                CreatedAtUtc = row.CreatedAtUtc,
+                CancelledAtUtc = row.CancelledAtUtc,
+                Source = row.Source,
+                LocationType = row.LocationType,
+                SnapshotAddressLine = row.SnapshotAddressLine,
+                SnapshotCity = row.SnapshotCity,
+                SnapshotZipCode = row.SnapshotZipCode,
+                SnapshotLatitude = row.SnapshotLatitude,
+                SnapshotLongitude = row.SnapshotLongitude,
+
+                ServiceId = serviceId,
+                ServiceCategory = serviceCategory,
+                SubCategory = subCategory,
+                CustomerName = customerName,
+                CustomerMobileCountryCode = customerMobileCountryCode,
+                CustomerMobile = customerMobile,
+                AnimalType = animalType,
+                PetName = petName,
+                BookingDate = bookingDate,
+                StartTime = startTime,
+                EndTime = endTime,
+                ServiceLocation = serviceLocation,
+                CustomerLocation = customerLocation,
+                PricePerHour = pricePerHour,
+                JobNotes = jobNotes,
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            };
+
+            bookings[bookingId] = updated;
+
+            AppendHistory(bookingId, updated.Status, updated.Status, "Provider", providerId,
+                scheduleChanged
+                    ? "Walk-in edited by the provider (service or schedule changed)"
+                    : "Walk-in edited by the provider");
+
+            return ToResult(updated);
+        }
+        finally
+        {
+            serviceLock.Release();
+        }
+    }
+
     public Task<BookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)
     {
         bookings.TryGetValue(bookingId, out var row);
@@ -330,6 +460,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         BookingStatusActor actor,
         Guid actorId,
         string? note,
+        CapturedLocation? location,
         CancellationToken cancellationToken)
     {
         if (!bookings.TryGetValue(bookingId, out var row))
@@ -517,19 +648,19 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
     private static NotSupportedException NotInMemory()
         => new("The booking job lifecycle requires the SQL-backed store.");
 
-    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<BookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+    public Task<BookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<BookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+    public Task<BookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<BookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<BookingResult> MarkPaidAsync(Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee, string paymentMethod, CancellationToken cancellationToken)
+    public Task<BookingResult> MarkPaidAsync(Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee, string paymentMethod, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<BookingResult> RequestModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
@@ -544,7 +675,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
     public Task<BookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
         => Task.FromResult<BookingModificationResult?>(null);
 
-    public Task<BookingEvidenceResult> AddEvidenceAsync(Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
+    public Task<BookingEvidenceResult> AddEvidenceAsync(Guid bookingId, Guid providerId, string photoUrl, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(Guid bookingId, CancellationToken cancellationToken)

@@ -1,3 +1,4 @@
+﻿using Pawfront.Application.Blocks;
 using System.Data;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
@@ -108,7 +109,10 @@ internal sealed class SqlEventStore(
         }
     }
 
-    public async Task<EventSqlSnapshot?> GetAsync(Guid eventId, CancellationToken cancellationToken)
+    public async Task<EventSqlSnapshot?> GetAsync(
+        Guid eventId,
+        CancellationToken cancellationToken,
+        BlockParty? viewer = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -118,6 +122,7 @@ internal sealed class SqlEventStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@EventId", eventId);
+        AddViewer(command, viewer);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
@@ -362,7 +367,8 @@ internal sealed class SqlEventStore(
 
     public async Task<IReadOnlyList<EventSqlSnapshot>> ListAsync(
         EventListFilter filter,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        BlockParty? viewer = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -372,6 +378,7 @@ internal sealed class SqlEventStore(
             CommandType = CommandType.StoredProcedure
         };
 
+        AddViewer(command, viewer);
         command.Parameters.AddWithValue("@EventCategory", DbValue(filter.EventCategory));
         command.Parameters.AddWithValue("@EventType", DbValue(filter.EventType));
         command.Parameters.AddWithValue("@StartDate",
@@ -426,7 +433,8 @@ internal sealed class SqlEventStore(
 
     public async Task<IReadOnlyList<EventSqlSnapshot>> ListTrendingAsync(
         int take,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        BlockParty? viewer = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -436,6 +444,7 @@ internal sealed class SqlEventStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@Take", take);
+        AddViewer(command, viewer);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
@@ -641,6 +650,19 @@ internal sealed class SqlEventStore(
         }
 
         return await secretProvider.GetSqlConnectionStringAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// The caller, so the procedure can hide events organised by somebody they
+    /// are blocked from -- in either direction. Both parameters default to NULL
+    /// in SQL, so passing nothing filters nothing.
+    /// </summary>
+    private static void AddViewer(SqlCommand command, BlockParty? viewer)
+    {
+        command.Parameters.AddWithValue(
+            "@ViewerType", viewer is null ? DBNull.Value : viewer.Value.Type.ToSqlValue());
+        command.Parameters.AddWithValue(
+            "@ViewerId", viewer is null ? DBNull.Value : viewer.Value.Id);
     }
 
     private static object DbValue(string? value) => value is null ? DBNull.Value : value;

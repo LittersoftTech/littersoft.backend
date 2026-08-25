@@ -6,7 +6,7 @@ namespace Pawfront.Application.Support;
 /// </summary>
 /// <remarks>
 /// Sits alongside <see cref="Earnings.EarningsQueryParsing"/> and
-/// <c>ParentBookingStatusFilter</c> for the same reason those do: the status GROUPS are
+/// <c>BookingStatusFilter</c> for the same reason those do: the status GROUPS are
 /// expanded to raw lifecycle statuses here, in C#, because <c>Support.ListTickets</c> takes
 /// a plain CSV. Adding a status is then an edit to <see cref="SupportTicketStatuses"/> and
 /// this file, rather than to the procedure.

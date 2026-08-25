@@ -1,4 +1,5 @@
--- Attaches one photo to a booking incident.
+-- Attaches one photo to a ticket that can carry evidence — everything except a
+-- chat incident.
 --
 -- Scoped to the ticket's CREATOR, not to either party. The evidence is the
 -- reporter's account of what happened, and the status vocabulary agrees — support
@@ -15,7 +16,7 @@
 -- mapping.
 --
 -- THROWs: 51344 ticket not found for this creator, 51345 already at the cap,
--- 51346 not a booking incident, 51347 ticket is closed.
+-- 51346 chat incident (carries no photos), 51347 ticket is closed.
 CREATE OR ALTER PROCEDURE [Support].[AddTicketPhoto]
     @TicketId UNIQUEIDENTIFIER,
     @ActorType NVARCHAR(16),
@@ -52,11 +53,12 @@ BEGIN
         THROW 51344, 'Ticket was not found.', 1;
     END
 
-    IF @TicketType <> N'BookingIncident'
+    IF @TicketType = N'ChatIncident'
     BEGIN
-        -- A chat incident needs no photos: the images already in the thread are
-        -- the evidence, and the whole conversation is under legal hold.
-        THROW 51346, 'Only booking incidents can carry photos.', 1;
+        -- The one kind that carries no photos: the images already in the thread
+        -- are the evidence, and the whole conversation is under legal hold.
+        -- Booking incidents, event incidents and app issues all take them.
+        THROW 51346, 'A reported chat cannot carry photos.', 1;
     END
 
     IF @Status = N'CLOSED'

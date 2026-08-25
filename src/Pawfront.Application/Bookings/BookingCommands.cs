@@ -107,6 +107,36 @@ public sealed record CreateCustomBookingCommand(
     decimal PricePerHour,
     string? JobNotes);
 
+/// <summary>
+/// Provider edits a walk-in they recorded earlier. Same field set as
+/// <see cref="CreateCustomBookingCommand"/> plus the booking to edit — a full
+/// replace rather than a patch, because the client is submitting the walk-in form
+/// again with corrected values, and a partial shape would make "cleared the notes"
+/// and "did not touch the notes" indistinguishable.
+/// </summary>
+/// <remarks>
+/// This is a plain edit, NOT a modification proposal: a walk-in is the provider's
+/// own record of their own job, so there is no counterparty to accept or decline
+/// it. Price and details stay editable through COMPLETED (correcting the money
+/// afterwards is the point); the service and schedule lock once the job starts.
+/// </remarks>
+public sealed record UpdateCustomBookingCommand(
+    Guid BookingId,
+    Guid ProviderId,
+    Guid ServiceId,
+    string CustomerName,
+    string CustomerMobileCountryCode,
+    string CustomerMobile,
+    string AnimalType,
+    string PetName,
+    DateOnly BookingDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    string ServiceLocation,
+    string? CustomerLocation,
+    decimal PricePerHour,
+    string? JobNotes);
+
 public sealed record BookingResult(
     Guid BookingId,
     Guid ProviderId,
@@ -361,10 +391,16 @@ public sealed class UnsupportedBookingPaymentMethodException(string value)
 /// The amount is computed server-side from the booking's price-locked snapshot —
 /// only the payment method comes from the caller.
 /// </summary>
+/// <param name="Location">
+/// Where the provider was when the cash changed hands. Required: the request is
+/// refused without it. The PARENT's own fix for the same moment arrives separately,
+/// on their app's call to <see cref="IBookingLocationService.RecordAsync"/>.
+/// </param>
 public sealed record MarkBookingPaidCommand(
     Guid BookingId,
     Guid ProviderId,
-    string PaymentMethod);
+    string PaymentMethod,
+    CapturedLocation? Location);
 
 /// <summary>
 /// A recorded booking payment (one per paid booking). <see cref="Amount"/> is the
@@ -404,12 +440,20 @@ public sealed class BookingNotPriceableException(Guid bookingId)
 /// route, never the body. The sproc enforces that the actor is party to the
 /// booking and that the transition is permitted for that actor.
 /// </summary>
+/// <param name="Location">
+/// The acting party's position, required for — and only stored on — the two
+/// NO-SHOW transitions. Every other status this engine serves (accept, decline,
+/// cancel, the legacy COMPLETED shim) leaves it null. The no-show routes on both
+/// hosts, and the legacy <c>/status</c> shim when it is used to set one, all refuse
+/// the request without it, so the shim cannot become a way to skip the capture.
+/// </param>
 public sealed record UpdateBookingStatusCommand(
     Guid BookingId,
     string NewStatus,
     BookingStatusActor Actor,
     Guid ActorId,
-    string? Note);
+    string? Note,
+    CapturedLocation? Location = null);
 
 /// <summary>One audited booking status change (or the seeded creation entry).</summary>
 public sealed record BookingStatusHistoryEntry(
@@ -574,8 +618,20 @@ public sealed record BookingEvidenceResult(
 /// issues the parent-facing start-OTP. Allowed only while the provider is inside
 /// their own weekly working hours. The provider then enters the code the parent
 /// shows to move the job to IN_PROGRESS.
+/// <para>
+/// Shared by both booking kinds. <paramref name="Location"/> is where the provider
+/// was when they answered the arrival question that put them on this call — "have
+/// you arrived at the customer's location?" for a ParentLocation booking, "has the
+/// customer arrived?" for a ProviderLocation one. Which question was asked is
+/// derived server-side from the booking's own LocationType, so both record the
+/// single <see cref="BookingLocationTriggers.ArrivalConfirmed"/> trigger and a
+/// client cannot misreport it. Required: the request is refused without it.
+/// </para>
 /// </summary>
-public sealed record StartBookingCommand(Guid BookingId, Guid ProviderId);
+public sealed record StartBookingCommand(
+    Guid BookingId,
+    Guid ProviderId,
+    CapturedLocation? Location);
 
 /// <summary>
 /// Either party proposes a new date/time for a single-day booking (editing is
@@ -796,3 +852,29 @@ public sealed class BookingModificationWindowClosedException(Guid bookingId)
 /// </summary>
 public sealed class BookingModificationExpiredException(Guid bookingId)
     : Exception($"The modification request for booking '{bookingId}' expired before it was answered; the booking has reverted to CONFIRMED.");
+
+/// <summary>
+/// The booking is an App booking, not a provider-recorded walk-in, so it cannot be
+/// edited directly — an App booking is a two-party agreement and changes go through
+/// the modification flow, where the counterparty accepts or declines.
+/// </summary>
+public sealed class BookingNotCustomException(Guid bookingId)
+    : Exception($"Booking '{bookingId}' is not a private walk-in and cannot be edited directly.");
+
+/// <summary>
+/// The walk-in ended in a status that means the job did not happen (cancelled,
+/// no-show, expired), so there is nothing left to correct. Deliberately NOT raised
+/// for COMPLETED: re-pricing a finished walk-in is the main reason the edit exists.
+/// </summary>
+public sealed class CustomBookingNotEditableException(Guid bookingId, string currentStatus)
+    : Exception($"Booking '{bookingId}' is '{currentStatus}' — the job did not happen and can no longer be edited.");
+
+/// <summary>
+/// The edit tried to change the service or the schedule after the job had started.
+/// Those fields lock at IN_PROGRESS: moving the window of a job already underway or
+/// finished is incoherent, and would mean re-checking capacity against a past slot.
+/// Raised rather than silently ignoring the fields, so a client cannot believe it
+/// saved a change it did not.
+/// </summary>
+public sealed class CustomBookingScheduleLockedException(Guid bookingId, string currentStatus)
+    : Exception($"Booking '{bookingId}' is '{currentStatus}'; the service and schedule can only be changed before the job starts.");

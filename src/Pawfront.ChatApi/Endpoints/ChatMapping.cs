@@ -16,15 +16,17 @@ namespace Pawfront.ChatApi.Endpoints;
 internal static class ChatMapping
 {
     public static ConversationResponse ToResponse(ChatConversationDetail detail) =>
-        Build(detail.Conversation, detail.Me, detail.Counterparty);
+        Build(detail.Conversation, detail.Me, detail.Counterparty, detail.MyTicket, detail.Block);
 
     public static ConversationResponse ToResponse(ChatConversationCard card) =>
-        Build(card.Conversation, card.Me, card.Counterparty);
+        Build(card.Conversation, card.Me, card.Counterparty, card.MyTicket, card.Block);
 
     private static ConversationResponse Build(
         ChatConversation conversation,
         ChatParticipantState me,
-        ChatCounterparty counterparty) =>
+        ChatCounterparty counterparty,
+        MySupportTicketRef? myTicket,
+        ChatBlockState? block) =>
         new(
             conversation.ConversationId,
             conversation.ProviderId,
@@ -41,7 +43,19 @@ internal static class ChatMapping
             me.LastReadSequence,
             me.UnreadCount,
             me.IsMuted,
-            conversation.CreatedAtUtc);
+            conversation.CreatedAtUtc,
+            // The caller's own open ticket on this thread. Null everywhere else, which
+            // reads as "not reported by me" — the safe default, since offering Report on
+            // an already-reported thread only costs a clean 409.
+            IsTicketRaisedByMe: myTicket is not null,
+            TicketId: myTicket?.TicketId,
+            TicketRef: myTicket?.TicketRef,
+            // Null block state reads as not blocked. That is the safe default:
+            // the send path is gated in SQL either way, so the worst case is a
+            // composer offered for a send that is then refused — never the
+            // reverse, where a usable thread looks closed.
+            IsBlocked: block?.IsBlocked ?? false,
+            BlockedByMe: block?.BlockedByMe ?? false);
 
     public static ChatMessageResponse ToResponse(ChatMessage message) =>
         new(
@@ -130,16 +144,6 @@ internal static class ChatMapping
                 job.Price?.TotalAmount,
                 job.Price?.PawfrontFee,
                 job.Price?.FeePercentage ?? 0m));
-
-    public static ChatBlockResponse ToResponse(ChatBlock block) =>
-        new(
-            block.ChatBlockId,
-            block.BlockedType.ToSqlValue(),
-            block.BlockedId,
-            block.BlockedName,
-            block.BlockedPhotoUrl,
-            block.Reason,
-            block.CreatedAtUtc);
 
     /// <summary>
     /// Resolves the caller, or returns the 403 to answer with. Every chat handler

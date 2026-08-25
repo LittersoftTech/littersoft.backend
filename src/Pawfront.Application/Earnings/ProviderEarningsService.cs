@@ -59,6 +59,7 @@ internal sealed class ProviderEarningsService(
             query.ProviderId,
             from,
             to,
+            query.Statuses,
             feeOptions.Value.PawfrontFeePercentage,
             query.SortBy,
             query.SortDirection,

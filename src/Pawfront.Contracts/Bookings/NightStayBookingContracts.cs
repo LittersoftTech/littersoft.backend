@@ -1,4 +1,4 @@
-using Pawfront.Contracts.Reviews;
+﻿using Pawfront.Contracts.Reviews;
 
 namespace Pawfront.Contracts.Bookings;
 
@@ -39,7 +39,22 @@ public sealed record NightStayBookingResponse(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? CancelledAtUtc,
-    Guid? PetId);
+    Guid? PetId,
+    // The caller's own open support ticket on this stay — see the trio's full
+    // note on BookingResponse. Mine only, open only, false/null on writes.
+    bool IsTicketRaisedByMe = false,
+    Guid? TicketId = null,
+    string? TicketRef = null,
+    // Whether the OTHER party on this booking is blocked, in either direction.
+    // A booking outlives the block that severs the pair -- the history is real
+    // and both sides keep it -- so the flag exists to let the app label an
+    // existing booking rather than leave the user wondering why they can no
+    // longer message or rebook.
+    bool IsBlocked = false,
+    // True only when the CALLER placed it: the one case where an Unblock action
+    // belongs. A block placed against them reads true/false and should show a
+    // neutral state -- saying more would confirm the other party acted.
+    bool BlockedByMe = false);
 
 /// <summary>
 /// Body for a night-stay modification request
@@ -97,7 +112,22 @@ public sealed record NightStayBookingDetailResponse(
     // The caller's OWN review of this stay, plus whether it is in a reviewable
     // state. Same per-host split as the single-day detail: each host reports its
     // own side only.
-    BookingReviewDetailsSection? Review = null);
+    BookingReviewDetailsSection? Review = null,
+    // The caller's own open support ticket on this stay — see the trio's full
+    // note on BookingResponse.
+    bool IsTicketRaisedByMe = false,
+    Guid? TicketId = null,
+    string? TicketRef = null,
+    // Whether the OTHER party on this booking is blocked, in either direction.
+    // A booking outlives the block that severs the pair -- the history is real
+    // and both sides keep it -- so the flag exists to let the app label an
+    // existing booking rather than leave the user wondering why they can no
+    // longer message or rebook.
+    bool IsBlocked = false,
+    // True only when the CALLER placed it: the one case where an Unblock action
+    // belongs. A block placed against them reads true/false and should show a
+    // neutral state -- saying more would confirm the other party acted.
+    bool BlockedByMe = false);
 
 /// <summary>The stay/job facts: identity, the check-in/check-out range + nights,
 /// drop-off/pick-up times, status, and where the provider delivers the service.</summary>

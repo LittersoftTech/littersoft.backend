@@ -1,3 +1,4 @@
+﻿using Pawfront.Application.Blocks;
 using Microsoft.Extensions.Logging;
 using Pawfront.Domain.Events;
 
@@ -6,6 +7,9 @@ namespace Pawfront.Application.Events;
 internal sealed class EventService(
     IEventSqlStore sqlStore,
     IEventCosmosStore cosmosStore,
+    // Who is reading, so a blocked pair never see each other's events. Null on
+    // a host that does not model a caller, which filters nothing.
+    ICurrentBlockParty currentBlockParty,
     ILogger<EventService> logger) : IEventService
 {
     private static readonly IReadOnlySet<string> AllowedCategories = new HashSet<string>(StringComparer.Ordinal)
@@ -345,7 +349,11 @@ internal sealed class EventService(
 
     public async Task<EventResult?> GetAsync(Guid eventId, CancellationToken cancellationToken)
     {
-        var snapshot = await sqlStore.GetAsync(eventId, cancellationToken);
+        // The two edit paths deliberately do NOT pass a viewer: an organiser
+        // always sees their own event, and a block with an attendee must not
+        // make their own event un-editable.
+        var snapshot = await sqlStore.GetAsync(
+            eventId, cancellationToken, await currentBlockParty.GetAsync(cancellationToken));
         if (snapshot is null)
         {
             return null;
@@ -392,7 +400,8 @@ internal sealed class EventService(
         CancellationToken cancellationToken)
     {
         var normalised = ValidateFilter(filter);
-        var snapshots = await sqlStore.ListAsync(normalised, cancellationToken);
+        var snapshots = await sqlStore.ListAsync(
+            normalised, cancellationToken, await currentBlockParty.GetAsync(cancellationToken));
         // The consumer-facing catalog needs the venue location + "max bookings"
         // (capacity) for physical events, so hydrate the Cosmos extension here —
         // one point read per physical event, fanned out in parallel. Online
@@ -404,7 +413,8 @@ internal sealed class EventService(
         int take,
         CancellationToken cancellationToken)
     {
-        var snapshots = await sqlStore.ListTrendingAsync(take, cancellationToken);
+        var snapshots = await sqlStore.ListTrendingAsync(
+            take, cancellationToken, await currentBlockParty.GetAsync(cancellationToken));
         // Same as the catalog list: hydrate the Cosmos physical extension (venue
         // location + "max bookings") for physical events; online events are
         // returned as-is. The trending order from SQL is preserved.

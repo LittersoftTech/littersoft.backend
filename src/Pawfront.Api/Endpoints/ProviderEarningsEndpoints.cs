@@ -90,6 +90,7 @@ internal static class ProviderEarningsEndpoints
         string? period,
         DateOnly? from,
         DateOnly? to,
+        string? status,
         string? sortBy,
         string? sortDirection,
         int? skip,
@@ -109,11 +110,16 @@ internal static class ProviderEarningsEndpoints
         EarningsPeriod parsedPeriod;
         EarningsSortBy parsedSortBy;
         EarningsSortDirection parsedDirection;
+        IReadOnlyList<string> statuses;
         try
         {
             parsedPeriod = EarningsPeriodRange.Parse(period);
             parsedSortBy = EarningsQueryParsing.ParseEarningsSortBy(sortBy);
             parsedDirection = EarningsQueryParsing.ParseSortDirection(sortDirection);
+            // Comma-separated, so one query param carries a mix of groups and raw
+            // statuses — the same shape the parent host's history filter takes.
+            statuses = BookingStatusFilter.Expand(
+                status?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
         }
         catch (ArgumentException exception)
         {
@@ -130,7 +136,7 @@ internal static class ProviderEarningsEndpoints
         // page-size rule here.
         var page = await earningsService.ListBookingsAsync(
             new ProviderEarningsBookingQuery(
-                providerId, parsedPeriod, from, to, parsedSortBy, parsedDirection,
+                providerId, parsedPeriod, from, to, statuses, parsedSortBy, parsedDirection,
                 skip ?? 0, take ?? 0),
             cancellationToken);
 
@@ -138,6 +144,7 @@ internal static class ProviderEarningsEndpoints
             parsedPeriod.ToString(),
             page.PeriodStart,
             page.PeriodEnd,
+            statuses,
             parsedSortBy.ToString(),
             parsedDirection.ToString(),
             page.TotalCount,
@@ -198,7 +205,15 @@ internal static class ProviderEarningsEndpoints
             totals.AwaitingFee,
             totals.AwaitingNet,
             totals.PrivateJobCount,
-            totals.PrivateJobAmount);
+            totals.PrivateJobAmount,
+            totals.CancelledJobCount,
+            totals.CancelledJobAmount,
+            totals.NoShowJobCount,
+            totals.NoShowJobAmount,
+            totals.ExpiredJobCount,
+            totals.ExpiredJobAmount,
+            totals.UnrealisedJobCount,
+            totals.UnrealisedAmount);
 
     private static ProviderEarningsBookingResponse ToBooking(ProviderEarningsBookingRow row) =>
         new(row.BookingType,
@@ -220,6 +235,7 @@ internal static class ProviderEarningsEndpoints
             row.PetName,
             row.IsPaid,
             row.IsPrivate,
+            row.IsEarned,
             row.GrossAmount,
             row.PawfrontFee,
             row.NetAmount,

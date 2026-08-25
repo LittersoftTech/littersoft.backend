@@ -142,7 +142,7 @@ internal static class ParentSpendEndpoints
     {
         // `status` accepts a comma-separated mix of friendly groups
         // (Completed / Upcoming / Cancelled) and raw lifecycle statuses.
-        var statuses = ParentBookingStatusFilter.Expand(
+        var statuses = BookingStatusFilter.Expand(
             status?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
 
         return new ParentBookingHistoryQuery(

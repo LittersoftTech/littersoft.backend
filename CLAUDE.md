@@ -182,7 +182,11 @@ Keep that file in sync whenever a table or relationship changes.
   only; check-in/check-out date range, per-night capacity)
 - `Review.*` — `BookingReviews`, `BookingReviewPhotos` (both review directions)
 - `Chat.*` — `Conversations`, `ConversationParticipants`, `ConversationMessages`,
-  `ChatConnections`, `BlockedParticipants`
+  `ChatConnections`
+- `Block.*` — `BlockedParticipants` (who has blocked whom; **moved out of `[Chat]`
+  on 2026-08-18** when a block stopped being a chat-only remedy — it now refuses
+  bookings, hides events and filters discovery too. `DeployAll.sql` transfers the
+  table and renames `ChatBlockId` → `BlockId`)
 - `Support.*` — `Tickets`, `TicketPhotos` (the support-ticket INDEX; the narrative
   lives in the Cosmos `SupportTickets` container)
 
@@ -335,6 +339,14 @@ Custom `THROW` codes used for typed errors:
     booking's provider → **403 Forbidden**; `51292` not a Vet booking → **400
     PrescriptionNotVetBooking**; `51293` job not underway/completed
     (`IN_PROGRESS`/`COMPLETED`; retired `ENDING` tolerated) → **409 PrescriptionNotAllowed**.
+- **Walk-in edit (`Booking.UpdateCustomBooking`, 2026-08-24):** `51380` booking not
+  found → **404 BookingNotFound**; `51381` not the provider on this booking →
+  **403 Forbidden**; `51382` not a Custom walk-in → **400 NotCustomBooking** (an App
+  booking changes through the modification flow, where the parent gets a say);
+  `51383` the job did not happen (cancelled / no-show / expired) so there is nothing
+  to correct → **409 BookingNotEditable**; `51384` the service or schedule was
+  changed after the job started → **409 BookingScheduleLocked**. It also reuses
+  `51066` (unknown/inactive service) and `51062` (no capacity) from the create path.
 - **Job-lifecycle sprocs (night-stay):** `51246` (transition guard, mirror of
   51126; `51247` retired with the evidence gate); `51248` (no-show too early —
   night-stay has its **own** rule, no longer a mirror of 51128: gated on
@@ -428,20 +440,34 @@ Custom `THROW` codes used for typed errors:
     and "not the one you raised" are one case, so a ticket id cannot be probed
     (same posture as `51005` / `51305`)
   - `51345` already at the 5-photo cap → **409 TicketPhotoLimitReached**
-  - `51346` photos on a chat incident → **400 TicketPhotoNotBookingIncident** (the
-    images already in the thread are the evidence, and it is under legal hold)
+  - `51346` photos on a **chat** incident → **400 TicketPhotoNotBookingIncident** (the
+    images already in the thread are the evidence, and it is under legal hold). Since
+    2026-08-16 this is the ONLY kind that refuses them — booking incidents, event
+    incidents and app issues all take up to 5. The code and its 400 kept their original
+    names so no client has to relearn them.
   - `51347` ticket is closed → **409 TicketClosed**
   - `51348` Custom walk-in — no second party to report or be reported →
     **400 ReportNotAppBooking** (mirror of `51163` / `51303`)
   - `51349` no clarification was requested → **409 NoClarificationRequested**
   - `51350` that status cannot be set here (`Support.UpdateTicketStatus`, admin only)
   - `51352` the conversation is under legal hold → **409 ConversationUnderLegalHold**
+  - `51355` event not found (report an event) → **404 EventNotFound**. The only refusal
+    an event report can raise besides validation: an event is public, so existence is the
+    whole check and there is no party test to fail
   - `51351` / `51353` / `51354` are **retired (2026-08-14)** along with the severance
     they enforced — a block frozen by an open ticket, and the two booking-create
     refusals. Reporting no longer blocks anybody, so nothing writes
-    `Chat.BlockedParticipants.Source = 'Incident'` and the three guards had nothing
+    `Block.BlockedParticipants.Source = 'Incident'` and the three guards had nothing
     left to fire on. The codes are burned rather than reused, so an old deployment
     throwing one cannot be mistaken for something else.
+- **Booking geolocation capture (`Booking.BookingLocationEvents`, 2026-08-17).** Only
+  the two STANDALONE record procedures throw — every other fix is written inside the
+  transition that produced it and inherits that procedure's refusals:
+  - `51360` booking not found (record location) → **404 BookingNotFound**
+  - `51361` caller is not a party to the booking → **403 Forbidden**
+  - `51362` this party cannot record this trigger → **400 UnsupportedLocationTrigger**.
+    Defensive; `BookingLocationTriggers.NormalizeRecordable` rejects first
+  - `51363` / `51364` / `51365` — the night-stay mirrors of the three above
 - **Night-stay booking sprocs** (multi-night boarding — `Booking.NightStayBookings`):
   - `51230` provider not found (night-stay create) → **404 ProviderNotFound**
   - `51231` provider inactive (night-stay create) → **409 ProviderInactive**
@@ -1202,15 +1228,23 @@ to the same cutoff.
 
      The date gate runs first, so a provider who is open but looking at the wrong
      day gets the more specific error. Same rules for both booking kinds.
-  2. `POST .../start-job/verify` (body `{ otpCode }`) — provider enters the
-     start-code the parent showed → `IN_PROGRESS` (6 wrong attempts cancel the
-     job, see `OTP_MAX_ATTEMPTS_EXCEEDED`).
+  2. `POST .../start-job/verify` (body `{ otpCode, location }`) — provider enters
+     the start-code the parent showed → `IN_PROGRESS` (6 wrong attempts cancel the
+     job, see `OTP_MAX_ATTEMPTS_EXCEEDED`). The location is required on the request
+     but stored only on SUCCESS (`JobStartProceeded`) — a wrong code is not a job start.
   3. `POST .../complete` (body optional: `{ nextConsultationDate?, prescription? }`)
      — provider marks the job done → `COMPLETED`. **No OTP.**
+  **A Custom walk-in skips all of this (2026-08-24):** `/start-job` takes it
+  straight to `IN_PROGRESS` and the provider goes on to `/complete`. It has no
+  `PetParentId`, so there is nobody to show a code to — which is why walk-ins used
+  to strand at `CONFIRMED` and never reach `COMPLETED`, `PAID` (which they still
+  can't — `MarkBookingPaid` refuses them) or the earnings figures.
   The start-OTP lives in `Booking.BookingStartOtps` / `NightStayBookingStartOtps`
   (10-min TTL, reuse-while-valid; the `OtpKind` column from the short-lived
-  dual-OTP experiment was dropped). The parent reads the active code via the
-  GET-one detail (`startOtp` block, surfaced only at `START_JOB`). Sprocs:
+  dual-OTP experiment was dropped). **Since 2026-08-17 the parent reads the active
+  code from `POST .../bookings/{bookingId}/start-otp`, NOT from the GET-one detail**
+  — showing the code is a geolocation-captured moment and a GET carries no body, so
+  the detail's `startOtp` block is now always null. Sprocs:
   `Booking.StartBooking` (issues the start-OTP + working-hours gate),
   `VerifyBookingStartOtp`, `CompleteBooking` (no OTP; `EndBooking` /
   `CompleteBookingWithOtp` were dropped) + night-stay mirrors. `JOB_STARTED` (the
@@ -1278,7 +1312,10 @@ to the same cutoff.
 
   Applies to the same from-state set as a manual report (confirmed-equivalent +
   `START_JOB`), so `CREATED` (never accepted → `EXPIRED`) and `IN_PROGRESS` (the
-  job started) are untouched. `JOB_EXPIRED` is fully superseded and catches
+  job started) are untouched. **Custom walk-ins are excluded entirely (2026-08-24)**
+  — a no-show says one PARTY failed to appear, and a walk-in has only one party, so
+  settling it marked the provider a no-show (and stamped `NO_PAYOUT`) for work they
+  had actually done. An unfinished walk-in now rests at `CONFIRMED`. `JOB_EXPIRED` is fully superseded and catches
   **nothing** (see below). **Midnight means midnight UTC**, per the
   codebase-wide UTC convention — a Swiss provider's cutoff lands at 01:00/02:00
   local, i.e. slightly in their favour. There is no in-sproc flip; how promptly
@@ -1492,8 +1529,9 @@ mirror there.
   Parent host: `POST /pet-parents/{petParentId}/bookings/{bookingId}/{cancel|no-show}` +
   `GET /terms-changes`, `/modifications`, `/modifications/{accept|decline}`,
   `GET /evidence`, and
-  `GET /pet-parents/{petParentId}/bookings/{bookingId}` (single read that
-  **issues the start-OTP** while the booking is `START_JOB`). `/accept`, `/decline`,
+  `GET /pet-parents/{petParentId}/bookings/{bookingId}` (single read; it no longer
+  issues the start-OTP — that moved to `POST .../start-otp`, which can carry the
+  parent's location). `/accept`, `/decline`,
   `/cancel`, `/no-show` flow through `Booking.UpdateBookingStatus`
   (UPDLOCK+HOLDLOCK), which enforces party + per-actor settable set + from-state
   (+ the 30-minute no-show grace window + the cancel-blocked-once-underway guard).
@@ -1538,14 +1576,21 @@ mirror there.
   telemetry-tracked): the provider's `/start-job` action issues the code; the
   parent shows it and the provider enters it via `/start-job/verify` →
   `IN_PROGRESS`. Completion needs no OTP. 6-digit plaintext share-codes (10-min
-  TTL, reuse-while-valid). The parent reads the active code off the GET-one
-  detail (`startOtp` block, present only at `START_JOB`). `VerifyBookingStartOtp`
+  TTL, reuse-while-valid). The parent reads the active code from `POST
+  .../start-otp` (2026-08-17; it used to come off the GET-one detail, whose
+  `startOtp` block is now always null). `VerifyBookingStartOtp`
   validates (consume on success, bump `FailedAttemptCount` on mismatch, cancel
   the job on the 6th → `OTP_MAX_ATTEMPTS_EXCEEDED`). The `OtpKind` column from the
   short-lived dual-OTP experiment was dropped.
 - **Evidence** (`Booking.BookingEvidence`): provider uploads photo(s) via
   `POST .../evidence` (blob `BlobUploadKind.BookingEvidence`, `booking-evidence/`
   folder, 3 MB, JPEG/PNG/WebP); **optional** — no longer gates `COMPLETED`.
+  Since 2026-08-17 the multipart body also carries the provider's geolocation as
+  flat form fields (`latitude`, `longitude`, `accuracyMetres?`, `capturedAtUtc?`),
+  **required**, validated BEFORE the blob upload so a caller with no fix is not
+  charged one, and written with the evidence row in a single transaction — one
+  `EvidenceCaptured` location per photo, which is why this is the one trigger that
+  legitimately repeats.
 - **Booking payment** (`Booking.BookingPayments`, 2026-07-23): one row per paid
   booking, written when the provider marks a `COMPLETED` booking `PAID`
   (`POST /providers/{id}/bookings/{bookingId}/paid` + night-stay twin, body
@@ -1711,6 +1756,99 @@ mirror there.
   request/respond, legacy cancel). Read via
   `GET .../bookings/{bookingId}/status-history` (oldest-first; caller-is-a-party
   → 404 otherwise).
+
+### Geolocation capture on booking actions (2026-08-17)
+
+Eight moments in a booking's life now record WHERE each party was, so a dispute can
+be settled on evidence rather than on two accounts of the same afternoon. Seven
+trigger values cover them — the two arrival questions collapse into one, because
+which one the app asked follows entirely from the booking's `LocationType`, and
+deriving it server-side means a client cannot misreport which question it showed.
+
+| Trigger | The moment | Provider | Parent |
+|---|---|---|---|
+| `ArrivalConfirmed` | "have you arrived at the customer's location?" / "has the customer arrived?" | ✅ | — |
+| `JobStartProceeded` | "Proceed to start" | ✅ | — |
+| `NoShowMarked` | either party marks the other absent | ✅ | ✅ |
+| `StartOtpShown` | parent opens their start code | — | ✅ |
+| `CashReceived` | provider swipes "Cash Received" | ✅ | ✅ |
+| `CashNotReceived` | provider marks "Cash Not Received" | ✅ | ✅ |
+| `EvidenceCaptured` | provider takes a completion photo | ✅ | ✅ |
+
+**Each app reports only its OWN position, and the server never derives one party's
+from the other's.** For the four moments the provider drives, the parent's fix
+therefore arrives on its own call (`POST .../bookings/{id}/location`) rather than
+being copied off the provider's. A moment with no row against it honestly reads as
+"we do not know where they were"; a stale coordinate presented as a live one would
+be worse than nothing, and is exactly what a dispute would turn on.
+
+**A LOCATION IS REQUIRED — the action is refused without one** (400
+`LocationRequired`; 400 `InvalidLocation` for an out-of-range coordinate). This was
+an explicit product decision over the alternative of recording "permission denied"
+and proceeding. The consequence to keep in mind: a provider whose GPS cannot get a
+fix — a basement clinic, a device with location off — **cannot start, complete or
+be paid for a job at all**. Enforced in the Application layer
+(`CapturedLocation.Require`), which is the single point every route funnels through.
+
+**The fix is written INSIDE the transaction that performs the transition**, not by a
+follow-up call: `StartBooking`, `VerifyBookingStartOtp`, `UpdateBookingStatus`,
+`MarkBookingPaid`, `AddBookingEvidence` and `IssueBookingStartOtp` each gained four
+optional parameters and their own INSERT (plus the six night-stay twins). A separate
+write would have let a no-show commit and its location be lost — and the retry would
+then hit 409 `BookingStatusUnchanged`, losing it permanently. That is the failure the
+chat send was rebuilt to avoid. Only the two genuinely standalone cases go through
+`Booking.RecordBookingLocationEvent` (+ night-stay twin): the log-only
+`CashNotReceived`, and a party's own fix for a moment the counterparty drove.
+
+**`Booking.BookingLocationEvents` + `NightStayBookingLocationEvents`** — twinned like
+every other lifecycle child table, FK + cascade to the booking, append-only and
+deliberately NOT unique on `(booking, trigger, party)`: a client retrying after a
+dropped response must not be refused, and `EvidenceCaptured` fires once per photo.
+Coordinates are `DECIMAL(9,6)` NOT NULL (matching every other lat/long here); a
+CHECK also stops the two provider-only triggers arriving from the parent side and
+vice versa.
+
+**Deliberately NOT columns on `BookingStatusHistory`.** An audit row has exactly one
+`ChangedByActor` while four of these triggers want both parties' positions, and four
+of the seven are not status changes at all, so there would be no audit row to hang
+them off. The two correlate on `(BookingId, RecordedAtUtc)`; `Trigger` already names
+the moment, so no FK is kept between them (which also avoids a second cascade path).
+
+**`AccuracyMetres` and `DeviceCapturedAtUtc` are optional and worth sending.** A fix
+good to 5 m and one good to 3 km support very different claims; and the device's own
+clock is untrusted, so a wide gap from the server's `RecordedAtUtc` is itself a
+signal that a cached fix was replayed.
+
+**"Cash Not Received" changes nothing.** It records that the provider raised the
+payment prompt and was not paid, with both positions, and leaves the booking
+`COMPLETED` with `PayoutStatus = 'Pending'`. It is deliberately not a new payout
+outcome: an unpaid job has a cancellation policy attached and the refund / chase leg
+is not built, so freezing a verdict on the money now would prejudge it — the same
+reasoning that keeps cancellations reading `Pending` rather than `NO_PAYOUT`.
+
+**⚠️ BREAKING for the parent app: the start-OTP left the booking-detail GET.** It
+used to be issued as a side effect of `GET /pet-parents/{id}/bookings/{bookingId}`,
+and a GET cannot carry a body — so leaving it there would have left a way to obtain
+the code while supplying no position, making `StartOtpShown` unenforceable. The code
+now comes from **`POST .../bookings/{bookingId}/start-otp`**, which returns the same
+`startOtp` block. The field is kept on the detail response and is **always null**, so
+the shape is stable but the app must call the new route.
+
+**The legacy `/status` shim is gated identically.** It can set a no-show, so gating
+only the dedicated `/no-show` routes would have left it as a way around the capture.
+The check lives in `BookingService.UpdateStatusAsync`, which both paths funnel
+through, rather than in the endpoints.
+
+**Reads are admin-only and NOT exposed on either app.** `Booking.ListBookingLocationEvents`
+(one procedure for both booking kinds) ships ahead of the admin panel, the same way
+`Support.CloseTicket` did. Handing a provider the parent's precise coordinates — or
+the reverse — is a safety problem, and the stated purpose of the capture is to
+confirm things to Pawfront, not to the counterparty.
+
+**In-memory dev fallback** is `NullBookingLocationService`: it validates exactly as
+the real one does, then logs and drops. Accepting rather than throwing is deliberate
+— there is no in-memory location table and no read to satisfy, but the surrounding
+flows must stay usable without a database, and every one of them now carries a fix.
 
 ### Bulk cancellation — cancel several bookings in one call (2026-08-14)
 
@@ -1920,12 +2058,69 @@ of them and reported as `privateJobCount` / `privateJobAmount`, so the provider
 still sees the work without it distorting platform earnings. Net is computed in
 C# (`ProviderEarningsTotals.NetAmount`), never in SQL — one subtraction, one place.
 
+### Unrealised jobs — the money that never arrived (2026-08-24)
+
+The three money views above all gate on `IsEarned`, so a booking that was on the
+calendar and then fell through appeared in **no figure at all**. That left a
+payouts screen unable to explain a thin month: the provider could not tell whether
+they were quiet or were stood up. The summary now also reports, **alongside** the
+earned figures and never folded into them:
+
+| Bucket | Statuses |
+|---|---|
+| `cancelledJobCount` / `cancelledJobAmount` | `PROVIDER_CANCELLED`, `PARENT_CANCELLED`, `PROVIDER_DECLINED` |
+| `noShowJobCount` / `noShowJobAmount` | `PARENT_NO_SHOW`, `PROVIDER_NO_SHOW` |
+| `expiredJobCount` / `expiredJobAmount` | `EXPIRED`, `JOB_EXPIRED`, `OTP_MAX_ATTEMPTS_EXCEEDED` |
+
+plus `unrealisedJobCount` / `unrealisedAmount`, their sum, computed in C#
+(`ProviderEarningsTotals`) for the same reason `NetAmount` is — one addition, one
+place. **Three buckets rather than the two that were asked for**: being stood up
+and a parent calling it off are different stories on a payouts screen, and three
+disjoint figures can be summed into any two, where two cannot be split back out.
+
+- **Never part of `grossAmount` / `netAmount`.** No money moved, so adding them
+  would misstate what the provider holds. This is the whole reason they are a
+  separate block rather than new statuses admitted into the existing totals.
+- **`Amount` is what the job WOULD have been worth**, from its creation-time
+  price-lock — `Booking.BookingAmounts` prices every row regardless of status, so
+  no new arithmetic was needed. **No fee is reported** against them: a commission
+  on money that never changed hands is not owed, so there is nothing to net off.
+- **Bookings still in flight are in NEITHER set** — they have not happened and
+  have not failed, so counting them anywhere would be a forecast, not a figure.
+- **Custom walk-ins are excluded here too**, consistent with every other platform
+  figure. Note `privateJob*` stays gated on `IsEarned`, so a walk-in that was
+  cancelled appears in no figure at all.
+
+**`GET .../earnings/bookings` gained `?status=`** so the same jobs can be listed,
+taking the friendly groups `Completed` / `Upcoming` / `Cancelled` / `NoShow` /
+`Expired` (or raw statuses, comma-separated, mixed freely). `Cancelled` is the
+broad "it didn't happen" group and is exactly the union of the three buckets above
+— so a `status=Cancelled` page reconciles with `unrealisedAmount` the way the
+default page reconciles with `grossAmount`.
+
+**Omitting `status` keeps today's behaviour** (earned rows only), deliberately
+rather than defaulting to everything: that is what every existing caller relies on,
+and a list that silently started including cancelled jobs would break its
+reconciliation with the summary without anybody asking it to. Supplying it
+**replaces** the `IsEarned` gate rather than intersecting with it — otherwise
+asking for cancelled jobs would return nothing, which is the whole point of the
+parameter. Each row carries **`isEarned`** so a mixed page can be rendered without
+the app re-deriving that rule from `status`.
+
+`ParentBookingStatusFilter` was renamed **`BookingStatusFilter`** and now serves
+both hosts — the groups were never parent-specific, and a provider-side filter
+calling itself "Parent…" would have invited a second copy of the vocabulary, which
+is what this file exists to prevent. `NoShow` and `Expired` are new; `Cancelled`,
+`Completed` and `Upcoming` are unchanged, so the parent host's behaviour is
+identical.
+
 **Application layer** lives in `Pawfront.Application/Earnings/`:
 `IProviderEarningsService` / `IParentSpendService` (+ their narrow
 `I*Store` SQL readers), `EarningsPeriod` + `EarningsPeriodRange`,
 `EarningsQueryParsing` (shared sort vocabulary so both hosts accept the same
-values), and `ParentBookingStatusFilter`, which expands the friendly
-`Completed` / `Upcoming` / `Cancelled` groups into raw lifecycle statuses **in C#**
+values), and `BookingStatusFilter`, which expands the friendly
+`Completed` / `Upcoming` / `Cancelled` / `NoShow` / `Expired` groups into raw
+lifecycle statuses **in C#**
 — the sprocs take a plain CSV, so adding a status means editing `BookingStatuses`
 and that one file rather than four stored procedures. Paging is capped at
 **20** server-side. In-memory dev fallbacks (`NullProviderEarningsStore` /
@@ -2657,6 +2852,11 @@ Mobile contract in [`docs/chat.md`](docs/chat.md).
 **OPEN model** — any pet parent may message any provider, with **no booking
 between them**. That is the right call for pre-sales questions, and it is why
 blocking and rate limiting are part of the feature rather than follow-ups.
+**Blocking has since outgrown chat** (2026-08-18): it lives in `[Block]` and
+`IBlockService` now, and one block refuses bookings and hides events as well as
+closing the thread — see the "Blocking — product-wide" section. Chat still enforces
+it on the same two procedures it always did, and still hosts the `/blocks` routes,
+but no longer owns the feature.
 
 **Why a third host, not a hub on each existing one.** Azure SignalR cannot route a
 message from host A's hub to a client connected to host B's hub. Two hubs would
@@ -2808,8 +3008,10 @@ here the conversation already does.
 deleted · `51322` pet parent not found or deleted · `51323` blocked (either
 direction) · `51324` actor is not a party · `51325` conversation not found ·
 `51326` sender is not a party · `51327` block between two participants on the same
-side · `51328` no reservation exists for this message (commit without reserve —
-unreachable through the service, which always reserves first).
+side (kept its code when blocking moved to `[Block]`, since the meaning is
+unchanged — it is thrown by `Block.BlockParticipant` now) · `51328` no reservation
+exists for this message (commit without reserve — unreachable through the service,
+which always reserves first).
 
 **Per-side chat delete, inbox search, MessageDeleted, and the thread's job list
 (2026-08-14).** Four additions, all on the chat host:
@@ -2841,45 +3043,87 @@ message delete has no SQL in its path, so `ChatService` reads
 `Support.GetConversationLegalHold` first).
 
 **Reporting does NOT block the reported party** (2026-08-14) — it writes nothing to
-`Chat.BlockedParticipants`, so the pair can still message each other while support
+`Block.BlockedParticipants`, so the pair can still message each other while support
 looks at the case. Blocking stays a separate, deliberate act, and a block is always
-the blocker's to lift: `Chat.UnblockChatParticipant` refuses nobody. The hold is
+the blocker's to lift: `Block.UnblockParticipant` refuses nobody. The hold is
 about preserving evidence, not about cutting contact.
 
 **Still deliberately not built:** group threads; message editing; and a mute
 ENDPOINT — `IsMuted` is modelled end to end and consulted by the push decision, but
 nothing can set it yet.
 
-### Support tickets — "Report Incident" and "Report Chat" (2026-08-14)
+### Support tickets — incidents, chats, events and app issues (2026-08-14 / 2026-08-16)
 
-Either party can raise a ticket against the other, from either app. Two kinds, one
-table, discriminated by `TicketType`:
+A ticket is raised from either app. **Four** kinds, one table, discriminated by
+`TicketType`:
 
-| `TicketType` | Raised on | Subject columns | Photos |
-|---|---|---|---|
-| `BookingIncident` | a booking ("Report Incident") | `BookingType` + `BookingId`, plus `PetId` denormalised from the booking | up to 5 |
-| `ChatIncident` | a conversation ("Report Chat") | `ConversationId` | none |
+| `TicketType` | Raised on | Subject columns | Counterparty | Photos |
+|---|---|---|---|---|
+| `BookingIncident` | a booking ("Report Incident") | `BookingType` + `BookingId`, plus `PetId` denormalised from the booking | derived from the booking | up to 5 |
+| `ChatIncident` | a conversation ("Report Chat") | `ConversationId` | derived from the conversation | none |
+| `EventIncident` | an event (2026-08-16) | `EventId` | **none** | up to 5 |
+| `AppIssue` | the app itself (2026-08-16) | *none* | **none** | up to 5 |
+
+**The two 2026-08-16 kinds have a REPORTER and nobody else**, which is what forced
+`Support.Tickets.ProviderId` / `PetParentId` to become nullable: only the reporter's own
+column is set (matching `RaisedByType`), the other is NULL, and
+`CK_Tickets_SubjectMatchesType` grew from two branches to four to keep each kind honest
+about which columns it may populate. Every existing read path is unchanged by that — the
+reporter's column is populated exactly as it always was, so the two "my tickets" lists,
+`GetTicket`'s scoping and the photo scoping all stay plain equality tests.
+
+**An event report deliberately records NO counterparty and the organiser is never told.**
+The organiser is one join away through `EventId`, and an event organised by a *pet parent*
+and reported by another *pet parent* cannot be represented by this table's
+one-Provider/one-PetParent shape at all. Support resolves them when they work the case.
+An event is public, so there is no attendance or ownership check either: **existence is
+the only test**, and 404 `EventNotFound` (THROW 51355) the only refusal besides validation.
+
+**`comment` is OPTIONAL on the two new kinds.** It stays required for a report *against a
+person* — a ticket accusing somebody with no account of what they did gives support nothing
+to act on — but an app issue or an event report may carry only its picker values, and then
+`Reason` opens the Cosmos narrative in the comment's place. Sending neither is a 400.
+Enforced once, in `SupportTicketService.Normalise`, via
+`SupportTicketTypes.RequiresComment`.
+
+**Photos are now allowed on everything EXCEPT a chat incident** (`AllowsPhotos`). The guard
+in `Support.AddTicketPhoto` inverted rather than widened — THROW 51346 keeps its code and
+its meaning, since the reason was always specific to chat: the images already in the thread
+are the evidence and the whole conversation is under legal hold. The 400's error code is
+still `TicketPhotoNotBookingIncident`, deliberately, so no client has to relearn it.
 
 **Raising a ticket does NOT block the reported party (2026-08-14).** `Support.CreateTicket`
 writes the ticket row and nothing else — no incident block, no `Source = 'Incident'`,
-nothing in `Chat.BlockedParticipants` at all. A report is a message to support, not a
+nothing in `Block.BlockedParticipants` at all. A report is a message to support, not a
 sanction the reporter applies to somebody on their own say-so, so the pair keep every
 ability they had: messaging, booking, discovery. Blocking remains the separate,
 deliberate act it always was, and a block is always the blocker's to lift —
-`Chat.UnblockChatParticipant` refuses nobody. (An earlier draft severed the pair inside
+`Block.UnblockParticipant` refuses nobody. (An earlier draft severed the pair inside
 the create transaction and froze the resulting block until support closed the ticket;
 that is gone, along with THROWs 51351 / 51353 / 51354 and the
 `BookingPartiesSeveredException` → 403 `ProviderNotAvailable` mapping.)
 
-**One open ticket per SUBJECT — per booking, or per conversation — NOT per person
-(2026-08-14).** A parent with five bookings from one provider can report each of them,
-because each is a different incident with its own account of what happened; what is
-refused is a second open report of the **same** booking. Enforced by the filtered
-UNIQUE indexes `UX_Tickets_OpenBooking` (`BookingType`, `BookingId`) and
-`UX_Tickets_OpenConversation` (`ConversationId`), both `WHERE Status <> 'CLOSED'`, with
-`Support.CreateTicket` reading the matching range under `UPDLOCK + HOLDLOCK` first so
+**One open ticket per SUBJECT — NOT per person (2026-08-14).** A parent with five
+bookings from one provider can report each of them, because each is a different incident
+with its own account of what happened; what is refused is a second open report of the
+**same** booking. Enforced by filtered UNIQUE indexes, all `WHERE Status <> 'CLOSED'`,
+with `Support.CreateTicket` reading the matching range under `UPDLOCK + HOLDLOCK` first so
 the conflict can be answered with data rather than a constraint violation. The reader
-branches on `@TicketType`, which is the only place the two kinds diverge.
+branches on `@TicketType`, which is the only place the kinds diverge:
+
+| Kind | Index | Scope |
+|---|---|---|
+| `BookingIncident` | `UX_Tickets_OpenBooking` (`BookingType`, `BookingId`) | per booking, **either direction** |
+| `ChatIncident` | `UX_Tickets_OpenConversation` (`ConversationId`) | per conversation, either direction |
+| `EventIncident` | `UX_Tickets_OpenEventReporter` (`EventId`, `ProviderId`, `PetParentId`) | per event **per reporter** |
+| `AppIssue` | *(none)* | uncapped |
+
+**An event is scoped per REPORTER, unlike the other two** — an event has many attendees
+and each of their accounts is its own ticket, where a booking or a thread has exactly two
+parties and therefore one incident between them. The key works because NULLs compare
+EQUAL for uniqueness: `(E, NULL, parentX)` and `(E, NULL, parentY)` are distinct rows while
+the same parent twice collides. An **app issue has no subject at all**, so there is nothing
+to key a rule on and every bug report is a new ticket.
 
 Still **either direction**: both parties reporting the same job is one incident seen
 from two sides, and support works it as one case, so the second reporter is handed the
@@ -2897,6 +3141,9 @@ adds the uniqueness. `DeployAll.sql` drops both superseded indexes by name.
 their own id and the subject; both party ids come off the booking or conversation
 row. That is what stops a report being filed against somebody who was never part of
 it, and it makes "is the caller a party to this subject" the whole authorisation.
+(The two reporter-only kinds have no counterparty to derive and therefore no party
+check to fail — the reporter's own column is set from `@ActorId`, so the existing
+check falls through trivially rather than being branched around.)
 
 **SQL owns the index, Cosmos owns the narrative.** `Support.Tickets` holds the
 parties, subject and status; the reporter's account and the clarification thread live
@@ -2911,7 +3158,7 @@ reach Cosmos.
 strings on `Support.Tickets` and both optional: `Category` (100 chars) is what KIND of
 problem it is, `Reason` (500) the one-line summary of this particular one, and the
 substance is still the `comment` that opens the Cosmos narrative. `Reason` **used to
-live on the severance row** in `Chat.BlockedParticipants`; with no severance it moved
+live on the severance row** in `Block.BlockedParticipants`; with no severance it moved
 onto the ticket it describes, and `Category` joined it.
 
 **Their values are deliberately unvalidated** — no CHECK constraint, no enum, no
@@ -2920,13 +3167,13 @@ release rather than a backend one, and an unrecognised value is stored verbatim 
 than refused. Only the lengths are enforced (400 `InvalidRequest` past them), and blank
 collapses to NULL so no read has to tell an empty picker value from an unset one.
 
-Both are accepted on all three report routes (including as form text on the multipart
-one) and **returned on every ticket read** — detail, list cards and the create response
-alike. They are appended **last** to the shared ticket projection in all five
-procedures, so no existing reader ordinal moved; the one thing that did move is
-`ListTickets`' trailing `TotalCount`, from ordinal **14 to 16**, which
-`SqlSupportTicketStore` reads positionally. Change that projection and you must change
-that read.
+Both are accepted on all **seven** report routes (including as form text on the three
+multipart ones) and **returned on every ticket read** — detail, list cards and the create
+response alike. They are appended **last** to the shared ticket projection in all six
+procedures, followed by `EventId` (2026-08-16), so no existing reader ordinal moved; the
+one thing that did move is `ListTickets`' trailing `TotalCount`, from ordinal **14 → 16 →
+17**, which `SqlSupportTicketStore` reads positionally. Change that projection and you
+must change that read.
 
 **Two orderings that matter, and they run opposite ways:**
 - **Create** is SQL → Cosmos, because the insert is what mints the ticket id the
@@ -2956,7 +3203,7 @@ about is not something the reporter should be able to do quietly.
 
 **An open ticket blocks three deletes**, all part of the legal hold: the pet-parent
 account delete, the provider account delete, and the per-pet delete (a booking
-incident carries the `PetId`; a chat incident never does, so it holds no pet). All
+incident carries the `PetId`; no other kind does, so none of them holds a pet). All
 three answer **409 `OpenTicketsExist`** with the blocking tickets in `data`, and the
 three procedures project the identical columns so one C# reader
 (`BlockingSupportTicketReader`) serves them. **Unlike the pending-jobs refusal the
@@ -2964,9 +3211,18 @@ user cannot clear this themselves** — only support closing the ticket lifts it
 the copy says so. Where both apply, pending jobs are reported first: those they can
 act on.
 
-**A booking incident can be raised WITH its evidence in one call (2026-08-14).**
-`POST .../support-tickets/report-incident-with-photos` is the multipart twin of
-`report-incident`: same fields as form text, plus repeated `photos` parts. The two-call
+**Only the two COUNTERPARTY kinds block a delete (2026-08-16).** The two account-delete
+guards filter on `TicketType IN ('BookingIncident','ChatIncident')`, because the guard
+exists to stop a party being anonymised while support is still asking questions about the
+OTHER party — an app issue or an event report is neither about them nor clearable by them,
+so leaving it in would strand an account delete behind an unrelated bug report.
+`Parent.DeletePetParentPet` needed no change: it keys on `PetId`, which only a booking
+incident ever sets.
+
+**A ticket can be raised WITH its evidence in one call (2026-08-14; widened to the two new
+kinds 2026-08-16).** `POST .../support-tickets/report-{incident,event,app-issue}-with-photos`
+are the multipart twins of the JSON routes: same fields as form text, plus repeated
+`photos` parts. There is no chat variant — that thread is its own evidence. The two-call
 form is unchanged and still needed — it is what a client retries against when one file
 fails, and the per-photo endpoint remains the only way to add evidence to an existing
 ticket. The split existed because the blob path is keyed by the ticket's own id, which
@@ -2999,13 +3255,597 @@ Photos are scoped to the ticket's **creator** (support asks the creator and rece
 from the creator, so the counterparty is never in the evidence loop), capped at 5
 under `UPDLOCK + HOLDLOCK`, and rejected on a chat incident.
 
-**Deliberately not built:** a general (no-counterparty) support ticket — the table
-would need a nullable subject and both kinds name a counterparty today; ticket
-withdrawal; and the `DISPUTE_RESOLVED` push, which has copy, a route and a
-`{ticketId}` param but still no trigger, because nothing in these two hosts can close
+### "Have I already reported this?" — `isTicketRaisedByMe` (2026-08-16)
+
+Every surface a Report button sits on now says whether the caller has already used it, so
+the app stops offering "Report" on something that will come straight back 409. Three flat
+fields, **identical on all of them**:
+
+```
+isTicketRaisedByMe: bool
+ticketId:           Guid?   // the GUID the .../support-tickets/{ticketId} routes take
+ticketRef:          string? // "TK-000123", what the screen shows
+```
+
+Both ids travel because the app needs both — one to navigate, one to render — and both are
+null when the flag is false.
+
+| Response | Surfaces |
+|---|---|
+| `BookingResponse` / `NightStayBookingResponse` | the provider's booking lists, **and the parent's card lists for free** (`ParentServiceBookingCardResponse.Booking` *is* a `BookingResponse`) |
+| `BookingDetailResponse` / `NightStayBookingDetailResponse` | the booking detail, both hosts, top-level beside `startOtp` |
+| `EventResponse` | `GET /events`, `/events/trending` and `GET /events/{eventId}` — list and detail from one field |
+| `ConversationResponse` | `GET /conversations` and `GET /conversations/{id}` from one field |
+
+All four are **trailing parameters with defaults**, so every create/status/edit response
+still compiles and simply reports `false` / `null` — the posture `EventResponse.IsBookable`
+already takes on organiser-context reads.
+
+**MINE ONLY, and OPEN only.** Mine: the counterparty's ticket is neither the caller's to
+open nor theirs to be told about. Open: a closed ticket is exactly the state in which a
+fresh report is allowed again, so counting one would leave the app offering a ticket the
+user can no longer reach — and it keeps the answer unambiguous, since at most one open
+ticket exists per subject.
+
+⚠️ **Consequence for mobile.** The one-open-ticket rule runs in **either direction** for
+bookings and chats, so a caller whose **counterparty** already reported the subject reads
+`isTicketRaisedByMe: false` and is still refused with **409 `TicketAlreadyOpen`**. The apps
+must treat that 409 as "already reported", not as an error. (A second flag — `canRaiseTicket`
+— would close it, and is one more column on the same query; deliberately not built, since
+the ask was for the caller's own state.)
+
+**One read per request, whatever the surface.** `IMySupportTicketLookup` →
+`Support.ListMyOpenTicketSubjects @RaisedByType, @ActorId` returns every open ticket the
+caller raised; `MySupportTicketSubjects` indexes them by subject (`ForBooking(type, id)` /
+`ForConversation` / `ForEvent`) and each card asks it. That is why the query is scoped to the
+ACTOR rather than taking a list of subject ids — a booking page costs one round trip instead
+of one per row, the same reasoning behind `Review.ListPetParentBookingReviews`. Served by the
+two filtered indexes `IX_Tickets_OpenRaisedBy{Provider,PetParent}`.
+
+**Best-effort by contract**: the lookup returns `Empty` rather than throwing, so a support-table
+hiccup costs a Report button that should not have been offered, never the page. Booking keys
+are `"SingleDay:<guid>"` / `"NightStay:<guid>"`, because the two booking tables share no id
+space and a bare GUID could name either.
+
+**The actor always comes from the JWT or an ownership-verified route**, never a body: the
+parent host uses the ownership-filtered `petParentId` (and `ICurrentPetParentContext` on the
+event routes, which are not parent-scoped); the provider host uses the route id on its
+provider-scoped reads and `ResolveProviderByFirebaseUidAsync` on `GET /bookings/{id}` and the
+event routes, which are not; the chat host uses `ICurrentChatParticipant`. Two small helpers,
+`MySupportTickets` on each API host, are the only places that resolution lives.
+
+**Deliberately not built:** a general (no-counterparty) support ticket — **now built**, see
+`AppIssue` above; ticket withdrawal; and the `DISPUTE_RESOLVED` push, which has copy, a route
+and a `{ticketId}` param but still no trigger, because nothing in these two hosts can close
 a ticket. Wiring it is one publisher call from whatever closes one.
 
+### Blocking — product-wide, provider ↔ pet-parent (2026-08-18)
+
+A block used to be a CHAT remedy and is not one any more. From **one row** it now
+severs the pair across the product:
+
+| What it stops | Where |
+|---|---|
+| messages | `Chat.GetOrCreateConversation` / `Chat.ReserveMessageSequence` (unchanged) |
+| new bookings | `Booking.CreateBooking` / `Booking.CreateNightStayBooking` |
+| seeing each other's events | `Event.ListEvents` / `ListTrendingEvents` / `GetEvent`, and ticket purchase |
+| finding each other | `GET /providers` + all five `/providers/search/*` |
+
+**The table moved to its own `[Block]` schema** (`Block.BlockedParticipants`), with
+`ChatBlockId` renamed `BlockId`. Leaving it under `[Chat]` would have left the
+schema name asserting something false — and the table's own header comment said, in
+three places, that a block "is a CHAT remedy and stops there" and that "the booking
+creates deliberately do not consult this table". All of that is now the opposite.
+`DeployAll.sql` does the `ALTER SCHEMA TRANSFER` + `sp_rename` (guarded, so a re-run
+is a no-op) and **drops** the three retired `Chat.*BlockParticipant` procedures, so a
+stray caller fails at deploy rather than at 3am against a table that has moved.
+
+**⚠️ PLACING A BLOCK CANCELS THE PAIR'S UNFINISHED JOBS.** This is the decision to
+know about the feature: blocking is not a passive setting. Every non-terminal
+booking of either kind between the two — an unanswered request, a confirmed job
+still to come, one with a modification pending — is cancelled in the blocker's name.
+It was chosen deliberately over the alternatives (refuse the block until jobs are
+settled; leave them alone and just flag them), and it means a provider can lose
+booked income to a tap they never see coming, which is why the response reports what
+it cancelled.
+
+**The one exception is a job already `IN_PROGRESS`** — the pet is physically in
+someone's care, and `Booking.UpdateBookingStatus` refuses that cancel (THROW 51149).
+That guard is **not bypassed**. Such a job runs to completion, and comes back in the
+response's `uncancelledBookings` so the app can say so rather than let the user
+discover a live booking with someone they have just blocked.
+
+**Ordering is load-bearing.** `Block.BlockParticipant` writes the block row and
+captures the pair's unfinished jobs **in the same transaction**, and the booking
+creates read the block table under **`HOLDLOCK`** — so a booking cannot commit
+between the block landing and the job list being taken. Without that range lock a
+booking created at that instant would survive the block.
+
+**The cancellations are NOT done in T-SQL.** The procedure returns the jobs and
+`BlockService` hands them to the existing **`IBulkBookingCancellationService`**, so
+each one takes the ordinary per-booking transition: party check, from-state rules,
+audit row, freed capacity and the counterparty's push, all for free. Reimplementing
+the status engine in the block procedure would have meant two copies that drift.
+Chunked to the 50-item batch cap.
+
+**A cancellation failure never fails the block.** The block has committed by then,
+so failing would tell a user their block did not happen when it did — the same
+failure the chat send was rebuilt to avoid — and a retry would be a no-op that
+cancels nothing. Failures are reported per item instead.
+
+**Jobs deliberately NOT in the cancel list:** `IN_PROGRESS` / `ENDING` (above);
+`COMPLETED` / `PAID` and every terminal status (`PAID` is named explicitly — the
+status engine's own terminal list omits it, since `PAID` is reachable only from
+`COMPLETED`); and a `CREATED` booking **already expired** under BR-17 or BR-53,
+because the engine rejects every transition on those (THROW 51129 / 51153) and
+listing them would guarantee a per-item failure for a booking that is already dead.
+
+**Disclosure: a block placed AGAINST somebody is never named to them.** Telling
+someone they have been blocked confirms the other party acted, which is the thing a
+block is meant to end. So:
+- the **list** returns only blocks the caller PLACED;
+- `Block.ListMyBlockedCounterparties` returns both directions but carries the
+  `BlockId` **only for the caller's own** — they cannot lift the other one anyway;
+- the booking refusal throws **two different codes** by side (**51370** parent
+  blocked provider, **51371** provider blocked parent) and **C# decides the
+  wording**: your own block is named ("you blocked this provider — unblock them to
+  book", 403 `ParentBlockedProvider` / `ProviderBlockedParent`), theirs reads as a
+  neutral 403 `BookingNotAvailable`. SQL reports which side acted because the create
+  procedures are called by BOTH hosts and have no actor of their own.
+- A **mutual** block reports the parent's side; the only cost is that a provider in
+  a mutual block reads the neutral wording instead of being told about their own.
+
+**What a block deliberately does NOT do:**
+- **delete chat history** — it is both parties' record, and the evidence a blocked
+  user might need in order to report the exchange;
+- **hide a provider behind a booking the parent already has** —
+  `IProviderDiscoveryService.GetSummaryAsync` stays UNFILTERED (only browse and
+  search are filtered), the same carve-out the `IsActive` decorator makes, or the
+  booking-detail provider block would go blank;
+- **take away an event ticket already paid for** — the event vanishes from the lists
+  and 404s on detail, but their own event-bookings list is untouched, since no
+  refund leg exists;
+- **block anybody as a side effect of a support ticket.** Reporting is still a
+  report to support, not a sanction the reporter applies. The two are independent.
+
+**Unblocking restores contact, not bookings.** The cancelled jobs stay cancelled —
+they went through the ordinary transition with an audit row, and their capacity was
+released back to the provider's calendar and may since have been sold.
+
+**Discovery filtering is a DECORATOR**, chained outside the existing
+`ActiveOnlyProviderDiscoveryService`: `BlockAwareProviderDiscoveryService`. The block
+lives in SQL while discovery reads Cosmos, so it cannot be pushed into the query —
+the same problem `IsActive` had, solved the same way, in ONE place so all six call
+sites inherit it. It needs the caller, which the discovery filter does not carry, so
+a scoped **`ICurrentBlockParty`** supplies it; the Application layer TryAdds a no-op
+and each host registers its own **before** `AddPawfrontApplication()` (the
+first-wins pattern the chat host already uses). Paging happens AFTER the filter, or
+a blocked provider inside a page would leave a hole.
+
+**One read per request drives every flag.** `Block.ListMyBlockedCounterparties`
+(scoped to the ACTOR, not to a list of ids) → `IMyBlockLookup` →
+`MyBlockedCounterparties`, exactly the shape `MySupportTicketSubjects` takes: a page
+of twenty bookings costs one round trip, not twenty. **Best-effort by contract** —
+it returns `Empty` rather than throwing, so a block-table hiccup costs a flag and
+never the page.
+
+**Flags on the wire** — `isBlocked` (true in EITHER direction, so the app can
+disable the composer / label the booking up front) paired with `blockedByMe` (true
+only for the caller's own, the one case where an Unblock action belongs):
+- `BookingResponse` / `NightStayBookingResponse` — the provider's lists, and the
+  parent's card lists for free;
+- `BookingDetailResponse` / `NightStayBookingDetailResponse`, both hosts;
+- `ConversationResponse` — `GET /conversations` and `GET /conversations/{id}`,
+  projected directly by the two chat procedures (appended LAST, so no existing
+  reader ordinal moved).
+
+All are trailing defaulted parameters, so create/status responses simply report
+`false`/`false` — the posture `IsTicketRaisedByMe` already takes.
+
+**The list carries the BUSINESS name.** `Provider.Providers` holds only the person's
+name, so a parent who blocked "Happy Paws Hotel" would otherwise see the owner's and
+not recognise them. `Block.ListBlockedParticipants` projects the provider's
+`ServiceCategory` (the Cosmos partition key) and `BlockService` does one point read
+per DISTINCT provider on the page — the same mechanism the chat inbox avatars use,
+and best-effort for the same reason: a provider mid-onboarding has no offering yet,
+and the list must still render. Freelancers have no business name and read null.
+
+**Vocabulary:** `BlockPartyType` (Provider | PetParent) is the block module's own,
+deliberately NOT `ChatParticipantType`. The two agree and probably always will, but
+they answer different questions, and a block placed from the bookings screen should
+not have to name itself in the chat module's terms. The chat host converts at its
+one boundary; nothing else does.
+
+**THROW codes:** `51327` same-side pair (kept from the chat era — same meaning);
+`51370` / `51371` the booking refusal, by blocking side.
+
+**In-memory dev fallback is functional** (`InMemoryBlockStore`), not a no-op — this
+is a write flow, and a store that accepted a block and never showed it again would
+make the feature untestable without SQL. **One gap:** it cannot see the booking
+tables, so a block placed there severs the pair but cancels nothing. The in-memory
+chat store now reads its block state from this store rather than its own dictionary,
+so in-memory dev does not become the one place a blocked pair can still message.
+
+**Deliberately not built:** an admin-placed block (support severing a pair is a
+different thing from a user's block and wants its own shape — which is why there is
+still no `Source` discriminator on the table); blocking as a side effect of
+reporting; and a push notification on being blocked, which would defeat the
+disclosure rule outright.
+
 ## In progress / next step
+
+**Earnings: unrealised jobs + a status filter (2026-08-24) — built, NOT deployed.**
+Two of three mobile asks against the earnings APIs; see "Unrealised jobs" in the
+Earnings section. Sits on top of the still-undeployed batches below, so it ships
+with them. Re-run `Deployment/DeployAll.sql`.
+
+SQL: two altered procedures, no new objects and no schema change —
+`Booking.GetProviderEarningsSummary` drops `IsEarned` from its WHERE (every
+existing aggregate is now gated on it individually, so the earned figures are
+unchanged) and adds six unrealised columns at ordinals **12-17**;
+`Booking.ListProviderEarningsBookings` gains `@Statuses NVARCHAR(MAX) = NULL` and
+appends `IsEarned` to its projection at ordinal **23**. `Booking.BookingAmounts`
+needed NO change — it already priced and returned every row regardless of status,
+which is why this is two procedures rather than a migration.
+
+Plus the walk-in work below: `Booking.StartBooking` and
+`Booking.SettleUnstartedJobsAsNoShow` altered, and **one new procedure**
+`Booking.UpdateCustomBooking` (THROW 51380-51384).
+
+C#: `ParentBookingStatusFilter` renamed `BookingStatusFilter` (+ `NoShow` /
+`Expired` groups), six fields and two computed properties on
+`ProviderEarningsTotals`, `IsEarned` on `ProviderEarningsBookingRow`, `Statuses` on
+the query + the store interface, and `?status=` on the one endpoint. For the
+walk-in edit: `UpdateCustomBookingCommand` + three exceptions,
+`IBookingService.UpdateCustomAsync` and its SQL and in-memory stores, the
+`UpdateCustomBookingRequest` contract, and one route.
+
+⚠️ **DEPLOY THE SQL BEFORE THE HOST**, and it is not additive in the safe
+direction: the summary reader takes six columns the old procedure does not return
+(`GetInt32(12)` onwards), so a new host against an old database throws
+`IndexOutOfRangeException` on **every** earnings read — the overview, the period
+totals and the three tiles alike; the list reader takes `IsEarned` at 23 and would
+do the same; and `@Statuses` would fail with "too many arguments specified". The
+reverse (old host, new database) is harmless. Ship `Pawfront.Api` only — no other
+host or Function touches these two procedures.
+
+**Not breaking for mobile**: every existing field keeps its name, meaning and
+value, `?status=` is opt-in, and omitting it returns exactly what the endpoint
+returns today.
+
+Verified: the solution builds clean (0 warnings, 0 errors); all five touched
+procedures and `DeployAll.sql` (**628 batches**, +2 for the one new procedure) parse
+clean under a **verified-loaded** net462 ScriptDom `TSql160Parser`; all five spliced
+copies were diffed byte-for-byte against their standalone files and are
+**identical** (spliced programmatically); all 178 procedures in `DeployAll.sql` were
+scanned for duplicate `DECLARE`s (T-SQL variables are procedure-scoped and ScriptDom
+does NOT catch a collision — `StartBooking` gained two) — none; the provider host
+starts, validating the DI graph, and answers **401** on all three earnings routes
+(including `?status=Cancelled` and `?status=NoShow,Expired`) and on the new
+`PATCH .../custom`, while bogus siblings on the same groups answer **404**; the
+parent host also starts and still answers 401 on its history/summary routes, which
+is what exercises the `BookingStatusFilter` rename; the OpenAPI document carries the
+new `status` param and the PATCH, and the Postman collection was regenerated from
+the live hosts (**280 requests**, +1).
+
+Two harnesses drove **shipped** code through **real DI registrations**:
+- **35 assertions** on `BookingStatusFilter` + `ProviderEarningsTotals` — each
+  group's exact expansion, the load-bearing invariant that cancelled+noShow+expired
+  is precisely the `Cancelled` group (disjoint and complete), the three broad groups
+  partitioning every known status, case-insensitive and whitespace-tolerant group
+  matching with raw statuses still case-SENSITIVE (a lowercased raw status must fail
+  loudly rather than silently filter to nothing), group+raw de-duplication, the
+  unknown-value refusal, and that unrealised and private money stay out of gross/net
+  while received+awaiting still sum to net.
+- **23 assertions** on the walk-in edit, over the **shipped** `InMemoryBookingStore`
+  resolved through `AddPawfrontSqlInfrastructure` — the price/notes/customer replace
+  and its durability, notes being CLEARABLE (which is why the body is a full replace
+  and not a patch), unknown-booking and wrong-provider refusals, the schedule moving
+  while CONFIRMED, **a booking not colliding with itself when nudged at capacity 1**
+  (the self-exclusion the sproc and the store must share), a move into a full slot
+  refused, **a price-only edit NOT re-checking capacity** (so a correction cannot
+  fail because the slot filled up afterwards), a COMPLETED walk-in still being
+  re-priceable while its schedule is locked, a cancelled one refused outright, and an
+  App booking refused with `BookingNotCustomException`.
+
+**Not** verified: none of the SQL has run against the dev database, so the six new
+aggregates, the `@Statuses` / `STRING_SPLIT` predicate, the two new reader ordinals,
+`StartBooking`'s walk-in branch, the sweep's `Source` filter and the whole of
+`Booking.UpdateCustomBooking` are parse-clean only; and no request has been made
+with a real Firebase token, so nothing has been read or edited end to end. In
+particular **no walk-in has actually been completed against SQL**, which is the one
+thing that would prove `privateJobCount` moves off 0.
+
+After deploying, confirm the walk-in path first, since the private-job figures
+depend on it: create a walk-in, `POST .../start-job` (expect **`IN_PROGRESS`**, NOT
+`START_JOB`, and no OTP anywhere), `POST .../complete`, then check
+`GET .../earnings/overview` reports `privateJobCount: 1` with a matching
+`privateJobAmount` and that `grossAmount` is unchanged. Then
+`PATCH .../bookings/{id}/custom` with a corrected `pricePerHour` and confirm the
+figure moves; try changing its `startTime` too (expect 409 `BookingScheduleLocked`,
+since it is past CONFIRMED); and try the PATCH on an App booking (expect 400
+`NotCustomBooking`). Leave a second walk-in unstarted past the provider's closing
+time and confirm the sweep leaves it `CONFIRMED` rather than `PROVIDER_NO_SHOW`.
+
+Then confirm: `GET .../earnings/overview` still reports the same
+grossAmount/netAmount as before (the earned figures must not move) and now carries
+non-zero unrealised buckets for a provider with a cancelled or no-showed booking;
+`?status=Cancelled` lists those same jobs with `isEarned: false`, and their
+`grossAmount` sums to `unrealisedAmount` over the same range; `?status=NoShow` and
+`?status=Expired` slice it; `?status=Upcoming` returns confirmed future jobs (which
+appear in NO summary figure — that is intended); the endpoint with **no** `status`
+returns exactly what it returned before; and `?status=Refunded` answers 400
+`InvalidRequest`. Also re-check the parent host's
+`GET /pet-parents/{id}/bookings/history?status=Completed` still works — it went
+through the renamed filter.
+
+### Walk-ins can finally complete, and can be edited (same batch)
+
+**`privateJobCount` read 0 because a Custom walk-in could never reach `COMPLETED`,
+not because of anything in the reporting.** It is created `CONFIRMED`, and the only
+route onwards was `START_JOB` → `IN_PROGRESS` via `Booking.VerifyBookingStartOtp`,
+whose code is readable **only** from the parent host's ownership-filtered
+`POST .../bookings/{id}/start-otp`. A walk-in has `PetParentId` NULL, so nobody
+could ever read it back: the job stuck at `CONFIRMED` forever, never reached the
+earnings figures, and once the sweep ships `Booking.SettleUnstartedJobsAsNoShow`
+would have settled it `PROVIDER_NO_SHOW` (+ `NO_PAYOUT`) at the end of the
+provider's working day — marking them a no-show for work they had done.
+
+Three fixes, all SQL except the last:
+
+1. **`Booking.StartBooking` branches on `[Source]`.** A walk-in goes STRAIGHT to
+   `IN_PROGRESS` — no OTP, no service-date gate (51144), no working-hours gate
+   (51137), no push. Every one of those protects a PARENT who is waiting, and a
+   walk-in has none; a code the provider both issues and enters proves nothing, and
+   the `BOOKING_START_OTP_ISSUED` push has audience `PetParent` with no recipient to
+   address. The arrival fix IS still recorded. **The provider's next call is
+   `/complete`, not `/start-job/verify`** — the app must branch on the returned
+   `status`.
+2. **`Booking.SettleUnstartedJobsAsNoShow` skips `[Source] = 'Custom'`.** An
+   unfinished walk-in now rests at `CONFIRMED`, which is honest — nobody was stood
+   up — and stays out of every earnings figure until the provider completes it.
+3. **`PATCH /providers/{providerId}/bookings/{bookingId}/custom`** (new sproc
+   `Booking.UpdateCustomBooking`, THROW **51380-51384**) closes the drift: a
+   provider's edits to price / service / notes reached nothing before.
+
+**Private jobs stay OUT of received earnings** — `privateJobCount` /
+`privateJobAmount` are where they land, unchanged, per the decision on this batch.
+They are off-platform and carry 0% commission, so folding them into
+`receivedNet` would report money Pawfront never processed. The app sums the two if
+it wants one headline. Nothing in the earnings code changed for this — those figures
+were always correct, they simply had nothing to count.
+
+**Known rough edge, deliberately left:** a COMPLETED walk-in reads
+`payoutStatus: "Pending"` forever, since `MarkBookingPaid` refuses a walk-in (51163)
+and nothing else moves the column. Neither `Pending` nor `NO_PAYOUT` is true — the
+provider WAS paid, off-platform — so inventing a third value was out of scope for a
+reporting fix. It is cosmetic inside the private-jobs section of the screen.
+
+⚠️ **BREAKING for the provider app (walk-ins only):** `/start-job` on a walk-in now
+returns `IN_PROGRESS`, not `START_JOB`, and `/start-job/verify` will reject it with
+409 `BookingNotStartable`. App bookings are completely unchanged.
+
+**Blocking made product-wide (2026-08-18) — built, NOT deployed.** The existing
+chat-only block was revamped: one block now refuses bookings, hides each party's
+events from the other and removes the provider from discovery, as well as closing
+the thread. See the "Blocking — product-wide" section above for the design, and in
+particular for the fact that **placing a block cancels the pair's unfinished jobs**.
+Sits on top of the still-undeployed batches below, so it ships with them. Re-run
+`Deployment/DeployAll.sql`.
+
+SQL: new **`[Block]` schema** with `Block.BlockedParticipants` transferred out of
+`[Chat]` and `ChatBlockId` renamed `BlockId` (both guarded, so a re-run is a no-op);
+four new procedures (`BlockParticipant`, `UnblockParticipant`,
+`ListBlockedParticipants`, `ListMyBlockedCounterparties`); the three retired
+`Chat.*BlockParticipant` procedures **dropped**; and seven altered —
+`CreateBooking` + `CreateNightStayBooking` (block guard under `HOLDLOCK`, THROW
+**51370 / 51371**), `ListEvents` + `ListTrendingEvents` + `GetEvent` (new optional
+`@ViewerType` / `@ViewerId`), and `ListConversations` +
+`GetConversationForParticipant` (two flags appended LAST).
+
+C#: new `Pawfront.Application/Blocks/` (models, exceptions, `IBlockService` +
+`BlockService`, `IBlockStore`, `IMyBlockLookup`, `ICurrentBlockParty`),
+`BlockAwareProviderDiscoveryService`, `Pawfront.Infrastructure.Sql/Blocks/`
+(`SqlBlockStore` serving both interfaces + `InMemoryBlockStore`),
+`Pawfront.Contracts/Blocks/`, and `BlockEndpoints` + `BlockMapping` + `MyBlocks` on
+each host. The chat host's `/blocks` routes now call `IBlockService`; `ChatBlock`,
+its store methods and its contracts are gone.
+
+⚠️ **DEPLOY THE SQL BEFORE THE HOSTS**, and it is not additive in the safe
+direction:
+- the hosts call `Block.*` procedures that would not exist, so **every** block
+  route fails;
+- `ListConversations` / `GetConversationForParticipant` now take two more columns
+  the old procedures do not return, so a new host against an old database throws
+  `IndexOutOfRangeException` on **every conversation read**;
+- the event reads always pass `@ViewerType` / `@ViewerId`, so against the old
+  procedures they fail with "too many arguments specified" — the same property the
+  2026-08-09 active-status change had.
+
+The reverse (old hosts, new database) is harmless. Ship **all three** hosts.
+
+⚠️ **BREAKING for the chat app:** `DELETE /blocks/{chatBlockId}` is now
+`DELETE /blocks/{blockId}`, and the block response renamed `chatBlockId` → `blockId`
+and gained `businessName`. `GET /blocks` is now **paged** — it returns
+`{ blocks, totalCount, skip, take, hasMore }` rather than a bare array. Safe to
+change because per CLAUDE.md no chat route has ever been exercised over HTTP, but
+the app must adopt it.
+
+⚠️ **Blocking now cancels bookings.** Both apps should warn before confirming, and
+should surface `uncancelledBookings` — a job in progress is NOT cancelled and the
+user needs to know it is still happening.
+
+Verified: the solution builds clean (0 warnings, 0 errors); all 18 touched SQL files
+plus `DeployAll.sql` (**626 batches**, exactly the expected +9) parse clean under a
+**verified-loaded** net472 ScriptDom `TSql160Parser`; all 15 spliced procedures were
+diffed line-for-line against their standalone files and are **byte-identical**
+(spliced programmatically); all 176 procedures in `DeployAll.sql` were scanned for
+duplicate `DECLARE`s (ScriptDom does not catch a collision) — none; **all three
+hosts start** — which validates the DI graph including the new `IBlockService` /
+`IMyBlockLookup` / `ICurrentBlockParty` on every one — and answer **401** on the
+block routes while a bogus sibling answers **404**; and the **shipped**
+`BlockService` was driven over the **shipped** `InMemoryBlockStore` through their
+real DI registrations — **41 assertions** covering idempotency, the derived blocked
+side, self-block and empty-id refusals, the mine-only list and its take cap, unblock
+scoped to the blocker (unknown id and somebody else's being one answer), the lookup
+in both directions with `BlockId` withheld for a block placed against the caller,
+mutual blocks collapsing to one entry with the caller's own id surviving, and the
+auto-cancel leg: actor and status derived from the blocker's side, night-stay
+dispatched by type, the underway job reported rather than swallowed, and — the
+load-bearing one — a cancellation outage leaving the block standing with the jobs
+reported as uncancelled.
+
+**Not** verified: none of the SQL has run against the dev database, so the schema
+transfer, the column rename, the `HOLDLOCK` block guard, the event viewer filters,
+the two new conversation ordinals and the four new procedures are parse-clean only;
+and no request has been made with a real Firebase token, so nothing has been blocked
+end to end.
+
+After deploying, confirm: as a PARENT with a CONFIRMED booking, `POST
+/pet-parents/{id}/blocks` naming that provider — expect the booking to come back
+cancelled in `cancelledBookingCount`, gone from `/availability/slots` occupancy, and
+the provider notified. Then check the provider has vanished from `GET /providers`
+and all five `/providers/search/*`, that a new booking is refused **403
+`ParentBlockedProvider`** (and that the PROVIDER attempting one gets the neutral
+`BookingNotAvailable`), that neither sees the other's events in `GET /events` or by
+direct id, and that the thread reports `isBlocked: true` / `blockedByMe: true` for
+the parent and `true`/`false` for the provider. Re-read an old booking on both hosts
+and confirm the same pair of flags. Then `DELETE .../blocks/{blockId}` and confirm
+contact is restored while the cancelled booking stays cancelled. Finally start a job,
+block mid-service, and confirm it appears in `uncancelledBookings` with
+`BookingInProgress` and still completes normally.
+
+**Booking geolocation capture (2026-08-17) — built, NOT deployed.** Eight moments in
+a booking now record where each party was; see the "Geolocation capture on booking
+actions" section above for the trigger vocabulary and the design decisions. Sits on
+top of the still-undeployed batches below, so it ships with them. Re-run
+`Deployment/DeployAll.sql`.
+
+SQL: two new tables (`Booking.BookingLocationEvents` + `NightStayBookingLocationEvents`,
+one index each), three new procedures (`RecordBookingLocationEvent`,
+`RecordNightStayBookingLocationEvent`, `ListBookingLocationEvents`), and **twelve
+altered** — `StartBooking`, `VerifyBookingStartOtp`, `UpdateBookingStatus`,
+`MarkBookingPaid`, `AddBookingEvidence`, `IssueBookingStartOtp` and their six
+night-stay twins each gain four optional location parameters and an INSERT inside
+their existing transaction. New THROWs **51360-51365**. Purely additive on the SQL
+side: the parameters default to NULL, so an old host against the new procedures
+behaves exactly as today.
+
+C#: `CapturedLocation` + `BookingLocationTriggers` + `IBookingLocationService` in
+Application (`BookingLocationCapture.cs`), `SqlBookingLocationService` +
+`NullBookingLocationService` + `LocationParameters` in Infrastructure.Sql, the
+location threaded through both service interfaces and both SQL/in-memory stores, and
+8 new routes (4 per host) plus location bodies on start-job / start-job-verify /
+no-show / paid / evidence / the legacy `/status` shim.
+
+⚠️ **DEPLOY THE SQL BEFORE THE HOSTS.** The hosts always pass the four new
+parameters, so against the old procedures **every** start-job, no-show, mark-paid,
+evidence upload and start-OTP issue fails with "too many arguments specified" — the
+same property the 2026-08-09 active-status change had. The reverse is harmless.
+
+⚠️ **BREAKING for the parent app** — `GET /pet-parents/{id}/bookings/{bookingId}`
+(and the night-stay twin) no longer return the `startOtp` block; it is always null.
+The code comes from the new `POST .../start-otp`. Mobile must adopt this or the
+parent can never show a start code. See the section above for why.
+
+⚠️ **A missing GPS fix now blocks the job.** Per the explicit decision on this batch,
+every one of the eight actions is refused with 400 `LocationRequired` when no usable
+coordinate is supplied — so a provider indoors with no fix cannot start, complete or
+be paid for a job. Worth confirming with the apps that they surface this as a
+permission prompt rather than a generic error.
+
+Verified: the solution builds clean (0 warnings, 0 errors); all 17 touched SQL files
+plus `DeployAll.sql` (**617 batches**) parse clean under a **verified-loaded** net472
+ScriptDom `TSql160Parser`; all 15 procedures were spliced into `DeployAll.sql`
+programmatically and diffed line-for-line — **byte-identical**; all 175 procedures in
+`DeployAll.sql` were scanned for duplicate `DECLARE`s (ScriptDom does not catch a
+collision) — none; both hosts start and answer **401** on all 12 new/changed routes
+while a bogus sibling on the same host answers **404**; the Postman collection was
+regenerated from the live hosts (**273 requests**, up from 265) and carries all 8 new
+routes; and the **shipped** `CapturedLocation`, `BookingLocationTriggers`,
+`IBookingLocationService`, `IBookingService` and `INightStayBookingService` were
+driven through their **real DI registrations** — 43 assertions covering the range
+checks and both exact bounds, the refusal naming its action, case- and
+whitespace-tolerant trigger matching, the three transition-only triggers being
+un-postable, a recorded fix round-tripping, and — the load-bearing pair — a no-show
+being refused *before the store is reached* while a cancel and an accept reach it,
+with a bad fix on a cancel still rejected rather than silently dropped.
+
+**Not** verified: none of the SQL has run against the dev database, so the two tables,
+their CHECK constraints, the twelve altered procedures' new parameters and the three
+new procedures are parse-clean only; and no request has been made with a real Firebase
+token, so no location has been written end to end.
+
+After deploying, confirm: start a job and check a `Booking.BookingLocationEvents` row
+appears with `ArrivalConfirmed`/`Provider`, then another with `JobStartProceeded` on
+verify; call `POST .../start-otp` as the parent and check `StartOtpShown`/`Parent`
+lands (and that the detail GET's `startOtp` is null); mark a booking paid and post the
+parent's `CashReceived` fix to `.../location`, expecting two rows for one moment;
+upload evidence and confirm one location row per photo; and send a request with the
+location omitted, expecting 400 `LocationRequired` and **no** status change. Then
+repeat one of each on a night stay. Finally run `Booking.ListBookingLocationEvents`
+by hand to confirm the timeline reads in order.
+
+**Two new ticket kinds + `isTicketRaisedByMe` (2026-08-16) — built, NOT deployed.** Two
+asks in one batch, both on top of the still-undeployed 2026-08-14 support batch below, so
+the two ship together. See the "Support tickets" and "Have I already reported this?"
+sections above. Re-run `Deployment/DeployAll.sql`.
+
+SQL: `Support.Tickets` gains `EventId`, nullable `ProviderId`/`PetParentId`, a four-branch
+`CK_Tickets_SubjectMatchesType`, a widened `CK_Tickets_TicketType`, and three indexes
+(`UX_Tickets_OpenEventReporter` + `IX_Tickets_OpenRaisedBy{Provider,PetParent}`); one new
+procedure (`Support.ListMyOpenTicketSubjects`); `Support.CreateTicket` gains `@EventId` and
+the two new branches (THROW **51355**); `Support.AddTicketPhoto`'s kind guard inverts; all
+six projecting procedures append `[EventId]` last; and the two account-delete guards are
+scoped to the counterparty kinds. **Both CHECK constraints and the two nullable columns
+have drop-and-recreate / guarded-`ALTER` repair blocks in `DeployAll.sql`** — a by-name
+`IF NOT EXISTS` could never repair an existing constraint, the trap `CK_Providers_Gender`
+and `CK_Bookings_PayoutStatus` both hit.
+
+C#: 8 new report routes (4 per host), `IMySupportTicketLookup` + `MySupportTicketSubjects`
+in Application, the three flat fields on four response types, and the read paths on all
+three hosts filled in.
+
+⚠️ **DEPLOY THE SQL BEFORE THE HOSTS.** Not additive in the safe direction: `ReadTicket`
+now takes `EventId` at `offset + 16` and `ListTickets`' `TotalCount` moved from 16 to 17,
+so a new host against an old database mis-reads every ticket; and
+`Support.ListMyOpenTicketSubjects` would not exist at all (that one degrades quietly — the
+lookup swallows and reports `false` — but every ticket read would be wrong). Ship
+`Pawfront.Api`, `Pawfront.PetParentApi` **and** `Pawfront.ChatApi` (its `ChatService` took
+the new dependency).
+
+Verified: the solution builds clean (0 warnings, 0 errors); all eleven touched SQL files
+plus `DeployAll.sql` (610 batches) parse clean under a **verified-loaded** net472 ScriptDom
+`TSql160Parser`; every spliced object was diffed line-for-line against its standalone file
+and is **byte-identical** (spliced programmatically, and the `CREATE TABLE` body too); the
+**shipped** `SupportTicketService` and `IMySupportTicketLookup` were driven over the
+**shipped** `InMemorySupportTicketStore` through their real DI registrations — 39
+assertions covering the app issue's missing comment falling back to the reason (and neither
+refused), the stray-subject drop, two app issues by one user both created, the same event
+refused for the same reporter but created for a different parent and for a provider on
+their own side, the booking/chat rules still holding, photos accepted on app-issue and
+event tickets and refused on a chat incident, the sixth photo refused before anything is
+written, and the lookup keyed by subject / mine-only / open-only including the same GUID
+under the wrong booking type; and all three hosts start and answer **401** on all 8 new
+routes (an unregistered sibling answers 405/404 on the same host, so the 401 is the route
+existing behind auth). **Not** verified: none of the SQL has run against the dev database,
+so the nullable-column `ALTER`s, the two CHECK repair blocks, the three new indexes, the
+new procedure and the shifted reader ordinals are parse-clean only; and no request has been
+made with a real Firebase token.
+
+After deploying, confirm: raise an app issue with two photos (expect 201, `providerId`
+null on a parent's, and a second one also succeeding); report an event, then the same event
+again (expect 409 `TicketAlreadyOpen`), then the same event from the other app (expect 201,
+its own ticket); report an unknown event (expect 404 `EventNotFound`); check both new kinds
+appear in `GET .../support-tickets`. Then, with an open **app issue**, confirm
+`DELETE /pet-parents/{id}` still succeeds while an open **booking** incident still refuses
+with 409 `OpenTicketsExist`. Finally report a booking and re-read it everywhere: the booking
+detail, both parent lists, `GET /providers/{id}/bookings` and both night-stay surfaces should
+show `isTicketRaisedByMe: true` with a matching `ticketId`/`ticketRef`, the **counterparty's**
+read of the same booking should show `false`, and the same round trip should hold for
+`GET /events` + `/events/{id}` and `GET /conversations` + `/conversations/{id}`. Close the
+ticket by hand with `Support.CloseTicket` and confirm every flag flips back to `false` and a
+fresh report is accepted.
 
 **Support tickets — "Report Incident" + "Report Chat" (2026-08-14) — built, NOT
 deployed.** See the "Support tickets" section above. The SQL half had been written
@@ -3034,11 +3874,11 @@ run against a database.
    naming the subject rather than the counterparty.
 2. **Reporting no longer blocks the reported party.** The severance write is gone from
    `Support.CreateTicket`; with it went the unblock freeze
-   (`Chat.UnblockChatParticipant`, THROW 51351 → 409 `BlockFrozenByTicket`), both
+   (`Block.UnblockParticipant`, THROW 51351 → 409 `BlockFrozenByTicket`), both
    booking-create gates (THROW 51353/51354 → 403 `ProviderNotAvailable` +
    `BookingPartiesSeveredException`), `Support.CloseTicket`'s `@UnblockParticipants`
    flag and `LiftedBlockCount` column, and the `Source`/`TicketId` columns on
-   `Chat.BlockedParticipants` — whose `ALTER` blocks in `DeployAll.sql` sat **before**
+   `Block.BlockedParticipants` — whose `ALTER` blocks in `DeployAll.sql` sat **before**
    that table is created and would have failed on a fresh database. The legal hold on
    a reported conversation is **kept** — it preserves evidence rather than cutting
    contact.
@@ -3227,7 +4067,9 @@ tickets, none of the chat batch — which is the failure mode of maintaining a r
 list by hand alongside the code.
 
 Replaced by **`docs/Pawfront.All.postman_collection.json`**: all three hosts in one
-collection, **255 requests**, generated from each host's live `/openapi/v1.json` by
+collection, **279 requests** (273 before the 2026-08-18 blocking batch, 265 before
+the 2026-08-17 geolocation one), generated from each host's
+live `/openapi/v1.json` by
 **`docs/generate_postman_collection.py`** (usage in its docstring; the captured
 `docs/openapi.{provider,parent,chat}.json` are committed alongside so it re-runs
 without starting the hosts). **Re-run it after adding or changing any endpoint** —
@@ -4014,22 +4856,23 @@ POST   /pet-parents/{petParentId}/profile-image                                 
 POST   /pet-parents/{petParentId}/pets                                           body { petType, petName, breed, gender, dateOfBirth, weight, microchipId?, description? }. Inserts into Parent.Pets via Parent.AddPetParentPet. PetType ∈ {Dog, Cat, Hamster, GuineaPig}; Gender ∈ {Male, Female}; Weight DECIMAL(5,2) > 0. MicrochipId is globally UNIQUE (filtered) — collision returns 409 MicrochipIdAlreadyExists. 404 PetParentNotFound (sproc 51202); 400 UnsupportedPetType / UnsupportedPetGender / InvalidRequest. Response carries medical-info fields too — all null until PATCH below runs.
 GET    /pet-parents/{petParentId}/pets                                           returns every pet on file for the parent with the full medical-info snapshot, embedded photo gallery, and nextConsultations [{ type: Groomer|Vet|Trainer, nextConsultation }] (written by the provider booking-complete flow). Backed by Parent.ListPetParentPets (three result sets: pets + photos + next-consultations, joined in C# by PetId). Photos within each pet are ordered oldest-first. Empty array when the parent has no pets (or doesn't exist) — list semantics, no 404. Distinct response type PetParentPetWithPhotosResponse so AddPet / PATCH medical-info responses stay unchanged.
 GET    /pet-parents/{petParentId}/event-bookings                                 returns the caller's event-ticket bookings — slim summary cards with the joined event (title, category, eventType, start date/time, banner URL, and venue `eventLocation` for physical events — null for online) so the mobile "My Bookings" screen can render without a follow-up fetch. Backed by Event.ListEventBookingsByBookerEmail (SQL) + a per-booking Cosmos point read that hydrates the venue location (physical events only, fanned out in parallel; a failed read returns that card with a null location). **Booker identity on Event.EventBookings is free text (no FK to PetParents), so the filter matches on the caller's Firebase email claim** — the route's petParentId is verified by the ownership filter, then the JWT email is used as the SQL filter. Ordered most-recent first; cancelled bookings included. Mobile drills into GET /event-bookings/{bookingId} for the full shape with attendee names. 403 EmailClaimMissing when the JWT carries no email claim (rare).
-GET    /pet-parents/{petParentId}/bookings                                       the parent's own SERVICE bookings ("my bookings"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered (petParentId from JWT), so a caller only sees their own. [] when none — no 404. Backed by IBookingService.ListByPetParentAsync (sproc Booking.ListBookingsByPetParent) + IParentBookingEnrichmentService. Returns sectioned cards `ParentServiceBookingCardResponse` { booking, providerDetails, serviceDetails, cancellationPolicy, location, review } — cancellationPolicy + location added 2026-07-24, both read from the booking's frozen-at-creation snapshot (serviceDetails.pricePerHour likewise prefers the price-locked rate, live only as the legacy fallback). `serviceDetails.description` (2026-07-29) is the opposite case — the groomer menu item's blurb / the trainer's privateTrainingDescription, read LIVE on purpose (cosmetic copy, never price-locked), so a provider's later edit shows through; null for the other categories and when the offering can't be resolved. `location` address fields are null on legacy rows without a snapshot (the booking-DETAIL read is the live-fallback authority) and on Custom walk-ins. `review` (2026-08-09) is { canReview, rating } — the caller's OWN review state, read for the whole page in one call (sproc Review.ListPetParentBookingReviews). **canReview here is NOT the booking detail's canReview:** on a list the useful question is whether anything is outstanding, so it means "show the review prompt" and goes FALSE once the parent has reviewed — read the pair together: true/null = ask them, false/4 = they gave four stars, false/null = not reviewable. (The detail's stays true after a review exists, because a review can be edited; only the score travels here, comment + photos live on the detail.) Eligibility mirrors the SQL gate — COMPLETED or PAID, App booking. A failed ratings read leaves every card false/null rather than failing the list. (The provider host's GET /pet-parents/{petParentId}/bookings is unscoped there and keeps the flat BookingResponse shape.)
+GET    /pet-parents/{petParentId}/bookings                                       the parent's own SERVICE bookings ("my bookings"), most-recent first (BookingDate/StartTime DESC), cancelled included. Ownership-filtered (petParentId from JWT), so a caller only sees their own. [] when none — no 404. Backed by IBookingService.ListByPetParentAsync (sproc Booking.ListBookingsByPetParent) + IParentBookingEnrichmentService. Returns sectioned cards `ParentServiceBookingCardResponse` { booking, providerDetails, serviceDetails, cancellationPolicy, location, review } — cancellationPolicy + location added 2026-07-24, both read from the booking's frozen-at-creation snapshot (serviceDetails.pricePerHour likewise prefers the price-locked rate, live only as the legacy fallback). `serviceDetails.description` (2026-07-29) is the opposite case — the groomer menu item's blurb / the trainer's privateTrainingDescription, read LIVE on purpose (cosmetic copy, never price-locked), so a provider's later edit shows through; null for the other categories and when the offering can't be resolved. `location` address fields are null on legacy rows without a snapshot (the booking-DETAIL read is the live-fallback authority) and on Custom walk-ins. `review` (2026-08-09) is { canReview, rating } — the caller's OWN review state, read for the whole page in one call (sproc Review.ListPetParentBookingReviews). **canReview here is NOT the booking detail's canReview:** on a list the useful question is whether anything is outstanding, so it means "show the review prompt" and goes FALSE once the parent has reviewed — read the pair together: true/null = ask them, false/4 = they gave four stars, false/null = not reviewable. (The detail's stays true after a review exists, because a review can be edited; only the score travels here, comment + photos live on the detail.) Eligibility mirrors the SQL gate — COMPLETED or PAID, App booking. A failed ratings read leaves every card false/null rather than failing the list. `isTicketRaisedByMe` + `ticketId`/`ticketRef` (2026-08-16) say whether the CALLER already has an OPEN support ticket on it — see "Have I already reported this?". (The provider host's GET /pet-parents/{petParentId}/bookings is unscoped there and keeps the flat BookingResponse shape.)
 POST   /pet-parents/{petParentId}/bookings                                       body { petId, serviceId, bookingDate, startTime, endTime, serviceItemCode?, jobNotes?, locationType } — parent-initiated SERVICE booking. locationType is REQUIRED (ParentLocation | ProviderLocation → 400 InvalidRequest / UnsupportedLocationType); drives the detail read's `location` address block. ("book now" from a search result/slot). Booker = route petParentId (ownership-filtered; never from body). Provider resolved server-side from serviceId. petId must be one of the caller's pets (404 PetNotFound / 403 Forbidden inline; sproc re-checks via THROW 51068 → 400 InvalidPetId). Same shared IBookingService.CreateAsync + race-safe Booking.CreateBooking sproc as the provider host — full validation chain (working hours, closures → 409 ServiceClosed, duration rules, groomer serviceItemCode, capacity → 409 CapacityExceeded, 409 ProviderInactive, **booking lead time → 409 BookingLeadTimeTooShort** when the requested start is under 2 h away). Booking.Bookings now carries nullable PetId (FK → Parent.Pets), surfaced as petId on every booking read.
 POST   /pet-parents/{petParentId}/bookings/bulk-cancel                           body { bookings: [{ bookingId, bookingType: "SingleDay"|"NightStay" }], note? } — the parent-host twin; identical shape, semantics and error codes to the provider host's bulk-cancel (see there). Covers BOTH booking kinds in one call because "my bookings" mixes them on one screen, so a multi-select naturally contains both — bookingType per item is what tells them apart. Sets PARENT_CANCELLED (the provider host sets PROVIDER_CANCELLED); the actor is the route's petParentId, and the RequireOwnedPetParent() group is what confines the batch to the caller's own bookings. Always 200 for a well-formed batch; 400 InvalidRequest when empty or over 50 items.
 GET    /pet-parents/{petParentId}/bookings/summary                               [?period=Weekly|Monthly|Quarterly|Yearly|AllTime &from= &to= &petId= &status=] counts + spend for the parent's bookings. Returns { period, periodStart, periodEnd, totalBookings, singleDayBookings, nightStayBookings, completedBookings, upcomingBookings, cancelledBookings, paidBookings, awaitingPaymentBookings, unpricedBookings, amountSpent, upcomingAmount }. The three buckets are mutually exclusive and sum to totalBookings — declines, no-shows and expiries all count as cancelled, since from the parent's side they equally mean "it didn't happen". amountSpent covers COMPLETED **or** PAID: a job the provider finished but hasn't tapped "mark paid" on is included, because the parent already handed over the cash and has no control over that tap (awaitingPaymentBookings says how many). upcomingAmount is what confirmed future bookings will cost and is deliberately NOT part of amountSpent. `status` accepts a comma-separated mix of the friendly groups Completed / Upcoming / Cancelled and raw lifecycle statuses. Same filters — and the identical WHERE clause — as /history below, so the summary always describes exactly the set that list returns. Ownership-filtered. 400 InvalidRequest (bad period/status, or from > to).
 GET    /pet-parents/{petParentId}/bookings/history                               [?period= &from= &to= &petId= &status= &sortBy=Date|Amount &sortDirection=Asc|Desc &skip= &take=] paginated history, single-day and night-stay merged into ONE feed (a parent thinks "my bookings", not "my two kinds of bookings"); bookingType discriminates and the other kind's fields are null. Unlike the provider earnings list this is NOT restricted to completed bookings — cancelled and upcoming ones belong in a history screen, each carrying its expected `amount`. Explicit from/to override period; take capped at 20; sort defaults to Date/Desc with a BookingId tie-break. Rows carry jobId, status, serviceDate, providerId + providerName (personal name from SQL — the business name lives in Cosmos, same as the booking-detail read), pet name + photo, isCompleted, isPaid, amount, paidAtUtc, paymentMethod. The Pawfront commission is deliberately absent: the parent pays `amount` either way and the split is the provider's concern. Ownership-filtered. 400 InvalidRequest. **Additive** — the existing unpaginated GET /pet-parents/{id}/bookings is unchanged.
 POST   /pet-parents/{petParentId}/bookings/{bookingId}/status                    body { status, note? } — parent sets APPROVAL_NEEDED|COMPLETED|PARENT_CANCELLED|PROVIDER_NO_SHOW on their own booking; audited. Actor=Parent, actorId=route petParentId. 403 Forbidden (not the parent's booking), 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged. Shared Booking.UpdateBookingStatus sproc with the provider host.
-POST   /pet-parents/{petParentId}/bookings/{bookingId}/no-show                   parent reports the PROVIDER never showed up → sets PROVIDER_NO_SHOW (terminal, frees capacity, audited). Allowed only from a confirmed-equivalent state and only 30+ minutes after the booking's scheduled start (BookingDate + StartTime, UTC). Reporting is optional: if nobody reports and the job is still unstarted at the end of the PROVIDER'S WORKING DAY on the booking date (their closing time from ProviderWeeklyAvailability, or the booking's own EndTime if that is later; midnight UTC when no hours are saved), the scheduled external job settles it automatically (START_JOB → PARENT_NO_SHOW, confirmed-equivalent → PROVIDER_NO_SHOW) — this used to be JOB_EXPIRED, and until 2026-08-02 fired at the booking's own end time. 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state), 409 NoShowTooEarly (grace window not elapsed, THROW 51128), 409 BookingStatusTerminal.
+POST   /pet-parents/{petParentId}/bookings/{bookingId}/no-show                   body { location } — REQUIRED (2026-08-17), recorded as NoShowMarked / Parent. Same gating on the legacy /status shim. 400 LocationRequired / InvalidLocation. parent reports the PROVIDER never showed up → sets PROVIDER_NO_SHOW (terminal, frees capacity, audited). Allowed only from a confirmed-equivalent state and only 30+ minutes after the booking's scheduled start (BookingDate + StartTime, UTC). Reporting is optional: if nobody reports and the job is still unstarted at the end of the PROVIDER'S WORKING DAY on the booking date (their closing time from ProviderWeeklyAvailability, or the booking's own EndTime if that is later; midnight UTC when no hours are saved), the scheduled external job settles it automatically (START_JOB → PARENT_NO_SHOW, confirmed-equivalent → PROVIDER_NO_SHOW) — this used to be JOB_EXPIRED, and until 2026-08-02 fired at the booking's own end time. 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state), 409 NoShowTooEarly (grace window not elapsed, THROW 51128), 409 BookingStatusTerminal.
 GET    /pet-parents/{petParentId}/bookings/{bookingId}/terms-changes             terms-changes` — the provider's terms that changed since the booking was created (price, cancellation policy, drop-off/pick-up, selected-location address) plus rule-violation rows (fixed duration / minimum duration / minimum nights) checked against the booked window. Always 200 → { bookingId, hasChanges, changes: [{ field, changeType, bookedValue, currentValue, message }] }; hasChanges false = no confirmation sheet. Feeds `acknowledgeTermsChanges` on POST .../modifications (409 BookingTermsChanged without it once drifted). 404 BookingNotFound when the booking isn't the caller's. Ownership-filtered group.
-GET    /pet-parents/{petParentId}/bookings/{bookingId}/status-history            full status audit trail, oldest-first (404 if not the parent's booking). Ownership-filtered group; bookingId re-checked against the booking's PetParentId.
+POST   /pet-parents/{petParentId}/bookings/{bookingId}/start-otp                 body { location } — "Show OTP" (2026-08-17). Issues (or reuses) the start code and returns the SAME { code, expiresAtUtc } block the booking-detail GET used to carry, recording where the parent was when it went on screen (StartOtpShown). **This route exists BECAUSE the capture is required**: the code used to be handed out as a side effect of GET .../bookings/{bookingId}, and a GET cannot carry a body, so leaving it there would have left a way to read the code while supplying no position. ⚠️ The detail GET's `startOtp` is now ALWAYS NULL — the parent app must call this instead. 404 BookingNotFound (unknown or not yours); 409 BookingNotStartable (the booking is not START_JOB, so there is no code to show); 400 LocationRequired / InvalidLocation. Night-stay twin: POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/start-otp.
+POST   /pet-parents/{petParentId}/bookings/{bookingId}/location                  body { trigger, location } — the PARENT's own fix for a moment the PROVIDER drove (2026-08-17). trigger ∈ NoShowMarked | CashReceived | CashNotReceived | EvidenceCaptured (case-insensitive); the three triggers tied to a transition the caller performs themselves cannot be posted here — they are written by the transition. Exists because each app reports only its OWN position: the server never copies the provider's coordinate onto the parent's side, so a missing row honestly reads as "we don't know where they were". 404 BookingNotFound; 403 Forbidden; 400 UnsupportedLocationTrigger / LocationRequired / InvalidLocation. Night-stay twin under /night-stay-bookings/. Ownership-filtered.
 POST   /pet-parents/{petParentId}/bookings/{bookingId}/review                    body { rating, comment? } — the parent's review of the provider for a finished booking. rating 1..5; comment optional, max 1000 CHARACTERS (blank/omitted stores nothing and reads back null). Reviewable = the booking is COMPLETED **or PAID** (PAID is downstream, so gating on COMPLETED alone would close the window the moment the provider recorded payment) and is an App booking. **Upsert:** resubmitting replaces rating + comment on the same review, so a corrected star doesn't duplicate — 201 on the first review, 200 on an edit. createdAtUtc does NOT move on an edit (it's the date given, which is what the list sorts on); updatedAtUtc does. The author is the route's petParentId (ownership-filtered, never from the body) and the gate runs inside Review.UpsertBookingReview, in the same transaction as the write. Photos are attached separately (below) because the blob path is keyed by the review id this call mints. 404 BookingNotFound; 403 Forbidden (not your booking); 409 BookingNotReviewable (not COMPLETED/PAID, THROW 51302); 400 ReviewNotAppBooking (Custom walk-in) / InvalidRequest (rating out of range, comment too long). Night-stay twin: POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/review.
 GET    /pet-parents/{petParentId}/bookings/{bookingId}/review                    the caller's own review of this booking with its photos. 404 ReviewNotFound when they haven't written one — the absence of a resource at this URL; the booking detail's `review` section is where it's reported as a nullable field instead. Night-stay twin under /night-stay-bookings/.
 POST   /pet-parents/{petParentId}/bookings/{bookingId}/review/photos             multipart { file } — one photo per call (same as every other gallery flow here). <=3 MB, image/jpeg|png|webp. Uploads to review-photos/<bookingReviewId>/ then inserts the row. Max **5 photos per review**, enforced in SQL under UPDLOCK + HOLDLOCK (two uploads in flight would each see room) and pre-checked here so a caller at the cap isn't charged an upload first. 404 ReviewNotFound ("submit your review before attaching photos" — the review must exist to own the blob path); 409 ReviewPhotoLimitReached; 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat. Night-stay twin under /night-stay-bookings/.
 DELETE /pet-parents/{petParentId}/bookings/{bookingId}/review/photos/{photoId}   removes one photo (scoped by review + author) + best-effort blob delete. Returns { bookingReviewPhotoId, bookingReviewId, photoUrl, deletedAtUtc }. **The review itself is not deletable** — only its photos — so a rating is never stranded. 404 ReviewPhotoNotFound (unknown id, wrong review, and "not yours" are one case). Night-stay twin under /night-stay-bookings/.
 GET    /providers/{providerId}/reviews                                           [?sortBy=Date|Rating &sortDirection=Asc|Desc &skip= &take=] the reviews parents have left for a provider — what a parent reads before booking. Returns { providerId, summary { reviewCount, averageRating, fiveStar..oneStar }, reviews: [{ bookingReviewId, bookingType, bookingId, jobId, petParentId, parentName, parentPhotoUrl, rating, comment, photoUrls, createdAtUtc, updatedAtUtc }], skip, take, hasMore }. bookingType discriminates because the two booking kinds share no id space — bookingId alone can't say which detail screen to open. **The summary is whole-population, not page-scoped**: it's the header's "4.6 (23)" and must not shift as the reader pages; averageRating is null (not 0.0) when nobody has reviewed. sortBy=Rating uses newest-first as its secondary, and both sorts carry a bookingReviewId tie-break so OFFSET paging can't repeat or skip. take caps at 20. parentName/photo are joined LIVE, so a deleted account reads "Deleted User". NOT ownership-filtered — it's someone else's public profile data, same posture as the rest of /providers/*. 400 InvalidRequest on an unknown sortBy/sortDirection. Mirrored on the provider host.
 POST   /pet-parents/{petParentId}/night-stay-bookings                            body { petId, serviceId, checkInDate, checkOutDate, jobNotes?, locationType } — multi-night boarding booking (PetSitter NightStay only). jobNotes is optional free text (returned on the detail read); locationType is REQUIRED (ParentLocation | ProviderLocation → 400 InvalidRequest / UnsupportedLocationType). Distinct entity from single-day bookings: the stay spans [checkInDate, checkOutDate) — checkOutDate is the pickup day, NOT a stayed night. Booker = route petParentId (ownership-filtered). Provider resolved server-side from serviceId; petId must be one of the caller's pets. Per-night capacity is race-safe (Booking.CreateNightStayBooking). DropOff/PickUp times snapshotted from the offering. Max 30 nights. Errors: 404 PetNotFound / 403 Forbidden (pet), 400 InvalidServiceId / NotNightStayService / OfferingNotConfigured / InvalidPetId / InvalidNightStayDates, 404 ProviderNotFound / PetParentNotFound, 409 ProviderInactive / CapacityExceeded / ServiceClosed / **BookingLeadTimeTooShort** (drop-off on the check-in day is under 2 h away).
-GET    /pet-parents/{petParentId}/night-stay-bookings                            the parent's own night-stay bookings, most-recent first (CheckInDate DESC), cancelled included. Ownership-filtered. [] when none. Returns sectioned cards `ParentNightStayBookingCardResponse` { booking, providerDetails, serviceDetails, cancellationPolicy, location, review } — cancellationPolicy + location added 2026-07-24, from the frozen-at-creation snapshot (serviceDetails.pricePerNight likewise prefers the price-locked rate, live only as the legacy fallback). `location` address fields are null on legacy rows without a snapshot. `review` (2026-08-09) is { canReview, rating }, identical in meaning to the single-day list's — see there.
+GET    /pet-parents/{petParentId}/night-stay-bookings                            the parent's own night-stay bookings, most-recent first (CheckInDate DESC), cancelled included. Ownership-filtered. [] when none. Returns sectioned cards `ParentNightStayBookingCardResponse` { booking, providerDetails, serviceDetails, cancellationPolicy, location, review } — cancellationPolicy + location added 2026-07-24, from the frozen-at-creation snapshot (serviceDetails.pricePerNight likewise prefers the price-locked rate, live only as the legacy fallback). `location` address fields are null on legacy rows without a snapshot. `review` (2026-08-09) is { canReview, rating }, identical in meaning to the single-day list's — see there. `isTicketRaisedByMe` + `ticketId`/`ticketRef` (2026-08-16) say whether the CALLER already has an OPEN support ticket on it — see "Have I already reported this?".
 GET    /pet-parents/{petParentId}/night-stay-bookings/{bookingId}                single night-stay booking (404 NightStayBookingNotFound if unknown or not the caller's). Ownership-filtered.
 POST   /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/status         body { status, note? } — parent sets APPROVAL_NEEDED|COMPLETED|PARENT_CANCELLED|PROVIDER_NO_SHOW (cancel is done here, mirroring single-day). Actor=Parent. 404 NightStayBookingNotFound, 403 Forbidden, 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged.
 POST   /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/no-show        parent reports the PROVIDER never showed up for the stay → sets PROVIDER_NO_SHOW (terminal, frees remaining per-night capacity, audited). Allowed from a confirmed-equivalent state or START_JOB, and only **2+ HOURS** after CheckInDate + DropOffTime (UTC) — night-stay's own grace window, NOT the single-day 30 minutes (a 09:00 check-in is reportable from 11:00). Reporting is optional: if nobody reports and the stay is still unstarted at midnight UTC on the check-in day, the scheduled external job settles it automatically (START_JOB → PARENT_NO_SHOW, confirmed-equivalent → PROVIDER_NO_SHOW). 404 NightStayBookingNotFound, 403 Forbidden, 409 BookingNotStartable, 409 NoShowTooEarly (THROW 51248), 409 BookingStatusTerminal.
@@ -4054,7 +4897,7 @@ GET    /pet-parents/{petParentId}/onboarding-status                             
 POST   /pet-parents/{petParentId}/mobile-verification/otp                        generates a 6-digit OTP, stores SHA-256 hash + last-2-digits hint with 10-minute expiry in Parent.ParentMobileOtps via Parent.CreateMobileVerificationOtp, dispatches the raw code via IPetParentMobileOtpSender (NoOp today — real SMS provider TBD). Returns { parentMobileOtpId, petParentId, mobileCountryCode, mobileNumber, dateSentUtc, expiresAtUtc }. 404 PetParentNotFound (sproc 51210).
 POST   /pet-parents/{petParentId}/mobile-verification/otp/{otpId}/verify         body { otpCode }. ALWAYS returns 200 — client branches on { isValidated, validationStatus: Validated|Invalid|Expired|Pending }. On the first successful verification, Parent.PetParents.MobileVerifiedAtUtc is set (COALESCE, so re-verification doesn't bump it). 404 ParentMobileOtpNotFound (sproc 51211); 400 InvalidRequest for empty otpCode.
 
-GET    /events                                                                   [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=... &title=] — same provider-agnostic catalog listing as the provider host; duplicated on the parent host because the two hosts authenticate against different Firebase projects. Backed by the shared IEventService — no new business logic. `title` is an optional case-insensitive "contains" search on the event title (LIKE %term%, LIKE-metacharacters escaped). Each event hydrates Cosmos physical details + carries pawPrints, bookings { maxBookings, totalBookings }, and isBookable (false once the caller already holds non-cancelled tickets, matched by JWT email).
+GET    /events                                                                   [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=... &title=] — same provider-agnostic catalog listing as the provider host; duplicated on the parent host because the two hosts authenticate against different Firebase projects. Backed by the shared IEventService — no new business logic. `title` is an optional case-insensitive "contains" search on the event title (LIKE %term%, LIKE-metacharacters escaped). Each event hydrates Cosmos physical details + carries pawPrints, bookings { maxBookings, totalBookings }, and isBookable (false once the caller already holds non-cancelled tickets, matched by JWT email). Plus `isTicketRaisedByMe` + `ticketId`/`ticketRef` (2026-08-16): whether the CALLER already has an OPEN support ticket on it.
 GET    /events/trending                                                          [?take=] top-N trending events, most engaging first. Trending score = ViewCount + ShareCount + non-cancelled (Confirmed) ticket bookings. take defaults to 20, clamped 1..100 by the sproc. Same provider-agnostic shape + Cosmos hydration + isBookable (JWT email) as GET /events; no filters. Backed by IEventService.ListTrendingAsync → Event.ListTrendingEvents (same two result sets as Event.ListEvents). Mirror of the provider host.
 GET    /events/{eventId}                                                         single event detail (SQL + Cosmos for physical). Includes pawPrints { viewCount, shareCount, inquiryCount }, bookings { maxBookings, totalBookings }, isBookable (false once the caller already holds non-cancelled tickets), paymentOptions [Cash|Digital], attendees [{ attendeeName, ticketNumber }] (names only), eventLink (online joining URL; null for physical).
 POST   /events/{eventId}/views                                                   public engagement counter (parent host copy).
@@ -4086,8 +4929,15 @@ GET    /providers/{providerId}                                                  
 > **Contact block (2026-07-27).** `email` / `mobileCountryCode` / `mobileNumber` sit at the top level, lifted the same way `description` / `servicesDescription` were, so mobile doesn't have to dig into the category branch — where a FREELANCER has nothing to find. Business sub-categories (hotel/shop/school/clinic/shelter) report the email + telephone captured on their registration; freelancers register neither (they ARE the business), so theirs falls back to the provider's own account — `ProviderAuthIdentities.Email` + the verified `Provider.Providers` mobile, read by the new narrow `IProviderContactReader` (`SqlProviderContactReader`, one indexed point read; `NullProviderContactReader` in the in-memory dev config). Since telephone became optional on business registration, a business that left it blank falls back the same way (blank counts as not-supplied, not as a value). Null only when neither source has anything.
 GET    /providers/{providerId}/agenda                                            ?serviceId= &date= — the provider's day for ONE service, laid out as a contiguous timeline of blocks so the parent can see the shape of the day and pick a slot. All three params required. Needs NO duration (unlike /availability/slots), which is the point: the parent browses first, then asks for slots once they know what they want. Returns { providerId, serviceId, date, serviceCategory, subCategory, serviceType, capacity, isOpen, isClosedForDay, openingTime, closingTime, entries: [{ startTime, endTime, entryType, status, jobId, bookingId, remainingCapacity, isBookable }] }. `entries` covers the working hours only, never overlaps, and merges neighbours that read alike (an untouched morning is ONE block). entryType ∈ Free | Booked | Break | Closed — branch on this, not on `status`. **Other parents' jobs are masked:** `status` carries the real lifecycle status (CONFIRMED, IN_PROGRESS, …) + jobId "PF-000123" + bookingId ONLY for a booking belonging to the caller (PetParentId resolved from the JWT, never the route); anyone else's reads `status: "BOOKED"` with null ids, and a Custom walk-in (no PetParentId) always masks. remainingCapacity = capacity − overlapping active bookings, the same overlap count the race-safe create sproc uses — so a Booked block with capacity left is still bookable (isBookable). isOpen false (entries empty) when the weekday is closed or an all-day closure covers the date; isClosedForDay distinguishes "away" from "not a working day". NightStay is date-granular: the whole day is ONE block, openingTime/closingTime null (a stay is booked against nights, not clock time — mirrors the create path). Backed by IProviderDailyAgendaService (Application) over the same offering/weekly-hours/closure readers as the slot service + the new IDailyAgendaReader → sproc Booking.GetAgendaForDate. 400 InvalidServiceId / OfferingNotConfigured / InvalidRequest; 404 ServiceNotRegistered. Not ownership-filtered (it's someone else's calendar) — same posture as the rest of /providers/*. Not mirrored on the provider host, which already has GET /providers/{id}/bookings?date= for its own day view.
 GET    /providers/{providerId}/availability/slots                                ?serviceId= &date= [&durationHours= | &serviceItemCode=] [&granularityMinutes=] — parent-facing free-slot query (mirror of the provider host). Backed by the shared IProviderAvailabilitySlotService. PetGroomer uses ?serviceItemCode= (duration resolved server-side from the menu item); other categories use ?durationHours=. Closures, capacity, and overlapping confirmed bookings are subtracted per-service. Same error map as provider host (InvalidServiceId, ServiceNotRegistered, OfferingNotConfigured, ServiceItemCodeRequired/NotOffered/Inactive, InvalidBookingDuration, InvalidRequest). Save/get weekly-hours endpoints on the same group (`POST /` and `GET /`) are intentionally **NOT** mirrored on the parent host — those are organiser-only; the 7-day shape is already returned by GET /providers/{providerId} under workingHours.
-POST   /pet-parents/{petParentId}/support-tickets/report-incident                body { bookingType, bookingId, comment, category?, reason? } — "Report Incident": raises a BookingIncident against the PROVIDER on that booking. bookingType is SingleDay|NightStay, case-insensitive; `comment` is what happened in the parent's own words (required, <=4000 chars, stored in the Cosmos narrative as the opening entry, NOT in SQL); `category?` and `reason?` are the reporter's two optional classifiers, both plain strings (<=100 / <=500 chars, blank stores null, values unvalidated — the vocabulary is the app's picker, so an unknown one is stored verbatim rather than refused) and both returned on every ticket read. **The provider is DERIVED from the booking, never sent** — the parent names only the booking and themselves, so a report cannot be aimed at somebody who was never party to it, and "is the caller a party to this booking" is the whole authorisation. **Reporting does NOT block the provider** (2026-08-14): nothing is written to Chat.BlockedParticipants, so the two can still message, book and find each other while support looks at the case. Returns 201 with the ticket, incl. its TK-000123 `ticketRef`. **409 TicketAlreadyOpen** when THIS BOOKING already has an open ticket, in either direction — not when the provider does: a parent with several bookings from one provider reports each of them separately, since each is its own incident. Nothing is written and the body carries the ticket already open, so the app can take them straight to it. 404 BookingNotFound / NightStayBookingNotFound; 403 Forbidden (not your booking); 400 ReportNotAppBooking (Custom walk-in — no second party to report); 400 InvalidRequest. Ownership-filtered.
+POST   /pet-parents/{petParentId}/blocks                                        body { counterpartyId, reason? } — blocks a provider. Idempotent. The blocked SIDE is never sent: a block only ever runs provider <-> parent, so the server derives it from the caller. **Product-wide** — see the Blocking section: it refuses new bookings both ways, hides each party's events from the other, closes the chat thread, and drops the provider out of GET /providers and all five searches. **⚠️ It CANCELS the parent's unfinished bookings with that provider** — the response carries `cancelledBookingCount` plus `uncancelledBookings`, which is the job already IN_PROGRESS (their pet is currently in that provider's care): the status engine refuses to cancel it, so it runs to completion and the app must say so. `reason?` is free text the blocker keeps for themselves and is never shown to the blocked party. 400 InvalidRequest (blank counterpartyId, or a self-block). Ownership-filtered, so the block can only ever be placed as the caller.
+GET    /pet-parents/{petParentId}/blocks                                        [?skip= &take=] the parent's blocked list, newest first → { blocks, totalCount, skip, take, hasMore }; take caps at 20. Only blocks the caller PLACED — one placed against them is never listed, because telling somebody they have been blocked confirms the other party acted. Each entry carries `name` (the provider's own name, joined LIVE so a deleted account reads "Deleted Provider") AND `businessName` ("Happy Paws Hotel"), resolved from the provider's Cosmos offering document since Provider.Providers holds only the person's name — one point read per distinct provider on the page, best-effort, null for a freelancer or a provider still mid-onboarding. Ownership-filtered.
+DELETE /pet-parents/{petParentId}/blocks/{blockId}                              lifts a block the parent placed. Restores contact — messaging, booking, events and search all work again — but **does NOT resurrect the bookings the block cancelled**: they were cancelled through the ordinary transition with an audit row, and their capacity went back on the provider's calendar and may since have been sold. Re-booking is a new booking. 404 BlockNotFound (unknown id and somebody else's block are one answer, so an id cannot be probed). Ownership-filtered.
+POST   /pet-parents/{petParentId}/support-tickets/report-incident                body { bookingType, bookingId, comment, category?, reason? } — "Report Incident": raises a BookingIncident against the PROVIDER on that booking. bookingType is SingleDay|NightStay, case-insensitive; `comment` is what happened in the parent's own words (required, <=4000 chars, stored in the Cosmos narrative as the opening entry, NOT in SQL); `category?` and `reason?` are the reporter's two optional classifiers, both plain strings (<=100 / <=500 chars, blank stores null, values unvalidated — the vocabulary is the app's picker, so an unknown one is stored verbatim rather than refused) and both returned on every ticket read. **The provider is DERIVED from the booking, never sent** — the parent names only the booking and themselves, so a report cannot be aimed at somebody who was never party to it, and "is the caller a party to this booking" is the whole authorisation. **Reporting does NOT block the provider** (2026-08-14): nothing is written to Block.BlockedParticipants, so the two can still message, book and find each other while support looks at the case. Returns 201 with the ticket, incl. its TK-000123 `ticketRef`. **409 TicketAlreadyOpen** when THIS BOOKING already has an open ticket, in either direction — not when the provider does: a parent with several bookings from one provider reports each of them separately, since each is its own incident. Nothing is written and the body carries the ticket already open, so the app can take them straight to it. 404 BookingNotFound / NightStayBookingNotFound; 403 Forbidden (not your booking); 400 ReportNotAppBooking (Custom walk-in — no second party to report); 400 InvalidRequest. Ownership-filtered.
 POST   /pet-parents/{petParentId}/support-tickets/report-incident-with-photos    multipart { bookingType, bookingId, comment, category?, reason?, photos[] } — "Report Incident" AND its evidence in ONE call. Same semantics as report-incident above (derived counterparty, one-open-ticket-per-booking rule, no blocking); the only difference is that up to 5 photos ride along. **Every photo is validated BEFORE the ticket is created** — count, size (<=3 MB), content type, and that this is not a chat incident — so a caller who sent a sixth photo is refused while that is still costless rather than left with a raised report only half their evidence reached; all of those answer 400 InvalidRequest with nothing written. **After the ticket exists a photo failure is reported, not thrown**: the row has committed, so failing would misreport a report that did happen. 201 → { ticket, attachedPhotoCount, photoErrors: [{ fileName, code, message }] } — photoErrors is empty on the happy path, and each entry is retryable against POST .../{ticketId}/photos, which is why the per-photo endpoint stays. On 409 TicketAlreadyOpen **nothing is uploaded** (the ticket handed back is one this call did not create). Same 404/403/400 map as report-incident. Ownership-filtered.
+POST   /pet-parents/{petParentId}/support-tickets/report-event                   body { eventId, comment?, category?, reason? } — "Report an event" (2026-08-16). Raises an EventIncident naming the event and NOBODY else: an event report records no counterparty, and the organiser is never told — support resolves them from the event when they work the case, which is also the only shape that works when a parent reports another parent's event. An event is public, so there is no attendance or ownership check: **existence is the whole test**, and 404 EventNotFound (THROW 51355) the only refusal besides validation. **`comment` is OPTIONAL here** (unlike a report against a person): when it is absent the picker's `reason` opens the ticket's narrative instead, and sending neither is a 400. **One open ticket per event PER REPORTER** — a second attendee reporting the same event gets their own ticket, since each account of it is its own; only the same person reporting it twice answers 409 TicketAlreadyOpen. Photos are allowed (see the multipart twin). 201 with the ticket + its TK-000123 ref. Ownership-filtered.
+POST   /pet-parents/{petParentId}/support-tickets/report-event-with-photos       multipart { eventId, comment?, category?, reason?, photos[] } — the same report with its evidence in one call; identical semantics and error map to report-event, and the same validate-everything-before-creating / report-don't-throw-after rules the booking twin uses. Ownership-filtered.
+POST   /pet-parents/{petParentId}/support-tickets/report-app-issue               body { comment?, category?, reason? } — "Report an app issue" (2026-08-16): something wrong with the app itself. No subject and no counterparty at all, so the ticket records only its reporter — `providerId` comes back null on a parent's, and there is nothing for the other side to see. **Uncapped**: every bug report is a different bug, so there is no subject to key a "one open ticket" rule on and 409 TicketAlreadyOpen can never fire here. `comment` optional, falling back to `reason`, exactly as on report-event. Photos (screenshots) allowed. 201 with the ticket. Ownership-filtered.
+POST   /pet-parents/{petParentId}/support-tickets/report-app-issue-with-photos   multipart { comment?, category?, reason?, photos[] } — the same, with the screenshots in one call. Ownership-filtered.
 POST   /pet-parents/{petParentId}/support-tickets/report-chat                    body { conversationId, comment, category?, reason? } — "Report Chat": raises a ChatIncident against the PROVIDER on that conversation. Same derived counterparty and the same no-blocking posture as report-incident; the one-open-ticket rule is scoped to the CONVERSATION here, so reporting a thread and reporting a booking with the same provider are independent. **It puts the thread under LEGAL HOLD**: from then until support closes the ticket neither party can clear the conversation or retract a message in it (409 ConversationUnderLegalHold naming the ticket). Both parties are held, not just the reporter — the accused is the one with a motive to erase. Note the hold preserves evidence; it does NOT stop them messaging each other. No messageId is sent and no photos can be attached: the whole thread is the evidence. 404 ConversationNotFound; 403 Forbidden (not a participant); 409 TicketAlreadyOpen; 400 InvalidRequest. Ownership-filtered.
 GET    /pet-parents/{petParentId}/support-tickets                                [?status= &sortBy=UpdatedAt|CreatedAt &sortDirection=Asc|Desc &skip= &take=] the parent's "my tickets" list. **Scoped by PARTY, not by direction** — a ticket the provider raised against you is as much yours as one you raised, and both need answering; each card carries `raisedByType` + `raisedByMe` to say which way round it is. Both kinds come back in one list (`ticketType` discriminates), the same reasoning that merges the two booking kinds in the history feed. `status` accepts the friendly group `Open` (everything not CLOSED) alongside any raw lifecycle status, comma-separated and case-insensitive — expanded to raw statuses in C#, so adding a status never touches the procedure. take caps at 20; default sort is last-activity first. Returns { tickets, totalCount, skip, take, hasMore }; no narrative on the cards (the list renders type/status/subject, all of which are on the row). 400 InvalidRequest on an unknown status/sortBy/sortDirection. Ownership-filtered.
 GET    /pet-parents/{petParentId}/support-tickets/{ticketId}                     one ticket with its NARRATIVE — the thread of what was said, oldest first, opening with the reporter's own account and then support's clarification requests and the creator's replies. Each entry carries { authorType (Provider|PetParent|**Support**), authorId (null for Support — the admin panel is not a party in this database), isMine, kind (Report|ClarificationRequest|ClarificationReply|Note), text, createdAtUtc }. `entries` comes back **empty rather than absent** when the Cosmos document cannot be read: the ticket is still real and a support screen should degrade to showing it rather than failing. `canSubmitClarification` is true only when support has asked YOU and the ticket is open. 404 TicketNotFound — unknown ticket and "not yours" are one answer, so an id cannot be probed. Ownership-filtered.
@@ -4112,9 +4962,9 @@ GET    /health
 GET    /me                                            who the server thinks you are → { participantType, participantId, firebaseUserId, canChat, userId }. canChat false = valid token, no completed profile; every chat route then answers 403 ChatProfileNotCompleted.
 
 POST   /conversations                                 body { counterpartyId } — get-or-create the caller's thread with somebody. The counterparty's TYPE is not sent: a thread always runs provider <-> parent, so the server derives it from whichever app validated the token. Idempotent by construction (UNIQUE (ProviderId, PetParentId)). Rate limited to 10/hour — opening threads with strangers is the actual spam vector, not volume within one. 404 ProviderNotFound / PetParentNotFound; 409 ProviderAccountDeleted; 403 ConversationBlocked.
-GET    /conversations                                 [?search= &skip= &take=] inbox, most recently active first; never-used threads sort last. take caps at 20. **`search` is the inbox search bar** (2026-08-14) — matched against the counterparty's LIVE-joined name and the thread's denormalised last-message preview, both of which this read already has, so searching is the same ONE indexed query and the filtered list cannot page or sort differently from the unfiltered one. Deliberately NOT full message-history search: bodies live in Cosmos partitioned by conversation, so matching them all would be a cross-partition scan per keystroke — that wants a search index, not a bigger query. Case-insensitive (database collation, no LOWER() to keep the predicate sargable), trimmed, capped at 200 chars, and LIKE metacharacters in the term are escaped so typing '%' matches a literal percent rather than every thread. Blank/omitted returns the whole inbox. Because names are joined live, a search matches what the caller can actually SEE — including "Deleted User". Counterparty name joined LIVE, so a deleted account reads "Deleted Provider" / "Deleted User". counterpartyPhotoUrl is populated for BOTH sides (2026-08-11): a pet parent's comes off their SQL row, a provider's is resolved from their Cosmos offering document by `ChatService` after the store returns — `Provider.Providers` has no photo column, which is why it used to read null. The sproc hands over the provider's `ServiceCategory` (the Cosmos partition key) so that costs ONE point read per DISTINCT provider on the page, not a SQL round trip first. Best-effort: a provider with no offering yet, or a failed Cosmos read, leaves it null rather than failing the inbox. Same source as the booking detail's `providerDetails.providerPhotoUrl`, deliberately — the face beside a thread should be the face beside the booking it is about.
+GET    /conversations                                 [?search= &skip= &take=] inbox, most recently active first; never-used threads sort last. take caps at 20. **`search` is the inbox search bar** (2026-08-14) — matched against the counterparty's LIVE-joined name and the thread's denormalised last-message preview, both of which this read already has, so searching is the same ONE indexed query and the filtered list cannot page or sort differently from the unfiltered one. Deliberately NOT full message-history search: bodies live in Cosmos partitioned by conversation, so matching them all would be a cross-partition scan per keystroke — that wants a search index, not a bigger query. Case-insensitive (database collation, no LOWER() to keep the predicate sargable), trimmed, capped at 200 chars, and LIKE metacharacters in the term are escaped so typing '%' matches a literal percent rather than every thread. Blank/omitted returns the whole inbox. Because names are joined live, a search matches what the caller can actually SEE — including "Deleted User". Counterparty name joined LIVE, so a deleted account reads "Deleted Provider" / "Deleted User". counterpartyPhotoUrl is populated for BOTH sides (2026-08-11): a pet parent's comes off their SQL row, a provider's is resolved from their Cosmos offering document by `ChatService` after the store returns — `Provider.Providers` has no photo column, which is why it used to read null. The sproc hands over the provider's `ServiceCategory` (the Cosmos partition key) so that costs ONE point read per DISTINCT provider on the page, not a SQL round trip first. Best-effort: a provider with no offering yet, or a failed Cosmos read, leaves it null rather than failing the inbox. Same source as the booking detail's `providerDetails.providerPhotoUrl`, deliberately — the face beside a thread should be the face beside the booking it is about. `isTicketRaisedByMe` + `ticketId`/`ticketRef` (2026-08-16) say whether the CALLER already has an OPEN support ticket on it — see "Have I already reported this?".
 GET    /conversations/unread-summary                  { unreadMessageCount, unreadConversationCount } — two figures because the badge wants one and "3 conversations need you" wants the other. A muted thread still counts: muting silences the push, it does not mark anything read.
-GET    /conversations/{conversationId}                thread header + your own read state. 404 ConversationNotFound for BOTH unknown and not-yours, so an id cannot be probed.
+GET    /conversations/{conversationId}                thread header + your own read state. 404 ConversationNotFound for BOTH unknown and not-yours, so an id cannot be probed. Plus `isTicketRaisedByMe` + `ticketId`/`ticketRef` (2026-08-16): whether the CALLER already has an OPEN support ticket on it.
 DELETE /conversations/{conversationId}                "Delete this chat" — for the CALLER ONLY (2026-08-14). Returns { conversationId, clearedUpToSequence, deletedAtUtc }. **The counterparty keeps everything** — every message, their unread count, their place in the thread — which is both the requirement and the only thing the storage allows: a message body is ONE Cosmos document read by both parties, so clearing it for one would clear it for both. What it writes is therefore a WATERMARK on the caller's own Chat.ConversationParticipants row: ClearedUpToSequence = the thread's last sequence, DeletedAtUtc = now, unread zeroed and the read pointer advanced. History at or below the watermark stops being returned to them (pushed into the Cosmos query as an exclusive floor, NOT filtered afterwards — filtering would return short pages and a cursor that walks down through cleared history one empty page at a time), and the thread leaves their inbox. **It comes BACK the moment the counterparty writes**, since their message pushes LastSequence past the watermark — deliberately, because a delete that stopped you receiving would be a broken conversation rather than a cleared one. Re-opening it yourself via POST /conversations also restores it to the inbox (they deliberately navigated back in) while LEAVING the watermark, so the history stays cleared — WhatsApp's behaviour. Both columns are needed: the watermark alone would hide a brand-new thread, where both sit at 0. Sproc Chat.DeleteConversationForParticipant, UPDLOCK + HOLDLOCK on the conversation row so a message committing mid-call cannot be swept under a watermark taken before it arrived. 404 ConversationNotFound for unknown AND not-yours.
 GET    /conversations/{conversationId}/bookings       [?skip= &take=] the jobs behind the thread — the chat screen's "View Jobs" (2026-08-14). Every booking of BOTH kinds between these two, newest first by service date, past and present, cancelled and completed included: unlike the two "my bookings" lists it is scoped to the PAIR, and unlike the pending-job lists it is filtered by nothing, because a finished or cancelled job is part of what they have done together. Works from either side and takes NO provider or parent id — the conversation id IS the pair, so the existing participant check is the whole authorisation. Returns { conversationId, providerId, petParentId, jobs: [...], totalCount, skip, take, hasMore }; take caps at 20. **`jobs[]` is the identical job card the two delete refusals return** (the 409 PendingJobsExist body on DELETE /pet-parents/{id} and DELETE /pets/{id}) — same 16-column SQL projection, same C# PendingJobReader, same IPendingJobEnricher filling `providerProfilePhotoUrl` (Cosmos) and the `price` block (fee percentage + live-offering fallback), both best-effort. Sproc Booking.ListBookingsForParentProvider UNIONs the two tables and appends COUNT(*) OVER() as a 17th column, so one round trip serves the page and its total. Custom walk-ins can never appear (no PetParentId). 404 ConversationNotFound.
 GET    /conversations/{conversationId}/messages       [?beforeSequence= &take=] history, newest first, take caps at 50. Ordered by SEQUENCE not timestamp — two messages can share a millisecond, never a sequence. Page back with the response's nextBeforeSequence; null means the start of the thread.
@@ -4123,9 +4973,9 @@ DELETE /conversations/{conversationId}/messages/{messageId}   SOFT delete — th
 POST   /conversations/{conversationId}/read           body { upToSequence } — clamped to the thread's own last sequence and never moves backwards, so a stale client cannot un-read a thread. Unread only reaches zero when the caller has fully caught up.
 POST   /conversations/{conversationId}/attachments    multipart { file } — <=5 MB, JPEG/PNG/WebP, uploaded to chat-attachments/<conversationId>/. Participant-authorised BEFORE the blob write. Returns the attachment block to put straight on the message you then send with kind "Image". 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat.
 
-POST   /blocks                                        body { counterpartyId, reason? } — idempotent. Stops new messages BOTH ways and stops the thread reopening; existing history stays readable, because it is part of both parties' record and is what a blocked user would need in order to report the exchange.
-GET    /blocks                                        only blocks the caller PLACED. Blocks against them are never returned — telling someone they have been blocked confirms the other party acted.
-DELETE /blocks/{chatBlockId}                          lifts one the caller placed. 404 ChatBlockNotFound (unknown and not-yours are one case).
+POST   /blocks                                        body { counterpartyId, reason? } — idempotent. **Product-wide as of 2026-08-18**: stops new messages BOTH ways AND refuses new bookings, hides each party's events from the other, and drops the provider out of browse + all five searches. The counterparty's SIDE is never sent — it is derived from whichever app validated the token. **⚠️ It also CANCELS the pair's unfinished bookings** (see the Blocking section): the response carries `cancelledBookingCount` and `uncancelledBookings`, the latter being the job already IN_PROGRESS, which the status engine refuses to cancel and which therefore runs to completion — surface it, or the user discovers a live booking with someone they just blocked. Existing chat history stays readable, because it is part of both parties' record and is what a blocked user would need in order to report the exchange. Rate limited to 10/hour as before. 400 InvalidRequest (blank id, self-block).
+GET    /blocks                                        [?skip= &take=] only blocks the caller PLACED. Blocks against them are never returned — telling someone they have been blocked confirms the other party acted. **Now PAGED** → { blocks, totalCount, skip, take, hasMore }; take caps at 20. Each entry carries `name` (joined LIVE, so a deleted account reads "Deleted Provider" / "Deleted User") AND `businessName` for a blocked provider — resolved from their Cosmos offering document, because Provider.Providers holds only the person's name and a parent who blocked "Happy Paws Hotel" must recognise it. Null for a parent, for a freelancer, and when the offering cannot be read (best-effort — the list renders either way).
+DELETE /blocks/{blockId}                              lifts one the caller placed. Restores contact but **does NOT resurrect the bookings the block cancelled** — they went through the ordinary transition with an audit row and their capacity was released, possibly since sold. 404 BlockNotFound (unknown and not-yours are one case, so an id cannot be probed). ⚠️ Renamed from `{chatBlockId}`, and the response's `chatBlockId` is now `blockId`.
 
 POST   /blob-images                                   body { blobUrl } — the same private-container fetch both other hosts carry.
 
@@ -4153,27 +5003,30 @@ PATCH  /providers/{providerId}/profile                                          
 DELETE /providers/{providerId}                                                   Account delete = ANONYMISE + permanently DISABLE, NOT a row delete. Scrubs the personal fields on Provider.Providers (name → "Deleted Provider", gender/DOB/mobile replaced, banner + mobileVerifiedAtUtc cleared), sets IsActive=0 + IsDeleted=1 + DeletedAtUtc, severs the Firebase auth identity (freeing the real uid AND phone number for a fresh sign-up), deactivates the ProviderServices rows, and deletes only operational config + media (device tokens, mobile OTPs, photos, service banners, availability, closures, cancellation policy, payout methods, service registration) — one transaction via Provider.DeleteProvider (THROW 51114). Then deletes the provider's Cosmos offering doc (the public listing, so they leave discovery) + best-effort their blobs. **RETAINED untouched:** bookings + night-stay bookings with all their children, organised events + ticket bookings, and the Booking.BookingPayments ledger — deleting them would destroy both parties' history. Orchestrated by IProviderAccountService. Idempotent. Returns { providerId, deletedAtUtc, wasAlreadyDeleted, deactivatedServiceCount, retained*Count… }. The caller's ProviderId is resolved from the JWT and must match the route → 403 Forbidden otherwise (the only ownership-enforced route on this host). 404 ProviderProfileNotFound.
 GET    /providers/{providerId}/services                                          [?includeInactive=]
 
+PATCH  /providers/{providerId}/bookings/{bookingId}/custom                       edit a walk-in the provider recorded earlier (2026-08-24). Body is the CREATE body — a FULL REPLACE, so send every field including the ones you are not changing; a partial body could not tell "cleared the notes" from "left the notes alone". **Walk-ins only** (400 NotCustomBooking): an App booking is a two-party agreement and changes through POST .../modifications, where the parent accepts or declines — a walk-in has no counterparty to ask, which is exactly why this is a plain edit. Exists because walk-ins were create-only, so a provider's later corrections to price / service / notes never left their phone and the amount the app showed could differ from the amount in earnings with nothing to reconcile them. **pricePerHour, customer/pet details, location text and notes stay editable through COMPLETED** — correcting the money after the job is the main point, and a walk-in can never be marked PAID, so no ledger row contradicts it. **serviceId + bookingDate + startTime + endTime lock once the job starts** (409 BookingScheduleLocked) — moving the window of a job already underway is incoherent and would re-check capacity against a past slot; refused rather than silently dropped, so a client cannot believe it saved a change it did not. A job that did NOT happen (cancelled / no-show / expired) refuses the edit outright (409 BookingNotEditable). Capacity and the working-hours / closure gates are re-checked ONLY when the window actually moved, so a price-only correction cannot fail because the slot has since filled or the provider has changed their hours; when it does move, the booking excludes ITSELF from the capacity count (or nudging a job by five minutes would collide with itself). Writes a FromStatus = ToStatus audit row — the status does not move, but on a one-party booking the audit trail is the only record that the terms were rewritten. 404 BookingNotFound; 403 Forbidden; 409 CapacityExceeded / ServiceClosed; 400 InvalidServiceId / InvalidBookingTime / UseNightStayEndpoint / InvalidRequest.
 POST   /providers/{providerId}/bookings                                          body carries serviceId; PetGroomer also requires serviceItemCode (one of the 18 canonical codes from the GET /pet-groomer response). App bookings enforce the 2-hour booking lead time → 409 BookingLeadTimeTooShort; the Custom walk-in create is exempt.
 GET    /providers/{providerId}/bookings                                          [?date=YYYY-MM-DD] — day-view filter
 POST   /providers/{providerId}/bookings/bulk-cancel                              body { bookings: [{ bookingId, bookingType: "SingleDay"|"NightStay" }], note? } — cancels many bookings of BOTH kinds in one call (the app's multi-select). "Delete" is a cancel: rows are never removed. Each item takes the ordinary cancel transition, so the party check, terminal / job-underway guards, audit row, freed capacity and the parent's push are identical to N single cancels — and a batch of five therefore sends five notifications. bookingType is required per item (the two kinds share no id space) and is case-insensitive. **Per-item, not all-or-nothing:** one refusal never rolls back the others. **Always 200** for a well-formed batch, even if everything was refused → { requestedCount, cancelledCount, failedCount, results: [{ bookingId, bookingType, cancelled, status, cancelledAtUtc, errorCode, message }] }; cancelledCount + failedCount == requestedCount == results.length. A cancelled item carries status + cancelledAtUtc and no error; a refused one carries errorCode + message and no status (re-reading each failure just to fill it would cost a round trip per item — refresh the list instead). Error codes are the single-booking endpoints' own: BookingNotFound / NightStayBookingNotFound / Forbidden / BookingStatusTerminal / BookingStatusUnchanged / BookingInProgress / BookingExpired / UnsupportedBookingType / InvalidRequest. Duplicate (bookingId, bookingType) pairs collapse to one cancellation. Max 50 items; 400 InvalidRequest for an empty or oversized batch. The actor is the route's providerId — the sproc's party check rejects anyone else's booking with a per-item Forbidden. No SQL change: pure orchestration over the existing transitions (IBulkBookingCancellationService).
 POST   /providers/{providerId}/bookings/{bookingId}/accept                        provider accepts → CONFIRMED; audited.
 POST   /providers/{providerId}/bookings/{bookingId}/decline                       provider rejects → PROVIDER_DECLINED (terminal, frees capacity); audited.
-POST   /providers/{providerId}/bookings/{bookingId}/start-job                     provider taps "Start Job" → START_JOB + issues the parent's start-OTP. Two gates: (1) today must BE the booking's service date — BookingDate here, CheckInDate on the night-stay twin (409 BookingNotOnServiceDate, THROW 51144 / night-stay 51264); (2) the provider must be inside their own weekly working hours (Provider.ProviderWeeklyAvailability for today, UTC — closed day or now outside StartTime..EndTime is rejected; break not consulted; unset hours = ungated → 409 OutsideWorkingHours, THROW 51137 / night-stay 51257). The scheduled start TIME does NOT gate it. 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state).
-POST   /providers/{providerId}/bookings/{bookingId}/start-job/verify              body { otpCode } — provider enters the parent's start-code → IN_PROGRESS. 6 wrong attempts cancel the job (OTP_MAX_ATTEMPTS_EXCEEDED). 400 InvalidRequest (blank), 409 BookingNotStartable (not START_JOB), 400 InvalidStartOtp, 409 StartOtpExpired, 409 OtpAttemptsExceeded.
+POST   /providers/{providerId}/bookings/{bookingId}/start-job                     **On a CUSTOM WALK-IN this returns `IN_PROGRESS`, not `START_JOB`** (2026-08-24), issues no OTP, sends no push, and skips both gates below — every one of them protects a PARENT who is waiting, and a walk-in has none. The provider's next call is /complete; /start-job/verify on a walk-in answers 409 BookingNotStartable. This is what unstuck walk-ins: the start code is readable only through the parent host, so a booking with no PetParentId could never be verified, never reached COMPLETED, and never appeared in earnings at all. App bookings are unchanged. body { location } — REQUIRED (2026-08-17): where the provider was when they answered the arrival question that led here ("have you arrived at the customer's location?" for a ParentLocation booking, "has the customer arrived?" for a ProviderLocation one). Which question was asked is derived from the booking's LocationType, so the client does not send it; both record the ArrivalConfirmed trigger. 400 LocationRequired / InvalidLocation. provider taps "Start Job" → START_JOB + issues the parent's start-OTP. Two gates: (1) today must BE the booking's service date — BookingDate here, CheckInDate on the night-stay twin (409 BookingNotOnServiceDate, THROW 51144 / night-stay 51264); (2) the provider must be inside their own weekly working hours (Provider.ProviderWeeklyAvailability for today, UTC — closed day or now outside StartTime..EndTime is rejected; break not consulted; unset hours = ungated → 409 OutsideWorkingHours, THROW 51137 / night-stay 51257). The scheduled start TIME does NOT gate it. 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state).
+POST   /providers/{providerId}/bookings/{bookingId}/start-job/verify              body { otpCode, location } — location REQUIRED (2026-08-17), recorded as JobStartProceeded but ONLY on success: a wrong code is not a job start, so the fix sent with a failed attempt is discarded. 400 LocationRequired / InvalidLocation. provider enters the parent's start-code → IN_PROGRESS. 6 wrong attempts cancel the job (OTP_MAX_ATTEMPTS_EXCEEDED). 400 InvalidRequest (blank), 409 BookingNotStartable (not START_JOB), 400 InvalidStartOtp, 409 StartOtpExpired, 409 OtpAttemptsExceeded.
 POST   /providers/{providerId}/bookings/{bookingId}/complete                      body OPTIONAL { nextConsultationDate?, prescription? } — provider marks the job done → COMPLETED (from IN_PROGRESS; no OTP). 409 BookingNotCompletable (not IN_PROGRESS); next-consultation/prescription validated first.
-POST   /providers/{providerId}/bookings/{bookingId}/paid                          body { paymentMethod: "Cash"|"Digital" } — the parent has paid the provider → PAID (from COMPLETED) + writes a Booking.BookingPayments ledger row (Amount/PawfrontFee from the price-locked total). App bookings only. 400 InvalidRequest (no method) / UnsupportedPaymentMethod / PaymentNotAppBooking (Custom walk-in), 403 Forbidden, 404 BookingNotFound, 409 BookingNotPayable (not COMPLETED) / BookingAlreadyPaid / BookingNotPriceable. Night-stay twin: POST /providers/{providerId}/night-stay-bookings/{bookingId}/paid.
+POST   /providers/{providerId}/bookings/{bookingId}/paid                          body { paymentMethod: "Cash"|"Digital", location } — location REQUIRED (2026-08-17), recorded as CashReceived in the same transaction as the ledger row; the PARENT's own fix for the same moment arrives separately on .../location. 400 LocationRequired / InvalidLocation. body { paymentMethod: "Cash"|"Digital" } — the parent has paid the provider → PAID (from COMPLETED) + writes a Booking.BookingPayments ledger row (Amount/PawfrontFee from the price-locked total). App bookings only. 400 InvalidRequest (no method) / UnsupportedPaymentMethod / PaymentNotAppBooking (Custom walk-in), 403 Forbidden, 404 BookingNotFound, 409 BookingNotPayable (not COMPLETED) / BookingAlreadyPaid / BookingNotPriceable. Night-stay twin: POST /providers/{providerId}/night-stay-bookings/{bookingId}/paid.
 POST   /providers/{providerId}/bookings/{bookingId}/status                       body { status, note? } — LEGACY back-compat shim. provider sets CONFIRMED|COMPLETED|APPROVAL_NEEDED|PROVIDER_CANCELLED|PARENT_NO_SHOW; audited. COMPLETED here mirrors /complete (from IN_PROGRESS) but skips the next-consultation/prescription extras; cancel blocked once underway (409 BookingInProgress). 403 Forbidden, 400 BookingStatusNotAllowed, 409 BookingStatusTerminal|BookingStatusUnchanged
-POST   /providers/{providerId}/bookings/{bookingId}/no-show                      provider reports the PARENT (pet) never showed up → sets PARENT_NO_SHOW (terminal, frees capacity, audited). Allowed from a confirmed-equivalent state or START_JOB, and only 30+ minutes after the booking's scheduled start (BookingDate + StartTime, UTC). Reporting is optional: if nobody reports and the job is still unstarted at the end of the PROVIDER'S WORKING DAY on the booking date (their closing time from ProviderWeeklyAvailability, or the booking's own EndTime if that is later; midnight UTC when no hours are saved), the scheduled external job settles it automatically (START_JOB → PARENT_NO_SHOW, confirmed-equivalent → PROVIDER_NO_SHOW) — this used to be JOB_EXPIRED, and until 2026-08-02 fired at the booking's own end time. Night-stay twin: POST /providers/{providerId}/night-stay-bookings/{bookingId}/no-show — gated on CheckInDate + DropOffTime + **2 HOURS** (night-stay's own window, not 30 min), and auto-settled by the scheduled external job at midnight UTC on the check-in day if the stay is still unstarted (START_JOB → PARENT_NO_SHOW, confirmed-equivalent → PROVIDER_NO_SHOW). 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state), 409 NoShowTooEarly (THROW 51128 / 51248), 409 BookingStatusTerminal
+POST   /providers/{providerId}/bookings/{bookingId}/cash-not-received            body { location } — "Cash Not Received" (2026-08-17). **LOG ONLY: nothing about the booking changes** — it stays COMPLETED with PayoutStatus 'Pending'. It records that the provider raised the payment prompt and was not paid, with their position; deliberately not a new payout outcome, because an unpaid job has a cancellation policy attached and the refund / chase leg is not built, so freezing a verdict on the money would prejudge it. The parent's own fix for the same moment goes to .../location with the same trigger. Returns the stored location event. 404 BookingNotFound; 403 Forbidden; 400 LocationRequired / InvalidLocation. Night-stay twin: .../night-stay-bookings/{bookingId}/cash-not-received.
+POST   /providers/{providerId}/bookings/{bookingId}/location                     body { trigger, location } — the PROVIDER's own fix for a moment the PARENT drove (2026-08-17); mirror of the parent host's route, same trigger vocabulary and error map. Night-stay twin under /night-stay-bookings/.
+POST   /providers/{providerId}/bookings/{bookingId}/no-show                      body { location } — REQUIRED (2026-08-17), recorded as NoShowMarked in the same transaction as the terminal status flip. The legacy POST .../status shim is gated identically when it is used to set a no-show, so it cannot be a way around the capture. 400 LocationRequired / InvalidLocation. provider reports the PARENT (pet) never showed up → sets PARENT_NO_SHOW (terminal, frees capacity, audited). Allowed from a confirmed-equivalent state or START_JOB, and only 30+ minutes after the booking's scheduled start (BookingDate + StartTime, UTC). Reporting is optional: if nobody reports and the job is still unstarted at the end of the PROVIDER'S WORKING DAY on the booking date (their closing time from ProviderWeeklyAvailability, or the booking's own EndTime if that is later; midnight UTC when no hours are saved), the scheduled external job settles it automatically (START_JOB → PARENT_NO_SHOW, confirmed-equivalent → PROVIDER_NO_SHOW) — this used to be JOB_EXPIRED, and until 2026-08-02 fired at the booking's own end time. Night-stay twin: POST /providers/{providerId}/night-stay-bookings/{bookingId}/no-show — gated on CheckInDate + DropOffTime + **2 HOURS** (night-stay's own window, not 30 min), and auto-settled by the scheduled external job at midnight UTC on the check-in day if the stay is still unstarted (START_JOB → PARENT_NO_SHOW, confirmed-equivalent → PROVIDER_NO_SHOW). 404 BookingNotFound, 403 Forbidden, 409 BookingNotStartable (wrong from-state), 409 NoShowTooEarly (THROW 51128 / 51248), 409 BookingStatusTerminal
 POST   /providers/{providerId}/bookings/{bookingId}/rating                      body { rating } — the provider's rating of the PET PARENT on a finished job. **Rating only, 1..5** — no comment, no photos (enforced three times: no comment field here, the service drops one from a direct caller, and CK_BookingReviews_ProviderRatingHasNoComment refuses to store one). Same gate as the parent's review: COMPLETED or PAID, App bookings only. Upsert — 201 on first rating, 200 on a correction. **The caller's ProviderId is resolved from the JWT and must match the route → 403 Forbidden otherwise** (one of the few ownership-enforced routes on this host, alongside earnings and account-delete): the sproc's party check compares the actor to the booking's ProviderId, so trusting the route would let anyone knowing a provider id and one of their booking ids write a rating AS that provider. 404 BookingNotFound; 409 BookingNotReviewable; 400 ReviewNotAppBooking / InvalidRequest. Night-stay twin: POST /providers/{providerId}/night-stay-bookings/{bookingId}/rating.
 GET    /providers/{providerId}/reviews                                          [?sortBy=Date|Rating &sortDirection=Asc|Desc &skip= &take=] the reviews parents have left for this provider, with the whole-population summary — the provider's "my reviews" screen. Identical shape and behaviour to the parent host's copy (see there). Deliberately NOT ownership-checked: these are public data, served unfiltered on the parent host too, so restricting it here would only stop the provider seeing what every parent already can.
 POST   /providers/{providerId}/bookings/{bookingId}/prescription               body { prescriptionText?, isPetVaccinated, vaccinations: [...] } — vet records/edits the visit prescription (upsert). Vet bookings only, provider-only, only from IN_PROGRESS/COMPLETED. Returns the saved prescription block. 404 BookingNotFound, 403 Forbidden, 400 PrescriptionNotVetBooking, 409 PrescriptionNotAllowed. Also settable via the `prescription` block on .../complete.
 GET    /providers/{providerId}/bookings/{bookingId}/terms-changes                terms-changes` — the provider's terms that changed since the booking was created (price, cancellation policy, drop-off/pick-up, selected-location address) plus rule-violation rows (fixed duration / minimum duration / minimum nights) checked against the booked window. Always 200 → { bookingId, hasChanges, changes: [{ field, changeType, bookedValue, currentValue, message }] }; hasChanges false = no confirmation sheet. Feeds `acknowledgeTermsChanges` on POST .../modifications (409 BookingTermsChanged without it once drifted). 404 BookingNotFound when the booking isn't this provider's. Night-stay twin: GET /providers/{providerId}/night-stay-bookings/{bookingId}/terms-changes.
 GET    /providers/{providerId}/bookings/{bookingId}/status-history               full status audit trail, oldest-first (404 if not this provider's booking)
-GET    /providers/{providerId}/earnings/overview                                 the earnings landing screen in one call: lifetime totals + thisWeek/thisMonth/thisYear, all resolved from ONE instant (four separate calls could straddle midnight UTC and mix two weeks into one screen). Each block carries counts (completed / paid / awaitingPayment / unpriced) and money three ways — grossAmount (what parents pay, the provider holds it), pawfrontFee (commission collected on Pawfront's behalf, owed back), netAmount (gross − fee, the headline) — each split into received* (marked PAID) and awaiting* (job COMPLETED, cash not yet recorded). privateJobCount/privateJobAmount report Custom walk-ins, which are off-platform and excluded from every other figure. **Ownership-enforced from the JWT → 403 Forbidden on a mismatch** (revenue data; unlike the rest of this host it does not trust the route id).
+GET    /providers/{providerId}/earnings/overview                                 the earnings landing screen in one call: lifetime totals + thisWeek/thisMonth/thisYear, all resolved from ONE instant (four separate calls could straddle midnight UTC and mix two weeks into one screen). Each block carries counts (completed / paid / awaitingPayment / unpriced) and money three ways — grossAmount (what parents pay, the provider holds it), pawfrontFee (commission collected on Pawfront's behalf, owed back), netAmount (gross − fee, the headline) — each split into received* (marked PAID) and awaiting* (job COMPLETED, cash not yet recorded). privateJobCount/privateJobAmount report Custom walk-ins, which are off-platform and excluded from every other figure. Each block ALSO carries the UNREALISED jobs (2026-08-24) — cancelledJobCount/Amount (cancelled or declined), noShowJobCount/Amount, expiredJobCount/Amount, and their sum unrealisedJobCount/unrealisedAmount — the money that never arrived, reported alongside and deliberately NOT part of grossAmount/netAmount, since nothing moved on them. Each amount is what the job would have been worth from its price-lock; no fee travels with them, because a commission on money that never changed hands is not owed. Bookings still in flight are in neither set. **Ownership-enforced from the JWT → 403 Forbidden on a mismatch** (revenue data; unlike the rest of this host it does not trust the route id).
 GET    /providers/{providerId}/earnings                                          [?period=Weekly|Monthly|Quarterly|Yearly|AllTime] the same totals scoped to ONE calendar period (default AllTime), plus the resolved periodStart/periodEnd so the client can label the screen without redoing calendar maths. Periods are calendar-aligned in UTC and cover the WHOLE period, not truncated at today (a booking can be marked COMPLETED ahead of its service date). 400 InvalidRequest on an unknown period; 403 Forbidden.
-GET    /providers/{providerId}/earnings/bookings                                 [?period= &from= &to= &sortBy=Date|Earnings &sortDirection=Asc|Desc &skip= &take=] which jobs produced the money — single-day and night-stay merged, bookingType discriminates. Explicit from/to override period; take is capped at 20 server-side; sort defaults to Date/Desc with a BookingId tie-break (without it OFFSET paging repeats or skips rows sharing a date or amount). Rows carry jobId (PF-000123), payoutId (PO-000123) + payoutStatus, serviceDate, grossAmount/pawfrontFee/netAmount, isPaid, paidAtUtc, paymentMethod, and the customer + pet name. Reconciles exactly with the summary over the same range because both read Booking.BookingAmounts. Custom walk-ins ARE listed but flagged isPrivate — they are real work, just not part of the platform totals. 400 InvalidRequest (bad period/sortBy/sortDirection, or from > to); 403 Forbidden.
+GET    /providers/{providerId}/earnings/bookings                                 [?period= &from= &to= &status= &sortBy=Date|Earnings &sortDirection=Asc|Desc &skip= &take=] which jobs produced the money — or, with a status filter, which produced nothing — single-day and night-stay merged, bookingType discriminates. Explicit from/to override period; take is capped at 20 server-side; sort defaults to Date/Desc with a BookingId tie-break (without it OFFSET paging repeats or skips rows sharing a date or amount). Rows carry jobId (PF-000123), payoutId (PO-000123) + payoutStatus, serviceDate, grossAmount/pawfrontFee/netAmount, isPaid, paidAtUtc, paymentMethod, and the customer + pet name. Reconciles exactly with the summary over the same range because both read Booking.BookingAmounts. Custom walk-ins ARE listed but flagged isPrivate — they are real work, just not part of the platform totals. `status` (2026-08-24) takes the friendly groups Completed | Upcoming | Cancelled | NoShow | Expired, or raw lifecycle statuses, comma-separated and mixed freely — the SAME vocabulary the parent host's history filter takes (shared `BookingStatusFilter`), so a client learns it once. OMIT it and the rows are the earned ones (COMPLETED/PAID), exactly as before — the default is back-compatible on purpose, since it is what keeps the list reconciling with the summary. SUPPLY it and it REPLACES the earned gate rather than intersecting with it, otherwise ?status=Cancelled would return nothing. Every row carries isEarned so a mixed page renders without the app re-deriving that rule; on an unrealised row grossAmount is what the job WOULD have been worth and pawfrontFee/netAmount are not money anybody owes. The response echoes back the expanded `statuses` it actually used (empty = earned only). ?status=Cancelled reconciles with the summary's unrealisedAmount the way the default page reconciles with grossAmount. 400 InvalidRequest (bad period/status/sortBy/sortDirection, or from > to); 403 Forbidden.
 
-GET    /bookings/{bookingId}
+GET    /bookings/{bookingId}                                          single booking detail (unscoped on this host). Carries `isTicketRaisedByMe` + `ticketId`/`ticketRef` (2026-08-16) — resolved from the JWT, not the booking's provider, since this route is not provider-scoped.
 POST   /bookings/{bookingId}/cancel                                              parent cancel → sets PARENT_CANCELLED + audit
 GET    /pet-parents/{petParentId}/bookings
 
@@ -4249,7 +5102,7 @@ POST   /providers/{providerId}/events
 PUT    /providers/{providerId}/events/{eventId}                        full-replace edit (every field). 404 EventNotFound (not found/not owned), 400 InvalidRequest. Reconciles Cosmos physical doc; returns full detail.
 PATCH  /providers/{providerId}/events/{eventId}                        partial edit — body fields are all Optional<T>; only supplied fields change (explicit null clears, e.g. bannerImageUrl). Reads current event, merges, reuses the full-replace update path (full re-validation). 404 EventNotFound; 400 InvalidRequest.
 GET    /providers/{providerId}/events                                  each event includes pawPrints + bookings { maxBookings, totalBookings }
-GET    /events                                                         [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=... &title=] provider-agnostic catalog listing. title = optional case-insensitive "contains" search on the event title (LIKE %term%, metacharacters escaped). Each event carries pawPrints, bookings { maxBookings, totalBookings }, and isBookable (false once the caller already holds non-cancelled tickets, matched by JWT email).
+GET    /events                                                         [?eventCategory= &eventType= &startDate= &endDate= &isChildFriendly= &amenities=... &title=] provider-agnostic catalog listing. title = optional case-insensitive "contains" search on the event title (LIKE %term%, metacharacters escaped). Each event carries pawPrints, bookings { maxBookings, totalBookings }, and isBookable (false once the caller already holds non-cancelled tickets, matched by JWT email). Plus `isTicketRaisedByMe` + `ticketId`/`ticketRef` (2026-08-16): whether the CALLER already has an OPEN support ticket on it.
 GET    /events/trending                                                [?take=] top-N trending events, most engaging first. Trending score = ViewCount + ShareCount + non-cancelled (Confirmed) ticket bookings. take defaults to 20, clamped 1..100. Same shape + Cosmos hydration + isBookable as GET /events; no filters. Backed by IEventService.ListTrendingAsync → Event.ListTrendingEvents. Mirrored on the parent host.
 GET    /events/{eventId}                                               includes pawPrints, bookings { maxBookings, totalBookings }, isBookable (false once the caller already holds non-cancelled tickets), paymentOptions [Cash|Digital], attendees [{ attendeeName, ticketNumber }], eventLink (online joining URL; null for physical)
 
@@ -4267,12 +5120,19 @@ POST   /events/{eventId}/payout-methods                               body { pay
 GET    /providers/{providerId}/events/{eventId}/attendees              organiser only — one entry per ticket
 GET    /providers/{providerId}/events/{eventId}/metrics                organiser only — views, shares, inquiries, confirmedAttendees, earnings
 
+POST   /providers/{providerId}/blocks                                  body { counterpartyId, reason? } — blocks a pet parent. Mirror of the parent host's route (see there for the full semantics): idempotent, blocked side derived, product-wide, and **it cancels the pair's unfinished bookings** with `uncancelledBookings` reporting the job already underway. **Every block route on this host resolves the caller's own ProviderId from the JWT and 403s on a mismatch**, joining earnings, ratings, account-delete and support tickets as the exceptions to this host's "trust the route id" posture — it matters as much as anywhere, since trusting the route would let anyone knowing a provider id block that provider's customers and cancel their bookings in the process. 400 InvalidRequest; 403 Forbidden.
+GET    /providers/{providerId}/blocks                                  [?skip= &take=] the provider's blocked list, newest first, paged the same way (take caps at 20). Only blocks the caller PLACED. `businessName` is null here — the blocked party is a pet parent, who has none; their `photoUrl` comes off their SQL row. 403 Forbidden.
+DELETE /providers/{providerId}/blocks/{blockId}                        lifts a block the provider placed. Restores contact but not the cancelled bookings. 404 BlockNotFound (unknown and not-yours are one case); 403 Forbidden.
 POST   /providers/{providerId}/support-tickets/report-incident          body { bookingType, bookingId, comment, category?, reason? } — "Report Incident" against the PET PARENT on that booking. Mirror of the parent host's route (see there for the full semantics): the counterparty is derived from the booking, reporting does not block the parent, and one open ticket per BOOKING is enforced in either direction. **Every support-ticket route on this host resolves the caller's own ProviderId from the JWT and 403s on a mismatch**, joining earnings, ratings and account-delete as the exceptions to this host's "trust the route id" posture — it matters more here than almost anywhere, since trusting the route would let anyone who knew a provider id file a report AS that provider. 201 + the ticket with its TK-000123 `ticketRef`; 409 TicketAlreadyOpen carrying the open ticket; 404 BookingNotFound / NightStayBookingNotFound; 403 Forbidden; 400 ReportNotAppBooking / InvalidRequest.
 POST   /providers/{providerId}/support-tickets/report-incident-with-photos multipart { bookingType, bookingId, comment, category?, reason?, photos[] } — "Report Incident" AND its evidence in ONE call; the multipart twin of report-incident above. Identical semantics and error map to the parent host's copy (see there): photos validated in full BEFORE the ticket is created, photo failures reported rather than thrown once it exists, and nothing uploaded on 409 TicketAlreadyOpen. JWT-ownership checked like every route on this host.
+POST   /providers/{providerId}/support-tickets/report-event             body { eventId, comment?, category?, reason? } — "Report an event" (2026-08-16). Mirror of the parent host's route (see there): no counterparty is recorded, the organiser is never told, existence is the only check (404 EventNotFound), `comment` is optional and falls back to `reason`, and the one-open-ticket rule is per event PER REPORTER — so a provider and a parent reporting the same event each get their own ticket. JWT-ownership checked like every route on this host.
+POST   /providers/{providerId}/support-tickets/report-event-with-photos multipart { eventId, comment?, category?, reason?, photos[] } — the same report with its evidence in one call.
+POST   /providers/{providerId}/support-tickets/report-app-issue         body { comment?, category?, reason? } — "Report an app issue" (2026-08-16). No subject, no counterparty, no cap; `comment` optional, falling back to `reason`. Mirror of the parent host's route.
+POST   /providers/{providerId}/support-tickets/report-app-issue-with-photos multipart { comment?, category?, reason?, photos[] } — the same, with the screenshots in one call.
 POST   /providers/{providerId}/support-tickets/report-chat              body { conversationId, comment, category?, reason? } — "Report Chat" against the PET PARENT on that conversation. One open ticket per CONVERSATION, no blocking; **puts the thread under legal hold**, so from then until support closes the ticket neither party can clear it or retract a message (409 ConversationUnderLegalHold). No photos — the thread is the evidence. 404 ConversationNotFound; 403 Forbidden; 409 TicketAlreadyOpen; 400 InvalidRequest.
 GET    /providers/{providerId}/support-tickets                          [?status= &sortBy=UpdatedAt|CreatedAt &sortDirection=Asc|Desc &skip= &take=] the provider's "my tickets" list — scoped by party, not direction, so it includes tickets the parent raised against them. Identical shape and filter vocabulary to the parent host's copy. 400 InvalidRequest; 403 Forbidden.
 GET    /providers/{providerId}/support-tickets/{ticketId}               one ticket with its narrative thread. Identical shape to the parent host's copy. 404 TicketNotFound (unknown and "not yours" are one answer); 403 Forbidden.
-POST   /providers/{providerId}/support-tickets/{ticketId}/photos        multipart { file } — one evidence photo, <=3 MB, JPEG/PNG/WebP, to incident-photos/<ticketId>/. Max 5, booking incidents only, scoped to the ticket's creator, and NO delete path. Returns the whole ticket. 404 TicketNotFound; 409 TicketPhotoLimitReached / TicketClosed; 400 TicketPhotoNotBookingIncident / InvalidFile / ImageTooLarge / UnsupportedImageFormat; 403 Forbidden.
+POST   /providers/{providerId}/support-tickets/{ticketId}/photos        multipart { file } — one evidence photo, <=3 MB, JPEG/PNG/WebP, to incident-photos/<ticketId>/. Max 5, on every kind EXCEPT a chat incident (2026-08-16), scoped to the ticket's creator, and NO delete path. Returns the whole ticket. 404 TicketNotFound; 409 TicketPhotoLimitReached / TicketClosed; 400 TicketPhotoNotBookingIncident / InvalidFile / ImageTooLarge / UnsupportedImageFormat; 403 Forbidden.
 POST   /providers/{providerId}/support-tickets/{ticketId}/clarification body { reply } — the creator answers support; the only status transition either app can drive (ASKED -> RECEIVED). Cosmos is written before the status moves. 404 TicketNotFound; 409 TicketClosed / NoClarificationRequested; 400 InvalidRequest; 403 Forbidden.
 
 POST   /blob-images                                                    body: { blobUrl } — streams bytes from the private blob container

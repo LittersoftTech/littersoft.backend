@@ -7,11 +7,17 @@
 -- deliberately not checked.
 -- THROWs: 51251 not found, 51252 forbidden, 51253 not startable,
 -- 51264 not the stay's check-in date, 51257 outside the provider's working hours.
+-- Also records the provider's ARRIVAL geolocation — see [Booking].[StartBooking]
+-- for the reasoning; here the arrival is the drop-off hand-over on the check-in day.
 CREATE OR ALTER PROCEDURE [Booking].[StartNightStayBooking]
     @NightStayBookingId UNIQUEIDENTIFIER,
     @ProviderId UNIQUEIDENTIFIER,
     @NewCode NVARCHAR(6),
-    @TtlMinutes INT = 10
+    @TtlMinutes INT = 10,
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -78,6 +84,17 @@ BEGIN
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@NightStayBookingId, @CurrentStatus, N'START_JOB', N'Provider', @ProviderId, N'Job start requested; start code issued to parent');
+
+    -- Where the provider was when they confirmed arrival.
+    IF @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[NightStayBookingLocationEvents]
+            ([NightStayBookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@NightStayBookingId, N'ArrivalConfirmed', N'Provider', @ProviderId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
 
     UPDATE [Booking].[NightStayBookingStartOtps]
     SET [Status] = N'Expired'

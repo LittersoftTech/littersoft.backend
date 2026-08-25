@@ -4,6 +4,8 @@ using Pawfront.Application.Storage;
 using Pawfront.Contracts.Common;
 using Pawfront.Contracts.Events;
 using Pawfront.Contracts.Services.PetSitter;
+using Pawfront.Application.Support;
+using Pawfront.Application.ProviderOnboarding;
 
 namespace Pawfront.Api.Endpoints;
 
@@ -286,6 +288,8 @@ internal static class EventEndpoints
         HttpContext httpContext,
         IEventService eventService,
         IEventBookingService bookingService,
+        IProviderOnboardingService onboardingService,
+        IMySupportTicketLookup ticketLookup,
         CancellationToken cancellationToken)
     {
         try
@@ -306,8 +310,14 @@ internal static class EventEndpoints
             var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
                 httpContext.User.FindFirstValue("email"), cancellationToken);
 
+            // One read for the whole page — the caller's own open tickets, keyed by
+            // subject.
+            var myTickets = await MySupportTickets.ForCallerAsync(
+                httpContext, onboardingService, ticketLookup, cancellationToken);
+
             return ApiResults.Ok(results
-                .Select(r => ToResponse(r, !bookedEventIds.Contains(r.EventId)))
+                .Select(r => ToResponse(
+                    r, !bookedEventIds.Contains(r.EventId), myTickets.ForEvent(r.EventId)))
                 .ToArray());
         }
         catch (ArgumentException exception)
@@ -321,6 +331,8 @@ internal static class EventEndpoints
         HttpContext httpContext,
         IEventService eventService,
         IEventBookingService bookingService,
+        IProviderOnboardingService onboardingService,
+        IMySupportTicketLookup ticketLookup,
         CancellationToken cancellationToken)
     {
         var result = await eventService.GetAsync(eventId, cancellationToken);
@@ -331,7 +343,11 @@ internal static class EventEndpoints
 
         var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
             httpContext.User.FindFirstValue("email"), cancellationToken);
-        return ApiResults.Ok(ToResponse(result, !bookedEventIds.Contains(result.EventId)));
+        var myTickets = await MySupportTickets.ForCallerAsync(
+            httpContext, onboardingService, ticketLookup, cancellationToken);
+
+        return ApiResults.Ok(ToResponse(
+            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId)));
     }
 
     private static async Task<IResult> Trending(
@@ -339,6 +355,8 @@ internal static class EventEndpoints
         HttpContext httpContext,
         IEventService eventService,
         IEventBookingService bookingService,
+        IProviderOnboardingService onboardingService,
+        IMySupportTicketLookup ticketLookup,
         CancellationToken cancellationToken)
     {
         // Default to 20; the sproc clamps to 1..100.
@@ -348,13 +366,19 @@ internal static class EventEndpoints
         // Booker identity is the caller's Firebase email claim.
         var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
             httpContext.User.FindFirstValue("email"), cancellationToken);
+        var myTickets = await MySupportTickets.ForCallerAsync(
+            httpContext, onboardingService, ticketLookup, cancellationToken);
 
         return ApiResults.Ok(results
-            .Select(r => ToResponse(r, !bookedEventIds.Contains(r.EventId)))
+            .Select(r => ToResponse(
+                r, !bookedEventIds.Contains(r.EventId), myTickets.ForEvent(r.EventId)))
             .ToArray());
     }
 
-    private static EventResponse ToResponse(EventResult result, bool isBookable = true)
+    private static EventResponse ToResponse(
+        EventResult result,
+        bool isBookable = true,
+        MySupportTicketRef? myTicket = null)
     {
         return new EventResponse(
             result.EventId,
@@ -401,7 +425,13 @@ internal static class EventEndpoints
                 .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber))
                 .ToArray(),
             result.CreatedAtUtc,
-            result.UpdatedAtUtc);
+            result.UpdatedAtUtc,
+            // The caller's own open ticket on this event. Null on organiser-context
+            // reads, which are not reporting surfaces — the same posture isBookable
+            // takes there.
+            IsTicketRaisedByMe: myTicket is not null,
+            TicketId: myTicket?.TicketId,
+            TicketRef: myTicket?.TicketRef);
     }
 
     /// <summary>

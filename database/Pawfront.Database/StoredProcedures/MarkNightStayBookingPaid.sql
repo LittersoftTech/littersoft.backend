@@ -5,12 +5,19 @@
 -- there is no Custom check. Provider-only, paid at most once.
 -- THROWs: 51280 not found, 51281 not the provider, 51282 not COMPLETED,
 -- 51283 already paid.
+-- Also records the provider's "Cash Received" geolocation — see
+-- [Booking].[MarkBookingPaid]. The parent's own fix arrives separately, via
+-- [Booking].[RecordNightStayBookingLocationEvent].
 CREATE OR ALTER PROCEDURE [Booking].[MarkNightStayBookingPaid]
     @NightStayBookingId UNIQUEIDENTIFIER,
     @ProviderId UNIQUEIDENTIFIER,
     @Amount DECIMAL(10, 2),
     @PawfrontFee DECIMAL(10, 2),
-    @PaymentMethod NVARCHAR(16)
+    @PaymentMethod NVARCHAR(16),
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -74,6 +81,17 @@ BEGIN
         ([BookingType], [BookingId], [ProviderId], [PetParentId], [Amount], [PawfrontFee], [PaymentMethod], [PaidAtUtc])
     VALUES
         (N'NightStay', @NightStayBookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
+
+    -- Where the provider was when they took the money.
+    IF @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[NightStayBookingLocationEvents]
+            ([NightStayBookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@NightStayBookingId, N'CashReceived', N'Provider', @ProviderId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
 
     -- The ledger's figure, not a re-derivation — the receipt must match the row.
     DECLARE @AmountText NVARCHAR(64) =

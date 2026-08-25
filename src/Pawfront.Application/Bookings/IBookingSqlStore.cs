@@ -65,6 +65,40 @@ public interface IBookingSqlStore
         int capacity,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Full-replace edit of a Source = 'Custom' booking
+    /// (<c>Booking.UpdateCustomBooking</c>). Re-checks the service and the
+    /// per-service capacity only when the service or the window actually moved, so
+    /// a price-only correction cannot fail because the slot has since filled.
+    /// Throws <see cref="BookingNotFoundException"/> (51380),
+    /// <see cref="BookingStatusForbiddenException"/> (51381),
+    /// <see cref="BookingNotCustomException"/> (51382),
+    /// <see cref="CustomBookingNotEditableException"/> (51383),
+    /// <see cref="CustomBookingScheduleLockedException"/> (51384),
+    /// <see cref="BookingServiceInvalidException"/> (51066) or
+    /// <see cref="BookingCapacityExceededException"/> (51062).
+    /// </summary>
+    Task<BookingResult> UpdateCustomAsync(
+        Guid bookingId,
+        Guid providerId,
+        Guid serviceId,
+        string serviceCategory,
+        string subCategory,
+        string customerName,
+        string customerMobileCountryCode,
+        string customerMobile,
+        string animalType,
+        string petName,
+        DateOnly bookingDate,
+        TimeOnly startTime,
+        TimeOnly endTime,
+        string serviceLocation,
+        string? customerLocation,
+        decimal pricePerHour,
+        string? jobNotes,
+        int capacity,
+        CancellationToken cancellationToken);
+
     Task<BookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
 
     /// <summary>
@@ -118,6 +152,9 @@ public interface IBookingSqlStore
         BookingStatusActor actor,
         Guid actorId,
         string? note,
+        // The acting party's position. Written only for the two NO-SHOW
+        // transitions; null for every other status this engine serves.
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
@@ -131,6 +168,8 @@ public interface IBookingSqlStore
         Guid bookingId,
         string newCode,
         int ttlMinutes,
+        // Where the parent was when the code went on screen.
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     /// <summary>
@@ -144,6 +183,8 @@ public interface IBookingSqlStore
         Guid providerId,
         string newCode,
         int ttlMinutes,
+        // Where the provider was when they confirmed arrival.
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     /// <summary>
@@ -154,6 +195,8 @@ public interface IBookingSqlStore
         Guid bookingId,
         Guid providerId,
         string otpCode,
+        // Written only on the success path — a wrong code is not a job start.
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     /// <summary>
@@ -176,6 +219,8 @@ public interface IBookingSqlStore
         decimal amount,
         decimal pawfrontFee,
         string paymentMethod,
+        // Where the provider was when the cash changed hands.
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     /// <summary>Stages a date/time-change proposal and flips the booking status.</summary>
@@ -216,6 +261,8 @@ public interface IBookingSqlStore
         Guid bookingId,
         Guid providerId,
         string photoUrl,
+        // Where the provider was when they took the photo; one row per photo.
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(

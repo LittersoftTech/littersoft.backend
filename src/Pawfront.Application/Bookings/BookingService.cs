@@ -194,6 +194,125 @@ internal sealed class BookingService(
         return new BookingLocationResult(locationType, addressLine, city, zipCode, latitude, longitude);
     }
 
+    public async Task<BookingResult> UpdateCustomAsync(
+        UpdateCustomBookingCommand command,
+        CancellationToken cancellationToken)
+    {
+        // 0. Field-level validation — identical to the create path, since this is a
+        // full replace of the same form.
+        var customerName = Required(command.CustomerName, nameof(command.CustomerName), maxLength: 200);
+        var countryCode = Required(command.CustomerMobileCountryCode, nameof(command.CustomerMobileCountryCode), maxLength: 8);
+        var mobile = Required(command.CustomerMobile, nameof(command.CustomerMobile), maxLength: 32);
+        var petName = Required(command.PetName, nameof(command.PetName), maxLength: 100);
+        var animalType = NormaliseAnimalType(command.AnimalType);
+        var serviceLocation = NormaliseServiceLocation(command.ServiceLocation);
+        var customerLocation = NormaliseCustomerLocation(command.CustomerLocation, serviceLocation);
+        var jobNotes = TrimOrNull(command.JobNotes, maxLength: 2000, nameof(command.JobNotes));
+
+        if (command.PricePerHour < 0m)
+        {
+            throw new ArgumentException(
+                "PricePerHour must be greater than or equal to 0.",
+                nameof(command.PricePerHour));
+        }
+
+        if (command.StartTime >= command.EndTime)
+        {
+            throw new InvalidBookingTimeException("StartTime must be earlier than EndTime.");
+        }
+
+        // 1. Read the booking first. Not just to fail early: the calendar gates
+        // below must run ONLY when the window actually moved, and that comparison
+        // needs the stored values. Without it, a provider correcting a price would
+        // be refused because their working hours had changed since — which is the
+        // opposite of what this endpoint is for. SQL re-checks all of it under
+        // UPDLOCK, so this read is for shaping the request, not for safety.
+        var existing = await sqlStore.GetAsync(command.BookingId, cancellationToken)
+            ?? throw new BookingNotFoundException(command.BookingId);
+
+        if (existing.ProviderId != command.ProviderId)
+        {
+            throw new BookingStatusForbiddenException(command.BookingId);
+        }
+
+        // "Custom" as a literal, matching how the endpoints and the sprocs spell it.
+        if (!string.Equals(existing.Source, "Custom", StringComparison.Ordinal))
+        {
+            throw new BookingNotCustomException(command.BookingId);
+        }
+
+        if (BookingStatuses.Cancelled.Contains(existing.Status))
+        {
+            throw new CustomBookingNotEditableException(command.BookingId, existing.Status);
+        }
+
+        var scheduleChanged =
+            existing.ServiceId != command.ServiceId
+            || existing.BookingDate != command.BookingDate
+            || existing.StartTime != command.StartTime
+            || existing.EndTime != command.EndTime;
+
+        if (scheduleChanged && !string.Equals(existing.Status, BookingStatuses.Confirmed, StringComparison.Ordinal))
+        {
+            throw new CustomBookingScheduleLockedException(command.BookingId, existing.Status);
+        }
+
+        // 2. Resolve the service for capacity + ownership. Done even on a
+        // price-only edit, because the capacity figure has to be handed to SQL
+        // either way and resolving it here keeps one code path.
+        var resolution = await offeringResolver.ResolveAsync(command.ServiceId, cancellationToken);
+        var offering = resolution switch
+        {
+            OfferingResolution.NotFound => throw new BookingServiceInvalidException(command.ServiceId, command.ProviderId),
+            OfferingResolution.Inactive => throw new BookingServiceInvalidException(command.ServiceId, command.ProviderId),
+            OfferingResolution.NotConfigured nc => throw new BookingOfferingNotConfiguredException(nc.ProviderId, nc.ServiceCategory),
+            OfferingResolution.Resolved r when r.ProviderId != command.ProviderId
+                => throw new BookingServiceInvalidException(command.ServiceId, command.ProviderId),
+            OfferingResolution.Resolved r => r,
+            _ => throw new InvalidOperationException("Unknown offering resolution.")
+        };
+
+        if (offering.ServiceType == ProviderServiceTypes.NightStay)
+        {
+            throw new BookingNightStayUseDedicatedEndpointException();
+        }
+
+        // 3. Calendar gates, only for a window that actually moved — same two the
+        // create path runs, and still no booking-lead-time check: a walk-in is
+        // recorded as it happens, so demanding two hours' notice on an edit would
+        // be as unusable as it would be on the create.
+        if (scheduleChanged)
+        {
+            await ValidateAgainstAvailabilityAsync(
+                command.ProviderId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
+
+            await ValidateAgainstClosuresAsync(
+                command.ServiceId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
+        }
+
+        // 4. Hand off to SQL (race-safe re-check + update).
+        return await sqlStore.UpdateCustomAsync(
+            command.BookingId,
+            command.ProviderId,
+            command.ServiceId,
+            offering.ServiceCategory,
+            offering.SubCategory,
+            customerName,
+            countryCode,
+            mobile,
+            animalType,
+            petName,
+            command.BookingDate,
+            command.StartTime,
+            command.EndTime,
+            serviceLocation,
+            customerLocation,
+            command.PricePerHour,
+            jobNotes,
+            offering.Capacity,
+            cancellationToken);
+    }
+
     public async Task<BookingResult> CreateCustomAsync(
         CreateCustomBookingCommand command,
         CancellationToken cancellationToken)
@@ -498,12 +617,25 @@ internal sealed class BookingService(
         // Reject an unknown status with a clean 400 before touching SQL; the
         // sproc still enforces role + transition rules authoritatively.
         var newStatus = BookingStatuses.Normalize(command.NewStatus);
+
+        // A no-show is one of the evidenced moments, so it cannot be recorded
+        // without a position. Enforced HERE rather than in the endpoints because
+        // this is the single point both hosts' /no-show routes and the legacy
+        // /status shim funnel through — the shim can set a no-show too, and
+        // gating only the dedicated routes would have left it as a way around
+        // the capture. Every other status this engine serves passes null.
+        var location = BookingStatuses.NoShow.Contains(newStatus)
+            ? CapturedLocation.Require(command.Location, "report a no-show")
+            : command.Location;
+        location?.Validate();
+
         return sqlStore.UpdateStatusAsync(
             command.BookingId,
             newStatus,
             command.Actor,
             command.ActorId,
             command.Note,
+            location,
             cancellationToken);
     }
 
@@ -586,6 +718,7 @@ internal sealed class BookingService(
         CancellationToken cancellationToken)
     {
         var method = BookingPaymentMethods.Normalize(command.PaymentMethod);
+        var location = CapturedLocation.Require(command.Location, "record a payment");
 
         // The amount is the booking's price-locked total (same figure the detail
         // read shows) — a single source of truth for pricing. The sproc enforces
@@ -603,6 +736,7 @@ internal sealed class BookingService(
             detail.TotalAmount.Value,
             detail.PawfrontFee ?? 0m,
             method,
+            location,
             cancellationToken);
     }
 
@@ -678,16 +812,27 @@ internal sealed class BookingService(
 
     private const int StartOtpTtlMinutes = 10;
 
-    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken)
-        => sqlStore.IssueStartOtpAsync(bookingId, GenerateOtpCode(), StartOtpTtlMinutes, cancellationToken);
+    public Task<StartOtpResult> IssueStartOtpAsync(
+        Guid bookingId, CapturedLocation? location, CancellationToken cancellationToken)
+    {
+        var fix = CapturedLocation.Require(location, "show your start code");
+        return sqlStore.IssueStartOtpAsync(bookingId, GenerateOtpCode(), StartOtpTtlMinutes, fix, cancellationToken);
+    }
 
     public Task<BookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken)
-        => sqlStore.StartJobAsync(
-            command.BookingId, command.ProviderId, GenerateOtpCode(), StartOtpTtlMinutes, cancellationToken);
+    {
+        var fix = CapturedLocation.Require(command.Location, "start a job");
+        return sqlStore.StartJobAsync(
+            command.BookingId, command.ProviderId, GenerateOtpCode(), StartOtpTtlMinutes, fix, cancellationToken);
+    }
 
     public Task<BookingResult> VerifyStartOtpAsync(
-        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
-        => sqlStore.VerifyStartOtpAsync(bookingId, providerId, (otpCode ?? string.Empty).Trim(), cancellationToken);
+        Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
+    {
+        var fix = CapturedLocation.Require(location, "start a job");
+        return sqlStore.VerifyStartOtpAsync(
+            bookingId, providerId, (otpCode ?? string.Empty).Trim(), fix, cancellationToken);
+    }
 
     public async Task<BookingResult> RequestModificationAsync(
         RequestBookingModificationCommand command,
@@ -796,8 +941,12 @@ internal sealed class BookingService(
     }
 
     public Task<BookingEvidenceResult> AddEvidenceAsync(
-        Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
-        => sqlStore.AddEvidenceAsync(bookingId, providerId, photoUrl, cancellationToken);
+        Guid bookingId, Guid providerId, string photoUrl, CapturedLocation? location,
+        CancellationToken cancellationToken)
+    {
+        var fix = CapturedLocation.Require(location, "attach job evidence");
+        return sqlStore.AddEvidenceAsync(bookingId, providerId, photoUrl, fix, cancellationToken);
+    }
 
     public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
         Guid bookingId, CancellationToken cancellationToken)

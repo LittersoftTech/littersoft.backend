@@ -158,33 +158,9 @@ public interface IChatConversationStore
         ChatParticipant participant,
         CancellationToken cancellationToken);
 
-    /// <summary>
-    /// Blocks the counterparty. Idempotent — blocking somebody already blocked
-    /// returns the existing row.
-    /// </summary>
-    /// <exception cref="ChatInvalidBlockException">Both parties are on the same side.</exception>
-    Task<ChatBlock> BlockAsync(
-        ChatParticipant blocker,
-        ChatParticipantType blockedType,
-        Guid blockedId,
-        string? reason,
-        CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Lifts a block the caller placed. Returns null when the id is unknown or
-    /// belongs to somebody else's block — one case, so a block id cannot be probed.
-    /// </summary>
-    Task<ChatBlock?> UnblockAsync(
-        Guid chatBlockId,
-        ChatParticipant blocker,
-        CancellationToken cancellationToken);
-
-    /// <summary>
-    /// Everyone the caller has blocked. Blocks placed AGAINST them are not
-    /// returned: telling someone they have been blocked confirms the other party
-    /// acted.
-    /// </summary>
-    Task<IReadOnlyList<ChatBlock>> ListBlocksAsync(
-        ChatParticipant blocker,
-        CancellationToken cancellationToken);
+    // Reading and writing blocks moved to IBlockStore (Pawfront.Application.Blocks)
+    // when a block stopped being a chat-only remedy. This store still DEPENDS on
+    // them — Chat.GetOrCreateConversation and Chat.ReserveMessageSequence both
+    // refuse a blocked pair — but it no longer owns them, and the table now lives
+    // in the [Block] schema rather than [Chat].
 }

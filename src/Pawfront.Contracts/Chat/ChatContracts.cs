@@ -1,4 +1,4 @@
-namespace Pawfront.Contracts.Chat;
+﻿namespace Pawfront.Contracts.Chat;
 
 /// <summary>
 /// Opens (or reopens) the caller's thread with somebody.
@@ -30,6 +30,14 @@ public sealed record ChatCounterpartyResponse(
 /// to know where the "unread" divider goes, and pass it to
 /// <c>POST /conversations/{id}/read</c> once the user has seen the thread.
 /// </param>
+/// <param name="IsTicketRaisedByMe">
+/// Whether the CALLER has an open support ticket on this conversation, and which one — the
+/// same trio the booking and event reads carry. Mine only: a ticket the counterparty raised
+/// reads false here, and because a thread admits one open ticket in either direction, that
+/// caller is still refused with <b>409 TicketAlreadyOpen</b> if they report it. Open only,
+/// so it clears when support closes the ticket. Populated on the inbox and the thread
+/// header alike.
+/// </param>
 public sealed record ConversationResponse(
     Guid ConversationId,
     Guid ProviderId,
@@ -42,7 +50,19 @@ public sealed record ConversationResponse(
     long LastReadSequence,
     int UnreadCount,
     bool IsMuted,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    bool IsTicketRaisedByMe = false,
+    Guid? TicketId = null,
+    string? TicketRef = null,
+    // Whether a block closes this thread. True in EITHER direction, because
+    // either closes it — so the app disables the composer up front rather than
+    // letting a send fail with 403.
+    bool IsBlocked = false,
+    // True only when the CALLER placed it: the one case where an Unblock button
+    // belongs, and the id to lift it with. A block placed against them reads as
+    // blocked / false / null and should show a neutral "this conversation is not
+    // available" — saying more would confirm the other party acted.
+    bool BlockedByMe = false);
 
 public sealed record ChatAttachmentPayload(
     string BlobUrl,
@@ -160,13 +180,6 @@ public sealed record ChatUnreadSummaryResponse(
     int UnreadMessageCount,
     int UnreadConversationCount);
 
-public sealed record BlockChatParticipantRequest(Guid CounterpartyId, string? Reason);
-
-public sealed record ChatBlockResponse(
-    Guid ChatBlockId,
-    string BlockedType,
-    Guid BlockedId,
-    string? BlockedName,
-    string? BlockedPhotoUrl,
-    string? Reason,
-    DateTimeOffset CreatedAtUtc);
+// The block contracts moved to Pawfront.Contracts.Blocks when blocking stopped
+// being a chat feature -- the same block now refuses bookings and hides events,
+// and both API hosts expose it without a conversation anywhere in sight.

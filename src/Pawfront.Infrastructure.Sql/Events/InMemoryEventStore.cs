@@ -1,3 +1,4 @@
+﻿using Pawfront.Application.Blocks;
 using System.Collections.Concurrent;
 using Pawfront.Application.Events;
 
@@ -72,8 +73,15 @@ internal sealed class InMemoryEventStore : IEventSqlStore
         return Task.FromResult(snapshot);
     }
 
-    public Task<EventSqlSnapshot?> GetAsync(Guid eventId, CancellationToken cancellationToken)
+    public Task<EventSqlSnapshot?> GetAsync(
+        Guid eventId,
+        CancellationToken cancellationToken,
+        BlockParty? viewer = null)
     {
+        // Blocking is not applied here: this store cannot see the block table,
+        // so in-memory dev shows every event regardless. Same gap as the rest of
+        // this store's cross-table rules.
+        _ = viewer;
         if (!events.TryGetValue(eventId, out var snapshot))
         {
             return Task.FromResult<EventSqlSnapshot?>(null);
@@ -185,8 +193,13 @@ internal sealed class InMemoryEventStore : IEventSqlStore
 
     public Task<IReadOnlyList<EventSqlSnapshot>> ListAsync(
         EventListFilter filter,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        BlockParty? viewer = null)
     {
+        // Blocking is not applied here: this store cannot see the block table,
+        // so in-memory dev shows every event regardless. Same gap as the rest of
+        // this store's cross-table rules.
+        _ = viewer;
         IEnumerable<EventSqlSnapshot> query = events.Values;
 
         if (!string.IsNullOrWhiteSpace(filter.EventCategory))
@@ -239,8 +252,13 @@ internal sealed class InMemoryEventStore : IEventSqlStore
 
     public Task<IReadOnlyList<EventSqlSnapshot>> ListTrendingAsync(
         int take,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        BlockParty? viewer = null)
     {
+        // Blocking is not applied here: this store cannot see the block table,
+        // so in-memory dev shows every event regardless. Same gap as the rest of
+        // this store's cross-table rules.
+        _ = viewer;
         if (take < 1) take = 20;
         if (take > 100) take = 100;
 

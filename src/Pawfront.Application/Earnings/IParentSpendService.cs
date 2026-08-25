@@ -28,7 +28,7 @@ public interface IParentSpendService
 /// <summary>
 /// Narrow SQL reader behind <see cref="IParentSpendService"/>. <paramref name="statuses"/>
 /// is already expanded to raw lifecycle statuses by
-/// <see cref="ParentBookingStatusFilter"/>; an empty list means no status filter.
+/// <see cref="BookingStatusFilter"/>; an empty list means no status filter.
 /// </summary>
 public interface IParentSpendStore
 {

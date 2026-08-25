@@ -129,7 +129,12 @@ BEGIN
         SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
         FROM [Support].[Tickets]
         WHERE [ProviderId] = @ProviderId
-          AND [Status] <> N'CLOSED';
+          AND [Status] <> N'CLOSED'
+          -- Only the two kinds with a COUNTERPARTY block a delete — see the twin
+          -- comment in [Parent].[DeletePetParent]. An app issue or an event
+          -- report is not about the other party, and the user cannot close it
+          -- themselves, so it must not stand in the way of their own deletion.
+          AND [TicketType] IN (N'BookingIncident', N'ChatIncident');
 
         IF EXISTS (SELECT 1 FROM @OpenTickets)
         BEGIN

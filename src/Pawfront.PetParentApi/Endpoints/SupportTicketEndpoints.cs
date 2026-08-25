@@ -7,8 +7,8 @@ using Microsoft.AspNetCore.Mvc;
 namespace Pawfront.PetParentApi.Endpoints;
 
 /// <summary>
-/// The pet parent's side of support tickets: reporting an incident on a booking, reporting
-/// a conversation, and following what happens next.
+/// The pet parent's side of support tickets: reporting an incident on a booking, a
+/// conversation, an event or the app itself, and following what happens next.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -18,11 +18,17 @@ namespace Pawfront.PetParentApi.Endpoints;
 /// while support looks at it. Blocking stays the separate, deliberate action it always was.
 /// </para>
 /// <para>
-/// <b>One open ticket per BOOKING</b> (and per conversation), in either direction — not one
-/// per provider. A parent with five bookings from the same provider can report each of them,
-/// because each is a different incident; what is refused is a second open report of the same
-/// booking, which answers 409 <c>TicketAlreadyOpen</c> carrying the ticket already open so
-/// the reporter is pointed at it rather than left at a dead end.
+/// <b>One open ticket per SUBJECT</b> — per booking and per conversation in either
+/// direction, and per event <i>per reporter</i>; an app issue has no subject and is never
+/// refused. Not one per provider: a parent with five bookings from the same provider can
+/// report each of them, because each is a different incident. What is refused answers 409
+/// <c>TicketAlreadyOpen</c> carrying the ticket already open, so the reporter is pointed at
+/// it rather than left at a dead end.
+/// </para>
+/// <para>
+/// <b>An event report names no counterparty and the organiser is never told</b> — support
+/// resolves them from the event. Only a chat incident carries no photos; the other three
+/// kinds all do.
 /// </para>
 /// <para>
 /// Every route sits on the ownership-filtered <c>/pet-parents/{petParentId:guid}</c> group,
@@ -53,15 +59,20 @@ internal static class SupportTicketEndpoints
             .MapGroup("/pet-parents/{petParentId:guid}/support-tickets")
             .RequireOwnedPetParent();
 
-        // Two dedicated routes rather than one with a discriminator field, following the
-        // booking transitions' convention: each takes exactly the fields its kind needs,
-        // so neither carries a conditionally-required subject.
+        // One dedicated route per kind rather than one with a discriminator field,
+        // following the booking transitions' convention: each takes exactly the fields its
+        // kind needs, so none carries a conditionally-required subject.
         group.MapPost("/report-incident", ReportIncident);
         group.MapPost("/report-chat", ReportChat);
-        // Same report, multipart, with the evidence in the same call. A separate route
-        // rather than content-negotiating on /report-incident: one route cannot carry two
+        group.MapPost("/report-event", ReportEvent);
+        group.MapPost("/report-app-issue", ReportAppIssue);
+        // The same reports, multipart, with the evidence in the same call. Separate routes
+        // rather than content-negotiating on the JSON ones: one route cannot carry two
         // request shapes in OpenAPI, and the app knows at the tap which one it is sending.
+        // A chat incident has no photo variant — its thread is the evidence.
         group.MapPost("/report-incident-with-photos", ReportIncidentWithPhotos).DisableAntiforgery();
+        group.MapPost("/report-event-with-photos", ReportEventWithPhotos).DisableAntiforgery();
+        group.MapPost("/report-app-issue-with-photos", ReportAppIssueWithPhotos).DisableAntiforgery();
 
         group.MapGet("/", ListTickets);
         group.MapGet("/{ticketId:guid}", GetTicket);
@@ -126,6 +137,80 @@ internal static class SupportTicketEndpoints
     }
 
     /// <summary>
+    /// "Report an event". No counterparty is recorded and the organiser is never told:
+    /// an event is public, so existence is the only check and 404 <c>EventNotFound</c> the
+    /// only refusal besides validation.
+    /// </summary>
+    private static Task<IResult> ReportEvent(
+        Guid petParentId,
+        ReportEventIncidentRequest request,
+        ISupportTicketService ticketService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            return Task.FromResult(ApiResults.BadRequest("InvalidRequest", "A report is required."));
+        }
+
+        return CreateAsync(
+            NewEventReport(petParentId, request.EventId, request.Comment, request.Category, request.Reason),
+            petParentId,
+            ticketService,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// "Report an app issue" — a problem with the app itself. No subject, no counterparty,
+    /// and no "one open ticket" rule: each bug report is a different bug.
+    /// </summary>
+    private static Task<IResult> ReportAppIssue(
+        Guid petParentId,
+        ReportAppIssueRequest request,
+        ISupportTicketService ticketService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+        {
+            return Task.FromResult(ApiResults.BadRequest("InvalidRequest", "A report is required."));
+        }
+
+        return CreateAsync(
+            NewAppIssueReport(petParentId, request.Comment, request.Category, request.Reason),
+            petParentId,
+            ticketService,
+            cancellationToken);
+    }
+
+    /// <summary>The two commands the new kinds build, named once so the JSON and multipart
+    /// routes cannot drift on which columns they populate.</summary>
+    private static CreateSupportTicketCommand NewEventReport(
+        Guid petParentId, Guid eventId, string? comment, string? category, string? reason) =>
+        new(
+            SupportTicketTypes.EventIncident,
+            SupportRaisedByTypes.PetParent,
+            petParentId,
+            BookingType: null,
+            BookingId: null,
+            ConversationId: null,
+            comment,
+            category,
+            reason,
+            EventId: eventId);
+
+    private static CreateSupportTicketCommand NewAppIssueReport(
+        Guid petParentId, string? comment, string? category, string? reason) =>
+        new(
+            SupportTicketTypes.AppIssue,
+            SupportRaisedByTypes.PetParent,
+            petParentId,
+            BookingType: null,
+            BookingId: null,
+            ConversationId: null,
+            comment,
+            category,
+            reason);
+
+    /// <summary>
     /// "Report Incident" with its evidence in one call. Fields arrive as form text, the
     /// files as repeated <c>photos</c> parts.
     /// </summary>
@@ -161,6 +246,39 @@ internal static class SupportTicketEndpoints
         return await CreateWithPhotosAsync(
             command, photos, petParentId, ticketService, cancellationToken);
     }
+
+    /// <summary>"Report an event" with its evidence in one call.</summary>
+    private static Task<IResult> ReportEventWithPhotos(
+        Guid petParentId,
+        [FromForm] Guid eventId,
+        [FromForm] string? comment,
+        [FromForm] string? category,
+        [FromForm] string? reason,
+        IFormFileCollection photos,
+        ISupportTicketService ticketService,
+        CancellationToken cancellationToken)
+        => CreateWithPhotosAsync(
+            NewEventReport(petParentId, eventId, comment, category, reason),
+            photos,
+            petParentId,
+            ticketService,
+            cancellationToken);
+
+    /// <summary>"Report an app issue" with its screenshots in one call.</summary>
+    private static Task<IResult> ReportAppIssueWithPhotos(
+        Guid petParentId,
+        [FromForm] string? comment,
+        [FromForm] string? category,
+        [FromForm] string? reason,
+        IFormFileCollection photos,
+        ISupportTicketService ticketService,
+        CancellationToken cancellationToken)
+        => CreateWithPhotosAsync(
+            NewAppIssueReport(petParentId, comment, category, reason),
+            photos,
+            petParentId,
+            ticketService,
+            cancellationToken);
 
     /// <summary>
     /// Opens each uploaded file, runs the combined flow, and disposes the streams
@@ -233,6 +351,10 @@ internal static class SupportTicketEndpoints
                     : "BookingNotFound",
                 exception.Message);
         }
+        catch (SupportEventNotFoundException exception)
+        {
+            return ApiResults.NotFound("EventNotFound", exception.Message);
+        }
         catch (SupportForbiddenException exception)
         {
             return ApiResults.Forbidden("Forbidden", exception.Message);
@@ -249,16 +371,17 @@ internal static class SupportTicketEndpoints
 
     /// <summary>
     /// The 409 names the SUBJECT rather than the counterparty. The rule is one open ticket
-    /// per booking (or per conversation), so "already open with this provider" would tell
-    /// the reporter the wrong thing about why they were refused — and invite them to
-    /// conclude they cannot report that provider again at all.
+    /// per booking (or per conversation, or per event per reporter), so "already open with
+    /// this provider" would tell the reporter the wrong thing about why they were refused —
+    /// and invite them to conclude they cannot report that provider again at all.
     /// </summary>
     private static string AlreadyOpenMessage(CreateSupportTicketCommand command, string ticketRef) =>
-        command.TicketType == SupportTicketTypes.ChatIncident
-            ? $"Support ticket {ticketRef} is already open on this conversation. "
-              + "It must be closed before another can be raised on it."
-            : $"Support ticket {ticketRef} is already open on this booking. "
-              + "It must be closed before another can be raised on it.";
+        $"Support ticket {ticketRef} is already open on this {command.TicketType switch
+        {
+            SupportTicketTypes.ChatIncident => "conversation",
+            SupportTicketTypes.EventIncident => "event",
+            _ => "booking"
+        }}. It must be closed before another can be raised on it.";
 
     /// <summary>Shared create for both kinds — only the command differs.</summary>
     private static async Task<IResult> CreateAsync(
@@ -294,6 +417,10 @@ internal static class SupportTicketEndpoints
         catch (SupportConversationNotFoundException exception)
         {
             return ApiResults.NotFound("ConversationNotFound", exception.Message);
+        }
+        catch (SupportEventNotFoundException exception)
+        {
+            return ApiResults.NotFound("EventNotFound", exception.Message);
         }
         catch (SupportForbiddenException exception)
         {
@@ -384,11 +511,11 @@ internal static class SupportTicketEndpoints
             return ApiResults.NotFound("TicketNotFound", $"Ticket '{ticketId}' was not found.");
         }
 
-        if (existing.Ticket.TicketType != SupportTicketTypes.BookingIncident)
+        if (!SupportTicketTypes.AllowsPhotos(existing.Ticket.TicketType))
         {
             return ApiResults.BadRequest(
                 "TicketPhotoNotBookingIncident",
-                "Only a reported booking incident can carry photos.");
+                "A reported chat cannot carry photos; the thread itself is the evidence.");
         }
 
         if (!existing.Ticket.IsOpen)

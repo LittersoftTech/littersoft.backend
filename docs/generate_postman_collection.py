@@ -29,7 +29,7 @@ ENV_OUT = os.path.join(HERE, "Pawfront.All.postman_environment.json")
 ID_VARS = {
     "providerId", "petParentId", "petId", "bookingId", "nightStayBookingId",
     "eventId", "eventBookingId", "serviceId", "closureId", "photoId", "ticketId",
-    "conversationId", "messageId", "chatBlockId", "otpId", "parentMobileOtpId",
+    "conversationId", "messageId", "blockId", "otpId", "parentMobileOtpId",
     "providerMobileOtpId", "bookingReviewId",
 }
 

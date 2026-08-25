@@ -414,7 +414,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BlockChatParticipantRequest"
+                "$ref": "#/components/schemas/BlockParticipantRequest"
               }
             }
           },
@@ -430,6 +430,32 @@
         "tags": [
           "Pawfront.ChatApi"
         ],
+        "parameters": [
+          {
+            "name": "skip",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "take",
+            "in": "query",
+            "schema": {
+              "pattern": "^-?(?:0|[1-9]\\d*)$",
+              "type": [
+                "integer",
+                "string"
+              ],
+              "format": "int32"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
@@ -437,14 +463,14 @@
         }
       }
     },
-    "/api/v1/blocks/{chatBlockId}": {
+    "/api/v1/blocks/{blockId}": {
       "delete": {
         "tags": [
           "Pawfront.ChatApi"
         ],
         "parameters": [
           {
-            "name": "chatBlockId",
+            "name": "blockId",
             "in": "path",
             "required": true,
             "schema": {
@@ -463,7 +489,7 @@
   },
   "components": {
     "schemas": {
-      "BlockChatParticipantRequest": {
+      "BlockParticipantRequest": {
         "required": [
           "counterpartyId",
           "reason"

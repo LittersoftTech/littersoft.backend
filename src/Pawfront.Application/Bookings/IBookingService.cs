@@ -14,6 +14,19 @@ public interface IBookingService
         CreateCustomBookingCommand command,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Provider edits a walk-in they recorded earlier — price, service, schedule,
+    /// customer/pet details or notes. A plain full-replace edit rather than a
+    /// modification proposal, because a walk-in has no counterparty to accept one.
+    /// Price and details stay editable through COMPLETED (correcting the money
+    /// after the job is the main reason this exists); the service and schedule lock
+    /// once the job starts, and a job that did not happen cannot be edited at all.
+    /// The availability and closure gates run ONLY when the window actually moved.
+    /// </summary>
+    Task<BookingResult> UpdateCustomAsync(
+        UpdateCustomBookingCommand command,
+        CancellationToken cancellationToken);
+
     Task<BookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
 
     /// <summary>
@@ -100,11 +113,21 @@ public interface IBookingService
     // --- Job lifecycle: start-OTP, evidence, modifications ------------------
 
     /// <summary>
-    /// Issues (or reuses) the parent-facing start-OTP. Called when the parent opens
-    /// a START_JOB booking; the returned plaintext code is read to the provider,
-    /// who posts it back to move the job to IN_PROGRESS.
+    /// Issues (or reuses) the parent-facing start-OTP. Called when the parent asks
+    /// to see the code on a START_JOB booking; the returned plaintext code is read
+    /// to the provider, who posts it back to move the job to IN_PROGRESS.
+    /// <para>
+    /// <paramref name="location"/> is where the parent was when the code went on
+    /// screen, and is REQUIRED — which is why this is reached through a dedicated
+    /// POST rather than as a side effect of the booking-detail GET as it once was.
+    /// A GET cannot carry a body, so leaving the code available there would have
+    /// left a way to obtain it while supplying no position at all.
+    /// </para>
     /// </summary>
-    Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken);
+    Task<StartOtpResult> IssueStartOtpAsync(
+        Guid bookingId,
+        CapturedLocation? location,
+        CancellationToken cancellationToken);
 
     /// <summary>
     /// Provider taps "Start Job": moves a confirmed-equivalent booking to START_JOB
@@ -122,9 +145,19 @@ public interface IBookingService
     /// IN_PROGRESS. Throws <see cref="BookingNotStartableException"/> (not START_JOB),
     /// <see cref="InvalidStartOtpException"/>, <see cref="StartOtpExpiredException"/>,
     /// or <see cref="OtpAttemptsExceededException"/> (6th wrong attempt cancels the job).
+    /// <para>
+    /// <paramref name="location"/> is the provider's position as they tap "Proceed
+    /// to start" — required on the request, but stored only when the job actually
+    /// starts: a wrong code is not a job start, so the fix that came with a failed
+    /// attempt is discarded.
+    /// </para>
     /// </summary>
     Task<BookingResult> VerifyStartOtpAsync(
-        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken);
+        Guid bookingId,
+        Guid providerId,
+        string otpCode,
+        CapturedLocation? location,
+        CancellationToken cancellationToken);
 
     /// <summary>Either party proposes a date/time change (validated, then staged).</summary>
     Task<BookingResult> RequestModificationAsync(
@@ -141,11 +174,17 @@ public interface IBookingService
         Guid bookingId,
         CancellationToken cancellationToken);
 
-    /// <summary>Records one job-completion evidence photo (provider-owned booking).</summary>
+    /// <summary>
+    /// Records one job-completion evidence photo (provider-owned booking).
+    /// <paramref name="location"/> is where the provider was when they took it,
+    /// required and stored in the same transaction as the photo — one location row
+    /// per photo, so this is the one trigger that legitimately repeats.
+    /// </summary>
     Task<BookingEvidenceResult> AddEvidenceAsync(
         Guid bookingId,
         Guid providerId,
         string photoUrl,
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     /// <summary>Lists a booking's evidence photos, oldest-first.</summary>

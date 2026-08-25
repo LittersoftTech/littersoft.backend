@@ -13,8 +13,41 @@ public static class SupportTicketTypes
     /// <summary>"Report Chat" — raised against the counterparty on a conversation.</summary>
     public const string ChatIncident = "ChatIncident";
 
+    /// <summary>A problem with an event. Named by its <c>EventId</c>.</summary>
+    public const string EventIncident = "EventIncident";
+
+    /// <summary>Something wrong with the app itself. No subject at all.</summary>
+    public const string AppIssue = "AppIssue";
+
     public static bool IsKnown(string? value) =>
+        value is BookingIncident or ChatIncident or EventIncident or AppIssue;
+
+    /// <summary>
+    /// Whether this kind is raised AGAINST somebody. True for the two that sit on a shared
+    /// subject, where the counterparty is derived from it; false for an app issue and an
+    /// event report, which have a reporter and nobody else.
+    /// </summary>
+    /// <remarks>
+    /// It follows that only the true cases store both party ids, and only they block an
+    /// account delete — the guard exists to stop a party being anonymised while support is
+    /// still asking questions about the OTHER party.
+    /// </remarks>
+    public static bool HasCounterparty(string? value) =>
         value is BookingIncident or ChatIncident;
+
+    /// <summary>
+    /// Whether evidence photos may be attached. Everything except a chat incident, whose
+    /// thread already holds its own images and is under legal hold besides.
+    /// </summary>
+    public static bool AllowsPhotos(string? value) =>
+        IsKnown(value) && value != ChatIncident;
+
+    /// <summary>
+    /// Whether the reporter's free-text account is required. It is for the two
+    /// counterparty kinds, where it is the whole substance of the accusation; for an app
+    /// issue or an event report the picker's <c>Reason</c> may stand in for it.
+    /// </summary>
+    public static bool RequiresComment(string? value) => HasCounterparty(value);
 }
 
 /// <summary>
@@ -186,12 +219,18 @@ public enum SupportTicketSortBy
 /// The reporter's one-line summary of this particular incident. Optional. The substance
 /// is the narrative's opening entry, in Cosmos; these two are the filing labels beside it.
 /// </param>
+/// <param name="ProviderId">
+/// Null on a ticket raised by a pet parent that has no counterparty (an app issue or an
+/// event report) — those store only the reporter's own side.
+/// </param>
+/// <param name="PetParentId">The mirror of <paramref name="ProviderId"/>.</param>
+/// <param name="EventId">The reported event. Set only on <c>EventIncident</c>.</param>
 public sealed record SupportTicketRecord(
     Guid TicketId,
     int TicketNumber,
     string TicketType,
-    Guid ProviderId,
-    Guid PetParentId,
+    Guid? ProviderId,
+    Guid? PetParentId,
     string RaisedByType,
     string? BookingType,
     Guid? BookingId,
@@ -200,6 +239,7 @@ public sealed record SupportTicketRecord(
     string Status,
     string? Category,
     string? Reason,
+    Guid? EventId,
     IReadOnlyList<SupportTicketPhotoRecord> Photos,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
@@ -299,15 +339,18 @@ public static class SupportNarrativeEntryKinds
 /// </summary>
 /// <param name="Comment">
 /// The reporter's account of what happened. Goes to the Cosmos narrative as the opening
-/// entry, not to SQL.
+/// entry, not to SQL. <b>Required for the two counterparty kinds</b>, where it is the
+/// substance of the accusation; optional for an app issue or an event report, where
+/// <paramref name="Reason"/> opens the narrative instead if it is absent.
 /// </param>
 /// <param name="Category">
 /// Optional. What kind of problem it is, as the app's picker labelled it.
 /// </param>
 /// <param name="Reason">
 /// Optional short reason for this particular incident. Stored on the ticket row beside
-/// <paramref name="Category"/>; the substance is <paramref name="Comment"/>.
+/// <paramref name="Category"/>; the substance is normally <paramref name="Comment"/>.
 /// </param>
+/// <param name="EventId">The reported event. Required for <c>EventIncident</c> only.</param>
 public sealed record CreateSupportTicketCommand(
     string TicketType,
     string RaisedByType,
@@ -315,9 +358,10 @@ public sealed record CreateSupportTicketCommand(
     string? BookingType,
     Guid? BookingId,
     Guid? ConversationId,
-    string Comment,
+    string? Comment,
     string? Category,
-    string? Reason);
+    string? Reason,
+    Guid? EventId = null);
 
 /// <summary>
 /// What <c>Support.CreateTicket</c> decided. <see cref="Created"/> means the ticket was
@@ -327,9 +371,16 @@ public sealed record CreateSupportTicketCommand(
 /// dead end.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Scoped to the subject, not to the pair: a parent with several bookings from one
 /// provider can report each of them, since each is a separate incident. What is refused is
 /// a second open report of the SAME booking, from either side.
+/// </para>
+/// <para>
+/// An EVENT is scoped to the subject <i>and</i> the reporter — an event has many attendees
+/// and each of their accounts is its own ticket, so only the same person reporting it twice
+/// is refused. An APP ISSUE has no subject and is never refused.
+/// </para>
 /// </remarks>
 public enum CreateSupportTicketOutcome
 {

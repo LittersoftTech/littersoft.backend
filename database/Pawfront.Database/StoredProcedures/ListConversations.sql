@@ -73,7 +73,9 @@ BEGIN
            t.[CounterpartyId],
            t.[CounterpartyName],
            t.[CounterpartyPhotoUrl],
-           t.[CounterpartyServiceCategory]
+           t.[CounterpartyServiceCategory],
+           t.[IsBlocked],
+           t.[BlockedByMe]
     FROM (
         SELECT c.[ConversationId],
                c.[ProviderId],
@@ -107,7 +109,31 @@ BEGIN
                -- above), and when the provider has registered no service yet, which is
                -- legitimate: chat is open to a provider mid-onboarding.
                CASE WHEN @ParticipantType = N'PetParent' THEN reg.[ServiceCategory] END
-                   AS [CounterpartyServiceCategory]
+                   AS [CounterpartyServiceCategory],
+               -- A block closes the thread. The flag is what lets the app disable
+               -- the composer up front instead of letting a send fail, and it is
+               -- TRUE in EITHER direction, because either direction closes it.
+               CAST(CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM [Block].[BlockedParticipants] bp
+                        WHERE (bp.[BlockerType] = N'Provider' AND bp.[BlockerId] = c.[ProviderId]
+                               AND bp.[BlockedType] = N'PetParent' AND bp.[BlockedId] = c.[PetParentId])
+                           OR (bp.[BlockerType] = N'PetParent' AND bp.[BlockerId] = c.[PetParentId]
+                               AND bp.[BlockedType] = N'Provider' AND bp.[BlockedId] = c.[ProviderId])
+                    ) THEN 1 ELSE 0 END AS BIT) AS [IsBlocked],
+               -- Only the caller's OWN block offers an Unblock button. One placed
+               -- against them is never named -- naming it would confirm the other
+               -- party acted, which is the thing a block must not do. The pair
+               -- reads as: true/true offer Unblock, true/false show a neutral
+               -- "not available".
+               CAST(CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM [Block].[BlockedParticipants] bp
+                        WHERE bp.[BlockerType] = @ParticipantType
+                          AND bp.[BlockerId] = @ParticipantId
+                          AND bp.[BlockedId] = CASE WHEN @ParticipantType = N'Provider'
+                                                    THEN c.[PetParentId] ELSE c.[ProviderId] END
+                    ) THEN 1 ELSE 0 END AS BIT) AS [BlockedByMe]
         FROM [Chat].[ConversationParticipants] p
         INNER JOIN [Chat].[Conversations] c
             ON c.[ConversationId] = p.[ConversationId]

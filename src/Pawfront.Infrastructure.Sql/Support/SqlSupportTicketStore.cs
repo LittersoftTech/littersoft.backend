@@ -7,8 +7,9 @@ namespace Pawfront.Infrastructure.Sql.Support;
 
 /// <summary>
 /// Reads and writes the support-ticket INDEX through the <c>Support</c> schema's
-/// procedures. Also serves <see cref="ISupportLegalHoldReader"/>: the chat host asks the
-/// same table one question, and there is no reason to open a second store for it.
+/// procedures. Also serves <see cref="ISupportLegalHoldReader"/> and
+/// <see cref="IMySupportTicketLookup"/>: both ask this same table one narrow question, and
+/// there is no reason to open a second store for either.
 /// </summary>
 /// <remarks>
 /// The ticket row is projected identically by four procedures — <c>CreateTicket</c> (after
@@ -20,7 +21,8 @@ namespace Pawfront.Infrastructure.Sql.Support;
 /// </remarks>
 internal sealed class SqlSupportTicketStore(
     string? configuredConnectionString,
-    IPawfrontSecretProvider? secretProvider) : ISupportTicketStore, ISupportLegalHoldReader
+    IPawfrontSecretProvider? secretProvider)
+    : ISupportTicketStore, ISupportLegalHoldReader, IMySupportTicketLookup
 {
     public async Task<CreateSupportTicketResult> CreateAsync(
         CreateSupportTicketCommand command,
@@ -46,6 +48,8 @@ internal sealed class SqlSupportTicketStore(
             "@Category", (object?)command.Category ?? DBNull.Value);
         sqlCommand.Parameters.AddWithValue(
             "@Reason", (object?)command.Reason ?? DBNull.Value);
+        sqlCommand.Parameters.AddWithValue(
+            "@EventId", (object?)command.EventId ?? DBNull.Value);
 
         try
         {
@@ -86,6 +90,10 @@ internal sealed class SqlSupportTicketStore(
         catch (SqlException exception) when (exception.Number == 51348)
         {
             throw new SupportNotAppBookingException(command.BookingId ?? Guid.Empty);
+        }
+        catch (SqlException exception) when (exception.Number == 51355)
+        {
+            throw new SupportEventNotFoundException(command.EventId ?? Guid.Empty);
         }
     }
 
@@ -158,9 +166,10 @@ internal sealed class SqlSupportTicketStore(
 
             // COUNT(*) OVER () — the same value on every row, so one round trip serves both
             // the page and its total. An empty page leaves it 0, which is correct.
-            // Ordinal 16, not 14: [Category] + [Reason] are appended to the ticket block
-            // ahead of it so that block stays identical to the other four procedures'.
-            totalCount = reader.GetInt32(16);
+            // Ordinal 17, not 14: [Category], [Reason] and [EventId] are appended to the
+            // ticket block ahead of it so that block stays identical to the other five
+            // procedures'.
+            totalCount = reader.GetInt32(17);
         }
 
         // The list carries no photos: the card shows type, status and subject, all of which
@@ -295,7 +304,60 @@ internal sealed class SqlSupportTicketStore(
     }
 
     /// <summary>
-    /// The 14-column ticket projection shared by four procedures.
+    /// The caller's own open tickets, keyed by subject — what puts
+    /// <c>isTicketRaisedByMe</c> on a booking, an event or a conversation.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately never throws. This decorates a list; a support-table hiccup must cost
+    /// the caller a Report button they should not have been offered, not the whole page.
+    /// </remarks>
+    public async Task<MySupportTicketSubjects> GetAsync(
+        string actorType,
+        Guid actorId,
+        CancellationToken cancellationToken)
+    {
+        if (!SupportRaisedByTypes.IsKnown(actorType) || actorId == Guid.Empty)
+        {
+            return MySupportTicketSubjects.Empty;
+        }
+
+        try
+        {
+            await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+            await connection.OpenAsync(cancellationToken);
+
+            await using var command = new SqlCommand("[Support].[ListMyOpenTicketSubjects]", connection)
+            {
+                CommandType = System.Data.CommandType.StoredProcedure
+            };
+            command.Parameters.AddWithValue("@RaisedByType", actorType);
+            command.Parameters.AddWithValue("@ActorId", actorId);
+
+            var subjects = new List<MySupportTicketSubject>();
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                subjects.Add(new MySupportTicketSubject(
+                    TicketId: reader.GetGuid(0),
+                    TicketNumber: reader.GetInt32(1),
+                    TicketType: reader.GetString(2),
+                    BookingType: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    BookingId: reader.IsDBNull(4) ? null : reader.GetGuid(4),
+                    ConversationId: reader.IsDBNull(5) ? null : reader.GetGuid(5),
+                    EventId: reader.IsDBNull(6) ? null : reader.GetGuid(6)));
+            }
+
+            return new MySupportTicketSubjects(subjects);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            return MySupportTicketSubjects.Empty;
+        }
+    }
+
+    /// <summary>
+    /// The 17-column ticket projection shared by six procedures.
     /// <paramref name="offset"/> is 1 for <c>Support.CreateTicket</c>, whose result set is
     /// prefixed with its <c>Outcome</c> discriminator, and 0 for the rest.
     /// </summary>
@@ -304,19 +366,22 @@ internal sealed class SqlSupportTicketStore(
             TicketId: reader.GetGuid(offset),
             TicketNumber: reader.GetInt32(offset + 1),
             TicketType: reader.GetString(offset + 2),
-            ProviderId: reader.GetGuid(offset + 3),
-            PetParentId: reader.GetGuid(offset + 4),
+            // Nullable since the reporter-only kinds ('AppIssue' / 'EventIncident') store
+            // just the side that raised them.
+            ProviderId: reader.IsDBNull(offset + 3) ? null : reader.GetGuid(offset + 3),
+            PetParentId: reader.IsDBNull(offset + 4) ? null : reader.GetGuid(offset + 4),
             RaisedByType: reader.GetString(offset + 5),
             BookingType: reader.IsDBNull(offset + 6) ? null : reader.GetString(offset + 6),
             BookingId: reader.IsDBNull(offset + 7) ? null : reader.GetGuid(offset + 7),
             PetId: reader.IsDBNull(offset + 8) ? null : reader.GetGuid(offset + 8),
             ConversationId: reader.IsDBNull(offset + 9) ? null : reader.GetGuid(offset + 9),
             Status: reader.GetString(offset + 10),
-            // Appended after ClosedAtUtc by every one of the five procedures, so adding
+            // Appended after ClosedAtUtc by every one of the six procedures, so adding
             // them shifted no ordinal above. Named arguments, so the record's own
             // parameter order is free to read better than the projection's.
             Category: reader.IsDBNull(offset + 14) ? null : reader.GetString(offset + 14),
             Reason: reader.IsDBNull(offset + 15) ? null : reader.GetString(offset + 15),
+            EventId: reader.IsDBNull(offset + 16) ? null : reader.GetGuid(offset + 16),
             Photos: [],
             CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(offset + 11), TimeSpan.Zero),
             UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(offset + 12), TimeSpan.Zero),

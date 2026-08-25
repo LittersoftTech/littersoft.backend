@@ -29,6 +29,7 @@ internal sealed class NullProviderEarningsStore : IProviderEarningsStore
         Guid providerId,
         DateOnly? fromDate,
         DateOnly? toDate,
+        IReadOnlyList<string> statuses,
         decimal feePercentage,
         EarningsSortBy sortBy,
         EarningsSortDirection sortDirection,

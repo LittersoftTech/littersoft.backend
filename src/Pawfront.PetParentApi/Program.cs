@@ -1,3 +1,4 @@
+﻿using Pawfront.Application.Blocks;
 using Pawfront.Application;
 using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
@@ -15,6 +16,12 @@ builder.Services.AddOpenApi();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpContextAccessor();
+
+// Registered BEFORE AddPawfrontApplication on purpose: Application TryAdds a
+// no-op in its place, so a host that wants real block filtering on discovery
+// has to get in first. Same first-wins pattern the chat host uses for its
+// realtime publisher.
+builder.Services.AddScoped<ICurrentBlockParty, CurrentBlockParty>();
 
 builder.Services
     .AddPawfrontAzureInfrastructure(builder.Configuration, builder.Environment)
@@ -65,6 +72,7 @@ api.MapParentReviewEndpoints();
 // Support tickets: "Report Incident" on a booking and "Report Chat" on a
 // conversation. One open ticket per subject; reporting does not block anybody.
 api.MapParentSupportTicketEndpoints();
+api.MapBlockEndpoints();
 api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapNightStayBookingEndpoints();

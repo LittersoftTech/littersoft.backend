@@ -146,7 +146,13 @@ internal sealed class SqlChatConversationStore(
                 PhotoUrl: NullIfBlank(reader, 14),
                 ServiceCategory: NullIfBlank(reader, 15));
 
-            cards.Add(new ChatConversationCard(conversation, me, counterparty));
+            cards.Add(new ChatConversationCard(
+                conversation,
+                me,
+                counterparty,
+                MyTicket: null,
+                // Appended after the service category, so nothing above moved.
+                Block: new ChatBlockState(ReadFlag(reader, 16), ReadFlag(reader, 17))));
         }
 
         return cards;
@@ -404,85 +410,12 @@ internal sealed class SqlChatConversationStore(
             : new ChatUnreadSummary(0, 0);
     }
 
-    public async Task<ChatBlock> BlockAsync(
-        ChatParticipant blocker,
-        ChatParticipantType blockedType,
-        Guid blockedId,
-        string? reason,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
-        await connection.OpenAsync(cancellationToken);
-
-        await using var command = StoredProcedure(connection, "[Chat].[BlockChatParticipant]");
-        command.Parameters.AddWithValue("@BlockerType", blocker.Type.ToSqlValue());
-        command.Parameters.AddWithValue("@BlockerId", blocker.Id);
-        command.Parameters.AddWithValue("@BlockedType", blockedType.ToSqlValue());
-        command.Parameters.AddWithValue("@BlockedId", blockedId);
-        command.Parameters.AddWithValue("@Reason", (object?)reason ?? DBNull.Value);
-
-        try
-        {
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-
-            return await reader.ReadAsync(cancellationToken)
-                ? ReadBlock(reader, hasNameColumns: false)
-                : throw new InvalidOperationException("Chat.BlockChatParticipant returned no row.");
-        }
-        catch (SqlException exception) when (exception.Number == 51327)
-        {
-            throw new ChatInvalidBlockException();
-        }
-    }
-
-    public async Task<ChatBlock?> UnblockAsync(
-        Guid chatBlockId,
-        ChatParticipant blocker,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
-        await connection.OpenAsync(cancellationToken);
-
-        await using var command = StoredProcedure(connection, "[Chat].[UnblockChatParticipant]");
-        command.Parameters.AddWithValue("@ChatBlockId", chatBlockId);
-        command.Parameters.AddWithValue("@BlockerType", blocker.Type.ToSqlValue());
-        command.Parameters.AddWithValue("@BlockerId", blocker.Id);
-
-        // No guard on the way in: a block is always the blocker's to lift. A support
-        // ticket does not freeze one, because raising a ticket never placed one.
-        var reader = await command.ExecuteReaderAsync(cancellationToken);
-
-        await using (reader)
-        {
-            // No rows means unknown id OR somebody else's block — one case by
-            // design, so a block id cannot be probed for existence.
-            return await reader.ReadAsync(cancellationToken)
-                ? ReadBlock(reader, hasNameColumns: false)
-                : null;
-        }
-    }
-
-    public async Task<IReadOnlyList<ChatBlock>> ListBlocksAsync(
-        ChatParticipant blocker,
-        CancellationToken cancellationToken)
-    {
-        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
-        await connection.OpenAsync(cancellationToken);
-
-        await using var command = StoredProcedure(connection, "[Chat].[ListBlockedParticipants]");
-        command.Parameters.AddWithValue("@BlockerType", blocker.Type.ToSqlValue());
-        command.Parameters.AddWithValue("@BlockerId", blocker.Id);
-
-        var blocks = new List<ChatBlock>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            blocks.Add(ReadBlock(reader, hasNameColumns: true));
-        }
-
-        return blocks;
-    }
+    // Blocking moved out of this store to SqlBlockStore when a block stopped
+    // being a chat remedy -- the table now lives in the [Block] schema, and the
+    // three Chat.*BlockParticipant procedures are dropped on deploy. This store
+    // still depends on blocks (GetOrCreateConversation and ReserveMessageSequence
+    // both refuse a blocked pair, and both conversation reads project the flags),
+    // it just no longer owns them.
 
     private static async Task<ChatConversationDetail?> ReadDetailAsync(
         SqlConnection connection,
@@ -527,6 +460,14 @@ internal sealed class SqlChatConversationStore(
 
         var counterparty = new ChatCounterparty(participant.Type.Counterparty(), Guid.Empty, null, null);
 
+        // Whether a block closes this thread. It rides the counterparty result set
+        // because that is the SELECT it was appended to, not because it describes
+        // the counterparty — so it is read here and returned on the detail itself.
+        // Defaults to "not blocked" if that set is somehow absent, which is the
+        // safe direction: the send path is gated in SQL regardless, so at worst
+        // the app offers a composer whose send is then refused.
+        ChatBlockState? block = null;
+
         if (await reader.NextResultAsync(cancellationToken)
             && await reader.ReadAsync(cancellationToken))
         {
@@ -537,21 +478,12 @@ internal sealed class SqlChatConversationStore(
                 PhotoUrl: NullIfBlank(reader, 3),
                 // Ordinal 4 is CounterpartyIsDeleted, which this reader does not use.
                 ServiceCategory: NullIfBlank(reader, 5));
+
+            block = new ChatBlockState(ReadFlag(reader, 6), ReadFlag(reader, 7));
         }
 
-        return new ChatConversationDetail(conversation, me, counterparty);
+        return new ChatConversationDetail(conversation, me, counterparty, MyTicket: null, Block: block);
     }
-
-    private static ChatBlock ReadBlock(SqlDataReader reader, bool hasNameColumns) => new(
-        ChatBlockId: reader.GetGuid(0),
-        BlockerType: ChatParticipantTypes.FromSqlValue(reader.GetString(1)),
-        BlockerId: reader.GetGuid(2),
-        BlockedType: ChatParticipantTypes.FromSqlValue(reader.GetString(3)),
-        BlockedId: reader.GetGuid(4),
-        Reason: reader.IsDBNull(5) ? null : reader.GetString(5),
-        BlockedName: hasNameColumns ? NullIfBlank(reader, 7) : null,
-        BlockedPhotoUrl: hasNameColumns ? NullIfBlank(reader, 8) : null,
-        CreatedAtUtc: ReadUtc(reader, 6) ?? default);
 
     private static string? NullIfBlank(SqlDataReader reader, int ordinal)
     {

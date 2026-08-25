@@ -68,16 +68,41 @@ public sealed record ChatCounterparty(
     string? ServiceCategory = null);
 
 /// <summary>A thread plus the caller's own state and the other party — the header.</summary>
+/// <param name="MyTicket">
+/// The caller's own OPEN support ticket on this thread, or null. Resolved after the store
+/// returns, exactly as the provider avatar is, and best-effort for the same reason: an
+/// inbox must not fail because the support table hiccuped. Never the counterparty's ticket
+/// — its existence is not the caller's to be told about.
+/// </param>
 public sealed record ChatConversationDetail(
     ChatConversation Conversation,
     ChatParticipantState Me,
-    ChatCounterparty Counterparty);
+    ChatCounterparty Counterparty,
+    Support.MySupportTicketRef? MyTicket = null,
+    ChatBlockState? Block = null);
 
 /// <summary>One row of the inbox list.</summary>
 public sealed record ChatConversationCard(
     ChatConversation Conversation,
     ChatParticipantState Me,
-    ChatCounterparty Counterparty);
+    ChatCounterparty Counterparty,
+    Support.MySupportTicketRef? MyTicket = null,
+    ChatBlockState? Block = null);
+
+/// <summary>
+/// Whether this thread is closed by a block, and whose block it is.
+/// </summary>
+/// <param name="IsBlocked">
+/// True in EITHER direction, because either closes the thread. This is what lets
+/// the app disable the composer up front instead of letting a send fail.
+/// </param>
+/// <param name="BlockedByMe">
+/// True only when the CALLER placed it -- the one case where an Unblock button
+/// belongs. A block placed against them shows as blocked with no explanation and
+/// no way to lift it: naming it would confirm the other party acted, which is the
+/// thing a block is meant to end.
+/// </param>
+public sealed record ChatBlockState(bool IsBlocked, bool BlockedByMe);
 
 /// <summary>An image attached to a message.</summary>
 public sealed record ChatAttachment(
@@ -138,17 +163,9 @@ public sealed record ChatMessagePage(
 /// <summary>The chat badge.</summary>
 public sealed record ChatUnreadSummary(int UnreadMessageCount, int UnreadConversationCount);
 
-/// <summary>A block the caller placed.</summary>
-public sealed record ChatBlock(
-    Guid ChatBlockId,
-    ChatParticipantType BlockerType,
-    Guid BlockerId,
-    ChatParticipantType BlockedType,
-    Guid BlockedId,
-    string? Reason,
-    string? BlockedName,
-    string? BlockedPhotoUrl,
-    DateTimeOffset CreatedAtUtc);
+// ChatBlock moved to Pawfront.Application.Blocks as ParticipantBlock. A block is
+// no longer a chat concept: the same row refuses bookings and hides events, and
+// the two API hosts read it without ever touching a conversation.
 
 /// <summary>
 /// Phase one of a send: the sequence SQL assigned, and whether this message has

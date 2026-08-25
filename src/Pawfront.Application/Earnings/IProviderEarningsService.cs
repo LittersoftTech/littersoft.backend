@@ -49,10 +49,16 @@ public interface IProviderEarningsStore
         decimal feePercentage,
         CancellationToken cancellationToken);
 
+    /// <param name="statuses">
+    /// Raw lifecycle statuses to include, already expanded from the caller's groups
+    /// by <see cref="BookingStatusFilter.Expand"/>. Empty means no status filter,
+    /// which the store reads as the earned rows only.
+    /// </param>
     Task<(IReadOnlyList<ProviderEarningsBookingRow> Items, int TotalCount)> ListBookingsAsync(
         Guid providerId,
         DateOnly? fromDate,
         DateOnly? toDate,
+        IReadOnlyList<string> statuses,
         decimal feePercentage,
         EarningsSortBy sortBy,
         EarningsSortDirection sortDirection,

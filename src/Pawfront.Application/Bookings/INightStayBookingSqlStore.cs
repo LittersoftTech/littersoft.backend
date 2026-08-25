@@ -84,6 +84,7 @@ public interface INightStayBookingSqlStore
         BookingStatusActor actor,
         Guid actorId,
         string? note,
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
@@ -96,6 +97,7 @@ public interface INightStayBookingSqlStore
         Guid bookingId,
         string newCode,
         int ttlMinutes,
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     Task<NightStayBookingResult> StartJobAsync(
@@ -103,12 +105,14 @@ public interface INightStayBookingSqlStore
         Guid providerId,
         string newCode,
         int ttlMinutes,
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     Task<NightStayBookingResult> VerifyStartOtpAsync(
         Guid bookingId,
         Guid providerId,
         string otpCode,
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     Task<NightStayBookingResult> CompleteAsync(
@@ -126,6 +130,7 @@ public interface INightStayBookingSqlStore
         decimal amount,
         decimal pawfrontFee,
         string paymentMethod,
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     /// <param name="acknowledgedTerms">
@@ -160,6 +165,7 @@ public interface INightStayBookingSqlStore
         Guid bookingId,
         Guid providerId,
         string photoUrl,
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(

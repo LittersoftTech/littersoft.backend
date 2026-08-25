@@ -31,12 +31,27 @@
 -- kept for legacy rows) → THROW 51149.
 -- Terminal states (no further change): COMPLETED, PROVIDER_DECLINED,
 -- PROVIDER_CANCELLED, PARENT_CANCELLED, PARENT_NO_SHOW, PROVIDER_NO_SHOW.
+--
+-- A geolocation fix may be supplied, and is written only for the NO-SHOW
+-- transitions — the one moment this engine handles that is being evidenced.
+-- Every other status it serves (accept, decline, cancel, the legacy COMPLETED
+-- shim) passes nothing and writes nothing. Both actors reach it: the provider
+-- reporting PARENT_NO_SHOW and the parent reporting PROVIDER_NO_SHOW each record
+-- their own position, so [CapturedByType] is simply @Actor.
 CREATE OR ALTER PROCEDURE [Booking].[UpdateBookingStatus]
     @BookingId UNIQUEIDENTIFIER,
     @NewStatus NVARCHAR(48),
     @Actor NVARCHAR(16),
     @ActorId UNIQUEIDENTIFIER,
-    @Note NVARCHAR(500) = NULL
+    @Note NVARCHAR(500) = NULL,
+    -- The acting party's position. Only ever populated by the two no-show routes
+    -- (and the legacy /status shim when it is used to set a no-show, which the API
+    -- gates identically so that path cannot become a way to skip the capture).
+    -- See [Booking].[StartBooking] for why these are defaulted to NULL.
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -221,6 +236,21 @@ BEGIN
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@BookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- Where the reporting party was when they marked the counterparty absent.
+    -- Written in the same transaction as the status flip: a no-show is terminal
+    -- and frees capacity, so it must never be possible to have one on record with
+    -- no idea where the person reporting it stood.
+    IF @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
+       AND @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[BookingLocationEvents]
+            ([BookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@BookingId, N'NoShowMarked', @Actor, @ActorId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
 
     -- Notify the OTHER party, inside this transaction so the notification can
     -- never exist without the status change (or vice versa). The actor never gets
