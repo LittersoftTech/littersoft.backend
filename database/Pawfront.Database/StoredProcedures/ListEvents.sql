@@ -10,6 +10,17 @@ CREATE OR ALTER PROCEDURE [Event].[ListEvents]
     -- Optional free-text title search. When supplied, only events whose Title
     -- CONTAINS the term (case-insensitive) are returned.
     @Title           NVARCHAR(200) = NULL,
+    -- Ticketing filters. @IsPaid is the app's "Free or Paid" picker: 0 = free
+    -- events only, 1 = ticketed only, NULL = both.
+    --
+    -- The price bounds count a FREE event as ZERO rather than skipping it --
+    -- [Price] is NULL whenever [IsPaid] = 0 (a CHECK enforces the pair), and a
+    -- free event genuinely is the cheapest end of the scale, so a slider set to
+    -- 0..20 must include it. That also makes any positive @MinPrice drop free
+    -- events, which is the same reading.
+    @IsPaid          BIT            = NULL,
+    @MinPrice        DECIMAL(18, 2) = NULL,
+    @MaxPrice        DECIMAL(18, 2) = NULL,
     -- The caller, so a blocked pair never see each other's events. Both NULL
     -- for a legacy or unauthenticated caller, which filters nothing.
     @ViewerType      NVARCHAR(16)     = NULL,
@@ -55,6 +66,9 @@ BEGIN
           AND (@EventType       IS NULL OR e.[EventType]       = @EventType)
           AND (@IsChildFriendly IS NULL OR e.[IsChildFriendly] = @IsChildFriendly)
           AND (@TitlePattern IS NULL OR LOWER(e.[Title]) LIKE @TitlePattern ESCAPE N'\')
+          AND (@IsPaid   IS NULL OR e.[IsPaid] = @IsPaid)
+          AND (@MinPrice IS NULL OR COALESCE(e.[Price], 0) >= @MinPrice)
+          AND (@MaxPrice IS NULL OR COALESCE(e.[Price], 0) <= @MaxPrice)
           -- Date-range filter: event's [StartDate, EndDate] must overlap the
           -- caller's [@StartDate, @EndDate]. Each bound is independently optional.
           AND (@StartDate IS NULL OR e.[EndDate]   >= @StartDate)
@@ -109,6 +123,9 @@ BEGIN
       AND (@EventType       IS NULL OR e.[EventType]       = @EventType)
       AND (@IsChildFriendly IS NULL OR e.[IsChildFriendly] = @IsChildFriendly)
       AND (@TitlePattern IS NULL OR LOWER(e.[Title]) LIKE @TitlePattern ESCAPE N'\')
+      AND (@IsPaid   IS NULL OR e.[IsPaid] = @IsPaid)
+      AND (@MinPrice IS NULL OR COALESCE(e.[Price], 0) >= @MinPrice)
+      AND (@MaxPrice IS NULL OR COALESCE(e.[Price], 0) <= @MaxPrice)
       AND (@StartDate IS NULL OR e.[EndDate]   >= @StartDate)
       AND (@EndDate   IS NULL OR e.[StartDate] <= @EndDate)
       AND (

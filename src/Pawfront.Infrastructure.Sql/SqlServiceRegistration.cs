@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using Pawfront.Infrastructure.Sql.Blocks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -10,9 +10,12 @@ using Pawfront.Application.Chat;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.DeviceTokens;
+using Pawfront.Application.Billing;
+using Pawfront.Application.Analytics;
 using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
 using Pawfront.Application.Notifications;
+using Pawfront.Application.Jobs;
 using Pawfront.Application.Onboarding;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
@@ -32,6 +35,8 @@ using Pawfront.Infrastructure.Sql.Bookings;
 using Pawfront.Infrastructure.Sql.Chat;
 using Pawfront.Infrastructure.Sql.Closures;
 using Pawfront.Infrastructure.Sql.DeviceTokens;
+using Pawfront.Infrastructure.Sql.Billing;
+using Pawfront.Infrastructure.Sql.Analytics;
 using Pawfront.Infrastructure.Sql.Earnings;
 using Pawfront.Infrastructure.Sql.Events;
 using Pawfront.Infrastructure.Sql.Notifications;
@@ -40,6 +45,7 @@ using Pawfront.Infrastructure.Sql.ParentOnboarding;
 using Pawfront.Infrastructure.Sql.ParentPets;
 using Pawfront.Infrastructure.Sql.ParentPhotos;
 using Pawfront.Infrastructure.Sql.Policies;
+using Pawfront.Infrastructure.Sql.Jobs;
 using Pawfront.Infrastructure.Sql.ProviderBanners;
 using Pawfront.Infrastructure.Sql.ProviderOnboarding;
 using Pawfront.Infrastructure.Sql.ProviderPhotos;
@@ -89,11 +95,31 @@ public static class SqlServiceRegistration
             // reports everything active — otherwise discovery and all five
             // searches would come back empty on a dev machine without SQL.
             services.AddSingleton<IProviderActiveStatusReader, NullProviderActiveStatusReader>();
+            // Functional rather than a Null store: the in-memory policy service DOES
+            // hold payout methods, so the parent-search Payments filter stays
+            // testable on a dev machine without SQL.
+            services.AddSingleton<IProviderPayoutMethodReader, InMemoryProviderPayoutMethodReader>();
             // Earnings are aggregates over the booking tables joined to the payment
             // ledger, neither of which the in-memory stores keep — report zeros
             // rather than 500ing the reporting screens.
             services.AddSingleton<IProviderEarningsStore, NullProviderEarningsStore>();
+            // Same posture, same reason: the job list joins both booking tables to
+            // the ledger, the service catalog and the live parent/pet rows, and the
+            // in-memory stores hold only some of that.
+            services.AddSingleton<IProviderJobStore, NullProviderJobStore>();
             services.AddSingleton<IParentSpendStore, NullParentSpendStore>();
+            // Analytics: the view WRITE is accepted and dropped (every provider
+            // profile open now performs one, so failing it would break browsing
+            // without a database); the reads report zeros for the same reason
+            // earnings do.
+            services.AddSingleton<IProviderServiceViewStore, NullProviderServiceViewStore>();
+            services.AddSingleton<IProviderServiceBreakdownStore, NullProviderServiceBreakdownStore>();
+
+            // Nothing in these hosts writes an invoice - they are raised by SQL
+            // inside the mark-paid transaction and rendered by an Azure Function
+            // against blob storage. With neither present there is nothing to serve,
+            // so every download answers 404 rather than fabricating a PDF.
+            services.AddSingleton<IInvoiceStore, NullInvoiceStore>();
             // The chat thread's "View Jobs" list reads the two booking tables the
             // in-memory stores do not keep in a form this can query — report an
             // empty history rather than 500ing the screen, the same posture as
@@ -292,17 +318,59 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            // Backs the parent-search "Payments" filter. Same structural reason as
+            // the active reader above: the accepted methods live in SQL while
+            // discovery lists from Cosmos, so the filter cannot be pushed into the
+            // discovery query.
+            services.AddScoped<IProviderPayoutMethodReader>(provider =>
+                new SqlProviderPayoutMethodReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             // Earnings / spend reporting. Both sides read the shared
             // Booking.BookingAmounts function, so a provider's "earned" and a
             // parent's "spent" on the same booking are the same number by
             // construction.
+            // The provider's job list. Reads Booking.ListProviderJobs, which sits on
+            // the same Booking.BookingAmounts function the earnings sprocs read, so a
+            // job's amount is one number across both screens.
+            services.AddScoped<IProviderJobStore>(provider =>
+                new SqlProviderJobStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             services.AddScoped<IProviderEarningsStore>(provider =>
                 new SqlProviderEarningsStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            // The per-service breakdown is one more aggregate over
+            // Booking.BookingAmounts, so the same class serves it -- registered
+            // separately because two different surfaces consume it (the analytics
+            // endpoint and the period-scoped earnings endpoint).
+            services.AddScoped<IProviderServiceBreakdownStore>(provider =>
+                new SqlProviderEarningsStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // The provider view log behind the PawPrints Views card. Written by
+            // the parent host on every provider-profile open, read by the
+            // provider host's analytics endpoints.
+            services.AddScoped<IProviderServiceViewStore>(provider =>
+                new SqlProviderServiceViewStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             services.AddScoped<IParentSpendStore>(provider =>
                 new SqlParentSpendStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Invoice lookup for the two download endpoints. Read-only: raising an
+            // invoice happens inside Booking.MarkBookingPaid and rendering happens
+            // in Pawfront.Functions, so neither path comes through here.
+            services.AddScoped<IInvoiceStore>(provider =>
+                new SqlInvoiceStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 

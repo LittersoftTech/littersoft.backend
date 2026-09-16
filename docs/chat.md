@@ -120,8 +120,8 @@ POST   /api/v1/conversations/{id}/read                    { upToSequence }
 DELETE /api/v1/conversations/{id}/messages/{messageId}
 POST   /api/v1/conversations/{id}/attachments             multipart { file }
 POST   /api/v1/blocks                                     { counterpartyId, reason? }
-GET    /api/v1/blocks
-DELETE /api/v1/blocks/{chatBlockId}
+GET    /api/v1/blocks                                     ?search= &skip= &take=  (max 20)
+DELETE /api/v1/blocks/{blockId}
 POST   /api/v1/blob-images                                { blobUrl }
 ```
 
@@ -131,6 +131,31 @@ wrong or contradict.
 
 Sending exists as REST as well as a hub method so a client whose socket has
 dropped can still send. Both go through identical server logic.
+
+### Naming the counterparty
+
+`counterparty` on every conversation read carries **both** names, and which one you
+show matters:
+
+```json
+{
+  "participantType": "Provider",
+  "participantId": "…",
+  "name": "Anna Meier",
+  "businessName": "Happy Paws Hotel",
+  "photoUrl": "…"
+}
+```
+
+`name` is the PERSON — for a provider, the account holder. `businessName` is what
+they trade as, and it is what the parent recognises, so **prefer it where it is
+present**. It is null for a pet-parent counterparty, for a freelancer trading under
+their own name, and — best-effort — when their offering document cannot be read; fall
+back to `name` in all three cases.
+
+Both are resolved live on every read rather than stored with the thread, which is
+why a deleted account reads "Deleted Provider" / "Deleted User" instead of keeping
+its real name. The same pair, resolved the same way, is on the blocked list.
 
 ### "Have I already reported this chat?"
 
@@ -169,6 +194,22 @@ rather than a bigger query.
 
 Case-insensitive, trimmed, and `%` / `_` in the term are matched literally rather
 than as wildcards. A blank term returns the whole inbox.
+
+### Searching the blocked list
+
+`GET /blocks?search=happy` filters the same cards the unfiltered list returns, on
+the blocked party's **name** and their **businessName** — so typing what is on the
+card finds it either way. Case-insensitive, trimmed, and a blank term returns the
+whole list.
+
+`totalCount` is then the number of MATCHES rather than the size of your blocked
+list, so the page still reconciles with what you are showing.
+
+Each entry also carries **`lastMessagePreview`** — the newest message between you
+and that person, the same line their inbox card would show. It is null when you
+never spoke, and null when you cleared the thread and nothing has been said since;
+blocking itself does not delete history, so a thread you had before still reads
+here.
 
 ### Deleting a whole chat
 

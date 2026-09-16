@@ -218,6 +218,26 @@ internal sealed class InMemoryEventStore : IEventSqlStore
             query = query.Where(e => e.IsChildFriendly == flag);
         }
 
+        if (filter.IsPaid is not null)
+        {
+            var isPaid = filter.IsPaid.Value;
+            query = query.Where(e => e.IsPaid == isPaid);
+        }
+
+        // Free events count as zero, matching the sproc's COALESCE(Price, 0) —
+        // otherwise a 0..20 slider would drop exactly the events it should keep.
+        if (filter.MinPrice is not null)
+        {
+            var min = filter.MinPrice.Value;
+            query = query.Where(e => (e.Price ?? 0m) >= min);
+        }
+
+        if (filter.MaxPrice is not null)
+        {
+            var max = filter.MaxPrice.Value;
+            query = query.Where(e => (e.Price ?? 0m) <= max);
+        }
+
         if (filter.StartDate is not null)
         {
             var from = filter.StartDate.Value;

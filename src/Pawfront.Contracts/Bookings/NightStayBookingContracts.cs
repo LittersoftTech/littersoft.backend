@@ -1,4 +1,4 @@
-﻿using Pawfront.Contracts.Reviews;
+using Pawfront.Contracts.Reviews;
 
 namespace Pawfront.Contracts.Bookings;
 
@@ -54,7 +54,21 @@ public sealed record NightStayBookingResponse(
     // True only when the CALLER placed it: the one case where an Unblock action
     // belongs. A block placed against them reads true/false and should show a
     // neutral state -- saying more would confirm the other party acted.
-    bool BlockedByMe = false);
+    bool BlockedByMe = false,
+    // The customer card. Boarding is App-only, so this response previously
+    // carried NO customer information at all -- not even a name -- and a
+    // provider's stay list could not be rendered without a per-row call to the
+    // booking detail.
+    //
+    // Populated on the PROVIDER's stay list only; null on the parent's own card
+    // list (the parent IS the customer there) and on the write paths. Resolved
+    // live, so a deleted account reads its anonymised placeholder.
+    string? CustomerName = null,
+    string? CustomerPhotoUrl = null,
+    string? PetName = null,
+    string? AnimalType = null,
+    string? Breed = null,
+    string? PetGender = null);
 
 /// <summary>
 /// Body for a night-stay modification request
@@ -127,7 +141,16 @@ public sealed record NightStayBookingDetailResponse(
     // True only when the CALLER placed it: the one case where an Unblock action
     // belongs. A block placed against them reads true/false and should show a
     // neutral state -- saying more would confirm the other party acted.
-    bool BlockedByMe = false);
+    bool BlockedByMe = false,
+    // Has this booking actually been MODIFIED? True once either party accepted a
+    // schedule change, which is the only thing that rewrites the booking's own
+    // date/time. A proposal that was REQUESTED and then declined leaves the terms
+    // exactly as they were, so it deliberately does not count -- for the full
+    // history of proposals, including ones that went nowhere, read
+    // GET .../bookings/{bookingId}/status-history. Unrelated to
+    // pendingModification above, which is the open proposal (if any); a booking
+    // modified last week and untouched since reads true here and null there.
+    bool IsModificationDone = false);
 
 /// <summary>The stay/job facts: identity, the check-in/check-out range + nights,
 /// drop-off/pick-up times, status, and where the provider delivers the service.</summary>

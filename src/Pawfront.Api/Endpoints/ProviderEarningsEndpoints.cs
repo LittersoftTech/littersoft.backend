@@ -1,6 +1,8 @@
 using Pawfront.Api.Auth;
+using Pawfront.Application.Analytics;
 using Pawfront.Application.Earnings;
 using Pawfront.Application.ProviderOnboarding;
+using Pawfront.Contracts.Analytics;
 using Pawfront.Contracts.Earnings;
 
 namespace Pawfront.Api.Endpoints;
@@ -62,6 +64,7 @@ internal static class ProviderEarningsEndpoints
         HttpContext httpContext,
         IProviderOnboardingService onboardingService,
         IProviderEarningsService earningsService,
+        IProviderAnalyticsService analyticsService,
         CancellationToken cancellationToken)
     {
         var denied = await EnsureCallerOwnsProviderAsync(
@@ -82,7 +85,29 @@ internal static class ProviderEarningsEndpoints
         }
 
         var result = await earningsService.GetForPeriodAsync(providerId, parsedPeriod, cancellationToken);
-        return ApiResults.Ok(ToPeriod(result));
+
+        // The per-service breakdown behind the totals. A second read rather than a
+        // widened summary sproc, deliberately: [totals] stays byte-for-byte what
+        // /earnings/overview reports, so the two endpoints cannot drift. Both sit on
+        // the same amounts function, so the rows still sum to the totals.
+        var breakdown = await analyticsService.GetBookingBreakdownAsync(
+            providerId, parsedPeriod, null, null, cancellationToken);
+
+        var totals = ToPeriod(result);
+        return ApiResults.Ok(new ProviderEarningsPeriodWithServicesResponse(
+            totals.Period,
+            totals.PeriodStart,
+            totals.PeriodEnd,
+            totals.Totals,
+            breakdown.Services
+                .Select(row => new ProviderServiceBookingResponse(
+                    row.ServiceId,
+                    row.ServiceCategory,
+                    row.SubCategory,
+                    row.ServiceType,
+                    row.IsActive,
+                    ProviderAnalyticsEndpoints.ToFigures(row.Figures)))
+                .ToArray()));
     }
 
     private static async Task<IResult> ListEarningsBookings(
@@ -91,6 +116,7 @@ internal static class ProviderEarningsEndpoints
         DateOnly? from,
         DateOnly? to,
         string? status,
+        Guid? serviceId,
         string? sortBy,
         string? sortDirection,
         int? skip,
@@ -137,7 +163,7 @@ internal static class ProviderEarningsEndpoints
         var page = await earningsService.ListBookingsAsync(
             new ProviderEarningsBookingQuery(
                 providerId, parsedPeriod, from, to, statuses, parsedSortBy, parsedDirection,
-                skip ?? 0, take ?? 0),
+                skip ?? 0, take ?? 0, serviceId),
             cancellationToken);
 
         return ApiResults.Ok(new ProviderEarningsBookingsResponse(
@@ -213,7 +239,11 @@ internal static class ProviderEarningsEndpoints
             totals.ExpiredJobCount,
             totals.ExpiredJobAmount,
             totals.UnrealisedJobCount,
-            totals.UnrealisedAmount);
+            totals.UnrealisedAmount,
+            totals.PendingBookings,
+            totals.AcceptedBookings,
+            totals.PrivateAcceptedJobs,
+            ProviderAnalyticsEndpoints.ToIncludingPrivate(totals.IncludingPrivate));
 
     private static ProviderEarningsBookingResponse ToBooking(ProviderEarningsBookingRow row) =>
         new(row.BookingType,
@@ -240,5 +270,8 @@ internal static class ProviderEarningsEndpoints
             row.PawfrontFee,
             row.NetAmount,
             row.PaidAtUtc,
-            row.PaymentMethod);
+            row.PaymentMethod,
+            row.Breed,
+            row.PetGender,
+            row.CustomerPhotoUrl);
 }

@@ -1,7 +1,9 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Pawfront.Application.Availability;
+using Pawfront.Application.Billing;
+using Pawfront.Application.Analytics;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Chat;
 using Pawfront.Application.Closures;
@@ -9,6 +11,7 @@ using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
 using Pawfront.Application.Notifications;
 using Pawfront.Application.Offerings;
+using Pawfront.Application.Jobs;
 using Pawfront.Application.Onboarding;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ProviderOnboarding;
@@ -91,7 +94,24 @@ public static class ApplicationServiceRegistration
         // a booking's amount, so a provider's "earned" and a parent's "spent" can
         // never disagree.
         services.TryAddScoped<IProviderEarningsService, ProviderEarningsService>();
+        services.TryAddScoped<IProviderJobService, ProviderJobService>();
         services.TryAddScoped<IParentSpendService, ParentSpendService>();
+
+        // PawPrints analytics: the provider view log plus the per-service
+        // breakdown of bookings and earnings. Reads the SAME
+        // Booking.BookingAmounts definition the earnings service above reads, so
+        // a breakdown can never disagree with the total it expands. Its one write
+        // (recording a view) is reachable only from the parent host.
+        services.TryAddScoped<IProviderAnalyticsService, ProviderAnalyticsService>();
+
+        // Invoice DOWNLOAD. Rendering lives entirely in Pawfront.Functions; these
+        // hosts only resolve a row and stream its blob.
+        services.TryAddScoped<IInvoiceService, InvoiceService>();
+        // Asks the renderer for a booking's invoices once its payment commits.
+        // TryAdd'd as a no-op so a host with no storage account configured still
+        // resolves and can still take a payment — the 'Pending' rows written
+        // inside the mark-paid transaction are what the sweep recovers from.
+        services.TryAddSingleton<IInvoiceQueuePublisher, NullInvoiceQueuePublisher>();
 
         // Booking reviews, both directions. The eligibility gate (COMPLETED or PAID,
         // correct party, App booking) is enforced in Review.UpsertBookingReview, so

@@ -90,6 +90,41 @@ public sealed record ProviderEarningsTotals(
     int ExpiredJobCount,
     decimal ExpiredJobAmount)
 {
+    /// <summary>
+    /// Marketplace bookings still waiting on the provider to accept or decline
+    /// (CREATED, plus the deprecated APPROVAL_NEEDED).
+    /// </summary>
+    /// <remarks>
+    /// Broken out because a request nobody has answered is not work the provider
+    /// has taken on, and a dashboard card counting "my jobs" that moves the moment
+    /// a parent taps Book is reporting demand, not workload.
+    /// </remarks>
+    public int PendingBookings { get; init; }
+
+    /// <summary>
+    /// Marketplace bookings the provider accepted and which did not then fall
+    /// through — confirmed-equivalent, underway, and finished alike.
+    /// </summary>
+    /// <remarks>
+    /// Defined as the complement of <see cref="PendingBookings"/> and the
+    /// unrealised trio, so those three partition the platform side of the range
+    /// and sum to every platform booking in range. To list exactly these rows, call
+    /// the bookings list with
+    /// <c>?status=Accepted,InProgress,ModificationRequest,Completed</c>.
+    /// </remarks>
+    public int AcceptedBookings { get; init; }
+
+    /// <summary>
+    /// Custom walk-ins the provider recorded and has not cancelled.
+    /// </summary>
+    /// <remarks>
+    /// A walk-in is CONFIRMED from the moment it is created — there is nobody to
+    /// accept it — so "accepted" here means only "not cancelled". Distinct from
+    /// <see cref="PrivateJobCount"/>, which is gated on the job being finished
+    /// because it feeds a money figure; this one feeds a job count.
+    /// </remarks>
+    public int PrivateAcceptedJobs { get; init; }
+
     /// <summary>What the provider keeps: <see cref="GrossAmount"/> less <see cref="PawfrontFee"/>.</summary>
     public decimal NetAmount => GrossAmount - PawfrontFee;
 
@@ -111,10 +146,65 @@ public sealed record ProviderEarningsTotals(
     /// </summary>
     public decimal UnrealisedAmount => CancelledJobAmount + NoShowJobAmount + ExpiredJobAmount;
 
+    /// <summary>
+    /// The same range counted and priced the way the provider's own dashboard
+    /// cards ask about it: platform work and private walk-ins together. See
+    /// <see cref="ProviderFiguresIncludingPrivate"/> for why the two are reported
+    /// separately as well as combined.
+    /// </summary>
+    public ProviderFiguresIncludingPrivate IncludingPrivate =>
+        new(AcceptedJobs: AcceptedBookings + PrivateAcceptedJobs,
+            CompletedJobs: CompletedBookings + PrivateJobCount,
+            GrossAmount: GrossAmount + PrivateJobAmount,
+            NetAmount: NetAmount + PrivateJobAmount);
+
     /// <summary>An all-zero total, for a provider with nothing in range.</summary>
     public static ProviderEarningsTotals Empty { get; } =
         new(0, 0, 0, 0, 0m, 0m, 0m, 0m, 0m, 0m, 0, 0m, 0, 0m, 0, 0m, 0, 0m);
 }
+
+/// <summary>
+/// A provider's work and money for one range with Custom walk-ins INCLUDED —
+/// the two numbers their own dashboard cards show.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Every other figure in this namespace keeps walk-ins out, and is right to: they
+/// are off-platform, carry no Pawfront commission, and can never be marked paid,
+/// so folding them into <c>grossAmount</c> would misreport what the platform
+/// processed and what fee is owed. But a provider looking at "jobs" and "earnings"
+/// means all of their work, so this block reports the combined figures beside the
+/// platform ones rather than forcing the app to add them up — and to add them up
+/// correctly, which is the part that goes wrong.
+/// </para>
+/// <para>
+/// There is deliberately NO received/awaiting split here. A walk-in can never be
+/// marked paid, so its money is neither "received" (no ledger row) nor "awaiting"
+/// (nothing is owed — the provider was paid in cash at the time). Read the split
+/// off the platform figures; this block is the headline only.
+/// </para>
+/// <para>
+/// <see cref="GrossAmount"/> is what the customer paid, before the platform fee;
+/// <see cref="NetAmount"/> is what the provider keeps. On a CHF 100 day care at a
+/// 10% commission those are 100 and 90 — a card labelled "earned" almost certainly
+/// wants gross.
+/// </para>
+/// </remarks>
+/// <param name="AcceptedJobs">
+/// Accepted marketplace bookings plus uncancelled walk-ins. Excludes requests the
+/// provider has not answered yet.
+/// </param>
+/// <param name="CompletedJobs">Finished jobs of both kinds (COMPLETED / PAID).</param>
+/// <param name="GrossAmount">Earned platform gross plus earned private jobs.</param>
+/// <param name="NetAmount">
+/// <see cref="GrossAmount"/> less the platform fee. A walk-in carries no fee, so
+/// its amount contributes to both figures unchanged.
+/// </param>
+public sealed record ProviderFiguresIncludingPrivate(
+    int AcceptedJobs,
+    int CompletedJobs,
+    decimal GrossAmount,
+    decimal NetAmount);
 
 /// <summary>Totals for one named period, with the resolved range they cover.</summary>
 public sealed record ProviderEarningsPeriodResult(
@@ -143,6 +233,16 @@ public sealed record ProviderEarningsOverview(
 /// <c>IsEarned</c> says whether this row produced money (COMPLETED / PAID) or is one
 /// of the unrealised ones a status filter can pull in; it is emitted rather than
 /// re-derived from <c>Status</c> in the app, so the rule lives in one place.
+/// <para>
+/// <c>Breed</c> / <c>PetGender</c> / <c>CustomerPhotoUrl</c> make this list
+/// renderable as the customer level of the analytics drill-down. Before them a row
+/// carried two bare names, so a card showing who booked and which animal needed a
+/// second call to the booking detail per row. All three are resolved live (so a
+/// deleted account shows its anonymised placeholder rather than leaving real data
+/// in a report) and all three are null on a Custom walk-in, which has no parent or
+/// pet record to read — its customer is the free text already in
+/// <c>CustomerName</c> / <c>PetName</c>.
+/// </para>
 /// </summary>
 public sealed record ProviderEarningsBookingRow(
     string BookingType,
@@ -168,7 +268,10 @@ public sealed record ProviderEarningsBookingRow(
     decimal? GrossAmount,
     decimal? PawfrontFee,
     DateTimeOffset? PaidAtUtc,
-    string? PaymentMethod)
+    string? PaymentMethod,
+    string? Breed = null,
+    string? PetGender = null,
+    string? CustomerPhotoUrl = null)
 {
     /// <summary>What the provider keeps on this booking; null when it can't be priced.</summary>
     public decimal? NetAmount => GrossAmount is null ? null : GrossAmount - (PawfrontFee ?? 0m);
@@ -197,6 +300,12 @@ public enum EarningsSortDirection
 /// <see cref="BookingStatusFilter.Expand"/>; empty means "no status filter", which
 /// the store reads as the earned rows only — the behaviour every caller had before
 /// the filter existed.
+/// <para>
+/// <c>ServiceId</c> narrows to one of the provider's bookable services, which is
+/// what makes this list the customer level of the analytics drill-down: a provider
+/// taps a service on the per-service breakdown and lands on exactly the jobs
+/// behind that figure. Null is every service, as before.
+/// </para>
 /// </remarks>
 public sealed record ProviderEarningsBookingQuery(
     Guid ProviderId,
@@ -207,4 +316,5 @@ public sealed record ProviderEarningsBookingQuery(
     EarningsSortBy SortBy,
     EarningsSortDirection SortDirection,
     int Skip,
-    int Take);
+    int Take,
+    Guid? ServiceId = null);

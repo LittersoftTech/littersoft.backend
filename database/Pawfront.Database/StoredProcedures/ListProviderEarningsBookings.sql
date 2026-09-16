@@ -25,6 +25,20 @@
 -- impossible to ask for cancelled or no-showed jobs at all, which is the whole
 -- point of the parameter.
 --
+-- @ServiceId narrows to ONE of the provider's bookable services, which is what
+-- makes this the third level of the PawPrints drill-down: a provider taps a
+-- service on the per-service breakdown ([Booking].[GetProviderBookingsByService])
+-- and lands on exactly the jobs behind that figure. Omit it for the whole
+-- provider, exactly as before.
+--
+-- [Breed] / [PetGender] / [CustomerPhotoUrl] are joined LIVE and appended LAST,
+-- so no existing reader ordinal moved. They exist because this list IS the
+-- customer level of the feature and had nothing but two names on it: a card
+-- showing who booked, and which animal, previously needed a second call per row
+-- to the booking detail. All three are NULL on a Custom walk-in, which has no
+-- parent or pet record to join -- its free-text [CustomerName] / [PetName] are
+-- already COALESCEd in below, and there is no breed or photo to be had.
+--
 -- Custom walk-ins ARE listed (they are real work the provider did) but carry
 -- [IsPrivate] = 1 and are excluded from the summary's platform totals — the flag
 -- is what lets the client present them apart rather than silently breaking the
@@ -39,7 +53,9 @@ CREATE OR ALTER PROCEDURE [Booking].[ListProviderEarningsBookings]
     @Skip INT = 0,
     @Take INT = 20,
     -- NULL / empty = the earned rows only (back-compatible default, see header).
-    @Statuses NVARCHAR(MAX) = NULL
+    @Statuses NVARCHAR(MAX) = NULL,
+    -- NULL = every service, the pre-existing behaviour.
+    @ServiceId UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -53,7 +69,8 @@ BEGIN
            OR (@FilterByStatus = 1
                AND e.[Status] IN (SELECT LTRIM(RTRIM([value])) FROM STRING_SPLIT(@Statuses, N','))))
       AND (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
-      AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate);
+      AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate)
+      AND (@ServiceId IS NULL OR e.[ServiceId] = @ServiceId);
 
     SELECT
         e.[BookingType],
@@ -90,7 +107,13 @@ BEGIN
         -- rather than left for the client to re-derive from [Status]: the moment a
         -- list can contain both, every row has to answer it, and deriving it in the
         -- app would be a second copy of a rule that already lives in the function.
-        e.[IsEarned]
+        e.[IsEarned],
+        -- The customer card. Live-joined rather than snapshotted, so a parent
+        -- who deletes their account reads its anonymised placeholder here
+        -- instead of leaving their real breed/photo in a provider's report.
+        [Breed]            = pet.[Breed],
+        [PetGender]        = pet.[Gender],
+        [CustomerPhotoUrl] = pp.[ProfilePhotoUrl]
     FROM [Booking].[BookingAmounts](@ProviderId, NULL, @FeePercentage) e
     LEFT JOIN [Booking].[Bookings] b
         ON e.[BookingType] = N'SingleDay' AND b.[BookingId] = e.[BookingId]
@@ -105,6 +128,7 @@ BEGIN
                AND e.[Status] IN (SELECT LTRIM(RTRIM([value])) FROM STRING_SPLIT(@Statuses, N','))))
       AND (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
       AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate)
+      AND (@ServiceId IS NULL OR e.[ServiceId] = @ServiceId)
     ORDER BY
         CASE WHEN @SortBy = N'Earnings' AND @SortDirection = N'Asc'  THEN e.[Amount] END ASC,
         CASE WHEN @SortBy = N'Earnings' AND @SortDirection = N'Desc' THEN e.[Amount] END DESC,

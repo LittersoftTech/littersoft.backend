@@ -60,6 +60,19 @@ CREATE OR ALTER PROCEDURE [Notification].[EnqueueBookingNotification]
     @ReviewByUtc DATETIME2(0) = NULL,
     @RequestedAtUtc DATETIME2(0) = NULL,
     @Location NVARCHAR(500) = NULL,
+    -- Invoicing. Supplied ONLY by [Billing].[CompleteInvoiceGeneration], which is
+    -- the moment a parent's invoice actually becomes downloadable.
+    --
+    -- @InvoiceId is the invoice NUMBER ('PF-INV-2026-004812'), not the GUID: it is
+    -- what the document itself prints and what a customer would quote, and the
+    -- route carries the booking id separately.
+    --
+    -- @IssuedBy is the provider's BUSINESS name, which lives in their Cosmos
+    -- offering document and is therefore unreachable from here — the caller passes
+    -- the value it already resolved for the PDF, so the notification names the
+    -- same issuer the invoice does.
+    @InvoiceId NVARCHAR(64) = NULL,
+    @IssuedBy NVARCHAR(200) = NULL,
     -- When the provider closes on the service date. An instant, not a bare TIME:
     -- converting a clock time to the recipient's zone needs the date it falls on.
     @ClosingAtUtc DATETIME2(0) = NULL,
@@ -235,6 +248,8 @@ BEGIN
             CONVERT(NVARCHAR(19), @NewServiceStartUtc, 126) AS [newServiceStartUtc],
             CONVERT(NVARCHAR(19), @NewCheckOutUtc, 126)   AS [newCheckOutUtc],
             @AbsentParty                                 AS [absentParty],
+            @InvoiceId                                   AS [invoiceId],
+            @IssuedBy                                    AS [issuedBy],
             CONVERT(NVARCHAR(19), @ReviewByUtc, 126)      AS [reviewByUtc],
             CONVERT(NVARCHAR(19), @RequestedAtUtc, 126)   AS [requestedAtUtc],
             COALESCE(@Location, @SnapshotAddressLine)     AS [location],

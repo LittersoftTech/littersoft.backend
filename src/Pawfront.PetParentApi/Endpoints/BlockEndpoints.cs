@@ -73,6 +73,7 @@ internal static class BlockEndpoints
 
         group.MapGet("/", async (
             Guid petParentId,
+            string? search,
             int? skip,
             int? take,
             IBlockService blockService,
@@ -81,8 +82,13 @@ internal static class BlockEndpoints
             // Only blocks the caller PLACED. One placed against them is never
             // listed: telling somebody they have been blocked confirms the other
             // party acted, which is the thing a block is meant to end.
+            //
+            // `search` matches the blocked provider's own name AND their business
+            // name — a parent looking for "Happy Paws Hotel" is typing the name on
+            // the card, not the owner's. Blank or absent returns the whole list.
             var page = await blockService.ListAsync(
                 new BlockParty(BlockPartyType.PetParent, petParentId),
+                search,
                 BlockListLimits.NormalizeSkip(skip),
                 BlockListLimits.NormalizeTake(take),
                 cancellationToken);

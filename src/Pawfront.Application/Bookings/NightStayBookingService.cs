@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Pawfront.Application.Billing;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Providers;
@@ -17,6 +18,7 @@ internal sealed class NightStayBookingService(
     IProviderDiscoveryService providerDiscovery,
     IProviderServiceLocationRegistry providerLocationRegistry,
     IBookingTermsChangeService termsChangeService,
+    IInvoiceQueuePublisher invoiceQueue,
     IOptions<PawfrontFeeOptions> feeOptions) : INightStayBookingService, INightStayOccupancyReader
 {
     // A stay can span at most this many nights. Matches the cap the night-stay
@@ -301,7 +303,7 @@ internal sealed class NightStayBookingService(
             throw new BookingNotPriceableException(command.BookingId);
         }
 
-        return await sqlStore.MarkPaidAsync(
+        var result = await sqlStore.MarkPaidAsync(
             command.BookingId,
             command.ProviderId,
             detail.TotalAmount.Value,
@@ -309,6 +311,14 @@ internal sealed class NightStayBookingService(
             method,
             location,
             cancellationToken);
+
+        // Twin of the single-day path - see BookingService.MarkPaidAsync for why
+        // this sits outside the transaction and why the publisher never throws.
+        await invoiceQueue.PublishAsync(
+            new InvoiceGenerationRequest(BookingTypes.NightStay, command.BookingId),
+            cancellationToken);
+
+        return result;
     }
 
     public async Task<NightStayBookingResult> RequestModificationAsync(

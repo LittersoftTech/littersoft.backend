@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using Microsoft.AspNetCore.Mvc;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
@@ -1168,7 +1168,11 @@ internal static class BookingEndpoints
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
             IsBlocked: block.IsBlocked,
-            BlockedByMe: block.BlockedByMe);
+            BlockedByMe: block.BlockedByMe,
+            // Whether this booking has ever been modified, so the screen can label
+            // it without walking the status history. An accepted change only --
+            // a declined proposal left the terms untouched.
+            IsModificationDone: row.IsModificationDone);
     }
 
     internal static BookingLocationDetailsSection ToLocationSection(BookingLocationResult location) =>
@@ -1224,5 +1228,11 @@ internal static class BookingEndpoints
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
             IsBlocked: block.IsBlocked,
-            BlockedByMe: block.BlockedByMe);
+            BlockedByMe: block.BlockedByMe,
+            // Only Booking.ListBookingsByProvider projects these, so they are
+            // null everywhere else this mapper is used -- which is right: a
+            // create or status response is not a customer card.
+            Breed: result.Breed,
+            PetGender: result.PetGender,
+            CustomerPhotoUrl: result.CustomerPhotoUrl);
 }

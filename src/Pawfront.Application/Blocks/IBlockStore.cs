@@ -42,8 +42,19 @@ public interface IBlockStore
     /// One page of the blocks the caller PLACED, newest first. Blocks placed
     /// against them are never returned.
     /// </summary>
+    /// <param name="search">
+    /// When supplied, the store returns EVERY block the caller placed -- in
+    /// order, unpaged -- and filters nothing itself. It cannot: half the text a
+    /// search has to match is a blocked provider's BUSINESS name, which lives in
+    /// their Cosmos offering document rather than in this table, so a predicate
+    /// here would quietly drop the rows the searcher was most likely looking for.
+    /// <see cref="IBlockService"/> resolves those names, filters on either name,
+    /// and pages what is left. Null returns the ordinary page, and
+    /// <c>TotalCount</c> is the unfiltered total either way.
+    /// </param>
     Task<(IReadOnlyList<ParticipantBlockRow> Rows, int TotalCount)> ListAsync(
         BlockParty blocker,
+        string? search,
         int skip,
         int take,
         CancellationToken cancellationToken);

@@ -15,8 +15,9 @@ public sealed class ChatService(
     IChatMessageStore messageStore,
     IChatRealtimePublisher realtimePublisher,
     IChatPushDispatcher pushDispatcher,
-    // Only for the counterparty avatar — a provider's image lives in Cosmos, so
-    // SQL cannot return it with the thread. See WithProviderPhotoAsync.
+    // For the counterparty's avatar AND business name — a provider's image and
+    // trading name both live in Cosmos, so SQL cannot return either with the
+    // thread. See WithProviderProfileAsync.
     IProviderDiscoveryService providerDiscovery,
     // The thread's "View Jobs" list. Chat owns the question ("what have we two
     // done together?"); the booking tables own the answer.
@@ -82,13 +83,13 @@ public sealed class ChatService(
             Math.Clamp(take, 1, ChatLimits.MaxConversationPageSize),
             cancellationToken);
 
-        var withPhotos = await WithProviderPhotosAsync(cards, cancellationToken);
+        var withProfiles = await WithProviderProfilesAsync(cards, cancellationToken);
 
         // ONE read for the whole page, not one per card — the point of scoping the
         // lookup to the caller rather than to a list of conversation ids.
         var myTickets = await MyTicketsAsync(participant, cancellationToken);
 
-        return [.. withPhotos.Select(card => card with
+        return [.. withProfiles.Select(card => card with
         {
             MyTicket = myTickets.ForConversation(card.Conversation.ConversationId)
         })];
@@ -108,7 +109,7 @@ public sealed class ChatService(
 
         return detail with
         {
-            Counterparty = await WithProviderPhotoAsync(detail.Counterparty, cancellationToken),
+            Counterparty = await WithProviderProfileAsync(detail.Counterparty, cancellationToken),
             MyTicket = myTickets.ForConversation(detail.Conversation.ConversationId)
         };
     }
@@ -201,32 +202,37 @@ public sealed class ChatService(
     }
 
     /// <summary>
-    /// Fills in the counterparty avatars SQL could not supply.
+    /// Fills in the two counterparty fields SQL could not supply: a provider's
+    /// avatar and their BUSINESS name.
     ///
-    /// A provider's image lives in their Cosmos offering document — the business
-    /// image for a shop / hotel / clinic, the freelancer's own photo otherwise —
-    /// because <c>Provider.Providers</c> has no photo column. That is the same
-    /// split the booking detail's <c>providerPhotoUrl</c> and the pending-job
-    /// card's <c>providerProfilePhotoUrl</c> live with, and the avatar here is
-    /// resolved from the same source deliberately: the face beside a thread should
-    /// be the face beside the booking it is about.
+    /// Both live in the provider's Cosmos offering document — the business image
+    /// and business name for a shop / hotel / clinic, the freelancer's own photo
+    /// and no business name otherwise — because <c>Provider.Providers</c> holds
+    /// neither a photo column nor a trading name. That is the same split the
+    /// booking detail's <c>providerPhotoUrl</c>, the pending-job card and the
+    /// blocked list all live with, and every one of them resolves from this one
+    /// source deliberately: a business should look the same wherever it appears.
+    /// Without the name here an inbox card shows the OWNER's name while the
+    /// blocked list beside it shows "Happy Paws Hotel" for the same provider.
     ///
     /// ONE point read per DISTINCT provider on the page, issued together — a
     /// parent's inbox is very often several threads with the same few providers,
     /// and a page is capped at <see cref="ChatLimits.MaxConversationPageSize"/>.
+    /// The name costs nothing extra: it comes back on the read the avatar was
+    /// already making.
     ///
     /// Best-effort, like every other enrichment of this shape: an inbox that
     /// renders with a missing avatar is a far better outcome than one that 500s
     /// because a Cosmos read failed, and a provider legitimately has no document
     /// until they save an offering.
     /// </summary>
-    private async Task<IReadOnlyList<ChatConversationCard>> WithProviderPhotosAsync(
+    private async Task<IReadOnlyList<ChatConversationCard>> WithProviderProfilesAsync(
         IReadOnlyList<ChatConversationCard> cards,
         CancellationToken cancellationToken)
     {
         var pending = cards
             .Select(card => card.Counterparty)
-            .Where(NeedsProviderPhoto)
+            .Where(NeedsProviderProfile)
             .Select(counterparty => (counterparty.ParticipantId, counterparty.ServiceCategory!))
             .Distinct()
             .ToList();
@@ -236,67 +242,80 @@ public sealed class ChatService(
             return cards;
         }
 
-        var photos = new Dictionary<Guid, string?>();
+        var profiles = new Dictionary<Guid, ProviderSummary>();
 
         var lookups = pending.Select(async entry =>
-            (entry.ParticipantId, Photo: await ReadProviderPhotoAsync(
+            (entry.ParticipantId, Summary: await ReadProviderProfileAsync(
                 entry.ParticipantId, entry.Item2, cancellationToken)));
 
-        foreach (var (providerId, photo) in await Task.WhenAll(lookups))
+        foreach (var (providerId, summary) in await Task.WhenAll(lookups))
         {
-            photos[providerId] = photo;
+            if (summary is not null)
+            {
+                profiles[providerId] = summary;
+            }
         }
 
         return cards
             .Select(card =>
-                photos.TryGetValue(card.Counterparty.ParticipantId, out var photo) && photo is not null
-                    ? card with { Counterparty = card.Counterparty with { PhotoUrl = photo } }
+                profiles.TryGetValue(card.Counterparty.ParticipantId, out var summary)
+                    ? card with { Counterparty = Apply(card.Counterparty, summary) }
                     : card)
             .ToList();
     }
 
-    /// <summary>Single-thread twin of <see cref="WithProviderPhotosAsync"/>.</summary>
-    private async Task<ChatCounterparty> WithProviderPhotoAsync(
+    /// <summary>Single-thread twin of <see cref="WithProviderProfilesAsync"/>.</summary>
+    private async Task<ChatCounterparty> WithProviderProfileAsync(
         ChatCounterparty counterparty,
         CancellationToken cancellationToken)
     {
-        if (!NeedsProviderPhoto(counterparty))
+        if (!NeedsProviderProfile(counterparty))
         {
             return counterparty;
         }
 
-        var photo = await ReadProviderPhotoAsync(
+        var summary = await ReadProviderProfileAsync(
             counterparty.ParticipantId, counterparty.ServiceCategory!, cancellationToken);
 
-        return photo is null ? counterparty : counterparty with { PhotoUrl = photo };
+        return summary is null ? counterparty : Apply(counterparty, summary);
     }
 
     /// <summary>
-    /// A provider counterparty with no photo yet and a category to look one up in.
-    /// A pet parent's photo already came from SQL, so they are never touched.
+    /// The photo is only filled in where SQL left one missing — a pet parent's
+    /// came off their own row — while the business name has no SQL source at all
+    /// and is simply taken. A freelancer trades under their own name, has no
+    /// business name in the document, and correctly keeps null here.
     /// </summary>
-    private static bool NeedsProviderPhoto(ChatCounterparty counterparty) =>
+    private static ChatCounterparty Apply(ChatCounterparty counterparty, ProviderSummary summary) =>
+        counterparty with
+        {
+            PhotoUrl = counterparty.PhotoUrl ?? summary.ImageUrl,
+            BusinessName = summary.DisplayName
+        };
+
+    /// <summary>
+    /// A provider counterparty with a category to look one up in. A pet parent is
+    /// never touched: their photo came from SQL and they have no business name.
+    /// </summary>
+    private static bool NeedsProviderProfile(ChatCounterparty counterparty) =>
         counterparty.ParticipantType == ChatParticipantType.Provider
-        && string.IsNullOrWhiteSpace(counterparty.PhotoUrl)
         && !string.IsNullOrWhiteSpace(counterparty.ServiceCategory);
 
-    private async Task<string?> ReadProviderPhotoAsync(
+    private async Task<ProviderSummary?> ReadProviderProfileAsync(
         Guid providerId,
         string serviceCategory,
         CancellationToken cancellationToken)
     {
         try
         {
-            var summary = await providerDiscovery.GetSummaryAsync(
+            return await providerDiscovery.GetSummaryAsync(
                 providerId, serviceCategory, cancellationToken);
-
-            return summary?.ImageUrl;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             logger.LogWarning(
                 exception,
-                "Could not resolve the chat avatar for provider {ProviderId}; the thread is returned without one.",
+                "Could not resolve the offering document for provider {ProviderId}; the thread is returned without their business name or avatar.",
                 providerId);
 
             return null;

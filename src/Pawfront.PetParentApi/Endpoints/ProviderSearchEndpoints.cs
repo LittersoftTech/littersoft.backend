@@ -1,5 +1,7 @@
+using Pawfront.Application.Earnings;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.Providers;
+using Pawfront.Domain.Vocabularies;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Contracts.Providers;
 using Pawfront.PetParentApi.Auth;
@@ -12,6 +14,23 @@ namespace Pawfront.PetParentApi.Endpoints;
 /// filter vocabulary differs per service. All filters are optional and
 /// combinable; date/time fields travel as complete groups. Results are
 /// availability-checked against real slots when dates are supplied.
+///
+/// The parent app's filter sheet adds four dimensions on top of the per-service
+/// ones, all shared by every search here and all handled by
+/// <see cref="BuildRefinements"/>: provider type (registered business vs
+/// freelancer), accepted payment methods, dog temperament, and a sort key.
+/// "Location" on that sheet is the pre-existing <c>city</c> parameter — the four
+/// cities it offers are the app's own picker, deliberately not a server-side
+/// enum, so a new city is a mobile release rather than a backend one.
+///
+/// DOG TEMPERAMENT is exposed on the day-care, night-stay and groomer searches
+/// only: those are the two categories whose offerings record a
+/// <c>dogTemperaments</c> list. Vets and trainers hold none, so offering the
+/// parameter there would be offering a filter that could only ever return
+/// nothing.
+///
+/// DISTANCE sorting is deliberately absent from <c>sortBy</c> — see
+/// <see cref="ProviderSearchSortBy"/>.
 /// </summary>
 internal static class ProviderSearchEndpoints
 {
@@ -36,6 +55,13 @@ internal static class ProviderSearchEndpoints
         TimeOnly? endTime,
         string? city,
         string? serviceLocation,
+        // The parent app's shared filter sheet. Repeated query values bind to a
+        // string[]: ?dogTemperaments=Anxious&dogTemperaments=Friendly.
+        string? providerType,
+        string[]? paymentMethods,
+        string[]? dogTemperaments,
+        string? sortBy,
+        string? sortDirection,
         int? skip,
         int? take,
         IProviderSearchService searchService,
@@ -65,17 +91,25 @@ internal static class ProviderSearchEndpoints
             return ApiResults.BadRequest("InvalidRequest", "startTime must be earlier than endTime.");
         }
 
-        var (error, animals) = await ResolveAnimalsFromPetAsync(
+        var (error, animals, petTemperament) = await ResolveAnimalsFromPetAsync(
             petId, currentPetParent, ownershipReader, cancellationToken);
         if (error is not null)
         {
             return error;
         }
 
+        var (refinementError, refinements) = BuildRefinements(
+            providerType, paymentMethods, dogTemperaments, sortBy, sortDirection);
+        if (refinementError is not null)
+        {
+            return refinementError;
+        }
+
         var (clampedSkip, clampedTake) = ClampPaging(skip, take);
         var results = await searchService.SearchDayCareAsync(
             new DayCareProviderSearchCriteria(
-                animals, city, normalisedLocation, date, startTime, endTime, clampedSkip, clampedTake),
+                animals, city, normalisedLocation, date, startTime, endTime,
+                clampedSkip, clampedTake, refinements, petTemperament),
             cancellationToken);
 
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
@@ -87,6 +121,13 @@ internal static class ProviderSearchEndpoints
         DateOnly? pickupDate,
         string? city,
         string? serviceLocation,
+        // The parent app's shared filter sheet. Repeated query values bind to a
+        // string[]: ?dogTemperaments=Anxious&dogTemperaments=Friendly.
+        string? providerType,
+        string[]? paymentMethods,
+        string[]? dogTemperaments,
+        string? sortBy,
+        string? sortDirection,
         int? skip,
         int? take,
         IProviderSearchService searchService,
@@ -124,17 +165,25 @@ internal static class ProviderSearchEndpoints
             }
         }
 
-        var (error, animals) = await ResolveAnimalsFromPetAsync(
+        var (error, animals, petTemperament) = await ResolveAnimalsFromPetAsync(
             petId, currentPetParent, ownershipReader, cancellationToken);
         if (error is not null)
         {
             return error;
         }
 
+        var (refinementError, refinements) = BuildRefinements(
+            providerType, paymentMethods, dogTemperaments, sortBy, sortDirection);
+        if (refinementError is not null)
+        {
+            return refinementError;
+        }
+
         var (clampedSkip, clampedTake) = ClampPaging(skip, take);
         var results = await searchService.SearchNightStayAsync(
             new NightStayProviderSearchCriteria(
-                animals, city, normalisedLocation, startDate, pickupDate, clampedSkip, clampedTake),
+                animals, city, normalisedLocation, startDate, pickupDate,
+                clampedSkip, clampedTake, refinements, petTemperament),
             cancellationToken);
 
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
@@ -146,6 +195,13 @@ internal static class ProviderSearchEndpoints
         string? serviceItemCode,
         string? city,
         string? serviceLocation,
+        // The parent app's shared filter sheet. Repeated query values bind to a
+        // string[]: ?dogTemperaments=Anxious&dogTemperaments=Friendly.
+        string? providerType,
+        string[]? paymentMethods,
+        string[]? dogTemperaments,
+        string? sortBy,
+        string? sortDirection,
         int? skip,
         int? take,
         IProviderSearchService searchService,
@@ -176,17 +232,25 @@ internal static class ProviderSearchEndpoints
                 $"Grooming service code '{normalisedCode}' is not in the service catalog.");
         }
 
-        var (error, animals) = await ResolveAnimalsFromPetAsync(
+        var (error, animals, petTemperament) = await ResolveAnimalsFromPetAsync(
             petId, currentPetParent, ownershipReader, cancellationToken);
         if (error is not null)
         {
             return error;
         }
 
+        var (refinementError, refinements) = BuildRefinements(
+            providerType, paymentMethods, dogTemperaments, sortBy, sortDirection);
+        if (refinementError is not null)
+        {
+            return refinementError;
+        }
+
         var (clampedSkip, clampedTake) = ClampPaging(skip, take);
         var results = await searchService.SearchGroomingAsync(
             new GroomingProviderSearchCriteria(
-                animals, city, normalisedLocation, date, normalisedCode, clampedSkip, clampedTake),
+                animals, city, normalisedLocation, date, normalisedCode,
+                clampedSkip, clampedTake, refinements, petTemperament),
             cancellationToken);
 
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
@@ -197,6 +261,12 @@ internal static class ProviderSearchEndpoints
         DateOnly? date,
         string? city,
         string? serviceLocation,
+        // The parent app's shared filter sheet, minus dogTemperaments — this
+        // category's offering records no temperament list.
+        string? providerType,
+        string[]? paymentMethods,
+        string? sortBy,
+        string? sortDirection,
         int? skip,
         int? take,
         IProviderSearchService searchService,
@@ -214,17 +284,25 @@ internal static class ProviderSearchEndpoints
             return ApiResults.BadRequest("UnsupportedServiceLocation", exception.Message);
         }
 
-        var (error, animals) = await ResolveAnimalsFromPetAsync(
+        var (error, animals, petTemperament) = await ResolveAnimalsFromPetAsync(
             petId, currentPetParent, ownershipReader, cancellationToken);
         if (error is not null)
         {
             return error;
         }
 
+        var (refinementError, refinements) = BuildRefinements(
+            providerType, paymentMethods, dogTemperaments: null, sortBy, sortDirection);
+        if (refinementError is not null)
+        {
+            return refinementError;
+        }
+
         var (clampedSkip, clampedTake) = ClampPaging(skip, take);
         var results = await searchService.SearchVetAsync(
             new VetProviderSearchCriteria(
-                animals, city, normalisedLocation, date, clampedSkip, clampedTake),
+                animals, city, normalisedLocation, date, clampedSkip, clampedTake, refinements,
+                petTemperament),
             cancellationToken);
 
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
@@ -235,6 +313,12 @@ internal static class ProviderSearchEndpoints
         DateOnly? date,
         string? city,
         string? serviceLocation,
+        // The parent app's shared filter sheet, minus dogTemperaments — this
+        // category's offering records no temperament list.
+        string? providerType,
+        string[]? paymentMethods,
+        string? sortBy,
+        string? sortDirection,
         int? skip,
         int? take,
         IProviderSearchService searchService,
@@ -252,28 +336,135 @@ internal static class ProviderSearchEndpoints
             return ApiResults.BadRequest("UnsupportedServiceLocation", exception.Message);
         }
 
-        var (error, animals) = await ResolveAnimalsFromPetAsync(
+        var (error, animals, petTemperament) = await ResolveAnimalsFromPetAsync(
             petId, currentPetParent, ownershipReader, cancellationToken);
         if (error is not null)
         {
             return error;
         }
 
+        var (refinementError, refinements) = BuildRefinements(
+            providerType, paymentMethods, dogTemperaments: null, sortBy, sortDirection);
+        if (refinementError is not null)
+        {
+            return refinementError;
+        }
+
         var (clampedSkip, clampedTake) = ClampPaging(skip, take);
         var results = await searchService.SearchTrainerAsync(
             new TrainerProviderSearchCriteria(
-                animals, city, normalisedLocation, date, clampedSkip, clampedTake),
+                animals, city, normalisedLocation, date, clampedSkip, clampedTake, refinements,
+                petTemperament),
             cancellationToken);
 
         return ApiResults.Ok(results.Select(ToResponse).ToArray());
     }
 
     /// <summary>
-    /// petId → the pet's type as the animal filter. Ownership is enforced
-    /// inline (these routes aren't under /pets/{petId}, so the group filter
-    /// doesn't apply) with the same status codes as OwnedPetFilter.
+    /// Validates the four cross-search filter/sort parameters in one place, so the
+    /// five endpoints cannot drift on what they accept or on the error code they
+    /// answer with. Returns an error result on the first unusable value, mirroring
+    /// the (Error, Value) shape <see cref="ResolveAnimalsFromPetAsync"/> already
+    /// uses in this file.
     /// </summary>
-    private static async Task<(IResult? Error, string[]? Animals)> ResolveAnimalsFromPetAsync(
+    private static (IResult? Error, ProviderSearchRefinements Refinements) BuildRefinements(
+        string? providerType,
+        string[]? paymentMethods,
+        string[]? dogTemperaments,
+        string? sortBy,
+        string? sortDirection)
+    {
+        var empty = new ProviderSearchRefinements();
+
+        string? normalisedProviderType;
+        try
+        {
+            normalisedProviderType = ProviderTypeFilters.NormaliseOrNull(providerType);
+        }
+        catch (ArgumentException exception)
+        {
+            return (ApiResults.BadRequest("UnsupportedProviderType", exception.Message), empty);
+        }
+
+        IReadOnlyCollection<string>? normalisedPayments;
+        try
+        {
+            normalisedPayments = ProviderPaymentMethodFilters.NormaliseOrNull(paymentMethods);
+        }
+        catch (ArgumentException exception)
+        {
+            return (ApiResults.BadRequest("UnsupportedPaymentMethod", exception.Message), empty);
+        }
+
+        IReadOnlyCollection<string>? normalisedTemperaments;
+        try
+        {
+            normalisedTemperaments = NormaliseTemperamentsOrNull(dogTemperaments);
+        }
+        catch (ArgumentException exception)
+        {
+            return (ApiResults.BadRequest("UnsupportedTemperament", exception.Message), empty);
+        }
+
+        ProviderSearchSortBy? parsedSortBy;
+        EarningsSortDirection parsedDirection;
+        try
+        {
+            parsedSortBy = ProviderSearchQueryParsing.ParseSortBy(sortBy);
+            // Shared with the earnings and history lists on purpose: a client that
+            // learns sortDirection=Asc on one API should not find another spells it
+            // differently.
+            parsedDirection = EarningsQueryParsing.ParseSortDirection(sortDirection);
+        }
+        catch (ArgumentException exception)
+        {
+            return (ApiResults.BadRequest("InvalidRequest", exception.Message), empty);
+        }
+
+        return (null, new ProviderSearchRefinements(
+            normalisedProviderType, normalisedPayments, normalisedTemperaments,
+            parsedSortBy, parsedDirection));
+    }
+
+    /// <summary>
+    /// Validates the requested temperaments against the canonical Behaviour
+    /// vocabulary, so a typo is a 400 rather than a silently empty result set —
+    /// the same reasoning behind validating the grooming service-item code.
+    /// </summary>
+    private static IReadOnlyCollection<string>? NormaliseTemperamentsOrNull(string[]? raw)
+    {
+        if (raw is null || raw.Length == 0)
+        {
+            return null;
+        }
+
+        var normalised = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var value in raw)
+        {
+            var trimmed = value?.Trim();
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                continue;
+            }
+            if (!VocabularyCatalog.BehaviourCodes.Contains(trimmed))
+            {
+                throw new ArgumentException(
+                    $"Temperament '{trimmed}' is not supported. Expected one of: " +
+                    string.Join(", ", VocabularyCatalog.BehaviourCodes) + ".");
+            }
+            normalised.Add(trimmed);
+        }
+
+        return normalised.Count == 0 ? null : normalised;
+    }
+
+    /// <summary>
+    /// petId → the pet's type as the animal filter, and its temperament as a HINT
+    /// stamped on every card (never a filter — see PetTemperamentMatch). Ownership
+    /// is enforced inline (these routes aren't under /pets/{petId}, so the group
+    /// filter doesn't apply) with the same status codes as OwnedPetFilter.
+    /// </summary>
+    private static async Task<(IResult? Error, string[]? Animals, string? Temperament)> ResolveAnimalsFromPetAsync(
         Guid? petId,
         ICurrentPetParentContext currentPetParent,
         IPetParentOwnershipReader ownershipReader,
@@ -281,7 +472,7 @@ internal static class ProviderSearchEndpoints
     {
         if (petId is null)
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         var callerPetParentId = await currentPetParent.GetPetParentIdAsync(cancellationToken);
@@ -289,22 +480,22 @@ internal static class ProviderSearchEndpoints
         {
             return (ApiResults.Forbidden(
                 "ParentProfileNotCompleted",
-                "Complete the parent profile (POST /api/v1/parent-onboarding/profile) before accessing this resource."), null);
+                "Complete the parent profile (POST /api/v1/parent-onboarding/profile) before accessing this resource."), null, null);
         }
 
         var pet = await ownershipReader.GetPetLookupAsync(petId.Value, cancellationToken);
         if (pet is null)
         {
-            return (ApiResults.NotFound("PetNotFound", $"Pet '{petId.Value}' was not found."), null);
+            return (ApiResults.NotFound("PetNotFound", $"Pet '{petId.Value}' was not found."), null, null);
         }
         if (pet.OwningPetParentId != callerPetParentId.Value)
         {
             return (ApiResults.Forbidden(
                 "Forbidden",
-                "You can only filter by pets belonging to your own profile."), null);
+                "You can only filter by pets belonging to your own profile."), null, null);
         }
 
-        return (null, [pet.PetType]);
+        return (null, [pet.PetType], pet.Temperament);
     }
 
     private static (int Skip, int Take) ClampPaging(int? skip, int? take) =>
@@ -339,5 +530,7 @@ internal static class ProviderSearchEndpoints
             result.ServiceItemCode,
             result.Description,
             result.ImageUrl,
-            result.BannerImageUrl);
+            result.BannerImageUrl,
+            result.PetCapacity,
+            result.MatchesPetTemperament);
 }

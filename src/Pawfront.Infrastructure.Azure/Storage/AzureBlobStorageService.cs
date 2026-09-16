@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Azure;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
@@ -13,7 +14,15 @@ internal sealed class AzureBlobStorageService(
 {
     private readonly BlobStorageOptions options = blobOptions.Value;
     private readonly SemaphoreSlim semaphore = new(1, 1);
-    private BlobContainerClient? containerClient;
+
+    // One client per container. There are two today — the media container and the
+    // invoices container — and they are cached rather than rebuilt because
+    // CreateIfNotExists is a network round trip we only want to pay once per
+    // container per process.
+    private readonly ConcurrentDictionary<string, BlobContainerClient> containerClients =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private BlobServiceClient? serviceClient;
 
     public async Task<string> UploadAsync(
         BlobUploadKind kind,
@@ -28,7 +37,7 @@ internal sealed class AzureBlobStorageService(
             throw new ArgumentException("File name is required.", nameof(fileName));
         }
 
-        var container = await GetContainerAsync(cancellationToken);
+        var container = await GetContainerAsync(ResolveContainerName(kind), cancellationToken);
         var blobName = BuildBlobName(kind, ownerId, fileName);
         var blobClient = container.GetBlobClient(blobName);
 
@@ -42,8 +51,7 @@ internal sealed class AzureBlobStorageService(
 
     public async Task<BlobDownload?> DownloadAsync(string blobUrl, CancellationToken cancellationToken)
     {
-        var container = await GetContainerAsync(cancellationToken);
-        var blobClient = ResolveBlobClient(container, blobUrl);
+        var blobClient = await ResolveBlobClientAsync(blobUrl, cancellationToken);
 
         try
         {
@@ -62,8 +70,7 @@ internal sealed class AzureBlobStorageService(
 
     public async Task<bool> DeleteAsync(string blobUrl, CancellationToken cancellationToken)
     {
-        var container = await GetContainerAsync(cancellationToken);
-        var blobClient = ResolveBlobClient(container, blobUrl);
+        var blobClient = await ResolveBlobClientAsync(blobUrl, cancellationToken);
 
         var response = await blobClient.DeleteIfExistsAsync(
             DeleteSnapshotsOption.IncludeSnapshots,
@@ -72,11 +79,12 @@ internal sealed class AzureBlobStorageService(
     }
 
     /// <summary>
-    /// Maps a stored blob URL back to a client within the configured
-    /// container, rejecting anything outside it (SSRF guard — the URL must
-    /// live under our own container, not an arbitrary host).
+    /// Maps a stored blob URL back to a client in one of the CONFIGURED
+    /// containers, rejecting anything outside them (SSRF guard — the URL must
+    /// live under our own storage account and in a container we own, not an
+    /// arbitrary host).
     /// </summary>
-    private static BlobClient ResolveBlobClient(BlobContainerClient container, string blobUrl)
+    private async Task<BlobClient> ResolveBlobClientAsync(string blobUrl, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(blobUrl))
         {
@@ -89,26 +97,63 @@ internal sealed class AzureBlobStorageService(
             throw new ArgumentException("Blob URL must be an absolute http(s) URL.", nameof(blobUrl));
         }
 
-        var containerUri = container.Uri;
-        if (!string.Equals(uri.Host, containerUri.Host, StringComparison.OrdinalIgnoreCase))
+        // Try each configured container in turn. A URL that matches none of them
+        // is rejected exactly as it was when there was only one — widening the
+        // set of containers must not widen what a caller can reach.
+        foreach (var containerName in ConfiguredContainers())
         {
-            throw new ArgumentException("Blob URL host does not match the configured storage account.", nameof(blobUrl));
+            var container = await GetContainerAsync(containerName, cancellationToken);
+            var containerUri = container.Uri;
+
+            if (!string.Equals(uri.Host, containerUri.Host, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var containerPath = containerUri.AbsolutePath.TrimEnd('/') + "/";
+            if (!uri.AbsolutePath.StartsWith(containerPath, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var blobName = Uri.UnescapeDataString(uri.AbsolutePath.Substring(containerPath.Length));
+            if (string.IsNullOrWhiteSpace(blobName))
+            {
+                throw new ArgumentException("Blob URL is missing a blob name.", nameof(blobUrl));
+            }
+
+            return container.GetBlobClient(blobName);
         }
 
-        var containerPath = containerUri.AbsolutePath.TrimEnd('/') + "/";
-        if (!uri.AbsolutePath.StartsWith(containerPath, StringComparison.Ordinal))
-        {
-            throw new ArgumentException("Blob URL does not point at the configured container.", nameof(blobUrl));
-        }
-
-        var blobName = Uri.UnescapeDataString(uri.AbsolutePath.Substring(containerPath.Length));
-        if (string.IsNullOrWhiteSpace(blobName))
-        {
-            throw new ArgumentException("Blob URL is missing a blob name.", nameof(blobUrl));
-        }
-
-        return container.GetBlobClient(blobName);
+        throw new ArgumentException(
+            "Blob URL does not point at a configured container on this storage account.",
+            nameof(blobUrl));
     }
+
+    private IEnumerable<string> ConfiguredContainers()
+    {
+        if (!string.IsNullOrWhiteSpace(options.Container))
+        {
+            yield return options.Container;
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.InvoiceContainer) &&
+            !string.Equals(options.InvoiceContainer, options.Container, StringComparison.OrdinalIgnoreCase))
+        {
+            yield return options.InvoiceContainer;
+        }
+    }
+
+    private string ResolveContainerName(BlobUploadKind kind) => kind switch
+    {
+        BlobUploadKind.Invoice => Required(options.InvoiceContainer, "BlobStorage:InvoiceContainer"),
+        _ => Required(options.Container, "BlobStorage:Container")
+    };
+
+    private static string Required(string? value, string configurationPath)
+        => string.IsNullOrWhiteSpace(value)
+            ? throw new InvalidOperationException($"{configurationPath} is required.")
+            : value;
 
     private string BuildBlobName(BlobUploadKind kind, Guid ownerId, string fileName)
     {
@@ -129,6 +174,7 @@ internal sealed class AzureBlobStorageService(
             BlobUploadKind.ReviewPhoto => options.Folders.ReviewPhotos,
             BlobUploadKind.ChatAttachment => options.Folders.ChatAttachments,
             BlobUploadKind.IncidentPhoto => options.Folders.IncidentPhotos,
+            BlobUploadKind.Invoice => options.Folders.Invoices,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported blob upload kind.")
         };
 
@@ -137,36 +183,40 @@ internal sealed class AzureBlobStorageService(
 
         var leaf = string.IsNullOrWhiteSpace(extension) ? unique : $"{unique}{extension}";
 
-        return $"{folder.Trim('/')}/{ownerId}/{leaf}";
+        // Invoices carry no folder prefix — their container name already says what
+        // they are, so the path is just <BookingId>/<file>.
+        var prefix = folder.Trim('/');
+        return string.IsNullOrEmpty(prefix)
+            ? $"{ownerId}/{leaf}"
+            : $"{prefix}/{ownerId}/{leaf}";
     }
 
-    private async Task<BlobContainerClient> GetContainerAsync(CancellationToken cancellationToken)
+    private async Task<BlobContainerClient> GetContainerAsync(string containerName, CancellationToken cancellationToken)
     {
-        if (containerClient is not null)
+        if (containerClients.TryGetValue(containerName, out var cached))
         {
-            return containerClient;
+            return cached;
         }
 
         await semaphore.WaitAsync(cancellationToken);
         try
         {
-            if (containerClient is not null)
+            if (containerClients.TryGetValue(containerName, out cached))
             {
-                return containerClient;
+                return cached;
             }
 
-            if (string.IsNullOrWhiteSpace(options.Container))
+            if (serviceClient is null)
             {
-                throw new InvalidOperationException("BlobStorage:Container is required.");
+                var connectionString = await secretProvider.GetBlobStorageKeyAsync(cancellationToken);
+                serviceClient = new BlobServiceClient(connectionString);
             }
 
-            var connectionString = await secretProvider.GetBlobStorageKeyAsync(cancellationToken);
-            var serviceClient = new BlobServiceClient(connectionString);
-            var client = serviceClient.GetBlobContainerClient(options.Container);
+            var client = serviceClient.GetBlobContainerClient(containerName);
             await client.CreateIfNotExistsAsync(cancellationToken: cancellationToken);
 
-            containerClient = client;
-            return containerClient;
+            containerClients[containerName] = client;
+            return client;
         }
         finally
         {

@@ -30,5 +30,12 @@ public enum BlobUploadKind
     // the ticket's own id keys the path. Unlike every other gallery here there
     // is no delete: evidence a reporter could retract after support has read it
     // would defeat the point of the legal hold.
-    IncidentPhoto = 14
+    IncidentPhoto = 14,
+    // An invoice PDF for a paid booking (owner = BookingId), rendered by the
+    // InvoiceGeneration function. The ONLY kind that does not live in the
+    // provider-images container: invoices are financial documents rather than
+    // media, they are the one thing here with a retention obligation, and both
+    // documents for a job belong side by side under one BookingId folder. It is
+    // also the only non-image kind — application/pdf, not JPEG/PNG/WebP.
+    Invoice = 15
 }

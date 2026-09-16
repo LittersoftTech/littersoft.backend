@@ -355,15 +355,42 @@ feature yet.
 | `DISPUTE_RESOLVED` | `BOOKING` | No Helpline / ticket module | P-S15 / V-S13 |
 | `PROMOTIONAL_MESSAGE` | `PROMOTIONAL` | No campaign module | *(not in V3)* |
 
-> `INVOICE_ISSUED` is **half-wired as of 2026-08-11**. The **provider** side
-> (V-S14) now fires from `Booking.MarkBookingPaid` and its night-stay twin — the
-> moment the provider records the cash on a COMPLETED job, which is when their
-> invoice for it is settled. It arrives alongside the parent's `BOOKING_PAID`
-> receipt for the same event, carries the same `amount`, and **routes to
-> `/bookings/detail`, not `/invoices/detail`**: there is no invoicing module and
-> therefore no document to open, and the booking summary is what the spec asks for.
-> The **parent** side (P-S16) is still unwired — issuing them an invoice needs that
-> module. Their receipt for the same moment is `BOOKING_PAID`.
+> `INVOICE_ISSUED` is **fully wired as of 2026-08-26**, but the two halves fire
+> from different places and at different times. Read this before building either.
+>
+> The **provider** side (V-S14) fires from `Booking.MarkBookingPaid` and its
+> night-stay twin — the moment the provider records the cash on a COMPLETED job,
+> which is when their invoice for it is settled. It arrives alongside the parent's
+> `BOOKING_PAID` receipt for the same event, carries the same `amount`, and
+> **routes to `/bookings/detail`, not `/invoices/detail`**. That is unchanged and
+> deliberate: the provider's card is about the job being settled, and the booking
+> summary is what the spec asks for. Their own fee invoice IS now downloadable
+> (`GET /providers/{id}/bookings/{bookingId}/invoice`) — it is simply not what this
+> notification opens.
+>
+> The **parent** side (P-S16) fires from **`Billing.CompleteInvoiceGeneration`** —
+> NOT from mark-paid. This matters: invoice PDFs are rendered asynchronously by
+> `InvoiceGenerationFunction`, so at mark-paid time the invoice row exists but its
+> document does not. A push sent there would say "your invoice is ready, tap to
+> view" about a URL that answers **409 `InvoiceNotReady`**. Firing it when the
+> render completes makes the notification true the moment it is sent, and atomic
+> with the URL that makes it true.
+>
+> **Consequence for the app:** the parent gets TWO notifications for one payment —
+> `BOOKING_PAID` (the receipt, immediately) and then `INVOICE_ISSUED` (the
+> document, typically seconds later). They are deliberately separate cards: one
+> confirms the money, the other delivers a file.
+>
+> The parent's card routes to `/invoices/detail` and its `data` carries
+> **`invoiceId`** — the invoice NUMBER (`PF-INV-2026-004812`), not a GUID, because
+> that is what the document prints and what a customer would quote — plus
+> **`issuedBy`**, the provider's business name. Open the document with the booking
+> ids already in the canonical block: `GET /pet-parents/{petParentId}/bookings/{bookingId}/invoice`,
+> or the `/night-stay-bookings/` variant when `isNightStay` is `true`.
+>
+> If the render never succeeds, no parent `INVOICE_ISSUED` is ever sent — which is
+> correct, and why the card must not be treated as guaranteed to follow a
+> `BOOKING_PAID`.
 
 `PROMOTIONAL_MESSAGE` takes its `title`/`body` from the caller rather than a
 template, since campaign wording is the point of a campaign.

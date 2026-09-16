@@ -16,14 +16,24 @@ public sealed record OpenConversationRequest(Guid CounterpartyId);
 /// "Deleted User" rather than its old name.
 /// </param>
 /// <param name="PhotoUrl">
-/// Present for a pet-parent counterparty. Null for a provider — their image
-/// lives in their Cosmos offering document, not on the SQL row this joins.
+/// Resolved for both sides: a pet parent's comes off their SQL row, a provider's
+/// from their Cosmos offering document. Null only when a provider has saved no
+/// offering yet, or the document could not be read.
+/// </param>
+/// <param name="BusinessName">
+/// The provider's business ("Happy Paws Hotel"), from that same offering
+/// document. Show it in preference to <paramref name="Name"/> where present —
+/// <paramref name="Name"/> is the owner's own name, which is not what the parent
+/// recognises. Null for a pet-parent counterparty, for a freelancer trading under
+/// their own name, and when the document cannot be read; the thread is served
+/// either way rather than failing over a missing name.
 /// </param>
 public sealed record ChatCounterpartyResponse(
     string ParticipantType,
     Guid ParticipantId,
     string? Name,
-    string? PhotoUrl);
+    string? PhotoUrl,
+    string? BusinessName = null);
 
 /// <param name="LastSequence">
 /// The newest message's sequence. Compare with <paramref name="LastReadSequence"/>

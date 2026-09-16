@@ -91,10 +91,15 @@ internal static class ProviderDetailsEndpoints
             return ApiResults.BadRequest("InvalidRequest", "startTime must be earlier than endTime.");
         }
 
-        // petId → the pet's type becomes the animal filter. Ownership is
-        // enforced here (the route isn't under /pets/{petId}, so the group
-        // filters don't apply): same codes as OwnedPetFilter.
+        // petId → the pet's type becomes the animal filter, and its temperament
+        // is stamped on each card as a hint (never a filter — see
+        // PetTemperamentMatch). This browse list exposes no ?dogTemperaments=
+        // parameter at all, which is why a sitter who takes friendly dogs only
+        // could turn up here for an aggressive one with nothing to say so.
+        // Ownership is enforced here (the route isn't under /pets/{petId}, so the
+        // group filters don't apply): same codes as OwnedPetFilter.
         string[]? animals = null;
+        string? petTemperament = null;
         if (petId is not null)
         {
             var callerPetParentId = await currentPetParent.GetPetParentIdAsync(cancellationToken);
@@ -118,6 +123,7 @@ internal static class ProviderDetailsEndpoints
             }
 
             animals = [pet.PetType];
+            petTemperament = pet.Temperament;
         }
 
         var clampedTake = take is null
@@ -157,7 +163,8 @@ internal static class ProviderDetailsEndpoints
             results = available.Skip(clampedSkip).ToList();
         }
 
-        return ApiResults.Ok(results.Select(ToSummaryResponse).ToArray());
+        return ApiResults.Ok(
+            results.Select(s => ToSummaryResponse(s, petTemperament)).ToArray());
     }
 
     private static async Task<IResult> Get(
@@ -176,7 +183,9 @@ internal static class ProviderDetailsEndpoints
         }
     }
 
-    private static ProviderSummaryResponse ToSummaryResponse(ProviderSummary summary) =>
+    private static ProviderSummaryResponse ToSummaryResponse(
+        ProviderSummary summary,
+        string? petTemperament) =>
         new(
             summary.ProviderId,
             summary.ServiceCategory,
@@ -185,7 +194,10 @@ internal static class ProviderDetailsEndpoints
             summary.ImageUrl,
             summary.City,
             summary.About,
-            summary.AnimalsHandled);
+            summary.AnimalsHandled,
+            // Same rule the five search cards use, from the same helper, so the
+            // browse list and a search cannot disagree about one provider.
+            PetTemperamentMatch.Evaluate(petTemperament, summary.DogTemperaments));
 
     private static string? NormaliseProviderTypeOrNull(string? raw)
     {

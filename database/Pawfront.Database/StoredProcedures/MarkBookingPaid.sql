@@ -99,6 +99,20 @@ BEGIN
     VALUES
         (N'SingleDay', @BookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
 
+    -- Raise the two invoices this payment produces (the parent's for the service,
+    -- the provider's for the Pawfront fee), at Status 'Pending'. INSIDE this
+    -- transaction on purpose: the queue message that renders them is sent from C#
+    -- once this commits and can be lost to a crash in that window, but these rows
+    -- cannot be — so the sweep can always recover what the queue dropped. Same
+    -- outbox reasoning as the notification enqueues below. Returns no result set.
+    EXEC [Billing].[RaiseBookingInvoices]
+        @BookingType = N'SingleDay',
+        @BookingId = @BookingId,
+        @ProviderId = @ProviderId,
+        @PetParentId = @RowPetParent,
+        @Amount = @Amount,
+        @PawfrontFee = @PawfrontFee;
+
     -- Where the provider was when they took the money.
     IF @Latitude IS NOT NULL AND @Longitude IS NOT NULL
     BEGIN

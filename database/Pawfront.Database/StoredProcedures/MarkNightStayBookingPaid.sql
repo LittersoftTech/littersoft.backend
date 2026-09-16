@@ -82,6 +82,17 @@ BEGIN
     VALUES
         (N'NightStay', @NightStayBookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
 
+    -- Raise the two invoices this payment produces. See the twin in
+    -- [Booking].[MarkBookingPaid] for why this sits inside the transaction.
+    -- Returns no result set.
+    EXEC [Billing].[RaiseBookingInvoices]
+        @BookingType = N'NightStay',
+        @BookingId = @NightStayBookingId,
+        @ProviderId = @ProviderId,
+        @PetParentId = @RowPetParent,
+        @Amount = @Amount,
+        @PawfrontFee = @PawfrontFee;
+
     -- Where the provider was when they took the money.
     IF @Latitude IS NOT NULL AND @Longitude IS NOT NULL
     BEGIN

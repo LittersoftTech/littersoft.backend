@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using Pawfront.Application.Availability;
+using Pawfront.Application.Billing;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Offerings;
@@ -19,6 +20,7 @@ internal sealed class BookingService(
     IProviderDiscoveryService providerDiscovery,
     IProviderServiceLocationRegistry providerLocationRegistry,
     IBookingTermsChangeService termsChangeService,
+    IInvoiceQueuePublisher invoiceQueue,
     IOptions<PawfrontFeeOptions> feeOptions) : IBookingService, IDailyBookingReader, IDailyAgendaReader
 {
     public async Task<BookingResult> CreateAsync(
@@ -730,7 +732,7 @@ internal sealed class BookingService(
             throw new BookingNotPriceableException(command.BookingId);
         }
 
-        return await sqlStore.MarkPaidAsync(
+        var result = await sqlStore.MarkPaidAsync(
             command.BookingId,
             command.ProviderId,
             detail.TotalAmount.Value,
@@ -738,6 +740,18 @@ internal sealed class BookingService(
             method,
             location,
             cancellationToken);
+
+        // The payment has committed, and with it the two 'Pending' invoice rows
+        // the sproc raised inside the same transaction. Asking the renderer for
+        // them is the fast path only: SQL cannot enqueue a Storage Queue message,
+        // so this call sits outside that transaction and can be lost to a crash.
+        // The publisher swallows its own failures for exactly that reason - the
+        // sweep is what guarantees the invoices, not this line.
+        await invoiceQueue.PublishAsync(
+            new InvoiceGenerationRequest(BookingTypes.SingleDay, command.BookingId),
+            cancellationToken);
+
+        return result;
     }
 
     public Task<BookingPrescriptionResult> UpsertPrescriptionAsync(

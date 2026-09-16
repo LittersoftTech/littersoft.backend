@@ -108,7 +108,25 @@ public sealed record ProviderSummaryResponse(
     string? ImageUrl,
     string City,
     string? About,
-    IReadOnlyCollection<string> AnimalsHandled);
+    IReadOnlyCollection<string> AnimalsHandled,
+    // Does this provider take the temperament of the pet the search was filtered
+    // by (?petId=)? true / false when the question can be answered, null when it
+    // cannot: no pet was named, the pet has no temperament recorded (it is
+    // optional), or the provider's category holds no such list — only PetSitter
+    // and PetGroomer offerings record dog temperaments, so vets, trainers and
+    // adoption-and-sale always read null here.
+    //
+    // false covers BOTH "they listed other temperaments" and "they listed none",
+    // which is what keeps this in step with the hard ?dogTemperaments= filter —
+    // that filter excludes a provider who recorded none, so a flag calling that
+    // case unanswerable would put one provider in two different buckets on two
+    // screens.
+    //
+    // A NON-MATCH IS STILL RETURNED. This is a hint for the app's "Other"
+    // section, not a filter: a parent whose dog is aggressive would otherwise see
+    // a near-empty list with no explanation, and the provider they could still
+    // ring up would simply have vanished.
+    bool? MatchesPetTemperament = null);
 
 /// <summary>
 /// Per-provider hit returned by the four per-service booking-search
@@ -140,4 +158,28 @@ public sealed record ProviderSearchResultResponse(
     // The wide banner the provider uploaded for this specific service
     // (POST /providers/{id}/services/{serviceId}/banner-image). Distinct from
     // ImageUrl. Null when the provider hasn't set a banner for this service.
-    string? BannerImageUrl);
+    string? BannerImageUrl,
+    // How many pets the provider can take at once on THIS service (the
+    // offering's capacity, scoped by ServiceId — day care and night stay have
+    // their own buckets; grooming capacity is shop-wide across the menu).
+    // On the card because ?sortBy=PetCapacity is offered: a list the parent
+    // asked to order by a number should show them the number.
+    int PetCapacity = 0,
+    // Does this provider take the temperament of the pet the search was filtered
+    // by (?petId=)? true / false when the question can be answered, null when it
+    // cannot: no pet was named, the pet has no temperament recorded (it is
+    // optional), or the provider's category holds no such list — only PetSitter
+    // and PetGroomer offerings record dog temperaments, so vets, trainers and
+    // adoption-and-sale always read null here.
+    //
+    // false covers BOTH "they listed other temperaments" and "they listed none",
+    // which is what keeps this in step with the hard ?dogTemperaments= filter —
+    // that filter excludes a provider who recorded none, so a flag calling that
+    // case unanswerable would put one provider in two different buckets on two
+    // screens.
+    //
+    // A NON-MATCH IS STILL RETURNED. This is a hint for the app's "Other"
+    // section, not a filter: a parent whose dog is aggressive would otherwise see
+    // a near-empty list with no explanation, and the provider they could still
+    // ring up would simply have vanished.
+    bool? MatchesPetTemperament = null);

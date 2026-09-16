@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
 using Pawfront.Application.Storage;
 using Pawfront.Contracts.Common;
@@ -250,6 +251,17 @@ internal static class EventEndpoints
         string[]? amenities,
         // Optional free-text title search (case-insensitive "contains").
         string? title,
+        // The app's event filter sheet. isPaid is "Free or Paid"; minPrice /
+        // maxPrice are the price slider (a free event counts as 0); city is
+        // "Location" and matches the VENUE city, so it excludes online events.
+        bool? isPaid,
+        decimal? minPrice,
+        decimal? maxPrice,
+        string? city,
+        // Date | Price | SeatsLeft, with sortDirection Asc | Desc. Omit both to
+        // keep the existing order (newest start date first).
+        string? sortBy,
+        string? sortDirection,
         HttpContext httpContext,
         IEventService eventService,
         IEventBookingService bookingService,
@@ -267,7 +279,13 @@ internal static class EventEndpoints
                     endDate,
                     isChildFriendly,
                     amenities,
-                    title),
+                    title,
+                    isPaid,
+                    minPrice,
+                    maxPrice,
+                    city,
+                    EventListSorting.ParseSortBy(sortBy),
+                    EarningsQueryParsing.ParseSortDirection(sortDirection)),
                 cancellationToken);
 
             // An event the caller already holds tickets for is no longer

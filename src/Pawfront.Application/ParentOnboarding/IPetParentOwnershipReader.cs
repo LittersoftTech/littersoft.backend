@@ -46,8 +46,16 @@ public interface IPetParentOwnershipReader
 /// The owner's display name. Empty when the owning profile row can't be read —
 /// the ownership answer must not depend on a name being resolvable.
 /// </param>
+/// <param name="Temperament">
+/// The pet's recorded temperament (Anxious / Friendly / Aggressive), or null —
+/// it is optional on a pet profile. Read here so the provider searches can stamp
+/// "does this provider take a dog like mine" on every card without a second
+/// round-trip; it is NOT a filter. See
+/// <see cref="Pawfront.Application.Providers.PetTemperamentMatch"/>.
+/// </param>
 public sealed record PetOwnershipLookup(
     Guid OwningPetParentId,
     string PetType,
     string PetName,
-    string ParentName);
+    string ParentName,
+    string? Temperament = null);

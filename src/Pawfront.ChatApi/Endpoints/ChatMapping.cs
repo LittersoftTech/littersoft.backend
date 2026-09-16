@@ -35,7 +35,12 @@ internal static class ChatMapping
                 counterparty.ParticipantType.ToSqlValue(),
                 counterparty.ParticipantId,
                 counterparty.Name,
-                counterparty.PhotoUrl),
+                counterparty.PhotoUrl,
+                // Null for a pet parent and for a freelancer, both of whom trade
+                // under the name above. ServiceCategory is deliberately NOT
+                // mapped — it is the Cosmos partition key the enrichment needed,
+                // not something a client has any use for.
+                counterparty.BusinessName),
             conversation.LastSequence,
             conversation.LastMessageAtUtc,
             conversation.LastMessagePreview,

@@ -36,6 +36,9 @@ internal sealed class CosmosProviderDiscoveryService(
         CancellationToken cancellationToken)
     {
         var animalsFilter = NormaliseAnimals(filter.Animals);
+        // Same OR semantics and same normalisation as the animals filter — it is
+        // the same shape of question about the same kind of list.
+        var temperamentsFilter = NormaliseAnimals(filter.DogTemperaments);
         var cityFilter = string.IsNullOrWhiteSpace(filter.City) ? null : filter.City.Trim();
         var locationFilter = string.IsNullOrWhiteSpace(filter.ServiceLocation) ? null : filter.ServiceLocation;
         var categories = string.IsNullOrWhiteSpace(filter.ServiceCategory)
@@ -55,32 +58,52 @@ internal sealed class CosmosProviderDiscoveryService(
                 continue;
             }
 
+            // Only PetSitter and PetGroomer offerings record dogTemperaments. The
+            // other three carry no such list, so a temperament filter excludes
+            // them outright rather than matching them vacuously — the same posture
+            // the animals filter takes towards PetAdoptionAndSale above.
+            if (temperamentsFilter is { Count: > 0 }
+                && category is not (nameof(ProviderServiceCategory.PetSitter)
+                                    or nameof(ProviderServiceCategory.PetGroomer)))
+            {
+                continue;
+            }
+
             var summaries = category switch
             {
                 nameof(ProviderServiceCategory.PetSitter) =>
                     await QueryAsync<PetSitterServiceDocument>(
                         container, category, ToPetSitterSummary, animalsFilter, cityFilter,
                         locationFilter is null ? null : doc => MatchesPetSitterLocation(doc, locationFilter),
+                        temperamentsFilter is null ? null : doc => MatchesTemperaments(
+                            doc.PetHotel?.Offering?.DogTemperaments ?? doc.Freelance?.Offering?.DogTemperaments,
+                            temperamentsFilter),
                         cancellationToken),
                 nameof(ProviderServiceCategory.PetGroomer) =>
                     await QueryAsync<PetGroomerServiceDocument>(
                         container, category, ToPetGroomerSummary, animalsFilter, cityFilter,
                         locationFilter is null ? null : doc => MatchesPetGroomerLocation(doc, locationFilter),
+                        temperamentsFilter is null ? null : doc => MatchesTemperaments(
+                            doc.GroomerShop?.Offering?.DogTemperaments ?? doc.Freelance?.Offering?.DogTemperaments,
+                            temperamentsFilter),
                         cancellationToken),
                 nameof(ProviderServiceCategory.PetTrainer) =>
                     await QueryAsync<PetTrainerServiceDocument>(
                         container, category, ToPetTrainerSummary, animalsFilter, cityFilter,
                         locationFilter is null ? null : doc => MatchesPetTrainerLocation(doc, locationFilter),
+                        temperamentPredicate: null,
                         cancellationToken),
                 nameof(ProviderServiceCategory.PetAdoptionAndSale) =>
                     await QueryAsync<PetAdoptionSaleServiceDocument>(
                         container, category, ToPetAdoptionSaleSummary, animalsFilter, cityFilter,
                         locationPredicate: null,
+                        temperamentPredicate: null,
                         cancellationToken),
                 nameof(ProviderServiceCategory.Vet) =>
                     await QueryAsync<VetServiceDocument>(
                         container, category, ToVetSummary, animalsFilter, cityFilter,
                         locationFilter is null ? null : doc => MatchesVetLocation(doc, locationFilter),
+                        temperamentPredicate: null,
                         cancellationToken),
                 _ => new List<ProviderSummary>()
             };
@@ -143,6 +166,7 @@ internal sealed class CosmosProviderDiscoveryService(
         HashSet<string>? animalsFilter,
         string? cityFilter,
         Func<TDoc, bool>? locationPredicate,
+        Func<TDoc, bool>? temperamentPredicate,
         CancellationToken cancellationToken)
     {
         var iterator = container.GetItemQueryIterator<TDoc>(
@@ -159,6 +183,10 @@ internal sealed class CosmosProviderDiscoveryService(
             foreach (var doc in page)
             {
                 if (locationPredicate is not null && !locationPredicate(doc))
+                {
+                    continue;
+                }
+                if (temperamentPredicate is not null && !temperamentPredicate(doc))
                 {
                     continue;
                 }
@@ -254,6 +282,32 @@ internal sealed class CosmosProviderDiscoveryService(
         return false;
     }
 
+    /// <summary>
+    /// OR semantics: the provider matches when their offering names ANY of the
+    /// requested temperaments. A provider who has recorded none (no offering yet,
+    /// or an offering saved before they filled the list in) matches nothing — the
+    /// parent asked for someone comfortable with an anxious dog, and silence is
+    /// not that answer.
+    /// </summary>
+    private static bool MatchesTemperaments(
+        IReadOnlyCollection<string>? stored,
+        HashSet<string> requested)
+    {
+        if (stored is null || stored.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var value in stored)
+        {
+            if (value is not null && requested.Contains(value))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static HashSet<string>? NormaliseAnimals(IReadOnlyCollection<string>? animals)
     {
         if (animals is null || animals.Count == 0)
@@ -294,7 +348,13 @@ internal sealed class CosmosProviderDiscoveryService(
             Address: doc.Address,
             Zip: doc.Zip,
             About: doc.PetHotel?.Description ?? doc.Freelance?.AboutYou,
-            AnimalsHandled: animals);
+            AnimalsHandled: animals,
+            // Non-null (possibly empty) for this category: PetSitter offerings DO
+            // record temperaments, so an empty list means "recorded none", not
+            // "not applicable". See ProviderSummary.DogTemperaments.
+            DogTemperaments: doc.PetHotel?.Offering?.DogTemperaments
+                ?? doc.Freelance?.Offering?.DogTemperaments
+                ?? new List<string>());
     }
 
     private static ProviderSummary ToPetGroomerSummary(PetGroomerServiceDocument doc)
@@ -313,7 +373,11 @@ internal sealed class CosmosProviderDiscoveryService(
             Address: doc.Address,
             Zip: doc.Zip,
             About: doc.GroomerShop?.Description ?? doc.Freelance?.AboutYou,
-            AnimalsHandled: animals);
+            AnimalsHandled: animals,
+            // Non-null for this category, same as PetSitter above.
+            DogTemperaments: doc.GroomerShop?.Offering?.DogTemperaments
+                ?? doc.Freelance?.Offering?.DogTemperaments
+                ?? new List<string>());
     }
 
     private static ProviderSummary ToPetTrainerSummary(PetTrainerServiceDocument doc)

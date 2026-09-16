@@ -271,16 +271,51 @@ public sealed record IdentityStageResponse(string Status, string? IdentityType);
 
 public sealed record OnboardingStageResponse(string Status);
 
-public sealed record PetsStageResponse(string Status, int PetCount);
+/// <summary>
+/// The "pets added" stage, plus a pointer straight at the first pet that still
+/// needs finishing.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <c>incompletePetId</c> / <c>incompletePetName</c> let a "Complete Profile"
+/// button open the exact pet rather than the app guessing which of several is
+/// unfinished. They name the FIRST pet (in the order they were added) missing a
+/// section that actually gates onboarding — medical info, and nothing else today
+/// — so they are null exactly when <c>petMedicalInfo.status</c> is
+/// <c>Complete</c>.
+/// </para>
+/// <para>
+/// <c>missingSections</c> is that pet's unfinished sections: <c>MedicalInfo</c>
+/// and/or <c>ProfilePhoto</c>. A photo is reported but does NOT gate onboarding,
+/// exactly as the parent's own profile photo does not — so a pet can appear here
+/// with <c>["ProfilePhoto"]</c> only if it is also missing medical info. Null when
+/// there is no incomplete pet. There is no <c>BasicInfo</c> value: those columns
+/// are mandatory when a pet is created, so they can never be missing.
+/// </para>
+/// </remarks>
+public sealed record PetsStageResponse(
+    string Status,
+    int PetCount,
+    Guid? IncompletePetId = null,
+    string? IncompletePetName = null,
+    IReadOnlyCollection<string>? MissingSections = null);
 
 public sealed record PetMedicalInfoStageResponse(
     string Status,
     IReadOnlyCollection<PetMedicalInfoCompletionResponse> Pets);
 
+/// <summary>
+/// One pet's completion state. <c>missingSections</c> names what is unfinished,
+/// from the same vocabulary as <see cref="PetsStageResponse.MissingSections"/>,
+/// and is empty when nothing is — so the app can render every pet's remaining
+/// work, not only the first one.
+/// </summary>
 public sealed record PetMedicalInfoCompletionResponse(
     Guid PetId,
     string PetName,
-    bool IsMedicalInfoComplete);
+    bool IsMedicalInfoComplete,
+    bool HasProfilePhoto = false,
+    IReadOnlyCollection<string>? MissingSections = null);
 
 public sealed record PetParentVerificationStatusResponse(
     bool IsEmailVerified,

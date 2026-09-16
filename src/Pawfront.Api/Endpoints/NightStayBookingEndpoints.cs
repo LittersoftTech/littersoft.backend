@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using Microsoft.AspNetCore.Mvc;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
@@ -213,7 +213,11 @@ internal static class NightStayBookingEndpoints
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
             IsBlocked: block.IsBlocked,
-            BlockedByMe: block.BlockedByMe);
+            BlockedByMe: block.BlockedByMe,
+            // Whether this booking has ever been modified, so the screen can label
+            // it without walking the status history. An accepted change only --
+            // a declined proposal left the terms untouched.
+            IsModificationDone: row.IsModificationDone);
     }
 
     private static string? CombineName(string? first, string? last)
@@ -662,5 +666,13 @@ internal static class NightStayBookingEndpoints
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
             IsBlocked: block.IsBlocked,
-            BlockedByMe: block.BlockedByMe);
+            BlockedByMe: block.BlockedByMe,
+            // Only Booking.ListNightStayBookingsByProvider projects these, so
+            // they are null everywhere else this mapper is used.
+            CustomerName: result.CustomerName,
+            CustomerPhotoUrl: result.CustomerPhotoUrl,
+            PetName: result.PetName,
+            AnimalType: result.AnimalType,
+            Breed: result.Breed,
+            PetGender: result.PetGender);
 }

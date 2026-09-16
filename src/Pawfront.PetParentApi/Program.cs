@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using Pawfront.Application;
 using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
@@ -77,7 +77,12 @@ api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapNightStayBookingEndpoints();
 api.MapProviderDetailsEndpoints();
+// Records a parent looking at a provider -- the ONLY writer behind the
+// provider's PawPrints "Views" analytics. Without it those figures are zero.
+api.MapProviderViewEndpoints();
 api.MapProviderSearchEndpoints();
+// Invoice PDF download (the provider's service invoice for a paid booking).
+api.MapInvoiceEndpoints();
 api.MapBlobImageEndpoints();
 api.MapAvailabilitySlotsEndpoints();
 api.MapProviderAgendaEndpoints();

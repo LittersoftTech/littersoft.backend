@@ -54,6 +54,11 @@ public interface IProviderEarningsStore
     /// by <see cref="BookingStatusFilter.Expand"/>. Empty means no status filter,
     /// which the store reads as the earned rows only.
     /// </param>
+    /// <param name="serviceId">
+    /// One of the provider's bookable services, or null for all of them. This is
+    /// the analytics drill-down: the per-service breakdown's figures and the rows
+    /// this returns for the same service must reconcile.
+    /// </param>
     Task<(IReadOnlyList<ProviderEarningsBookingRow> Items, int TotalCount)> ListBookingsAsync(
         Guid providerId,
         DateOnly? fromDate,
@@ -64,5 +69,6 @@ public interface IProviderEarningsStore
         EarningsSortDirection sortDirection,
         int skip,
         int take,
+        Guid? serviceId,
         CancellationToken cancellationToken);
 }

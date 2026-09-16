@@ -394,6 +394,15 @@ internal sealed class SqlEventStore(
         // Free-text title filter — the sproc escapes LIKE metacharacters and
         // does a case-insensitive "contains" match.
         command.Parameters.AddWithValue("@Title", DbValue(filter.Title));
+        // Ticketing filters. The venue-city filter and the sort are deliberately
+        // NOT sent: both need the Cosmos extension document, so they are applied
+        // in EventService after hydration.
+        command.Parameters.AddWithValue("@IsPaid",
+            filter.IsPaid is null ? DBNull.Value : (object)filter.IsPaid.Value);
+        command.Parameters.AddWithValue("@MinPrice",
+            filter.MinPrice is null ? DBNull.Value : (object)filter.MinPrice.Value);
+        command.Parameters.AddWithValue("@MaxPrice",
+            filter.MaxPrice is null ? DBNull.Value : (object)filter.MaxPrice.Value);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 

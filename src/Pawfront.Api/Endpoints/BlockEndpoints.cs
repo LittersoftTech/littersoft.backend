@@ -83,6 +83,7 @@ internal static class BlockEndpoints
 
         group.MapGet("/", async (
             Guid providerId,
+            string? search,
             int? skip,
             int? take,
             HttpContext httpContext,
@@ -100,8 +101,12 @@ internal static class BlockEndpoints
             // Only blocks the caller PLACED. One placed against them is never
             // listed: telling somebody they have been blocked confirms the other
             // party acted, which is the thing a block is meant to end.
+            //
+            // `search` matches the blocked parent's name. Blank or absent returns
+            // the whole list, so an empty search box is the unfiltered screen.
             var page = await blockService.ListAsync(
                 new BlockParty(BlockPartyType.Provider, providerId),
+                search,
                 BlockListLimits.NormalizeSkip(skip),
                 BlockListLimits.NormalizeTake(take),
                 cancellationToken);

@@ -56,6 +56,11 @@ public static class CosmosServiceRegistration
         // list providers that then rejected every booking with 409
         // ProviderInactive. Scoped, because the SQL reader it composes is.
         services.TryAddSingleton<CosmosProviderDiscoveryService>();
+        // The unfiltered reader, under its own narrow interface. Same instance the
+        // wrappers below compose, so it can never disagree with them about who a
+        // provider is - it simply skips the two filters. See
+        // IProviderSummaryReader for when that is the right thing to want.
+        services.TryAddSingleton<IProviderSummaryReader, CosmosProviderSummaryReader>();
         services.TryAddScoped<IProviderDiscoveryService>(sp =>
             // Two wrappers, innermost first: drop the providers who switched
             // themselves off, then drop the ones this caller is blocked from.
@@ -70,6 +75,40 @@ public static class CosmosServiceRegistration
                 sp.GetRequiredService<IMyBlockLookup>()));
 
         services.AddHostedService<CosmosBootstrapper>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registers ONLY the provider-offering lookup slice: the ProviderServices
+    /// container accessor and the raw Cosmos discovery reader.
+    ///
+    /// For a host that needs a provider's business identity (name, address, city,
+    /// zip - none of which are in SQL) but has no discovery surface and no
+    /// reference to Pawfront.Infrastructure.Sql. The invoice renderer in
+    /// Pawfront.Functions is the case this exists for.
+    ///
+    /// Deliberately NOT the full <see cref="AddPawfrontCosmosInfrastructure"/>:
+    /// that registers <see cref="IProviderDiscoveryService"/> wrapped in the
+    /// active-status and block filters, both of which need SQL-backed services
+    /// this host does not have. It also skips
+    /// <see cref="Provisioning.CosmosBootstrapper"/> - a background worker has no
+    /// business creating containers.
+    ///
+    /// It returns the RAW reader on purpose, so the two filters are not applied.
+    /// That is correct here and would be wrong on an API host: an invoice for a
+    /// job that already happened must still name its provider, whether or not
+    /// that provider has since switched themselves off, deleted their account, or
+    /// been blocked by the parent.
+    /// </summary>
+    public static IServiceCollection AddPawfrontCosmosProviderLookup(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.Configure<CosmosOptions>(configuration.GetSection("Cosmos"));
+        services.TryAddSingleton<IProviderServicesContainerAccessor, ProviderServicesContainerAccessor>();
+        services.TryAddSingleton<CosmosProviderDiscoveryService>();
+        services.TryAddSingleton<IProviderSummaryReader, CosmosProviderSummaryReader>();
 
         return services;
     }

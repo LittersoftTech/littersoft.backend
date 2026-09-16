@@ -91,6 +91,7 @@ internal sealed class InMemoryBlockStore : IBlockStore, IMyBlockLookup
 
     public Task<(IReadOnlyList<ParticipantBlockRow> Rows, int TotalCount)> ListAsync(
         BlockParty blocker,
+        string? search,
         int skip,
         int take,
         CancellationToken cancellationToken)
@@ -101,9 +102,17 @@ internal sealed class InMemoryBlockStore : IBlockStore, IMyBlockLookup
             .ThenByDescending(b => b.BlockId)
             .ToList();
 
-        var rows = mine
-            .Skip(skip)
-            .Take(take)
+        // Same contract as the procedure: a term means "hand the caller the whole
+        // list and filter nothing", because the names a search matches are not
+        // this store's to hold. Here that is doubly true — there are no profile
+        // tables at all, so every row's name is null and a searched list comes
+        // back empty. That is the honest answer without SQL, and it keeps the two
+        // stores behaving the same way rather than only looking as though they do.
+        var page = string.IsNullOrWhiteSpace(search)
+            ? mine.Skip(skip).Take(take)
+            : mine.AsEnumerable();
+
+        var rows = page
             // No profile tables here, so no names and no service category — which
             // also means the Cosmos business-name lookup is never attempted.
             .Select(b => new ParticipantBlockRow(b, BlockedServiceCategory: null))

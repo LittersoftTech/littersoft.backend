@@ -1,4 +1,4 @@
-﻿using Pawfront.Api;
+using Pawfront.Api;
 using Pawfront.Api.Auth;
 using Pawfront.Api.Endpoints;
 using Pawfront.Api.Telemetry;
@@ -62,6 +62,15 @@ api.MapEventBookingEndpoints();
 api.MapEventDashboardEndpoints();
 api.MapBookingEndpoints();
 api.MapProviderEarningsEndpoints();
+// The provider's job list -- the agenda inbox behind their filter sheet.
+// Additive: GET /providers/{id}/bookings and the night-stay list are unchanged.
+api.MapProviderJobEndpoints();
+// PawPrints analytics: the views card (figure, per-service breakdown, and who
+// viewed) plus the per-service breakdown of bookings and earnings. The third
+// level for those two is the earnings booking list above, via ?serviceId=.
+api.MapProviderAnalyticsEndpoints();
+// Invoice PDF download (the provider's Pawfront-fee invoice for a paid booking).
+api.MapInvoiceEndpoints();
 // Provider rates the parent after a finished job (rating only) + reads the reviews
 // parents have left for them.
 api.MapProviderReviewEndpoints();

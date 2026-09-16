@@ -1,4 +1,4 @@
-﻿using Pawfront.Contracts.Reviews;
+using Pawfront.Contracts.Reviews;
 
 namespace Pawfront.Contracts.Bookings;
 
@@ -486,7 +486,16 @@ public sealed record BookingDetailResponse(
     // True only when the CALLER placed it: the one case where an Unblock action
     // belongs. A block placed against them reads true/false and should show a
     // neutral state -- saying more would confirm the other party acted.
-    bool BlockedByMe = false);
+    bool BlockedByMe = false,
+    // Has this booking actually been MODIFIED? True once either party accepted a
+    // schedule change, which is the only thing that rewrites the booking's own
+    // date/time. A proposal that was REQUESTED and then declined leaves the terms
+    // exactly as they were, so it deliberately does not count -- for the full
+    // history of proposals, including ones that went nowhere, read
+    // GET .../bookings/{bookingId}/status-history. Unrelated to
+    // pendingModification above, which is the open proposal (if any); a booking
+    // modified last week and untouched since reads true here and null there.
+    bool IsModificationDone = false);
 
 /// <summary>
 /// The resolved "where does the service happen" block on a booking-detail read.
@@ -706,4 +715,20 @@ public sealed record BookingResponse(
     // True only when the CALLER placed it: the one case where an Unblock action
     // belongs. A block placed against them reads true/false and should show a
     // neutral state -- saying more would confirm the other party acted.
-    bool BlockedByMe = false);
+    bool BlockedByMe = false,
+    // The customer card: the pet's breed and gender, and the parent's photo.
+    // Added so a bookings LIST renders the same card the booking DETAIL does,
+    // without a second call per row -- previously the only place a provider could
+    // get them was BookingDetailResponse's petDetails / parentDetails sections.
+    //
+    // Populated on the PROVIDER's bookings list, which is the surface that has to
+    // show somebody else's identity. Null on the parent's own card lists (the
+    // parent IS the customer there) and on the write paths. Also null on a Custom
+    // walk-in, which has no parent or pet record -- its customer is the free text
+    // in CustomerName / PetName / AnimalType above.
+    //
+    // Resolved live, so a deleted account reads its anonymised placeholder rather
+    // than leaving real personal data frozen in a list.
+    string? Breed = null,
+    string? PetGender = null,
+    string? CustomerPhotoUrl = null);

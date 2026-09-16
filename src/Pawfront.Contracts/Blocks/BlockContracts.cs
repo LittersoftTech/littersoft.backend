@@ -26,6 +26,14 @@ public sealed record BlockParticipantRequest(Guid CounterpartyId, string? Reason
 /// missing name. Clients should show it in preference to <paramref name="Name"/>
 /// where present, since it is what the parent recognises.
 /// </param>
+/// <param name="LastMessagePreview">
+/// The newest message between the caller and this blocked party, from the same
+/// cache the chat inbox card shows -- so the two screens can never name two
+/// different "last messages" for one pair. Null when they have never spoken, and
+/// null when the CALLER has cleared the thread and nothing has been said since:
+/// a per-side "delete chat" must not leak the text it cleared onto this screen.
+/// Blocking does NOT delete history, so a thread they had before still reads here.
+/// </param>
 public sealed record BlockedParticipantResponse(
     Guid BlockId,
     string BlockedType,
@@ -34,7 +42,8 @@ public sealed record BlockedParticipantResponse(
     string? BusinessName,
     string? PhotoUrl,
     string? Reason,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    string? LastMessagePreview = null);
 
 /// <summary>
 /// What placing a block did.
@@ -75,9 +84,16 @@ public sealed record BlockUncancelledBookingResponse(
 
 /// <summary>One page of the people the caller has blocked, newest first.</summary>
 /// <remarks>
+/// <para>
 /// Only blocks the caller PLACED. One placed against them is never listed:
 /// telling somebody they have been blocked confirms the other party acted, which
 /// is the thing a block is meant to end.
+/// </para>
+/// <para>
+/// With <c>?search=</c>, <see cref="TotalCount"/> is the number of MATCHES, not
+/// the size of the blocked list -- so the page still reconciles with what is
+/// being shown.
+/// </para>
 /// </remarks>
 public sealed record BlockedParticipantsPageResponse(
     IReadOnlyList<BlockedParticipantResponse> Blocks,

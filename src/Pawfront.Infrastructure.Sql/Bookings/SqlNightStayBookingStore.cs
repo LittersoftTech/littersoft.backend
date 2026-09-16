@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using System.Data;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Bookings;
@@ -201,8 +201,30 @@ internal sealed class SqlNightStayBookingStore(
         command.Parameters.AddWithValue("@OnDate",
             onDate is null ? DBNull.Value : (object)onDate.Value.ToDateTime(TimeOnly.MinValue));
 
-        return await ReadAllAsync(command, cancellationToken);
+        var rows = new List<NightStayBookingResult>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadProviderListRow(reader));
+        }
+        return rows;
     }
+
+    // Booking.ListNightStayBookingsByProvider appends the live-joined customer
+    // columns AFTER the standard night-stay row columns (ordinals 15-20), so the
+    // shared ReadRow reader -- which every other night-stay sproc feeds -- stays
+    // untouched at 0-14. Same convention ReadListItemRow uses for the parent
+    // list's snapshot extras.
+    private static NightStayBookingResult ReadProviderListRow(SqlDataReader reader) =>
+        ReadRow(reader) with
+        {
+            CustomerName = reader.IsDBNull(15) ? null : reader.GetString(15),
+            CustomerPhotoUrl = reader.IsDBNull(16) ? null : reader.GetString(16),
+            PetName = reader.IsDBNull(17) ? null : reader.GetString(17),
+            AnimalType = reader.IsDBNull(18) ? null : reader.GetString(18),
+            Breed = reader.IsDBNull(19) ? null : reader.GetString(19),
+            PetGender = reader.IsDBNull(20) ? null : reader.GetString(20)
+        };
 
     public async Task<IReadOnlyList<NightStayBookingListItemResult>> ListByPetParentAsync(
         Guid petParentId,
@@ -866,6 +888,8 @@ internal sealed class SqlNightStayBookingStore(
             SnapshotLatitude: reader.IsDBNull(53) ? null : reader.GetDecimal(53),
             SnapshotLongitude: reader.IsDBNull(54) ? null : reader.GetDecimal(54),
             // Payment ledger join — null until the stay is marked PAID.
+            // Appended LAST to the sproc's projection, so no ordinal above moved.
+            IsModificationDone: !reader.IsDBNull(57) && reader.GetBoolean(57),
             PayoutMethod: reader.IsDBNull(55) ? null : reader.GetString(55),
             PaidAtUtc: reader.IsDBNull(56)
                 ? null

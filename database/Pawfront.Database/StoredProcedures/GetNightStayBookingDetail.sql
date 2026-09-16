@@ -78,7 +78,27 @@ BEGIN
            -- columns stay NULL until the provider marks the stay PAID. Appended
            -- LAST so existing reader ordinals stay stable.
            pay.[PaymentMethod] AS [PayoutMethod],
-           pay.[PaidAtUtc]
+           pay.[PaidAtUtc],
+           -- Has this booking ever actually BEEN modified? True once either party
+           -- accepted a schedule change, which is the only thing that rewrites the
+           -- booking's own date/time. Read from the audit trail rather than from
+           -- [Booking].[BookingModifications], because that table is a STAGING area
+           -- holding only the open proposal -- the row is deleted on accept AND on
+           -- decline, so after the fact it can say nothing about whether a
+           -- modification happened.
+           --
+           -- A REQUESTED-then-declined modification is deliberately NOT counted:
+           -- the booking's terms are exactly what they were, so a screen labelling
+           -- it "modified" would be wrong. Use the status-history endpoint for the
+           -- full trail, including proposals that went nowhere.
+           --
+           -- Appended LAST so existing reader ordinals stay stable.
+           CAST(CASE WHEN EXISTS (
+                         SELECT 1
+                         FROM [Booking].[NightStayBookingStatusHistory] AS mh
+                         WHERE mh.[NightStayBookingId] = b.[NightStayBookingId]
+                           AND mh.[ToStatus] IN (N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION'))
+                     THEN 1 ELSE 0 END AS BIT) AS [IsModificationDone]
     FROM [Booking].[NightStayBookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]

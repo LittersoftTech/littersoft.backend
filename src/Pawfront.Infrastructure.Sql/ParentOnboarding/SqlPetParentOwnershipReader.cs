@@ -84,7 +84,10 @@ internal sealed class SqlPetParentOwnershipReader(
         // filter and both booking creates reject them before SQL is reached.
         await using var command = new SqlCommand(
             "SELECT p.[PetParentId], p.[PetType], p.[PetName], " +
-            "NULLIF(LTRIM(RTRIM(CONCAT(pp.[FirstName], N' ', pp.[LastName]))), N'') " +
+            "NULLIF(LTRIM(RTRIM(CONCAT(pp.[FirstName], N' ', pp.[LastName]))), N''), " +
+            // Appended last: the searches stamp a temperament match on each card,
+            // and this point read is already being made for the ownership check.
+            "p.[Temperament] " +
             "FROM [Parent].[Pets] AS p " +
             "LEFT JOIN [Parent].[PetParents] AS pp ON pp.[PetParentId] = p.[PetParentId] " +
             "WHERE p.[PetId] = @PetId AND p.[IsDeleted] = 0;",
@@ -101,7 +104,8 @@ internal sealed class SqlPetParentOwnershipReader(
             reader.GetGuid(0),
             reader.GetString(1),
             reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-            reader.IsDBNull(3) ? string.Empty : reader.GetString(3));
+            reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4));
     }
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)

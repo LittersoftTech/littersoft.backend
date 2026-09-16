@@ -20,7 +20,8 @@ internal static class BlockMapping
             block.BlockedBusinessName,
             block.BlockedPhotoUrl,
             block.Reason,
-            block.CreatedAtUtc);
+            block.CreatedAtUtc,
+            block.LastMessagePreview);
 
     public static BlockParticipantResponse ToResponse(BlockResult result) =>
         new(

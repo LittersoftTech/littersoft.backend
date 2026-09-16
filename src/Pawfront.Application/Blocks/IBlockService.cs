@@ -66,12 +66,29 @@ public interface IBlockService
     /// One page of the people the caller has blocked, newest first, with a
     /// blocked provider's business name resolved alongside their own.
     /// </summary>
+    /// <param name="search">
+    /// Optional free text from the blocked list's search bar, matched against
+    /// BOTH names the card can show -- the person's and, for a provider, their
+    /// business. Matching only the first would miss "Happy Paws Hotel", which is
+    /// the name a parent recognises and therefore the one they type. Blank or
+    /// null returns the whole list.
+    /// </param>
     /// <remarks>
+    /// <para>
     /// Only blocks the caller PLACED. One placed against them is never listed:
     /// telling somebody they have been blocked confirms the other party acted.
+    /// </para>
+    /// <para>
+    /// A searched list costs more than an unsearched one: a business name lives
+    /// in Cosmos, so the whole blocked list has to be read and resolved before it
+    /// can be filtered, and only then paged. That is the same trade the sorted
+    /// provider searches make, and it is bounded here by the fact that the set is
+    /// one person's own blocks.
+    /// </para>
     /// </remarks>
     Task<ParticipantBlockPage> ListAsync(
         BlockParty blocker,
+        string? search,
         int skip,
         int take,
         CancellationToken cancellationToken);
@@ -87,6 +104,29 @@ public static class BlockListLimits
     public const int MaxTake = 20;
 
     public const int DefaultTake = 20;
+
+    /// <summary>
+    /// Longest search term accepted, matching the <c>@Search NVARCHAR(200)</c>
+    /// the procedure declares and the figure the chat inbox search uses. A longer
+    /// term is truncated rather than refused -- a search box is not a place to
+    /// fail a request over length.
+    /// </summary>
+    public const int MaxSearchLength = 200;
+
+    /// <summary>
+    /// Blank is the same as absent: an empty search box must return the whole
+    /// list, not nothing.
+    /// </summary>
+    public static string? NormalizeSearch(string? search)
+    {
+        var trimmed = search?.Trim();
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            return null;
+        }
+
+        return trimmed.Length <= MaxSearchLength ? trimmed : trimmed[..MaxSearchLength];
+    }
 
     public static int NormalizeTake(int? take) =>
         take is null or < 1 ? DefaultTake : Math.Min(take.Value, MaxTake);

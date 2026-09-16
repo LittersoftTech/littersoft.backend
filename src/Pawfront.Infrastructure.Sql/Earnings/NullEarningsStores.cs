@@ -35,6 +35,7 @@ internal sealed class NullProviderEarningsStore : IProviderEarningsStore
         EarningsSortDirection sortDirection,
         int skip,
         int take,
+        Guid? serviceId,
         CancellationToken cancellationToken)
         => Task.FromResult<(IReadOnlyList<ProviderEarningsBookingRow>, int)>(
             (Array.Empty<ProviderEarningsBookingRow>(), 0));

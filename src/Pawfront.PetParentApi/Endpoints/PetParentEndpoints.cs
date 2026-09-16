@@ -985,7 +985,11 @@ internal static class PetParentEndpoints
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
             IsBlocked: block.IsBlocked,
-            BlockedByMe: block.BlockedByMe);
+            BlockedByMe: block.BlockedByMe,
+            // Whether this booking has ever been modified, so the screen can label
+            // it without walking the status history. An accepted change only --
+            // a declined proposal left the terms untouched.
+            IsModificationDone: row.IsModificationDone);
     }
 
     /// <summary>Builds the detail read's prescription block — null until a vet records one.</summary>
@@ -1206,14 +1210,21 @@ internal static class PetParentEndpoints
             status.PetParentId,
             new OnboardingStageResponse(status.BasicInfo.Status),
             new OnboardingStageResponse(status.ProfilePhoto.Status),
-            new PetsStageResponse(status.Pets.Status, status.Pets.PetCount),
+            new PetsStageResponse(
+                status.Pets.Status,
+                status.Pets.PetCount,
+                status.Pets.IncompletePetId,
+                status.Pets.IncompletePetName,
+                status.Pets.MissingSections),
             new PetMedicalInfoStageResponse(
                 status.PetMedicalInfo.Status,
                 status.PetMedicalInfo.Pets
                     .Select(p => new PetMedicalInfoCompletionResponse(
                         p.PetId,
                         p.PetName,
-                        p.IsMedicalInfoComplete))
+                        p.IsMedicalInfoComplete,
+                        p.HasProfilePhoto,
+                        p.MissingSections))
                     .ToArray()),
             new IdentityStageResponse(status.Identity.Status, status.Identity.IdentityType),
             new PetParentVerificationStatusResponse(

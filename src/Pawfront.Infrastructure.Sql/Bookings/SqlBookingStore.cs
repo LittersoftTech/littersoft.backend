@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using System.Data;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
@@ -203,8 +203,27 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@BookingDate",
             date is null ? DBNull.Value : (object)date.Value.ToDateTime(TimeOnly.MinValue));
 
-        return await ReadAllAsync(command, cancellationToken);
+        var rows = new List<BookingResult>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadProviderListRow(reader));
+        }
+        return rows;
     }
+
+    // Booking.ListBookingsByProvider appends the live-joined customer columns
+    // AFTER the standard booking-row columns (ordinals 25-27), so the shared
+    // ReadBookingRow reader -- which every other booking sproc feeds -- stays
+    // untouched at 0-24. Same convention ReadListItemRow uses for the parent
+    // list's snapshot extras.
+    private static BookingResult ReadProviderListRow(SqlDataReader reader) =>
+        ReadBookingRow(reader) with
+        {
+            Breed = reader.IsDBNull(25) ? null : reader.GetString(25),
+            PetGender = reader.IsDBNull(26) ? null : reader.GetString(26),
+            CustomerPhotoUrl = reader.IsDBNull(27) ? null : reader.GetString(27)
+        };
 
     public async Task<IReadOnlyList<BookingListItemResult>> ListByPetParentAsync(
         Guid petParentId,
@@ -1253,6 +1272,8 @@ internal sealed class SqlBookingStore(
             SnapshotLatitude: reader.IsDBNull(66) ? null : reader.GetDecimal(66),
             SnapshotLongitude: reader.IsDBNull(67) ? null : reader.GetDecimal(67),
             // Payment ledger join — null until the booking is marked PAID.
+            // Appended LAST to the sproc's projection, so no ordinal above moved.
+            IsModificationDone: !reader.IsDBNull(70) && reader.GetBoolean(70),
             PayoutMethod: reader.IsDBNull(68) ? null : reader.GetString(68),
             PaidAtUtc: reader.IsDBNull(69)
                 ? null

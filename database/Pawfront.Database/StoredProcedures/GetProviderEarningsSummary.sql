@@ -77,7 +77,34 @@ BEGIN
         [NoShowJobCount]     = COUNT(CASE WHEN e.[IsPrivate] = 0 AND e.[Status] IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW') THEN 1 END),
         [NoShowJobAmount]    = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 AND e.[Status] IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW') THEN e.[Amount] END), 0),
         [ExpiredJobCount]    = COUNT(CASE WHEN e.[IsPrivate] = 0 AND e.[Status] IN (N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN 1 END),
-        [ExpiredJobAmount]   = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 AND e.[Status] IN (N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN e.[Amount] END), 0)
+        [ExpiredJobAmount]   = ISNULL(SUM(CASE WHEN e.[IsPrivate] = 0 AND e.[Status] IN (N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN e.[Amount] END), 0),
+
+        -- APPENDED LAST so no existing reader ordinal moved. Job COUNTS rather
+        -- than money, carried here as well as on
+        -- [Booking].[GetProviderBookingsByService] so the earnings screen and the
+        -- analytics screen describe a provider's workload with the same three
+        -- numbers -- the expressions below are character-for-character that
+        -- procedure's, and must stay so.
+        --
+        -- A request the provider has not answered is not work they have taken on,
+        -- which is why [AcceptedBookings] exists separately from
+        -- [CompletedBookings]: the dashboard's job card counts jobs accepted, not
+        -- jobs requested.
+        [PendingBookings]     = COUNT(CASE WHEN e.[IsPrivate] = 0 AND e.[Status] IN (N'CREATED', N'APPROVAL_NEEDED') THEN 1 END),
+        [AcceptedBookings]    = COUNT(CASE WHEN e.[IsPrivate] = 0
+                                            AND e.[Status] NOT IN (N'CREATED', N'APPROVAL_NEEDED')
+                                            AND e.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
+                                                                    N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                                                                    N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+                                           THEN 1 END),
+        -- Not gated on IsEarned, unlike [PrivateJobCount]: that one feeds a money
+        -- figure, this one feeds a job count, and a walk-in the provider has
+        -- recorded but not finished is still a job they have taken on.
+        [PrivateAcceptedJobs] = COUNT(CASE WHEN e.[IsPrivate] = 1
+                                            AND e.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
+                                                                    N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                                                                    N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+                                           THEN 1 END)
     FROM [Booking].[BookingAmounts](@ProviderId, NULL, @FeePercentage) e
     WHERE (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)
       AND (@ToDate IS NULL OR e.[ServiceDate] <= @ToDate);

@@ -65,6 +65,7 @@ internal sealed class ProviderEarningsService(
             query.SortDirection,
             skip,
             take,
+            query.ServiceId,
             cancellationToken);
 
         return new PagedEarningsResult<ProviderEarningsBookingRow>(items, total, skip, take, from, to);

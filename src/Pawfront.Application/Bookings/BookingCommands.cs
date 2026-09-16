@@ -169,7 +169,18 @@ public sealed record BookingResult(
     string? JobNotes,
     // Which of the parent's pets the booking is for. Null for Custom
     // walk-ins and for legacy/provider-host bookings.
-    Guid? PetId = null);
+    Guid? PetId = null,
+    // The customer card, joined LIVE from the parent and pet rows. Populated
+    // only by the PROVIDER's bookings list (Booking.ListBookingsByProvider),
+    // which is the surface that has to render somebody else's identity; every
+    // other read of this shape leaves them null. Also null on a Custom walk-in,
+    // which has no parent or pet record -- its customer is the free text above.
+    //
+    // Live rather than snapshotted so a deleted account reads its anonymised
+    // placeholder here instead of leaving real personal data in a list.
+    string? Breed = null,
+    string? PetGender = null,
+    string? CustomerPhotoUrl = null);
 
 /// <summary>
 /// One row of the parent's "my bookings" list: the flat booking plus the
@@ -310,7 +321,13 @@ public sealed record BookingDetailRow(
     // from then on PayoutMethod is the 'Cash' / 'Digital' the money actually changed
     // hands as, which is the one payment fact the booking row itself never stores.
     string? PayoutMethod = null,
-    DateTimeOffset? PaidAtUtc = null);
+    DateTimeOffset? PaidAtUtc = null,
+    // True once either party ACCEPTED a schedule change on this booking -- the
+    // only thing that rewrites its date/time. Computed in the sproc from the audit
+    // trail, not from Booking.BookingModifications: that table is a staging area
+    // holding only the OPEN proposal, and its row is deleted on accept and on
+    // decline alike, so after the fact it can say nothing about what happened.
+    bool IsModificationDone = false);
 
 /// <summary>
 /// Fully resolved booking-detail view: the raw <see cref="Row"/> plus the friendly

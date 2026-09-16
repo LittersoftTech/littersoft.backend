@@ -60,12 +60,22 @@ public sealed record ChatParticipantState(
 /// mapping ignores it. Null for a pet-parent counterparty and for a provider who
 /// has not registered a service yet.
 /// </param>
+/// <param name="BusinessName">
+/// The provider's business ("Happy Paws Hotel"), from the same Cosmos offering
+/// document as <paramref name="PhotoUrl"/> and filled in by the same enrichment.
+/// It is what a parent recognises — <c>Provider.Providers</c> holds only the
+/// owner's own name — and it is the same value the blocked list shows, so the two
+/// screens name one business the same way. Null for a pet-parent counterparty,
+/// for a freelancer trading under their own name, and when the offering document
+/// cannot be read.
+/// </param>
 public sealed record ChatCounterparty(
     ChatParticipantType ParticipantType,
     Guid ParticipantId,
     string? Name,
     string? PhotoUrl,
-    string? ServiceCategory = null);
+    string? ServiceCategory = null,
+    string? BusinessName = null);
 
 /// <summary>A thread plus the caller's own state and the other party — the header.</summary>
 /// <param name="MyTicket">

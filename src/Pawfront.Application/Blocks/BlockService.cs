@@ -137,19 +137,48 @@ public sealed class BlockService(
 
     public async Task<ParticipantBlockPage> ListAsync(
         BlockParty blocker,
+        string? search,
         int skip,
         int take,
         CancellationToken cancellationToken)
     {
         var normalisedSkip = BlockListLimits.NormalizeSkip(skip);
         var normalisedTake = BlockListLimits.NormalizeTake(take);
+        var term = BlockListLimits.NormalizeSearch(search);
 
+        // With a term the store hands back the WHOLE list, unpaged and
+        // unfiltered -- see IBlockStore.ListAsync for why it cannot do better.
         var (rows, totalCount) = await store.ListAsync(
-            blocker, normalisedSkip, normalisedTake, cancellationToken);
+            blocker, term, normalisedSkip, normalisedTake, cancellationToken);
 
         var blocks = await ResolveBusinessNamesAsync(rows, cancellationToken);
-        return new ParticipantBlockPage(blocks, totalCount, normalisedSkip, normalisedTake);
+
+        if (term is null)
+        {
+            return new ParticipantBlockPage(blocks, totalCount, normalisedSkip, normalisedTake);
+        }
+
+        // Filter first, page second -- the order matters for the same reason it
+        // does in the block-aware discovery filter: paging a set that is about to
+        // shrink leaves holes in it. The business names are already resolved
+        // above, so the match sees exactly the two names the card will show.
+        var matches = blocks.Where(block => Matches(block, term)).ToList();
+
+        return new ParticipantBlockPage(
+            matches.Skip(normalisedSkip).Take(normalisedTake).ToList(),
+            matches.Count,
+            normalisedSkip,
+            normalisedTake);
     }
+
+    /// <summary>
+    /// A "contains" match over both names the card can show. Case-insensitive,
+    /// like every other search here; a blocked party whose name could not be
+    /// resolved at all simply matches nothing rather than matching everything.
+    /// </summary>
+    private static bool Matches(ParticipantBlock block, string term) =>
+        (block.BlockedName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+        || (block.BlockedBusinessName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false);
 
     /// <summary>
     /// Fills in a blocked PROVIDER's business name and image from their Cosmos

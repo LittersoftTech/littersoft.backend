@@ -77,6 +77,13 @@ public static class BlockPartyTypes
 /// A parent's photo comes off their SQL row; a provider's comes from the same
 /// Cosmos offering document as the business name.
 /// </param>
+/// <param name="LastMessagePreview">
+/// The newest thing the pair said to each other, from the same denormalised cache
+/// the chat inbox card renders -- so the two screens can never disagree about
+/// what the last message was. Null when they have never spoken, and null when the
+/// CALLER has cleared the thread and nothing has been said since: a per-side
+/// "delete chat" must not leak the text it cleared onto another screen.
+/// </param>
 public sealed record ParticipantBlock(
     Guid BlockId,
     BlockPartyType BlockerType,
@@ -87,7 +94,8 @@ public sealed record ParticipantBlock(
     string? BlockedName,
     string? BlockedBusinessName,
     string? BlockedPhotoUrl,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    string? LastMessagePreview = null);
 
 /// <summary>One page of the caller's blocked list.</summary>
 public sealed record ParticipantBlockPage(

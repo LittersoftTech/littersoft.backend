@@ -76,6 +76,7 @@ internal static class ChatBlockEndpoints
         });
 
         group.MapGet("/", async (
+            string? search,
             int? skip,
             int? take,
             ICurrentChatParticipant currentParticipant,
@@ -91,8 +92,12 @@ internal static class ChatBlockEndpoints
             // Only blocks the caller PLACED. Blocks against them are never
             // returned: telling someone they have been blocked confirms the other
             // party acted, which is exactly what a block is meant to end.
+            //
+            // `search` matches both names the card can show — the person's, and a
+            // blocked provider's business. Blank or absent returns the whole list.
             var page = await blockService.ListAsync(
                 ToBlockParty(me!.Value),
+                search,
                 BlockListLimits.NormalizeSkip(skip),
                 BlockListLimits.NormalizeTake(take),
                 cancellationToken);

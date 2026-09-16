@@ -406,7 +406,16 @@ internal sealed class EventService(
         // (capacity) for physical events, so hydrate the Cosmos extension here —
         // one point read per physical event, fanned out in parallel. Online
         // events have no Cosmos doc and are returned as-is.
-        return await HydratePhysicalAsync(snapshots, cancellationToken);
+        var hydrated = await HydratePhysicalAsync(snapshots, cancellationToken);
+
+        // The venue city and the seat count only exist once the Cosmos extension
+        // has been read, so these two run here rather than in the query. Every
+        // other filter is settled in SQL, which is what keeps the number of point
+        // reads above down to the events that can still match.
+        return EventListSorting.Apply(
+            ApplyVenueCityFilter(hydrated, normalised.City),
+            normalised.SortBy,
+            normalised.SortDirection);
     }
 
     public async Task<IReadOnlyCollection<EventResult>> ListTrendingAsync(
@@ -419,6 +428,32 @@ internal sealed class EventService(
         // location + "max bookings") for physical events; online events are
         // returned as-is. The trending order from SQL is preserved.
         return await HydratePhysicalAsync(snapshots, cancellationToken);
+    }
+
+    /// <summary>
+    /// Narrows a hydrated page to one venue city. ONLINE events are dropped when a
+    /// city is requested — they have no venue, so they are not an answer to "what
+    /// is on in Zurich"; the same posture the animals filter takes towards
+    /// PetAdoptionAndSale providers, which likewise hold no such data.
+    ///
+    /// A PHYSICAL event whose extension document could not be read is dropped too:
+    /// the hydration is best-effort, and keeping an event whose city is unknown
+    /// would silently widen a filter the parent set.
+    /// </summary>
+    private static IReadOnlyCollection<EventResult> ApplyVenueCityFilter(
+        IReadOnlyCollection<EventResult> events,
+        string? city)
+    {
+        if (string.IsNullOrWhiteSpace(city))
+        {
+            return events;
+        }
+
+        var wanted = city.Trim();
+        return events
+            .Where(e => e.Physical?.Location is { } location
+                        && string.Equals(location.City, wanted, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
     }
 
     /// <summary>
@@ -491,6 +526,28 @@ internal sealed class EventService(
         // case-insensitive "contains" match is applied in the store.
         var title = string.IsNullOrWhiteSpace(filter.Title) ? null : filter.Title.Trim();
 
+        if (filter.MinPrice is < 0)
+        {
+            throw new ArgumentException("MinPrice cannot be negative.", nameof(filter.MinPrice));
+        }
+        if (filter.MaxPrice is < 0)
+        {
+            throw new ArgumentException("MaxPrice cannot be negative.", nameof(filter.MaxPrice));
+        }
+        if (filter.MinPrice is not null && filter.MaxPrice is not null
+            && filter.MaxPrice < filter.MinPrice)
+        {
+            throw new ArgumentException(
+                "MaxPrice must be greater than or equal to MinPrice.",
+                nameof(filter.MaxPrice));
+        }
+
+        // Venue city is matched case-insensitively against whatever the organiser
+        // typed; it is deliberately not validated against a list of cities, since
+        // that vocabulary belongs to the app's picker (same posture as a support
+        // ticket's category).
+        var city = string.IsNullOrWhiteSpace(filter.City) ? null : filter.City.Trim();
+
         return new EventListFilter(
             category,
             eventType,
@@ -498,7 +555,13 @@ internal sealed class EventService(
             filter.EndDate,
             filter.IsChildFriendly,
             amenities,
-            title);
+            title,
+            filter.IsPaid,
+            filter.MinPrice,
+            filter.MaxPrice,
+            city,
+            filter.SortBy,
+            filter.SortDirection);
     }
 
     public Task<EventCounters> IncrementCounterAsync(

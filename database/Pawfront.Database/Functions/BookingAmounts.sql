@@ -34,6 +34,12 @@
 -- A legacy row with no price snapshot yields [Amount] NULL rather than 0 — callers
 -- surface that as an "unpriced" count instead of silently under-reporting.
 --
+-- [ServiceId] is the provider's bookable service the booking was made against
+-- (both booking tables carry one). It exists so the per-service PawPrints
+-- breakdown can GROUP BY it, and so the earnings booking list can be narrowed to
+-- one service for the drill-down, without either of them re-deriving which table
+-- the id came from.
+--
 -- Custom walk-ins ([IsPrivate] = 1) are off-platform: Pawfront takes no commission
 -- (fee 0, matching the 0% the booking detail shows) and they can never be marked
 -- PAID. They are emitted so a provider's own private jobs can be shown, but callers
@@ -54,6 +60,7 @@ RETURN
            [ProviderId]    = b.[ProviderId],
            [PetParentId]   = b.[PetParentId],
            [PetId]         = b.[PetId],
+           [ServiceId]     = b.[ServiceId],
            [ServiceDate]   = b.[BookingDate],
            [Status]        = b.[Status],
            [IsEarned]      = CAST(CASE WHEN b.[Status] IN (N'COMPLETED', N'PAID') THEN 1 ELSE 0 END AS BIT),
@@ -106,6 +113,7 @@ RETURN
            [ProviderId]    = n.[ProviderId],
            [PetParentId]   = n.[PetParentId],
            [PetId]         = n.[PetId],
+           [ServiceId]     = n.[ServiceId],
            [ServiceDate]   = n.[CheckOutDate],
            [Status]        = n.[Status],
            [IsEarned]      = CAST(CASE WHEN n.[Status] IN (N'COMPLETED', N'PAID') THEN 1 ELSE 0 END AS BIT),

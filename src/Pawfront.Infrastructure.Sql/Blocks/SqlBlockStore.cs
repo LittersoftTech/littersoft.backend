@@ -103,6 +103,7 @@ internal sealed class SqlBlockStore(
 
     public async Task<(IReadOnlyList<ParticipantBlockRow> Rows, int TotalCount)> ListAsync(
         BlockParty blocker,
+        string? search,
         int skip,
         int take,
         CancellationToken cancellationToken)
@@ -115,6 +116,10 @@ internal sealed class SqlBlockStore(
         command.Parameters.AddWithValue("@BlockerId", blocker.Id);
         command.Parameters.AddWithValue("@Skip", skip);
         command.Parameters.AddWithValue("@Take", take);
+        // A term makes the procedure ignore the paging above and return the whole
+        // list, because the business name it would have to match is in Cosmos.
+        // The caller filters and pages what comes back.
+        command.Parameters.AddWithValue("@Search", (object?)search ?? DBNull.Value);
 
         var rows = new List<ParticipantBlockRow>();
         var totalCount = 0;
@@ -125,7 +130,10 @@ internal sealed class SqlBlockStore(
             var block = ReadBlock(reader) with
             {
                 BlockedName = reader.IsDBNull(7) ? null : reader.GetString(7),
-                BlockedPhotoUrl = reader.IsDBNull(8) ? null : reader.GetString(8)
+                BlockedPhotoUrl = reader.IsDBNull(8) ? null : reader.GetString(8),
+                // Appended after the total on purpose, so adding it moved no
+                // ordinal an existing deployment already reads.
+                LastMessagePreview = reader.IsDBNull(11) ? null : reader.GetString(11)
             };
 
             rows.Add(new ParticipantBlockRow(
