@@ -1,3 +1,4 @@
+using Pawfront.Application.Blocks;
 using Pawfront.Application;
 using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
@@ -15,6 +16,12 @@ builder.Services.AddOpenApi();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpContextAccessor();
+
+// Registered BEFORE AddPawfrontApplication on purpose: Application TryAdds a
+// no-op in its place, so a host that wants real block filtering on discovery
+// has to get in first. Same first-wins pattern the chat host uses for its
+// realtime publisher.
+builder.Services.AddScoped<ICurrentBlockParty, CurrentBlockParty>();
 
 builder.Services
     .AddPawfrontAzureInfrastructure(builder.Configuration, builder.Environment)
@@ -54,12 +61,28 @@ var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExte
 api.MapHealthEndpoints();
 api.MapMetadataEndpoints();
 api.MapParentOnboardingEndpoints();
+// FCM token register/refresh + sign-out. Not ownership-filtered — a token is
+// bound to the auth identity, which exists before the profile does.
+api.MapDeviceTokenEndpoints();
 api.MapPetParentEndpoints();
+api.MapParentSpendEndpoints();
+// Parent reviews a provider after a finished booking (rating + comment + photos),
+// plus the public read of a provider's reviews.
+api.MapParentReviewEndpoints();
+// Support tickets: "Report Incident" on a booking and "Report Chat" on a
+// conversation. One open ticket per subject; reporting does not block anybody.
+api.MapParentSupportTicketEndpoints();
+api.MapBlockEndpoints();
 api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapNightStayBookingEndpoints();
 api.MapProviderDetailsEndpoints();
+// Records a parent looking at a provider -- the ONLY writer behind the
+// provider's PawPrints "Views" analytics. Without it those figures are zero.
+api.MapProviderViewEndpoints();
 api.MapProviderSearchEndpoints();
+// Invoice PDF download (the provider's service invoice for a paid booking).
+api.MapInvoiceEndpoints();
 api.MapBlobImageEndpoints();
 api.MapAvailabilitySlotsEndpoints();
 api.MapProviderAgendaEndpoints();

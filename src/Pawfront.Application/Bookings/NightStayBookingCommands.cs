@@ -39,7 +39,21 @@ public sealed record NightStayBookingResult(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? CancelledAtUtc,
-    Guid? PetId);
+    Guid? PetId,
+    // The customer card, joined LIVE from the parent and pet rows. Populated
+    // only by the PROVIDER's stay list (Booking.ListNightStayBookingsByProvider);
+    // every other read of this shape leaves them null.
+    //
+    // Unlike the single-day list there is nothing to fall back to: boarding is
+    // App-only, so [NightStayBookings] carries no free-text customer columns at
+    // all and this list previously returned no customer information of any kind,
+    // not even a name.
+    string? CustomerName = null,
+    string? CustomerPhotoUrl = null,
+    string? PetName = null,
+    string? AnimalType = null,
+    string? Breed = null,
+    string? PetGender = null);
 
 /// <summary>
 /// One row of the parent's night-stay "my bookings" list: the flat booking plus
@@ -130,7 +144,19 @@ public sealed record NightStayBookingDetailRow(
     string? SnapshotCity = null,
     string? SnapshotZipCode = null,
     decimal? SnapshotLatitude = null,
-    decimal? SnapshotLongitude = null);
+    decimal? SnapshotLongitude = null,
+    // The payment ledger row ([Booking].[BookingPayments]) for this stay, joined on
+    // read. Both are null until the provider records the payment (Status = PAID);
+    // from then on PayoutMethod is the 'Cash' / 'Digital' the money actually changed
+    // hands as, which the booking row itself never stores.
+    string? PayoutMethod = null,
+    DateTimeOffset? PaidAtUtc = null,
+    // True once either party ACCEPTED a schedule change on this booking -- the
+    // only thing that rewrites its date/time. Computed in the sproc from the audit
+    // trail, not from Booking.BookingModifications: that table is a staging area
+    // holding only the OPEN proposal, and its row is deleted on accept and on
+    // decline alike, so after the fact it can say nothing about what happened.
+    bool IsModificationDone = false);
 
 /// <summary>
 /// Fully resolved night-stay booking-detail view: the raw <see cref="Row"/> plus the
@@ -158,19 +184,28 @@ public sealed record NightStayBookingDetailResult(
     // Null when the offering can't be resolved.
     string? ProviderAddress = null,
     string? ProviderCity = null,
-    string? ProviderZip = null);
+    string? ProviderZip = null,
+    // The provider's photo, from the same Cosmos service doc: the business image
+    // for hotels, the freelancer's profile image otherwise. The SQL provider row
+    // has no photo column, which is why providerDetails used to report null here.
+    string? ProviderPhotoUrl = null);
 
 /// <summary>
 /// Request to move a night-stay booking to a new lifecycle status. Same shape
 /// and actor rules as <see cref="UpdateBookingStatusCommand"/>; <see cref="ActorId"/>
 /// is the caller's ProviderId / PetParentId derived from the authenticated route.
 /// </summary>
+/// <param name="Location">
+/// The acting party's position — required for, and only stored on, the two NO-SHOW
+/// transitions. See <see cref="UpdateBookingStatusCommand.Location"/>.
+/// </param>
 public sealed record UpdateNightStayBookingStatusCommand(
     Guid NightStayBookingId,
     string NewStatus,
     BookingStatusActor Actor,
     Guid ActorId,
-    string? Note);
+    string? Note,
+    CapturedLocation? Location = null);
 
 /// <summary>
 /// Either party proposes a new check-in / check-out range for a night-stay

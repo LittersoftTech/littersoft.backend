@@ -25,24 +25,42 @@ internal sealed class PetParentOnboardingStatusService(
                 ? OnboardingStageStatuses.Remaining
                 : OnboardingStageStatuses.Complete);
 
+        // Per-pet section lists, computed once and shared by both pet stages so
+        // the pointer below and the medical-info list can never name different
+        // sections for the same pet.
+        var petsWithSections = snapshot.Pets
+            .Select(p => p with { MissingSections = MissingSectionsFor(p) })
+            .ToArray();
+
+        // The first pet still missing a GATING section, so a "Complete Profile"
+        // button can open that exact pet instead of the app guessing which of
+        // several is unfinished. Medical info is the only gating section today, so
+        // this is null exactly when stage 4 below reads Complete — a parent with
+        // nothing left to do is never pointed at a pet screen. Order is the order
+        // the pets were added (the sproc's ORDER BY CreatedAtUtc).
+        var firstIncomplete = petsWithSections.FirstOrDefault(p => !p.IsMedicalInfoComplete);
+
         // Stage 3 — Pets: at least one pet on file.
         var pets = new PetParentPetsStage(
             snapshot.Pets.Count > 0
                 ? OnboardingStageStatuses.Complete
                 : OnboardingStageStatuses.Remaining,
-            snapshot.Pets.Count);
+            snapshot.Pets.Count,
+            firstIncomplete?.PetId,
+            firstIncomplete?.PetName,
+            firstIncomplete?.MissingSections);
 
         // Stage 4 — PetMedicalInfo: every pet has VaccinationStatus,
         // SterilizationStatus, and Temperament set (free-text MedicalHistory
         // is optional and not part of the completion check — the sproc CASE
         // applies the same rule).
-        var allPetsMedicalComplete = snapshot.Pets.Count > 0
-            && snapshot.Pets.All(p => p.IsMedicalInfoComplete);
+        var allPetsMedicalComplete = petsWithSections.Length > 0
+            && petsWithSections.All(p => p.IsMedicalInfoComplete);
         var petMedicalInfo = new PetParentPetMedicalInfoStage(
             allPetsMedicalComplete
                 ? OnboardingStageStatuses.Complete
                 : OnboardingStageStatuses.Remaining,
-            snapshot.Pets);
+            petsWithSections);
 
         // Stage 5 — Identity. Snapshot.IdentityType is null until the
         // parent uploads via POST /pet-parents/{id}/identity. The
@@ -82,5 +100,30 @@ internal sealed class PetParentOnboardingStatusService(
             identity,
             verification,
             isFullyOnboarded);
+    }
+
+    /// <summary>
+    /// What is still unfinished on one pet, named so the app can deep-link to the
+    /// right screen rather than reopening the whole pet form.
+    /// </summary>
+    /// <remarks>
+    /// The list mixes gating and non-gating sections on purpose: the app decides
+    /// how hard to push, and hiding the photo prompt here would mean the only way
+    /// to discover it was to fetch the pet. Only <c>MedicalInfo</c> affects
+    /// <c>isFullyOnboarded</c>. No basic-info section exists — those columns are
+    /// NOT NULL, so a pet that exists always has them.
+    /// </remarks>
+    private static IReadOnlyCollection<string> MissingSectionsFor(PetMedicalInfoCompletion pet)
+    {
+        var missing = new List<string>(2);
+        if (!pet.IsMedicalInfoComplete)
+        {
+            missing.Add(PetProfileSections.MedicalInfo);
+        }
+        if (!pet.HasProfilePhoto)
+        {
+            missing.Add(PetProfileSections.ProfilePhoto);
+        }
+        return missing;
     }
 }

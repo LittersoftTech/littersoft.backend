@@ -1,3 +1,5 @@
+﻿using Pawfront.Application.Blocks;
+
 namespace Pawfront.Application.Events;
 
 public interface IEventSqlStore
@@ -42,7 +44,11 @@ public interface IEventSqlStore
     /// </summary>
     Task<EventSqlSnapshot?> GetAsync(
         Guid eventId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        // The caller, so a blocked pair never see each other's events. Null
+        // filters nothing. Not applied to an organiser's own list -- you always
+        // see your own events.
+        BlockParty? viewer = null);
 
     Task<IReadOnlyList<EventSqlSnapshot>> ListByProviderAsync(
         Guid providerId,
@@ -64,7 +70,11 @@ public interface IEventSqlStore
     /// </summary>
     Task<IReadOnlyList<EventSqlSnapshot>> ListAsync(
         EventListFilter filter,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        // The caller, so a blocked pair never see each other's events. Null
+        // filters nothing. Not applied to an organiser's own list -- you always
+        // see your own events.
+        BlockParty? viewer = null);
 
     /// <summary>
     /// Lists the most engaging events first (trending score =
@@ -74,7 +84,11 @@ public interface IEventSqlStore
     /// </summary>
     Task<IReadOnlyList<EventSqlSnapshot>> ListTrendingAsync(
         int take,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        // The caller, so a blocked pair never see each other's events. Null
+        // filters nothing. Not applied to an organiser's own list -- you always
+        // see your own events.
+        BlockParty? viewer = null);
 
     /// <summary>
     /// Atomic single-column increment. <paramref name="counterType"/> must be

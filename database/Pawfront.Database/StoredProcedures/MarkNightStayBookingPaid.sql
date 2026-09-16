@@ -5,12 +5,19 @@
 -- there is no Custom check. Provider-only, paid at most once.
 -- THROWs: 51280 not found, 51281 not the provider, 51282 not COMPLETED,
 -- 51283 already paid.
+-- Also records the provider's "Cash Received" geolocation — see
+-- [Booking].[MarkBookingPaid]. The parent's own fix arrives separately, via
+-- [Booking].[RecordNightStayBookingLocationEvent].
 CREATE OR ALTER PROCEDURE [Booking].[MarkNightStayBookingPaid]
     @NightStayBookingId UNIQUEIDENTIFIER,
     @ProviderId UNIQUEIDENTIFIER,
     @Amount DECIMAL(10, 2),
     @PawfrontFee DECIMAL(10, 2),
-    @PaymentMethod NVARCHAR(16)
+    @PaymentMethod NVARCHAR(16),
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -20,10 +27,12 @@ BEGIN
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @RowPetParent UNIQUEIDENTIFIER;
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @RowPetParent = [PetParentId]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
+           @RowPetParent = [PetParentId], @PayoutId = [PayoutId]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -47,8 +56,20 @@ BEGIN
         THROW 51282, 'Booking must be completed before it can be marked paid.', 1;
     END
 
+    -- Backstop for stays completed before payout stamping shipped — see the
+    -- single-day mirror.
+    IF @PayoutId IS NULL
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
     UPDATE [Booking].[NightStayBookings]
-    SET [Status] = N'PAID', [UpdatedAtUtc] = @Now
+    SET [Status] = N'PAID',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId),
+        [PayoutStatus] = N'Paid'
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]
@@ -60,6 +81,47 @@ BEGIN
         ([BookingType], [BookingId], [ProviderId], [PetParentId], [Amount], [PawfrontFee], [PaymentMethod], [PaidAtUtc])
     VALUES
         (N'NightStay', @NightStayBookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
+
+    -- Raise the two invoices this payment produces. See the twin in
+    -- [Booking].[MarkBookingPaid] for why this sits inside the transaction.
+    -- Returns no result set.
+    EXEC [Billing].[RaiseBookingInvoices]
+        @BookingType = N'NightStay',
+        @BookingId = @NightStayBookingId,
+        @ProviderId = @ProviderId,
+        @PetParentId = @RowPetParent,
+        @Amount = @Amount,
+        @PawfrontFee = @PawfrontFee;
+
+    -- Where the provider was when they took the money.
+    IF @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[NightStayBookingLocationEvents]
+            ([NightStayBookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@NightStayBookingId, N'CashReceived', N'Provider', @ProviderId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
+
+    -- The ledger's figure, not a re-derivation — the receipt must match the row.
+    DECLARE @AmountText NVARCHAR(64) =
+        N'CHF ' + CONVERT(NVARCHAR(32), CAST(@Amount AS DECIMAL(12, 2)));
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_PAID',
+        @Amount = @AmountText;
+
+    -- ...and the provider's invoice (V-S14). Mirror of Booking.MarkBookingPaid.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = N'Provider',
+        @NotificationType = N'INVOICE_ISSUED',
+        @Amount = @AmountText;
 
     SELECT [NightStayBookingId],
            [ProviderId],

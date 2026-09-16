@@ -72,7 +72,33 @@ BEGIN
            b.[SnapshotCity],
            b.[SnapshotZipCode],
            b.[SnapshotLatitude],
-           b.[SnapshotLongitude]
+           b.[SnapshotLongitude],
+           -- Payment ledger join. HOW the money changed hands ('Cash'/'Digital')
+           -- is recorded only on the ledger row, never on the booking. Both
+           -- columns stay NULL until the provider marks the stay PAID. Appended
+           -- LAST so existing reader ordinals stay stable.
+           pay.[PaymentMethod] AS [PayoutMethod],
+           pay.[PaidAtUtc],
+           -- Has this booking ever actually BEEN modified? True once either party
+           -- accepted a schedule change, which is the only thing that rewrites the
+           -- booking's own date/time. Read from the audit trail rather than from
+           -- [Booking].[BookingModifications], because that table is a STAGING area
+           -- holding only the open proposal -- the row is deleted on accept AND on
+           -- decline, so after the fact it can say nothing about whether a
+           -- modification happened.
+           --
+           -- A REQUESTED-then-declined modification is deliberately NOT counted:
+           -- the booking's terms are exactly what they were, so a screen labelling
+           -- it "modified" would be wrong. Use the status-history endpoint for the
+           -- full trail, including proposals that went nowhere.
+           --
+           -- Appended LAST so existing reader ordinals stay stable.
+           CAST(CASE WHEN EXISTS (
+                         SELECT 1
+                         FROM [Booking].[NightStayBookingStatusHistory] AS mh
+                         WHERE mh.[NightStayBookingId] = b.[NightStayBookingId]
+                           AND mh.[ToStatus] IN (N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION'))
+                     THEN 1 ELSE 0 END AS BIT) AS [IsModificationDone]
     FROM [Booking].[NightStayBookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]
@@ -80,5 +106,9 @@ BEGIN
         ON pet.[PetId] = b.[PetId]
     LEFT JOIN [Provider].[Providers] AS prov
         ON prov.[ProviderId] = b.[ProviderId]
+    -- BookingType discriminates which booking table BookingId points at — the
+    -- ledger is shared by single-day and night-stay bookings and has no FK.
+    LEFT JOIN [Booking].[BookingPayments] AS pay
+        ON pay.[BookingId] = b.[NightStayBookingId] AND pay.[BookingType] = N'NightStay'
     WHERE b.[NightStayBookingId] = @NightStayBookingId;
 END;

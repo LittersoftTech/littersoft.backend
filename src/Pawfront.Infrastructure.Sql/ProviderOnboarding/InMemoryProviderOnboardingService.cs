@@ -303,11 +303,14 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
     public Task<SetActiveStatusOutcome> SetActiveStatusAsync(
         Guid providerId,
         bool isActive,
+        bool acknowledgeExistingBookings,
         CancellationToken cancellationToken)
     {
         // Dev fallback only. Bookings live in InMemoryBookingStore (not reachable
-        // from this service), so the conflict check is skipped here. Production
-        // uses the SQL path, which enforces it inside Provider.SetProviderActiveStatus.
+        // from this service), so the conflict check is skipped here — which also
+        // means acknowledgeExistingBookings has nothing to acknowledge and the
+        // honoured count is always 0. Production uses the SQL path, which
+        // enforces both inside Provider.SetProviderActiveStatus.
         var now = DateTimeOffset.UtcNow;
 
         lock (syncRoot)
@@ -321,7 +324,7 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
             profile.UpdatedAtUtc = now;
 
             return Task.FromResult<SetActiveStatusOutcome>(
-                new SetActiveStatusOutcome.Updated(providerId, isActive, now));
+                new SetActiveStatusOutcome.Updated(providerId, isActive, now, HonouredBookingCount: 0));
         }
     }
 

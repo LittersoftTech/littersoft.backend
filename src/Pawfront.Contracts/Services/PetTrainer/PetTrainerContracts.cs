@@ -36,7 +36,10 @@ public sealed record SaveTrainingSchoolOfferingRequest(
     IReadOnlyCollection<string> ServiceLocations,
     IReadOnlyCollection<string> TrainingApproaches,
     IReadOnlyCollection<string>? PreviousExperience,
-    string PrivateTrainingDescription);
+    // Optional. Carries a C# default so it stays out of the OpenAPI `required`
+    // list; blank/omitted reads back as "" on this host and as null on the two
+    // parent-facing surfaces that show it.
+    string? PrivateTrainingDescription = null);
 
 public sealed record SaveFreelanceTrainerOfferingRequest(
     string LicenseNumber,
@@ -50,7 +53,10 @@ public sealed record SaveFreelanceTrainerOfferingRequest(
     IReadOnlyCollection<string> ServiceLocations,
     IReadOnlyCollection<string> TrainingApproaches,
     IReadOnlyCollection<string>? PreviousExperience,
-    string PrivateTrainingDescription);
+    // Optional. Carries a C# default so it stays out of the OpenAPI `required`
+    // list; blank/omitted reads back as "" on this host and as null on the two
+    // parent-facing surfaces that show it.
+    string? PrivateTrainingDescription = null);
 
 public sealed record TrainingSessionRequest(
     decimal SessionDurationHours,

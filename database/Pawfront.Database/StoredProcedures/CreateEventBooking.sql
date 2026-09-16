@@ -88,6 +88,17 @@ BEGIN
     SELECT @BookingId, @EventId, a.[TicketNumber], a.[AttendeeName]
     FROM @AttendeeNames AS a;
 
+    -- Tell the ORGANISER somebody bought tickets. No self-notification risk: an
+    -- organiser is blocked from booking their own event (403 SelfBookingNotAllowed),
+    -- so the buyer is always someone else. The buyer gets nothing here — buying is
+    -- their own action, and they saw the confirmation on screen.
+    EXEC [Notification].[EnqueueEventNotification]
+        @EventId = @EventId,
+        @EventBookingId = @BookingId,
+        @NotificationType = N'EVENT_TICKET_SOLD',
+        @BookerName = @BookerName,
+        @TicketCount = @TicketCount;
+
     -- Result set 1: the booking row.
     SELECT [BookingId],
            [EventId],

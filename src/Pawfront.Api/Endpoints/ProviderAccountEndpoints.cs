@@ -1,5 +1,6 @@
 using Pawfront.Api.Auth;
 using Pawfront.Application.ProviderOnboarding;
+using Pawfront.Contracts.Support;
 
 namespace Pawfront.Api.Endpoints;
 
@@ -58,6 +59,20 @@ internal static class ProviderAccountEndpoints
         catch (ProviderProfileNotFoundException exception)
         {
             return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
+        }
+        // An open support ticket blocks the delete — part of the legal hold, since
+        // anonymising one party while support is still looking at the dispute would
+        // erase what the ticket is about. Nothing was changed; the account is
+        // untouched. The provider cannot clear this themselves — only support closing
+        // the ticket lifts it — and there is no force override.
+        catch (ProviderOpenTicketsException exception)
+        {
+            return ApiResults.Conflict(
+                "OpenTicketsExist",
+                exception.Message,
+                new OpenTicketsForProviderResponse(
+                    exception.ProviderId,
+                    [.. exception.OpenTickets.Select(SupportTicketMapping.ToResponse)]));
         }
     }
 }

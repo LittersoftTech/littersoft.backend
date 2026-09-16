@@ -1,3 +1,4 @@
+using Pawfront.Contracts.Reviews;
 using Pawfront.Contracts.Services.PetAdoptionSale;
 using Pawfront.Contracts.Services.PetGroomer;
 using Pawfront.Contracts.Services.PetSitter;
@@ -61,22 +62,21 @@ public sealed record ProviderPublicProfileResponse(
     // The provider's gallery photos (Provider.ProviderPhotos), oldest-first;
     // empty when none.
     IReadOnlyList<string> GalleryImages,
-    // Parent reviews of the provider. Always empty for now — the review
-    // feature isn't built yet; the field is wired so the mobile client can
-    // bind it ahead of time.
-    IReadOnlyList<ProviderReviewResponse> Reviews,
+    // Aggregate over every review this provider has received — the header's
+    // "4.6 (23)" plus the star histogram. AverageRating is null when nobody has
+    // reviewed them yet ("No reviews yet", not 0.0).
+    ReviewSummaryResponse ReviewSummary,
+    // The most recent parent reviews, newest first — enough to render the profile
+    // without a second call. This is a PREVIEW, not the whole set: for the full
+    // list, with sorting by date or score and paging, use
+    // GET /providers/{providerId}/reviews.
+    IReadOnlyList<ProviderReviewItemResponse> Reviews,
     PetSitterServiceResponse? PetSitter,
     PetGroomerServiceResponse? PetGroomer,
     PetTrainerServiceResponse? PetTrainer,
     PetAdoptionSaleServiceResponse? PetAdoptionSale,
     VetServiceResponse? Vet);
 
-/// <summary>
-/// Placeholder for a parent's review of a provider. The review feature is not
-/// built yet, so this carries no fields and the <c>Reviews</c> array is always
-/// empty — fields will be added when reviews land.
-/// </summary>
-public sealed record ProviderReviewResponse();
 
 public sealed record ProviderWorkingHoursDayResponse(
     int DayOfWeek,              // 0 = Sunday .. 6 = Saturday
@@ -108,7 +108,25 @@ public sealed record ProviderSummaryResponse(
     string? ImageUrl,
     string City,
     string? About,
-    IReadOnlyCollection<string> AnimalsHandled);
+    IReadOnlyCollection<string> AnimalsHandled,
+    // Does this provider take the temperament of the pet the search was filtered
+    // by (?petId=)? true / false when the question can be answered, null when it
+    // cannot: no pet was named, the pet has no temperament recorded (it is
+    // optional), or the provider's category holds no such list — only PetSitter
+    // and PetGroomer offerings record dog temperaments, so vets, trainers and
+    // adoption-and-sale always read null here.
+    //
+    // false covers BOTH "they listed other temperaments" and "they listed none",
+    // which is what keeps this in step with the hard ?dogTemperaments= filter —
+    // that filter excludes a provider who recorded none, so a flag calling that
+    // case unanswerable would put one provider in two different buckets on two
+    // screens.
+    //
+    // A NON-MATCH IS STILL RETURNED. This is a hint for the app's "Other"
+    // section, not a filter: a parent whose dog is aggressive would otherwise see
+    // a near-empty list with no explanation, and the provider they could still
+    // ring up would simply have vanished.
+    bool? MatchesPetTemperament = null);
 
 /// <summary>
 /// Per-provider hit returned by the four per-service booking-search
@@ -140,4 +158,28 @@ public sealed record ProviderSearchResultResponse(
     // The wide banner the provider uploaded for this specific service
     // (POST /providers/{id}/services/{serviceId}/banner-image). Distinct from
     // ImageUrl. Null when the provider hasn't set a banner for this service.
-    string? BannerImageUrl);
+    string? BannerImageUrl,
+    // How many pets the provider can take at once on THIS service (the
+    // offering's capacity, scoped by ServiceId — day care and night stay have
+    // their own buckets; grooming capacity is shop-wide across the menu).
+    // On the card because ?sortBy=PetCapacity is offered: a list the parent
+    // asked to order by a number should show them the number.
+    int PetCapacity = 0,
+    // Does this provider take the temperament of the pet the search was filtered
+    // by (?petId=)? true / false when the question can be answered, null when it
+    // cannot: no pet was named, the pet has no temperament recorded (it is
+    // optional), or the provider's category holds no such list — only PetSitter
+    // and PetGroomer offerings record dog temperaments, so vets, trainers and
+    // adoption-and-sale always read null here.
+    //
+    // false covers BOTH "they listed other temperaments" and "they listed none",
+    // which is what keeps this in step with the hard ?dogTemperaments= filter —
+    // that filter excludes a provider who recorded none, so a flag calling that
+    // case unanswerable would put one provider in two different buckets on two
+    // screens.
+    //
+    // A NON-MATCH IS STILL RETURNED. This is a hint for the app's "Other"
+    // section, not a filter: a parent whose dog is aggressive would otherwise see
+    // a near-empty list with no explanation, and the provider they could still
+    // ring up would simply have vanished.
+    bool? MatchesPetTemperament = null);

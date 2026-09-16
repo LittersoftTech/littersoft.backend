@@ -1,0 +1,289 @@
+{
+  "info": {
+    "name": "Pawfront — Chat API",
+    "_postman_id": "c4f4a1f4-2222-4a11-9c11-chatapi00000001",
+    "description": "Postman collection for Pawfront.ChatApi — the third host, shared by BOTH apps, that carries provider ↔ pet-parent messaging. Full mobile contract: docs/chat.md.\n\n**Not deployed yet** — the [Chat] schema ships in DeployAll.sql but has never been run against a live database, and the two Firebase service-account credentials (needed for push) are still outstanding. Everything below except an actual push notification should work once the schema is deployed.\n\n**This collection tests ONE side of a conversation per run.** Paste EITHER a provider Firebase ID token OR a pet-parent Firebase ID token into `firebaseToken`, and the OTHER party's id into `counterpartyId`. To exercise both sides of the same thread (e.g. send as the provider, then read as the parent), swap `firebaseToken` for the other party's token between requests — `conversationId` stays valid either way.\n\n**Setup**\n1. Set `chatBaseUrl` (default `https://localhost:7217`).\n2. Get a Firebase ID token for whichever side you're testing (see CLAUDE.md `Get a fresh Firebase ID token`) — a PROVIDER token comes from the `littersoftprovider` project, a PET-PARENT token from the pet-parent project. Set `firebaseToken`.\n3. Set `counterpartyId` to the OTHER party's ProviderId or PetParentId (both hosts' onboarding flows capture these — see the other two collections).\n4. Run `1. Conversations (Inbox) → POST /conversations` first — its test script captures `conversationId`, `providerId`, `petParentId` for everything below.\n\n**Notes**\n- Response envelope is `{ success, data, error }`, same as the other two hosts.\n- Every route resolves the caller's own participant id from the JWT — never from a route or body. There is no `{petParentId}` / `{providerId}` segment anywhere on this host except inside response payloads.\n- `canChat: false` on `GET /me` means the token is valid but onboarding never produced a Provider/PetParent profile — every other chat route will then answer 403 ChatProfileNotCompleted.\n- `Text` messages need only `text`; `Image` messages need `attachment` from `POST .../attachments` first (see folder 3).\n- The real-time half (the `/hubs/chat` SignalR hub) is documentation-only here — see folder 6 and docs/chat.md §2. Sending, reading and blocking are full REST so they stay scriptable with Postman/newman; only the push-suppression / typing / presence behaviours need an actual socket.\n- Rate limits: 30 messages/minute and 10 new conversations/hour, per Firebase account (429 TooManyRequests, honour `Retry-After`).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{firebaseToken}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "chatBaseUrl", "value": "https://localhost:7217" },
+    { "key": "firebaseToken", "value": "PASTE_A_PROVIDER_OR_PET_PARENT_FIREBASE_ID_TOKEN_HERE", "description": "Whichever side you're testing as. Swap this (and counterpartyId) to flip sides on the same conversation." },
+    { "key": "counterpartyId", "value": "", "description": "The OTHER party's id — a ProviderId if firebaseToken is a pet-parent token, a PetParentId if firebaseToken is a provider token." },
+    { "key": "conversationId", "value": "", "description": "Captured by POST /conversations." },
+    { "key": "providerId", "value": "", "description": "Captured from the conversation response — the thread's provider side." },
+    { "key": "petParentId", "value": "", "description": "Captured from the conversation response — the thread's pet-parent side." },
+    { "key": "messageId", "value": "", "description": "Captured by POST .../messages (the sent message's id) — used by the DELETE (soft-delete) request." },
+    { "key": "chatAttachmentBlobUrl", "value": "", "description": "Captured by POST .../attachments — put straight onto the next message's `attachment.blobUrl`." },
+    { "key": "chatBlockId", "value": "", "description": "Captured by POST /blocks." },
+    { "key": "blobUrl", "value": "", "description": "Set to any blobUrl returned by an upload endpoint to test POST /blob-images." }
+  ],
+  "item": [
+    {
+      "name": "0. Health & Identity",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/health", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "health"] }
+          }
+        },
+        {
+          "name": "GET /me",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/me", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "me"] },
+            "description": "Who the server thinks you are, as this host sees you — worth calling once at startup while integrating. Returns { participantType (Provider|PetParent — whichever app validated your token), participantId (your ProviderId/PetParentId, null if onboarding never produced one), firebaseUserId, canChat, userId (the SignalR user id your connections are addressed by, e.g. \"Provider:{guid}\" — null when canChat is false) }. `canChat: false` means the token is valid but there's no profile behind it yet — every other chat route will answer 403 ChatProfileNotCompleted and the hub will drop the connection."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Conversations (Inbox)",
+      "description": "The caller's participant id is ALWAYS resolved from the token — there is no route or body field for it anywhere in this folder, which is a deliberate departure from the other two hosts' \"trust the route id\" posture. A conversation id is the only handle a caller has, so trusting anything client-supplied for identity would let one party read another's messages.",
+      "item": [
+        {
+          "name": "POST /conversations (open or get-or-create)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data) {",
+                  "  if (json.data.conversationId) { pm.collectionVariables.set('conversationId', json.data.conversationId); }",
+                  "  if (json.data.providerId) { pm.collectionVariables.set('providerId', json.data.providerId); }",
+                  "  if (json.data.petParentId) { pm.collectionVariables.set('petParentId', json.data.petParentId); }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"counterpartyId\": \"{{counterpartyId}}\"\n}" },
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/conversations", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "conversations"] },
+            "description": "Get-or-create the caller's thread with `counterpartyId`. The counterparty's TYPE is not sent — a thread always runs provider <-> pet parent, so the server derives it from whichever app the caller's token came from. Idempotent by construction: a UNIQUE (ProviderId, PetParentId) constraint means a second call returns the SAME thread, so a client need not remember whether it has opened one before. Captures `conversationId`, `providerId`, `petParentId`.\n\nRate limited to **10/hour** per account — this is the tighter of the two chat limits, since opening threads with strangers is the real spam vector (it reaches people who never chose to hear from you), unlike message volume within an existing thread which the recipient can always block.\n\n400 InvalidRequest (missing counterpartyId); 404 ProviderNotFound / PetParentNotFound (counterparty doesn't exist); 409 ProviderAccountDeleted (that provider deleted their account — an INACTIVE provider is still chattable, only IsDeleted closes the door); 403 ConversationBlocked (one party blocked the other — direction is never disclosed); 429 TooManyRequests."
+          }
+        },
+        {
+          "name": "GET /conversations (inbox list)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{chatBaseUrl}}/api/v1/conversations?skip=0&take=20",
+              "host": ["{{chatBaseUrl}}"],
+              "path": ["api", "v1", "conversations"],
+              "query": [
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "20", "description": "capped at 20 server-side" }
+              ]
+            },
+            "description": "The caller's inbox, most recently active first; never-used threads sort last. Each row is a `ConversationResponse` — { conversationId, providerId, petParentId, counterparty: { participantType, participantId, name, photoUrl }, lastSequence, lastMessageAtUtc, lastMessagePreview, lastMessageSenderType, lastReadSequence, unreadCount, isMuted, createdAtUtc }. `counterparty.name` is joined LIVE, so a deleted account reads \"Deleted Provider\" / \"Deleted User\" instead of keeping its old name. `counterparty.photoUrl` is populated for a pet-parent counterparty only — a provider's image lives in their Cosmos offering document, not the SQL row this joins."
+          }
+        },
+        {
+          "name": "GET /conversations/unread-summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/conversations/unread-summary", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "conversations", "unread-summary"] },
+            "description": "{ unreadMessageCount, unreadConversationCount } — two figures because a badge wants one (\"12 unread messages\") and \"3 conversations need you\" wants the other. A muted thread still counts toward both: muting silences the push, it does not mark anything read."
+          }
+        },
+        {
+          "name": "GET /conversations/{conversationId}",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/conversations/{{conversationId}}", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "conversations", "{{conversationId}}"] },
+            "description": "Thread header + the caller's own read state — same `ConversationResponse` shape as the inbox list, for one thread. 404 ConversationNotFound for BOTH an unknown id and one that isn't yours — deliberately the same answer, so a conversation id cannot be probed for existence."
+          }
+        },
+        {
+          "name": "POST /conversations/{conversationId}/read",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"upToSequence\": 1\n}" },
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/conversations/{{conversationId}}/read", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "conversations", "{{conversationId}}", "read"] },
+            "description": "Marks the thread read up to `upToSequence`. Clamped server-side to the thread's own last sequence and NEVER moved backwards, so a stale client cannot un-read a thread. Unread only reaches zero once the caller has fully caught up. Returns { conversationId, participantType, participantId, lastReadSequence, unreadCount, isMuted } — mirrors the hub's `MarkRead` method and its `MessageRead` broadcast. 404 ConversationNotFound; 403 Forbidden (not a party)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Messages",
+      "description": "Sending exists as REST here AND as the hub's SendMessage method — both call the identical server logic, so a client whose socket has dropped can still send. Order by `sequence`, never by timestamp: two messages can share a millisecond, they can never share a sequence.",
+      "item": [
+        {
+          "name": "GET /conversations/{conversationId}/messages (history)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{chatBaseUrl}}/api/v1/conversations/{{conversationId}}/messages?take=50",
+              "host": ["{{chatBaseUrl}}"],
+              "path": ["api", "v1", "conversations", "{{conversationId}}", "messages"],
+              "query": [
+                { "key": "beforeSequence", "value": "", "disabled": true, "description": "Pass the previous page's nextBeforeSequence to page backwards; omit for the newest page." },
+                { "key": "take", "value": "50", "description": "capped at 50 server-side" }
+              ]
+            },
+            "description": "History, NEWEST first. Returns { messages: [ChatMessageResponse...], nextBeforeSequence, hasMore } — page backwards by passing `nextBeforeSequence` as `?beforeSequence=`; null means you've reached the start of the thread. Each message is { messageId, conversationId, sequence, senderType, senderId, kind (Text|Image), text, attachment, isDeleted, createdAtUtc, editedAtUtc, deletedAtUtc }. A retracted message keeps its place with `isDeleted: true` and no content — render \"This message was deleted\", don't remove the row, or your sequence numbering disagrees with the server's. 404 ConversationNotFound; 403 Forbidden."
+          }
+        },
+        {
+          "name": "POST /conversations/{conversationId}/messages (send text)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.messageId) {",
+                  "  pm.collectionVariables.set('messageId', json.data.messageId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"clientMessageId\": \"{{$guid}}\",\n  \"kind\": \"Text\",\n  \"text\": \"Hi! Do you have availability this weekend for a day-care drop-off?\"\n}" },
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/conversations/{{conversationId}}/messages", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "conversations", "{{conversationId}}", "messages"] },
+            "description": "ALWAYS send `clientMessageId` (Postman's `{{$guid}}` dynamic variable mints a fresh one per send here) — it becomes the message id, so a retry after a dropped response returns the ORIGINAL message instead of posting twice. Uniqueness is enforced by a primary key on (conversationId, messageId), so it holds across the hub and REST alike: send the same id over both and the second is a replay, not a second message. Omit it and the server mints one, but then a retry WILL duplicate.\n\nReturns 200, not 201 — resending the same clientMessageId is an accepted replay that returns the existing message, so \"Created\" would be a lie half the time. Rate limited to **30/minute** per account (this REST path only — the hub's SendMessage is not covered, since ASP.NET Core rate limiting is request middleware and a hub call arrives over an already-established socket). 400 UnsupportedMessageKind (kind must be Text or Image); 404 ConversationNotFound; 403 Forbidden / ConversationBlocked; 429 TooManyRequests."
+          }
+        },
+        {
+          "name": "POST /conversations/{conversationId}/messages (send image)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"clientMessageId\": \"{{$guid}}\",\n  \"kind\": \"Image\",\n  \"attachment\": {\n    \"blobUrl\": \"{{chatAttachmentBlobUrl}}\",\n    \"contentType\": \"image/jpeg\",\n    \"sizeBytes\": 245678,\n    \"width\": null,\n    \"height\": null\n  }\n}" },
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/conversations/{{conversationId}}/messages", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "conversations", "{{conversationId}}", "messages"] },
+            "description": "Run `3. Attachments → POST .../attachments` FIRST and put its response straight into `attachment` here — the server does not re-measure the file at send time, it trusts what the upload call returned. Same clientMessageId / rate-limit / error rules as the text send above."
+          }
+        },
+        {
+          "name": "DELETE /conversations/{conversationId}/messages/{messageId}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/conversations/{{conversationId}}/messages/{{messageId}}", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "conversations", "{{conversationId}}", "messages", "{{messageId}}"] },
+            "description": "SOFT delete — the message keeps its place and its sequence, only its content goes, and it reads back `isDeleted: true` with `text`/`attachment` cleared. Removing it outright would leave a hole in the thread and rewrite what the other party already saw. Scoped to the SENDER — \"not yours\" and \"no such message\" are one answer (404 ConversationNotFound / 403 Forbidden, same posture as the rest of this host)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Attachments",
+      "item": [
+        {
+          "name": "POST /conversations/{conversationId}/attachments",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.blobUrl) {",
+                  "  pm.collectionVariables.set('chatAttachmentBlobUrl', json.data.blobUrl);",
+                  "  pm.collectionVariables.set('blobUrl', json.data.blobUrl);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": [] }] },
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/conversations/{{conversationId}}/attachments", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "conversations", "{{conversationId}}", "attachments"] },
+            "description": "multipart { file } — ≤5 MB, JPEG/PNG/WebP. Larger than the 3 MB the review/pet galleries allow, since a chat photo is usually straight off a camera. The caller is authorised as a party to `conversationId` BEFORE anything is written, so nobody can push bytes into a thread's blob folder by guessing its id. Uploads to `chat-attachments/<conversationId>/<guid>.<ext>` and echoes back { blobUrl, contentType, sizeBytes, width: null, height: null } — put this object straight onto the next `POST .../messages` call's `attachment` field with `kind: \"Image\"`. Captures `chatAttachmentBlobUrl`. 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat; 404 ConversationNotFound; 403 Forbidden."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Blocks",
+      "description": "Chat being OPEN — any pet parent may message any provider with no booking between them — is what makes blocking non-optional rather than a nice-to-have. A block stops new messages BOTH ways and stops the thread reopening, but deliberately leaves existing history readable: it's part of both parties' record, and a blocked user might need it to report the exchange. Reporting itself is NOT built — it terminates in a support workflow this backend has no Helpline/ticket module for yet.",
+      "item": [
+        {
+          "name": "POST /blocks",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.chatBlockId) {",
+                  "  pm.collectionVariables.set('chatBlockId', json.data.chatBlockId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"counterpartyId\": \"{{counterpartyId}}\",\n  \"reason\": \"Repeated inappropriate messages.\"\n}" },
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/blocks", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "blocks"] },
+            "description": "Blocks `counterpartyId` (their TYPE is derived from the caller's token, same rule as opening a conversation). `reason` is optional free text, for the blocker's own record. Idempotent. Captures `chatBlockId`. 400 InvalidRequest (missing counterpartyId); 404 ProviderNotFound / PetParentNotFound."
+          }
+        },
+        {
+          "name": "GET /blocks (mine)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/blocks", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "blocks"] },
+            "description": "Only blocks the caller PLACED — blocks against them are never returned. Telling someone they've been blocked would confirm the other party acted, which is exactly what a block is meant to end. Each row: { chatBlockId, blockedType, blockedId, blockedName, blockedPhotoUrl, reason, createdAtUtc } (name/photo joined live)."
+          }
+        },
+        {
+          "name": "DELETE /blocks/{chatBlockId}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/blocks/{{chatBlockId}}", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "blocks", "{{chatBlockId}}"] },
+            "description": "Lifts a block the caller placed — the conversation can be reopened afterwards. 404 ChatBlockNotFound (unknown id and not-yours are one case, same posture as everywhere else on this host)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Blob Images (universal fetch)",
+      "item": [
+        {
+          "name": "POST /blob-images",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"blobUrl\": \"{{blobUrl}}\"\n}" },
+            "url": { "raw": "{{chatBaseUrl}}/api/v1/blob-images", "host": ["{{chatBaseUrl}}"], "path": ["api", "v1", "blob-images"] },
+            "description": "The same private-container fetch the other two hosts carry — the chat-attachments container is private, so the client renders an image by POSTing its `blobUrl` here rather than hitting it directly. **Response is binary** (not the JSON envelope) — see Postman's response **Preview** tab. 400 InvalidRequest (bad/foreign URL); 404 BlobNotFound."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Hub Reference (SignalR — not executable via REST)",
+      "description": "The real-time half. Not runnable as plain Postman HTTP requests — this folder documents the contract; wire it up with a SignalR client (Flutter: `signalr_netcore`). Full details: docs/chat.md §1-2, §4.\n\n**Connect:** `{chatBaseUrl}/hubs/chat`, token passed via `accessTokenFactory` (query string `?access_token=`, honoured ONLY on `/hubs/*` — a WebSocket handshake cannot carry an Authorization header, and the REST surface deliberately does not accept one there so a token never lands in an access log).\n\n**Client → server**\n- `JoinConversation(conversationId)` — authorises first (a thread you're not part of throws), returns the conversation, and sets `ActiveConversationId` — this is what SUPPRESSES the push for that thread. Call on opening a thread.\n- `LeaveConversation(conversationId)` — call on navigating away, or the user keeps getting pushed for a thread they've stopped viewing.\n- `SendMessage(conversationId, request)` — identical server logic to `POST .../messages`; returns the stored message.\n- `MarkRead(conversationId, upToSequence)` — identical server logic to `POST .../read`; returns the new read state.\n- `SetTyping(conversationId, isTyping)` — never stored, broadcast only.\n- `Heartbeat()` — call every ~60s. A connection whose heartbeat stops for 3 minutes is presumed dead and purged by `ChatPresenceSweepFunction`; it re-registers on the next heartbeat, but in between the user is pushed for a thread they're actually reading.\n\n**Server → client**\n- `MessageReceived` — the full message.\n- `MessageRead` — { conversationId, participantType, participantId, lastReadSequence }.\n- `TypingChanged` — { conversationId, participantType, participantId, isTyping }.\n- `ConversationUpdated` — { conversationId, lastSequence, lastMessageAtUtc, unreadCount }.\n- `UnreadCountChanged` — { conversationId, unreadCount }.\n\n**Reconnect:** SignalR is fire-and-forget — on every reconnect, re-read `GET /conversations/{id}/messages` from your last known sequence. That reconciliation is the ONLY delivery guarantee; the socket never replays what was missed while disconnected.\n\n**Push:** sent only when the recipient has no connection with `ActiveConversationId` set to that thread (i.e. they didn't `JoinConversation` it, or they `LeaveConversation`d) and hasn't muted it — MESSAGE_RECEIVED, category MESSAGING, route /messages/thread (placeholder, pending the mobile route table), body \"Sent you a message.\" with no preview today.",
+      "item": []
+    }
+  ]
+}

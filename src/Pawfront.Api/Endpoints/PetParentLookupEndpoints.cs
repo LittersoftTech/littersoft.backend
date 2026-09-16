@@ -1,5 +1,6 @@
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
+using Pawfront.Application.Reviews;
 using Pawfront.Contracts.ParentPets;
 using Pawfront.Contracts.PetParentLookup;
 
@@ -25,6 +26,7 @@ internal static class PetParentLookupEndpoints
         Guid petParentId,
         IParentOnboardingService onboardingService,
         IParentPetService petService,
+        IPetParentRatingReader ratingReader,
         CancellationToken cancellationToken)
     {
         Contracts.ParentOnboarding.PetParentProfileDetailsResponse profile;
@@ -40,10 +42,14 @@ internal static class PetParentLookupEndpoints
         var pets = await petService.GetPetsAsync(petParentId, cancellationToken);
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
+        // The parent's rating as given BY providers on completed jobs. Null average
+        // with a zero count when nobody has rated them yet.
+        var rating = await ratingReader.GetAsync(petParentId, cancellationToken);
+
         return ApiResults.Ok(new PetParentDetailsResponse(
             profile.PetParentId,
             ProfileImageUrl: profile.ProfilePhotoUrl,
-            Rating: null, // review feature not built yet — wired ahead for mobile
+            Rating: rating.AverageRating,
             Name: $"{profile.FirstName} {profile.LastName}".Trim(),
             profile.Gender,
             Age: AgeFrom(profile.DateOfBirth, today).Years,
@@ -58,7 +64,8 @@ internal static class PetParentLookupEndpoints
             profile.Email,
             profile.MobileCountryCode,
             profile.MobileNumber,
-            pets.Select(pet => ToPetCard(pet, today)).ToArray()));
+            pets.Select(pet => ToPetCard(pet, today)).ToArray(),
+            RatingCount: rating.RatingCount));
     }
 
     private static async Task<IResult> GetPetDetails(

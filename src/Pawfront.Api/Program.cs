@@ -45,6 +45,9 @@ var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExte
 api.MapHealthEndpoints();
 api.MapMetadataEndpoints();
 api.MapProviderOnboardingEndpoints();
+// FCM token register/refresh + sign-out. Not scoped under /providers/{id} — a
+// token is bound to the auth identity, which exists before the profile does.
+api.MapDeviceTokenEndpoints();
 api.MapProviderEndpoints();
 api.MapProviderServiceCatalogEndpoints();
 api.MapProviderPolicyEndpoints();
@@ -58,6 +61,23 @@ api.MapEventEndpoints();
 api.MapEventBookingEndpoints();
 api.MapEventDashboardEndpoints();
 api.MapBookingEndpoints();
+api.MapProviderEarningsEndpoints();
+// The provider's job list -- the agenda inbox behind their filter sheet.
+// Additive: GET /providers/{id}/bookings and the night-stay list are unchanged.
+api.MapProviderJobEndpoints();
+// PawPrints analytics: the views card (figure, per-service breakdown, and who
+// viewed) plus the per-service breakdown of bookings and earnings. The third
+// level for those two is the earnings booking list above, via ?serviceId=.
+api.MapProviderAnalyticsEndpoints();
+// Invoice PDF download (the provider's Pawfront-fee invoice for a paid booking).
+api.MapInvoiceEndpoints();
+// Provider rates the parent after a finished job (rating only) + reads the reviews
+// parents have left for them.
+api.MapProviderReviewEndpoints();
+// Support tickets: "Report Incident" on a booking and "Report Chat" on a
+// conversation. One open ticket per subject; reporting does not block anybody.
+api.MapProviderSupportTicketEndpoints();
+api.MapBlockEndpoints();
 api.MapPetParentLookupEndpoints();
 api.MapProviderNightStayBookingEndpoints();
 api.MapBlobImageEndpoints();

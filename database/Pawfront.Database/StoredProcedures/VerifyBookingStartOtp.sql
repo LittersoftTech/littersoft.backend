@@ -8,10 +8,23 @@
 -- call THROWs 51136. THROWs: 51131 not found, 51132 forbidden, 51138 not START_JOB
 -- (can't verify the start code), 51134 invalid/missing OTP, 51135 OTP expired,
 -- 51136 too many wrong attempts (job cancelled).
+--
+-- This is the provider tapping "Proceed to start", so their geolocation is written
+-- here — but ONLY on the success path, where the job actually starts. A wrong code
+-- is not a job start, and the 6th failure ends the booking as
+-- OTP_MAX_ATTEMPTS_EXCEEDED, which is not one of the moments being evidenced; the
+-- fix supplied with those attempts is simply discarded. Recorded inside the same
+-- transaction as the move to IN_PROGRESS, so the two cannot come apart.
 CREATE OR ALTER PROCEDURE [Booking].[VerifyBookingStartOtp]
     @BookingId UNIQUEIDENTIFIER,
     @ProviderId UNIQUEIDENTIFIER,
-    @OtpCode NVARCHAR(6)
+    @OtpCode NVARCHAR(6),
+    -- The provider's position at the moment the job starts. See
+    -- [Booking].[StartBooking] for why these are defaulted to NULL.
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -83,6 +96,16 @@ BEGIN
                 (@BookingId, @CurrentStatus, N'OTP_MAX_ATTEMPTS_EXCEEDED', N'System', NULL,
                  N'Job cancelled after 6 incorrect start-code attempts.');
 
+            -- The provider entered the wrong codes, so only the parent is told
+            -- their job is off. Enqueued before the COMMIT below so it lands in
+            -- the same transaction as the cancellation — the THROW that follows
+            -- is the API's 409, not a rollback.
+            EXEC [Notification].[EnqueueBookingNotification]
+                @BookingId = @BookingId,
+                @IsNightStay = 0,
+                @Audience = N'PetParent',
+                @NotificationType = N'BOOKING_OTP_ATTEMPTS_EXCEEDED';
+
             COMMIT TRANSACTION;
             THROW 51136, 'Too many incorrect start-code attempts; the job has been cancelled.', 1;
         END
@@ -104,6 +127,25 @@ BEGIN
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@BookingId, @CurrentStatus, N'IN_PROGRESS', N'Provider', @ProviderId, N'Job started with parent start-OTP');
+
+    -- Where the provider was when the job actually started.
+    IF @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[BookingLocationEvents]
+            ([BookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@BookingId, N'JobStartProceeded', N'Provider', @ProviderId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
+
+    -- "Your job has started. Thank you for the OTP!" — the provider entered the
+    -- code, so the parent is the one told.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_IN_PROGRESS';
 
     SELECT [BookingId],
            [ProviderId],

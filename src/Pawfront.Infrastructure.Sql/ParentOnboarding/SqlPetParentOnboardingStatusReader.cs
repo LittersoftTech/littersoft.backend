@@ -43,7 +43,11 @@ internal sealed class SqlPetParentOnboardingStatusReader(
                 pets.Add(new PetMedicalInfoCompletion(
                     reader.GetGuid(0),
                     reader.GetString(1),
-                    reader.GetBoolean(2)));
+                    reader.GetBoolean(2),
+                    // Appended LAST to the sproc's projection, so the ordinals
+                    // above did not move. MissingSections is derived by the
+                    // orchestrator, not read.
+                    HasProfilePhoto: reader.GetBoolean(3)));
             }
         }
 

@@ -52,10 +52,13 @@ BEGIN
         THROW 51066, 'Service is not valid or active for this provider.', 1;
     END
 
-    -- Race-safe capacity check — identical to [Booking].[CreateBooking].
-    -- Custom and App bookings share the same per-service capacity bucket so the
-    -- COUNT(*) sees both. A booking holds its slot in every status except the
-    -- two cancelled ones.
+    -- Race-safe capacity check — identical to [Booking].[CreateBooking], and it
+    -- must STAY identical: Custom and App bookings share the same per-service
+    -- capacity bucket, so the COUNT(*) sees both and the two sprocs have to
+    -- agree on what "occupied" means or one of them will over- or under-admit.
+    -- A booking holds its slot in every status except the two cancelled ones,
+    -- and only up to COALESCE([ActualEndTime], [EndTime]) — hours handed back by
+    -- a job that finished early are free for a walk-in too.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
@@ -63,7 +66,7 @@ BEGIN
       AND [BookingDate] = @BookingDate
       AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
       AND [StartTime] < @EndTime
-      AND [EndTime] > @StartTime;
+      AND COALESCE([ActualEndTime], [EndTime]) > @StartTime;
 
     IF @Concurrent >= @Capacity
     BEGIN

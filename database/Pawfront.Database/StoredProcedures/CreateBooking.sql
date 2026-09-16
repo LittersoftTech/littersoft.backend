@@ -67,6 +67,49 @@ BEGIN
         THROW 51060, 'Pet parent was not found.', 1;
     END
 
+    -- Either party having blocked the other refuses the booking. A block is no
+    -- longer the chat-only remedy it began as: it severs the pair across the
+    -- product, and a new booking is the most consequential thing it has to stop.
+    --
+    -- HOLDLOCK, not a plain read. [Block].[BlockParticipant] takes UPDLOCK +
+    -- HOLDLOCK over this same key range before it captures the unfinished jobs it
+    -- is about to cancel, so the range lock here is what makes the two serialise:
+    -- without it a booking created at that instant would commit after the block
+    -- and after the job list was taken, and would survive it.
+    --
+    -- The two directions THROW DIFFERENT codes so the API can word the refusal
+    -- without leaking. Only the caller's OWN block may be named ("unblock to
+    -- book"); one placed against them must read as a neutral "not available",
+    -- because naming it would confirm the other party acted -- the one thing a
+    -- block must never do. SQL reports which side acted and C# decides what this
+    -- actor is allowed to know, because this procedure is called by BOTH hosts and
+    -- has no actor of its own.
+    --
+    -- If the two have blocked each other, the parent's is reported. That is
+    -- deterministic rather than meaningful: the pair is severed either way, and
+    -- the only cost is that a provider in a mutual block reads the neutral wording
+    -- instead of being told about their own block.
+    DECLARE @BlockedByParent BIT = 0;
+    DECLARE @BlockedByProvider BIT = 0;
+
+    SELECT @BlockedByParent = MAX(CASE WHEN [BlockerType] = N'PetParent' THEN 1 ELSE 0 END),
+           @BlockedByProvider = MAX(CASE WHEN [BlockerType] = N'Provider' THEN 1 ELSE 0 END)
+    FROM [Block].[BlockedParticipants] WITH (HOLDLOCK)
+    WHERE ([BlockerType] = N'PetParent' AND [BlockerId] = @PetParentId
+           AND [BlockedType] = N'Provider' AND [BlockedId] = @ProviderId)
+       OR ([BlockerType] = N'Provider' AND [BlockerId] = @ProviderId
+           AND [BlockedType] = N'PetParent' AND [BlockedId] = @PetParentId);
+
+    IF @BlockedByParent = 1
+    BEGIN
+        THROW 51370, 'The pet parent has blocked this provider.', 1;
+    END
+
+    IF @BlockedByProvider = 1
+    BEGIN
+        THROW 51371, 'The provider has blocked this pet parent.', 1;
+    END
+
     -- Defense-in-depth: the API validates pet ownership before calling, but a
     -- direct sproc caller must not be able to pin someone else's pet on a booking.
     IF @PetId IS NOT NULL AND NOT EXISTS (
@@ -74,6 +117,9 @@ BEGIN
         FROM [Parent].[Pets]
         WHERE [PetId] = @PetId
           AND [PetParentId] = @PetParentId
+          -- A soft-deleted pet can't be booked. The row survives only to keep
+          -- EXISTING bookings readable; it is not a pet the parent still has.
+          AND [IsDeleted] = 0
     )
     BEGIN
         THROW 51068, 'Pet was not found or does not belong to the pet parent.', 1;
@@ -100,6 +146,9 @@ BEGIN
     -- under the SAME UPDLOCK + HOLDLOCK range as the capacity count below (fully
     -- race-safe: a concurrent duplicate serialises behind us and then sees our row).
     -- Only applies to App bookings that name a pet; Custom walk-ins carry no @PetId.
+    -- The existing booking's window ends at COALESCE([ActualEndTime], [EndTime]):
+    -- once its job has finished early the pet is demonstrably free again, so it
+    -- must not block a fresh booking in the time that was released.
     IF @PetId IS NOT NULL AND EXISTS (
         SELECT 1
         FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
@@ -108,7 +157,7 @@ BEGIN
           AND [BookingDate] = @BookingDate
           AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [StartTime] < @EndTime
-          AND [EndTime] > @StartTime
+          AND COALESCE([ActualEndTime], [EndTime]) > @StartTime
     )
     BEGIN
         THROW 51069, 'This pet already has a booking for this slot.', 1;
@@ -118,7 +167,12 @@ BEGIN
     -- the requested window FOR THIS SERVICE, holding UPDLOCK + HOLDLOCK so
     -- concurrent CreateBooking calls on the same service serialise. DayCare and
     -- NightStay each have their own capacity bucket. A booking holds its slot in
-    -- every status except the two cancelled ones.
+    -- every status except the two cancelled ones — and only up to
+    -- COALESCE([ActualEndTime], [EndTime]), so a job that finished early has
+    -- already handed its remaining hours back and does not count against them.
+    -- This is the gate the slot grid promises: [Booking].[GetBookingsForDate]
+    -- uses the identical expression, so what is shown as free is what is
+    -- admitted here.
     DECLARE @Concurrent INT;
     SELECT @Concurrent = COUNT(*)
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
@@ -126,7 +180,7 @@ BEGIN
       AND [BookingDate] = @BookingDate
       AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
       AND [StartTime] < @EndTime
-      AND [EndTime] > @StartTime;
+      AND COALESCE([ActualEndTime], [EndTime]) > @StartTime;
 
     IF @Concurrent >= @Capacity
     BEGIN

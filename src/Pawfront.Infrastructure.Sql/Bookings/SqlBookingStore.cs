@@ -1,3 +1,4 @@
+using Pawfront.Application.Blocks;
 using System.Data;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
@@ -92,6 +93,20 @@ internal sealed class SqlBookingStore(
         catch (SqlException exception) when (exception.Number == 51069)
         {
             throw new PetAlreadyBookedException(petId!.Value, serviceId, bookingDate, startTime, endTime);
+        }
+        // 51370 / 51371 say WHICH SIDE placed the block, and the exception carries
+        // it through so the API can name the caller's own block while staying
+        // neutral about one placed against them. The procedure has no actor of its
+        // own -- it is called by both hosts -- so that decision belongs upstream.
+        catch (SqlException exception) when (exception.Number == 51370)
+        {
+            throw new BookingBlockedException(
+                BlockPartyType.PetParent, "This booking is not available.");
+        }
+        catch (SqlException exception) when (exception.Number == 51371)
+        {
+            throw new BookingBlockedException(
+                BlockPartyType.Provider, "This booking is not available.");
         }
     }
 
@@ -188,8 +203,27 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@BookingDate",
             date is null ? DBNull.Value : (object)date.Value.ToDateTime(TimeOnly.MinValue));
 
-        return await ReadAllAsync(command, cancellationToken);
+        var rows = new List<BookingResult>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadProviderListRow(reader));
+        }
+        return rows;
     }
+
+    // Booking.ListBookingsByProvider appends the live-joined customer columns
+    // AFTER the standard booking-row columns (ordinals 25-27), so the shared
+    // ReadBookingRow reader -- which every other booking sproc feeds -- stays
+    // untouched at 0-24. Same convention ReadListItemRow uses for the parent
+    // list's snapshot extras.
+    private static BookingResult ReadProviderListRow(SqlDataReader reader) =>
+        ReadBookingRow(reader) with
+        {
+            Breed = reader.IsDBNull(25) ? null : reader.GetString(25),
+            PetGender = reader.IsDBNull(26) ? null : reader.GetString(26),
+            CustomerPhotoUrl = reader.IsDBNull(27) ? null : reader.GetString(27)
+        };
 
     public async Task<IReadOnlyList<BookingListItemResult>> ListByPetParentAsync(
         Guid petParentId,
@@ -372,12 +406,105 @@ internal sealed class SqlBookingStore(
         }
     }
 
+    public async Task<BookingResult> UpdateCustomAsync(
+        Guid bookingId,
+        Guid providerId,
+        Guid serviceId,
+        string serviceCategory,
+        string subCategory,
+        string customerName,
+        string customerMobileCountryCode,
+        string customerMobile,
+        string animalType,
+        string petName,
+        DateOnly bookingDate,
+        TimeOnly startTime,
+        TimeOnly endTime,
+        string serviceLocation,
+        string? customerLocation,
+        decimal pricePerHour,
+        string? jobNotes,
+        int capacity,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = new SqlCommand("Booking.UpdateCustomBooking", connection)
+        {
+            CommandType = CommandType.StoredProcedure
+        };
+
+        command.Parameters.AddWithValue("@BookingId", bookingId);
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@ServiceId", serviceId);
+        command.Parameters.AddWithValue("@ServiceCategory", serviceCategory);
+        command.Parameters.AddWithValue("@SubCategory", subCategory);
+        command.Parameters.AddWithValue("@CustomerName", customerName);
+        command.Parameters.AddWithValue("@CustomerMobileCountryCode", customerMobileCountryCode);
+        command.Parameters.AddWithValue("@CustomerMobile", customerMobile);
+        command.Parameters.AddWithValue("@AnimalType", animalType);
+        command.Parameters.AddWithValue("@PetName", petName);
+        command.Parameters.AddWithValue("@BookingDate", bookingDate.ToDateTime(TimeOnly.MinValue));
+        command.Parameters.AddWithValue("@StartTime", startTime.ToTimeSpan());
+        command.Parameters.AddWithValue("@EndTime", endTime.ToTimeSpan());
+        command.Parameters.AddWithValue("@ServiceLocation", serviceLocation);
+        command.Parameters.AddWithValue("@CustomerLocation",
+            customerLocation is null ? DBNull.Value : (object)customerLocation);
+        command.Parameters.AddWithValue("@PricePerHour", pricePerHour);
+        command.Parameters.AddWithValue("@JobNotes",
+            jobNotes is null ? DBNull.Value : (object)jobNotes);
+        command.Parameters.AddWithValue("@Capacity", capacity);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                throw new InvalidOperationException("Booking row was not returned after update.");
+            }
+            return ReadBookingRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51380)
+        {
+            throw new BookingNotFoundException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51381)
+        {
+            throw new BookingStatusForbiddenException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51382)
+        {
+            throw new BookingNotCustomException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51383)
+        {
+            // The sproc knows the status; the message it throws carries it, but the
+            // typed exception wants it separately and re-reading the row to find out
+            // would race. "terminal" is accurate for every status that reaches here.
+            throw new CustomBookingNotEditableException(bookingId, "terminal");
+        }
+        catch (SqlException exception) when (exception.Number == 51384)
+        {
+            throw new CustomBookingScheduleLockedException(bookingId, "started");
+        }
+        catch (SqlException exception) when (exception.Number == 51062)
+        {
+            throw new BookingCapacityExceededException(serviceId, bookingDate, startTime, endTime);
+        }
+        catch (SqlException exception) when (exception.Number == 51066)
+        {
+            throw new BookingServiceInvalidException(serviceId, providerId);
+        }
+    }
+
     public async Task<BookingResult> UpdateStatusAsync(
         Guid bookingId,
         string newStatus,
         BookingStatusActor actor,
         Guid actorId,
         string? note,
+        CapturedLocation? location,
         CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
@@ -392,6 +519,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@Actor", actor.ToString());
         command.Parameters.AddWithValue("@ActorId", actorId);
         command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
+        LocationParameters.Add(command, location);
 
         try
         {
@@ -443,7 +571,13 @@ internal sealed class SqlBookingStore(
             // transition (e.g. accept) is rejected. The sproc rejects only — the
             // stored status is still CREATED until the scheduled external job
             // settles it to EXPIRED.
-            throw new BookingExpiredException(bookingId);
+            throw BookingExpiredException.NeverAccepted(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51153)
+        {
+            // BR-53: still CREATED with under 2 hours to the service. Same
+            // reject-only posture as 51129 above.
+            throw BookingExpiredException.ServiceTooClose(bookingId);
         }
         catch (SqlException exception) when (exception.Number == 51149)
         {
@@ -483,7 +617,8 @@ internal sealed class SqlBookingStore(
     }
 
     public async Task<StartOtpResult> IssueStartOtpAsync(
-        Guid bookingId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+        Guid bookingId, string newCode, int ttlMinutes, CapturedLocation? location,
+        CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -494,6 +629,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@BookingId", bookingId);
         command.Parameters.AddWithValue("@NewCode", newCode);
         command.Parameters.AddWithValue("@TtlMinutes", ttlMinutes);
+        LocationParameters.Add(command, location);
 
         try
         {
@@ -511,7 +647,8 @@ internal sealed class SqlBookingStore(
     }
 
     public async Task<BookingResult> StartJobAsync(
-        Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+        Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location,
+        CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -523,6 +660,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@ProviderId", providerId);
         command.Parameters.AddWithValue("@NewCode", newCode);
         command.Parameters.AddWithValue("@TtlMinutes", ttlMinutes);
+        LocationParameters.Add(command, location);
 
         try
         {
@@ -556,7 +694,8 @@ internal sealed class SqlBookingStore(
     }
 
     public async Task<BookingResult> VerifyStartOtpAsync(
-        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+        Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location,
+        CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -567,6 +706,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@BookingId", bookingId);
         command.Parameters.AddWithValue("@ProviderId", providerId);
         command.Parameters.AddWithValue("@OtpCode", otpCode);
+        LocationParameters.Add(command, location);
 
         try
         {
@@ -641,7 +781,8 @@ internal sealed class SqlBookingStore(
 
     public async Task<BookingResult> MarkPaidAsync(
         Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee,
-        string paymentMethod, CancellationToken cancellationToken)
+        string paymentMethod, CapturedLocation? location,
+        CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -654,6 +795,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@Amount", amount);
         command.Parameters.AddWithValue("@PawfrontFee", pawfrontFee);
         command.Parameters.AddWithValue("@PaymentMethod", paymentMethod);
+        LocationParameters.Add(command, location);
 
         try
         {
@@ -791,7 +933,8 @@ internal sealed class SqlBookingStore(
     }
 
     public async Task<BookingEvidenceResult> AddEvidenceAsync(
-        Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
+        Guid bookingId, Guid providerId, string photoUrl, CapturedLocation? location,
+        CancellationToken cancellationToken)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -802,6 +945,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@BookingId", bookingId);
         command.Parameters.AddWithValue("@ProviderId", providerId);
         command.Parameters.AddWithValue("@PhotoUrl", photoUrl);
+        LocationParameters.Add(command, location);
 
         try
         {
@@ -1126,7 +1270,14 @@ internal sealed class SqlBookingStore(
             SnapshotCity: reader.IsDBNull(64) ? null : reader.GetString(64),
             SnapshotZipCode: reader.IsDBNull(65) ? null : reader.GetString(65),
             SnapshotLatitude: reader.IsDBNull(66) ? null : reader.GetDecimal(66),
-            SnapshotLongitude: reader.IsDBNull(67) ? null : reader.GetDecimal(67));
+            SnapshotLongitude: reader.IsDBNull(67) ? null : reader.GetDecimal(67),
+            // Payment ledger join — null until the booking is marked PAID.
+            // Appended LAST to the sproc's projection, so no ordinal above moved.
+            IsModificationDone: !reader.IsDBNull(70) && reader.GetBoolean(70),
+            PayoutMethod: reader.IsDBNull(68) ? null : reader.GetString(68),
+            PaidAtUtc: reader.IsDBNull(69)
+                ? null
+                : new DateTimeOffset(reader.GetDateTime(69), TimeSpan.Zero));
     }
 
     private static BookingPrescriptionResult ReadPrescription(SqlDataReader reader) =>

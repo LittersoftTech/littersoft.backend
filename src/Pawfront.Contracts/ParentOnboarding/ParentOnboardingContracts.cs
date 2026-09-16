@@ -153,6 +153,104 @@ public sealed record DeletePetParentAccountResponse(
     int RetainedEventCount,
     int RetainedPaymentCount);
 
+/// <summary>
+/// One unfinished job standing in the way of a pet-parent account delete —
+/// returned in the body of the <c>409 PendingJobsExist</c> response so the app
+/// can list exactly what must be settled first. "Unfinished" means the booking
+/// is in none of the terminal statuses: a request the provider hasn't answered,
+/// a confirmed job still to come, one underway, or one with an open modification
+/// proposal.
+///
+/// <see cref="BookingType"/> is <c>SingleDay</c> or <c>NightStay</c> and says
+/// which detail screen to open — the two kinds live in separate tables and share
+/// no id space. For a night stay <see cref="ServiceDate"/> is the check-in date
+/// and the two times are drop-off / pick-up.
+/// </summary>
+/// <param name="ProviderProfilePhotoUrl">
+/// The provider's photo — the business image for a shop / hotel / clinic, the
+/// freelancer's own image otherwise. It comes from the provider's service
+/// document rather than their profile row, so it is null when that document
+/// cannot be read (a deregistered provider), same as elsewhere.
+/// </param>
+/// <param name="CheckOutDate">
+/// The stay's checkout day, which is NOT itself a stayed night. Null for a
+/// single-day booking.
+/// </param>
+/// <param name="Price">What the job costs — see <see cref="PendingJobPriceResponse"/>.</param>
+public sealed record PendingParentJobResponse(
+    Guid BookingId,
+    string BookingType,
+    // Friendly sequential job id, e.g. "PF-000123".
+    string JobId,
+    Guid ProviderId,
+    string? ProviderName,
+    string? ProviderProfilePhotoUrl,
+    string ServiceCategory,
+    string SubCategory,
+    string Status,
+    DateOnly ServiceDate,
+    DateOnly? CheckOutDate,
+    TimeOnly? StartTime,
+    TimeOnly? EndTime,
+    string? PetName,
+    Guid ServiceId,
+    string? ServiceItemCode,
+    PendingJobPriceResponse Price);
+
+/// <summary>
+/// What a pending job costs, in the same shape and by the same arithmetic as the
+/// booking detail's <c>paymentDetails</c> — so the figure a parent sees while
+/// clearing a blocked delete matches the one on the job itself.
+/// </summary>
+/// <param name="PricePerUnit">
+/// The rate, frozen onto the booking when it was created (a later change by the
+/// provider never re-prices an existing job) and read live from their current
+/// offering only for older bookings that froze none. Null when neither can be
+/// resolved — an old booking whose service has since been deactivated — in which
+/// case the amounts below are null too.
+/// </param>
+/// <param name="PriceUnit">
+/// <c>PerHour</c> | <c>PerNight</c> | <c>PerService</c> | <c>PerAppointment</c> |
+/// <c>PerSession</c>. Always present, even when the amounts are not.
+/// </param>
+/// <param name="TotalAmount">
+/// The rate times the hours or nights booked for the two services billed that
+/// way; the flat fee for the rest.
+/// </param>
+/// <param name="PawfrontFee">
+/// The platform commission included in <see cref="TotalAmount"/>. Never zero-rated
+/// here the way a private walk-in is on a booking detail: every job that can block
+/// a delete belongs to a pet parent, so it is a platform booking by definition.
+/// </param>
+public sealed record PendingJobPriceResponse(
+    decimal? PricePerUnit,
+    string PriceUnit,
+    decimal? TotalAmount,
+    decimal? PawfrontFee,
+    decimal FeePercentage);
+
+/// <summary>
+/// Body of the <c>409 PendingJobsExist</c> response from
+/// <c>DELETE /api/v1/pet-parents/{petParentId}</c>. Nothing was changed — the
+/// account is untouched. The parent must cancel or see through every job in
+/// <see cref="PendingJobs"/> (soonest first) and retry. There is deliberately no
+/// force override, matching the provider-side deactivation and closure flows.
+/// </summary>
+public sealed record PendingParentJobsResponse(
+    Guid PetParentId,
+    IReadOnlyList<PendingParentJobResponse> PendingJobs);
+
+/// <summary>
+/// Body of the <c>409 PendingJobsExist</c> response from
+/// <c>DELETE /api/v1/pets/{petId}</c>. The twin of
+/// <see cref="PendingParentJobsResponse"/>, carrying the identical job shape:
+/// nothing was changed, and the listed jobs — the ones booked for THIS pet — must
+/// be cancelled or seen through first. No force override.
+/// </summary>
+public sealed record PendingPetJobsResponse(
+    Guid PetId,
+    IReadOnlyList<PendingParentJobResponse> PendingJobs);
+
 public sealed record PetParentOnboardingStatusResponse(
     Guid PetParentId,
     OnboardingStageResponse BasicInfo,
@@ -173,16 +271,51 @@ public sealed record IdentityStageResponse(string Status, string? IdentityType);
 
 public sealed record OnboardingStageResponse(string Status);
 
-public sealed record PetsStageResponse(string Status, int PetCount);
+/// <summary>
+/// The "pets added" stage, plus a pointer straight at the first pet that still
+/// needs finishing.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <c>incompletePetId</c> / <c>incompletePetName</c> let a "Complete Profile"
+/// button open the exact pet rather than the app guessing which of several is
+/// unfinished. They name the FIRST pet (in the order they were added) missing a
+/// section that actually gates onboarding — medical info, and nothing else today
+/// — so they are null exactly when <c>petMedicalInfo.status</c> is
+/// <c>Complete</c>.
+/// </para>
+/// <para>
+/// <c>missingSections</c> is that pet's unfinished sections: <c>MedicalInfo</c>
+/// and/or <c>ProfilePhoto</c>. A photo is reported but does NOT gate onboarding,
+/// exactly as the parent's own profile photo does not — so a pet can appear here
+/// with <c>["ProfilePhoto"]</c> only if it is also missing medical info. Null when
+/// there is no incomplete pet. There is no <c>BasicInfo</c> value: those columns
+/// are mandatory when a pet is created, so they can never be missing.
+/// </para>
+/// </remarks>
+public sealed record PetsStageResponse(
+    string Status,
+    int PetCount,
+    Guid? IncompletePetId = null,
+    string? IncompletePetName = null,
+    IReadOnlyCollection<string>? MissingSections = null);
 
 public sealed record PetMedicalInfoStageResponse(
     string Status,
     IReadOnlyCollection<PetMedicalInfoCompletionResponse> Pets);
 
+/// <summary>
+/// One pet's completion state. <c>missingSections</c> names what is unfinished,
+/// from the same vocabulary as <see cref="PetsStageResponse.MissingSections"/>,
+/// and is empty when nothing is — so the app can render every pet's remaining
+/// work, not only the first one.
+/// </summary>
 public sealed record PetMedicalInfoCompletionResponse(
     Guid PetId,
     string PetName,
-    bool IsMedicalInfoComplete);
+    bool IsMedicalInfoComplete,
+    bool HasProfilePhoto = false,
+    IReadOnlyCollection<string>? MissingSections = null);
 
 public sealed record PetParentVerificationStatusResponse(
     bool IsEmailVerified,

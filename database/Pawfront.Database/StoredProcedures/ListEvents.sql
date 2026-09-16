@@ -9,7 +9,22 @@ CREATE OR ALTER PROCEDURE [Event].[ListEvents]
     @AmenitiesJson   NVARCHAR(MAX) = NULL,
     -- Optional free-text title search. When supplied, only events whose Title
     -- CONTAINS the term (case-insensitive) are returned.
-    @Title           NVARCHAR(200) = NULL
+    @Title           NVARCHAR(200) = NULL,
+    -- Ticketing filters. @IsPaid is the app's "Free or Paid" picker: 0 = free
+    -- events only, 1 = ticketed only, NULL = both.
+    --
+    -- The price bounds count a FREE event as ZERO rather than skipping it --
+    -- [Price] is NULL whenever [IsPaid] = 0 (a CHECK enforces the pair), and a
+    -- free event genuinely is the cheapest end of the scale, so a slider set to
+    -- 0..20 must include it. That also makes any positive @MinPrice drop free
+    -- events, which is the same reading.
+    @IsPaid          BIT            = NULL,
+    @MinPrice        DECIMAL(18, 2) = NULL,
+    @MaxPrice        DECIMAL(18, 2) = NULL,
+    -- The caller, so a blocked pair never see each other's events. Both NULL
+    -- for a legacy or unauthenticated caller, which filters nothing.
+    @ViewerType      NVARCHAR(16)     = NULL,
+    @ViewerId        UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -51,6 +66,9 @@ BEGIN
           AND (@EventType       IS NULL OR e.[EventType]       = @EventType)
           AND (@IsChildFriendly IS NULL OR e.[IsChildFriendly] = @IsChildFriendly)
           AND (@TitlePattern IS NULL OR LOWER(e.[Title]) LIKE @TitlePattern ESCAPE N'\')
+          AND (@IsPaid   IS NULL OR e.[IsPaid] = @IsPaid)
+          AND (@MinPrice IS NULL OR COALESCE(e.[Price], 0) >= @MinPrice)
+          AND (@MaxPrice IS NULL OR COALESCE(e.[Price], 0) <= @MaxPrice)
           -- Date-range filter: event's [StartDate, EndDate] must overlap the
           -- caller's [@StartDate, @EndDate]. Each bound is independently optional.
           AND (@StartDate IS NULL OR e.[EndDate]   >= @StartDate)
@@ -63,6 +81,19 @@ BEGIN
                     INNER JOIN @Amenities f ON f.[Amenity] = a.[Amenity]
                     WHERE a.[EventId] = e.[EventId])
               )
+          -- A block hides each party's events from the other, both ways. The
+          -- organiser is whichever of the two id columns is set (a CHECK enforces
+          -- exactly one), and GUIDs are globally unique, so matching on the id alone
+          -- is safe without branching on organiser type -- the same reasoning the
+          -- self-booking check uses.
+          AND (@ViewerId IS NULL OR NOT EXISTS (
+                SELECT 1
+                FROM [Block].[BlockedParticipants] bp
+                WHERE (bp.[BlockerType] = @ViewerType AND bp.[BlockerId] = @ViewerId
+                       AND bp.[BlockedId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+                   OR (bp.[BlockedType] = @ViewerType AND bp.[BlockedId] = @ViewerId
+                       AND bp.[BlockerId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+              ))
     )
     SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly],
            e.[Title], e.[Description], e.[BannerImageUrl], e.[EventType],
@@ -92,6 +123,9 @@ BEGIN
       AND (@EventType       IS NULL OR e.[EventType]       = @EventType)
       AND (@IsChildFriendly IS NULL OR e.[IsChildFriendly] = @IsChildFriendly)
       AND (@TitlePattern IS NULL OR LOWER(e.[Title]) LIKE @TitlePattern ESCAPE N'\')
+      AND (@IsPaid   IS NULL OR e.[IsPaid] = @IsPaid)
+      AND (@MinPrice IS NULL OR COALESCE(e.[Price], 0) >= @MinPrice)
+      AND (@MaxPrice IS NULL OR COALESCE(e.[Price], 0) <= @MaxPrice)
       AND (@StartDate IS NULL OR e.[EndDate]   >= @StartDate)
       AND (@EndDate   IS NULL OR e.[StartDate] <= @EndDate)
       AND (
@@ -102,5 +136,18 @@ BEGIN
                 INNER JOIN @Amenities ff ON ff.[Amenity] = a2.[Amenity]
                 WHERE a2.[EventId] = e.[EventId])
           )
+      -- A block hides each party's events from the other, both ways. The
+      -- organiser is whichever of the two id columns is set (a CHECK enforces
+      -- exactly one), and GUIDs are globally unique, so matching on the id alone
+      -- is safe without branching on organiser type -- the same reasoning the
+      -- self-booking check uses.
+      AND (@ViewerId IS NULL OR NOT EXISTS (
+            SELECT 1
+            FROM [Block].[BlockedParticipants] bp
+            WHERE (bp.[BlockerType] = @ViewerType AND bp.[BlockerId] = @ViewerId
+                   AND bp.[BlockedId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+               OR (bp.[BlockedType] = @ViewerType AND bp.[BlockedId] = @ViewerId
+                   AND bp.[BlockerId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+          ))
     ORDER BY a.[EventId], a.[Amenity];
 END;

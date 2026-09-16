@@ -18,30 +18,50 @@
 --      identity and a brand-new PetParentId. The mobile number on the profile row
 --      is replaced for the same reason: (MobileCountryCode, MobileNumber) is
 --      UNIQUE, so the real number becomes available for re-registration.
---   3. Anonymises the parent's PETS rather than deleting them. Bookings FK to
---      PetId and read the pet's details through that join, so a delete would
---      blank out the provider's own booking history. The pet's identity goes
---      (name, microchip, photo, free-text notes); the animal facts that give a
---      past booking meaning stay (type, breed, gender, DOB, weight, vaccination /
---      sterilization status, temperament). MicrochipId is cleared rather than
---      replaced because it is a real-world identifier and UNIQUE — freeing it
---      lets the animal be registered again under a new account.
+--   3. Anonymises the parent's PETS rather than deleting them, and marks them
+--      IsDeleted (the same flag a per-pet delete sets). Bookings FK to PetId and
+--      read the pet's details through that join, so a delete would blank out the
+--      provider's own booking history. The pet's identity goes (name, microchip,
+--      photo, free-text notes); the animal facts that give a past booking meaning
+--      stay (type, breed, gender, DOB, weight, vaccination / sterilization
+--      status, temperament). MicrochipId is cleared rather than replaced because
+--      it is a real-world identifier and UNIQUE — freeing it lets the animal be
+--      registered again under a new account.
 --   4. Deletes only what is operational or pure PII and carries no history:
 --      device tokens (stop push), mobile OTPs, the identity document, the parent
 --      photo gallery, the pets' photo galleries, and the pets' next-consultation
 --      reminders (forward-looking, not history).
 --
+-- The scrub is REFUSED while the parent still has unfinished jobs — any booking
+-- (single-day or night-stay) that is neither finished nor cancelled: a request
+-- the provider hasn't answered, a confirmed job still to come, one underway, or
+-- one with an open modification proposal. Severing the login under a provider
+-- who is holding a slot, or who is mid-job, is not something the parent can undo,
+-- so the caller is handed the list to settle first (the API answers 409
+-- PendingJobsExist). Deciding it HERE rather than in the app layer is what makes
+-- it race-safe: the check runs inside the same transaction that already holds
+-- UPDLOCK + HOLDLOCK on the parent row, which is the row a concurrent
+-- [Booking].[CreateBooking] must read, so a booking landing at the same instant
+-- serialises rather than slipping in behind the check.
+--
 -- All the placeholder values are derived from @PetParentId, so they are stable:
 -- re-running on an already-deleted parent is a no-op that returns the original
 -- DeletedAtUtc (@WasAlreadyDeleted = 1) instead of churning new values.
 --
--- Returns two result sets, since SQL cannot reach Blob Storage:
+-- Returns four result sets, since SQL cannot reach Blob Storage:
 --   1. summary — PetParentId, DeletedAtUtc, WasAlreadyDeleted, the number of pets
 --                anonymised + retained counts (the retained counts document, in
---                the response, that history survived)
+--                the response, that history survived), plus BlockedByPendingJobs
+--                and BlockedByOpenTickets
 --   2. blob URLs — profile photo, parent gallery, identity document, pet profile
 --      photos and pet galleries. Booking evidence and event banners are NOT
 --      returned: those belong to records that are being kept.
+--   3. pending jobs — empty unless BlockedByPendingJobs = 1, in which case
+--      NOTHING was scrubbed and result sets 1 and 2 describe an untouched account.
+--   4. open support tickets — empty unless BlockedByOpenTickets = 1, same
+--      all-or-nothing meaning. Either flag alone refuses the delete, and both are
+--      collected on the same pass so the caller can report everything outstanding
+--      at once rather than one blocker at a time.
 --
 -- THROW 51223 = pet parent not found (account delete).
 CREATE OR ALTER PROCEDURE [Parent].[DeletePetParent]
@@ -58,12 +78,61 @@ BEGIN
     DECLARE @DeletedAtUtc DATETIME2(7);
     DECLARE @WasAlreadyDeleted BIT = 0;
     DECLARE @AnonymisedPetCount INT = 0;
+    DECLARE @BlockedByPendingJobs BIT = 0;
+    DECLARE @BlockedByOpenTickets BIT = 0;
+
+    -- Open support tickets blocking the delete. Only the identifying columns: the
+    -- narrative lives in the ticket's Cosmos document and the caller is being told
+    -- "settle these first", not being shown the case.
+    DECLARE @OpenTickets TABLE
+    (
+        [TicketId] UNIQUEIDENTIFIER NOT NULL,
+        [TicketNumber] INT NOT NULL,
+        [TicketType] NVARCHAR(24) NOT NULL,
+        [RaisedByType] NVARCHAR(16) NOT NULL,
+        [Status] NVARCHAR(48) NOT NULL,
+        [CreatedAtUtc] DATETIME2(7) NOT NULL
+    );
 
     -- Captured before the scrub so the caller can clean Blob Storage.
     DECLARE @BlobUrls TABLE
     (
         [BlobUrl] NVARCHAR(1000) NOT NULL,
         [Kind] NVARCHAR(32) NOT NULL
+    );
+
+    -- Unfinished jobs blocking the delete. Populated only when the parent still
+    -- has some; the caller surfaces them so they can be cancelled or seen through.
+    --
+    -- The last four columns are pricing inputs, not display fields: SQL cannot
+    -- reach the Cosmos offering, so it hands over the price-locked unit rate it
+    -- DOES have (plus what is needed to turn a rate into a total) and the caller
+    -- computes the money block — falling back to the live offering for a legacy
+    -- row that froze no rate, exactly as the booking-detail read does. The
+    -- provider's photo lives in that same Cosmos document and is resolved there
+    -- too, which is why there is no photo column here.
+    DECLARE @PendingJobs TABLE
+    (
+        [BookingId] UNIQUEIDENTIFIER NOT NULL,
+        [BookingType] NVARCHAR(16) NOT NULL,
+        [JobId] NVARCHAR(32) NOT NULL,
+        [ProviderId] UNIQUEIDENTIFIER NOT NULL,
+        [ProviderName] NVARCHAR(201) NULL,
+        [ServiceCategory] NVARCHAR(64) NOT NULL,
+        [SubCategory] NVARCHAR(64) NOT NULL,
+        [Status] NVARCHAR(48) NOT NULL,
+        [ServiceDate] DATE NOT NULL,
+        [StartTime] TIME(0) NULL,
+        [EndTime] TIME(0) NULL,
+        [PetName] NVARCHAR(100) NULL,
+        [ServiceId] UNIQUEIDENTIFIER NOT NULL,
+        [ServiceItemCode] NVARCHAR(64) NULL,
+        -- Checkout day of a stay (exclusive — not a stayed night); NULL for a
+        -- single-day booking, whose duration comes from Start/EndTime instead.
+        [CheckOutDate] DATE NULL,
+        -- The unit rate frozen onto the booking at creation (per hour, or per
+        -- night for a stay). NULL on a legacy row created before price-locking.
+        [SnapshotUnitPrice] DECIMAL(10, 2) NULL
     );
 
     BEGIN TRANSACTION;
@@ -91,6 +160,113 @@ BEGIN
         SET @Now = ISNULL(@DeletedAtUtc, @Now);
     END
     ELSE
+    BEGIN
+        ------------------------------------------------------------------
+        -- 0. Refuse while unfinished jobs exist.
+        --    "Unfinished" is the complement of the terminal set, so a job that
+        --    is done (COMPLETED / PAID) or dead (cancelled / declined / no-show
+        --    / expired / OTP-cancelled) never blocks — only one that still has
+        --    a provider waiting on it or a service still to be delivered.
+        --    Both booking kinds count: a boarding stay is as live as an
+        --    appointment. Kept in step with Pawfront.Application's
+        --    BookingStatuses.Terminal — change one, change the other.
+        --
+        --    Note a CREATED booking that is already past its expiry rule still
+        --    reads CREATED until the sweep job flips it (every 5 minutes), so it
+        --    can block for that long. Self-correcting, and blocking briefly is
+        --    the safe direction.
+        ------------------------------------------------------------------
+        INSERT INTO @PendingJobs
+            ([BookingId], [BookingType], [JobId], [ProviderId], [ProviderName],
+             [ServiceCategory], [SubCategory], [Status], [ServiceDate],
+             [StartTime], [EndTime], [PetName], [ServiceId], [ServiceItemCode],
+             [CheckOutDate], [SnapshotUnitPrice])
+        SELECT b.[BookingId],
+               N'SingleDay',
+               N'PF-' + FORMAT(b.[JobNumber], N'D6'),
+               b.[ProviderId],
+               NULLIF(LTRIM(RTRIM(ISNULL(pr.[FirstName], N'') + N' ' + ISNULL(pr.[LastName], N''))), N''),
+               b.[ServiceCategory],
+               b.[SubCategory],
+               b.[Status],
+               b.[BookingDate],
+               b.[StartTime],
+               b.[EndTime],
+               pet.[PetName],
+               b.[ServiceId],
+               b.[ServiceItemCode],
+               NULL,
+               b.[PricePerHour]
+        FROM [Booking].[Bookings] AS b
+        LEFT JOIN [Provider].[Providers] AS pr ON pr.[ProviderId] = b.[ProviderId]
+        LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = b.[PetId]
+        WHERE b.[PetParentId] = @PetParentId
+          AND b.[Status] NOT IN (
+                N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
+                N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+        UNION ALL
+        SELECT n.[NightStayBookingId],
+               N'NightStay',
+               N'PF-' + FORMAT(n.[JobNumber], N'D6'),
+               n.[ProviderId],
+               NULLIF(LTRIM(RTRIM(ISNULL(pr.[FirstName], N'') + N' ' + ISNULL(pr.[LastName], N''))), N''),
+               n.[ServiceCategory],
+               n.[SubCategory],
+               n.[Status],
+               n.[CheckInDate],
+               n.[DropOffTime],
+               n.[PickUpTime],
+               pet.[PetName],
+               n.[ServiceId],
+               NULL,
+               n.[CheckOutDate],
+               n.[PricePerNight]
+        FROM [Booking].[NightStayBookings] AS n
+        LEFT JOIN [Provider].[Providers] AS pr ON pr.[ProviderId] = n.[ProviderId]
+        LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = n.[PetId]
+        WHERE n.[PetParentId] = @PetParentId
+          AND n.[Status] NOT IN (
+                N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
+                N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED');
+
+        IF EXISTS (SELECT 1 FROM @PendingJobs)
+        BEGIN
+            SET @BlockedByPendingJobs = 1;
+        END
+
+        -- An open support ticket refuses the delete too — part of the legal hold.
+        -- Anonymising a party mid-investigation destroys the account support is
+        -- still asking questions of, and unlike the pending-job refusal there is
+        -- nothing the parent can do to clear it themselves: it lifts when the
+        -- ticket closes.
+        --
+        -- Collected even when jobs already block, so the response names EVERYTHING
+        -- standing in the way. Discovering the ticket only after cancelling every
+        -- booking would be a second dead end.
+        INSERT INTO @OpenTickets
+            ([TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc])
+        SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
+        FROM [Support].[Tickets]
+        WHERE [PetParentId] = @PetParentId
+          AND [Status] <> N'CLOSED'
+          -- Only the two kinds with a COUNTERPARTY block a delete. The guard
+          -- exists so a party cannot be anonymised while support is still asking
+          -- questions of them about somebody else; an app issue or an event
+          -- report is neither about the other party nor clearable by the user,
+          -- so leaving them in would strand an account delete behind an
+          -- unrelated bug report.
+          AND [TicketType] IN (N'BookingIncident', N'ChatIncident');
+
+        IF EXISTS (SELECT 1 FROM @OpenTickets)
+        BEGIN
+            SET @BlockedByOpenTickets = 1;
+        END
+    END
+
+    -- Everything below only runs when the account is live AND unblocked.
+    IF @IsDeleted = 0 AND @BlockedByPendingJobs = 0 AND @BlockedByOpenTickets = 0
     BEGIN
         INSERT INTO @BlobUrls ([BlobUrl], [Kind])
         SELECT [ProfilePhotoUrl], N'ParentProfilePhoto'
@@ -168,6 +344,11 @@ BEGIN
             [VaccinationDose] = NULL,
             [Prescription] = NULL,
             [ProfilePhotoUrl] = NULL,
+            -- The pets go with the account, so they carry the same flag a
+            -- per-pet delete sets. COALESCE keeps the original timestamp on a
+            -- pet the parent had already deleted individually.
+            [IsDeleted] = 1,
+            [DeletedAtUtc] = COALESCE([DeletedAtUtc], @Now),
             [UpdatedAtUtc] = @Now
         WHERE [PetParentId] = @PetParentId;
         SET @AnonymisedPetCount = @@ROWCOUNT;
@@ -197,10 +378,15 @@ BEGIN
     END
 
     -- Result set 1: summary. The retained counts are reported so the caller can
-    -- see that history survived the delete.
+    -- see that history survived the delete. When BlockedByPendingJobs = 1 the
+    -- account is UNTOUCHED and every other column here is meaningless — the
+    -- caller reads that flag first and goes to result set 3. [DeletedAtUtc]
+    -- still carries @Now rather than NULL only to keep the column non-nullable
+    -- for the reader; it is never surfaced in that case.
     SELECT @PetParentId AS [PetParentId],
            @Now AS [DeletedAtUtc],
            @WasAlreadyDeleted AS [WasAlreadyDeleted],
+           @BlockedByPendingJobs AS [BlockedByPendingJobs],
            @AnonymisedPetCount AS [AnonymisedPetCount],
            (SELECT COUNT(*) FROM [Booking].[Bookings] WHERE [PetParentId] = @PetParentId)
                AS [RetainedBookingCount],
@@ -209,10 +395,31 @@ BEGIN
            (SELECT COUNT(*) FROM [Event].[Events] WHERE [PetParentId] = @PetParentId)
                AS [RetainedEventCount],
            (SELECT COUNT(*) FROM [Booking].[BookingPayments] WHERE [PetParentId] = @PetParentId)
-               AS [RetainedPaymentCount];
+               AS [RetainedPaymentCount],
+           -- Appended LAST on purpose: inserting it next to BlockedByPendingJobs,
+           -- where it reads better, would shift every retained-count ordinal and
+           -- break a reader deployed against the older procedure.
+           @BlockedByOpenTickets AS [BlockedByOpenTickets];
 
     -- Result set 2: blob URLs to delete best-effort.
     SELECT [BlobUrl], [Kind] FROM @BlobUrls;
+
+    -- Result set 3: the unfinished jobs that refused the delete. Empty on the
+    -- normal path. Ordered soonest-first — the parent has to deal with the next
+    -- one before anything else.
+    SELECT [BookingId], [BookingType], [JobId], [ProviderId], [ProviderName],
+           [ServiceCategory], [SubCategory], [Status], [ServiceDate],
+           [StartTime], [EndTime], [PetName], [ServiceId], [ServiceItemCode],
+           [CheckOutDate], [SnapshotUnitPrice]
+    FROM @PendingJobs
+    ORDER BY [ServiceDate] ASC, [StartTime] ASC;
+
+    -- Result set 4: the open support tickets that refused the delete. Empty on the
+    -- normal path. Oldest-first — the one that has been waiting longest is the one
+    -- to chase.
+    SELECT [TicketId], [TicketNumber], [TicketType], [RaisedByType], [Status], [CreatedAtUtc]
+    FROM @OpenTickets
+    ORDER BY [CreatedAtUtc] ASC;
 
     COMMIT TRANSACTION;
 END;

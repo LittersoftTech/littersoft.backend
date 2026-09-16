@@ -177,7 +177,8 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             row.NightStayBookingId, JobNumber: 0, row.ProviderId, row.PetParentId, row.ServiceId,
             row.ServiceCategory, row.SubCategory, row.CheckInDate, row.CheckOutDate,
             row.DropOffTime, row.PickUpTime, row.Status, row.CreatedAtUtc, row.UpdatedAtUtc,
-            row.CancelledAtUtc, row.PetId, PayoutStatus: "Pending", PayoutId: null,
+            row.CancelledAtUtc, row.PetId,
+            PayoutStatus: PayoutStatuses.ForBookingStatus(row.Status), PayoutId: null,
             ParentFirstName: null, ParentLastName: null, ParentGender: null,
             ParentMobileCountryCode: null, ParentMobileNumber: null, ParentPhotoUrl: null,
             PetProfileName: null, PetType: null, PetGender: null, PetPhotoUrl: null,
@@ -231,6 +232,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         BookingStatusActor actor,
         Guid actorId,
         string? note,
+        CapturedLocation? location,
         CancellationToken cancellationToken)
     {
         if (!bookings.TryGetValue(bookingId, out var row))
@@ -254,7 +256,15 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         if (row.Status == BookingStatuses.Created
             && DateTimeOffset.UtcNow >= row.CreatedAtUtc.AddHours(24))
         {
-            throw new BookingExpiredException(bookingId);
+            throw BookingExpiredException.NeverAccepted(bookingId);
+        }
+
+        // BR-53: still CREATED with under 2 hours to check-in + drop-off —
+        // mirror of the sproc's THROW 51273, and reject-only for the same reason.
+        if (row.Status == BookingStatuses.Created
+            && BookingLeadTime.IsTooSoon(row.CheckInDate, row.DropOffTime, DateTimeOffset.UtcNow))
+        {
+            throw BookingExpiredException.ServiceTooClose(bookingId);
         }
 
         var allowed = actor == BookingStatusActor.Provider
@@ -377,19 +387,19 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
     private static NotSupportedException NotInMemory()
         => new("The night-stay job lifecycle requires the SQL-backed store.");
 
-    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<NightStayBookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CancellationToken cancellationToken)
+    public Task<NightStayBookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<NightStayBookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
+    public Task<NightStayBookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<NightStayBookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<NightStayBookingResult> MarkPaidAsync(Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee, string paymentMethod, CancellationToken cancellationToken)
+    public Task<NightStayBookingResult> MarkPaidAsync(Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee, string paymentMethod, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<NightStayBookingResult> RequestModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
@@ -404,7 +414,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
     public Task<NightStayBookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
         => Task.FromResult<NightStayBookingModificationResult?>(null);
 
-    public Task<BookingEvidenceResult> AddEvidenceAsync(Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
+    public Task<BookingEvidenceResult> AddEvidenceAsync(Guid bookingId, Guid providerId, string photoUrl, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
     public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(Guid bookingId, CancellationToken cancellationToken)

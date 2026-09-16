@@ -5,12 +5,14 @@
   <Folder Name="/src/">
     <Project Path="src/Pawfront.Api/Pawfront.Api.csproj" />
     <Project Path="src/Pawfront.PetParentApi/Pawfront.PetParentApi.csproj" />
+    <Project Path="src/Pawfront.ChatApi/Pawfront.ChatApi.csproj" />
     <Project Path="src/Pawfront.Functions/Pawfront.Functions.csproj" />
     <Project Path="src/Pawfront.Application/Pawfront.Application.csproj" />
     <Project Path="src/Pawfront.Contracts/Pawfront.Contracts.csproj" />
     <Project Path="src/Pawfront.Domain/Pawfront.Domain.csproj" />
     <Project Path="src/Pawfront.Infrastructure.Azure/Pawfront.Infrastructure.Azure.csproj" />
     <Project Path="src/Pawfront.Infrastructure.Cosmos/Pawfront.Infrastructure.Cosmos.csproj" />
+    <Project Path="src/Pawfront.Infrastructure.Firebase/Pawfront.Infrastructure.Firebase.csproj" />
     <Project Path="src/Pawfront.Infrastructure.Sql/Pawfront.Infrastructure.Sql.csproj" />
   </Folder>
 </Solution>

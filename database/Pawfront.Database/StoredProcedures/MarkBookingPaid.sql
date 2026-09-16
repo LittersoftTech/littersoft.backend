@@ -6,12 +6,24 @@
 -- price-locked snapshot; @PaymentMethod is 'Cash' or 'Digital'.
 -- THROWs: 51160 not found, 51161 not the provider, 51162 not COMPLETED,
 -- 51163 Custom walk-in (App only), 51164 already paid.
+--
+-- This is the provider swiping "Cash Received", so their geolocation is written
+-- here, in the same transaction as the ledger row — the two records of the same
+-- moment must not be able to disagree about whether it happened. The PARENT's own
+-- fix for this moment arrives separately, on their app's own call to
+-- [Booking].[RecordBookingLocationEvent] with the same 'CashReceived' trigger.
 CREATE OR ALTER PROCEDURE [Booking].[MarkBookingPaid]
     @BookingId UNIQUEIDENTIFIER,
     @ProviderId UNIQUEIDENTIFIER,
     @Amount DECIMAL(10, 2),
     @PawfrontFee DECIMAL(10, 2),
-    @PaymentMethod NVARCHAR(16)
+    @PaymentMethod NVARCHAR(16),
+    -- The provider's position when the cash changed hands. See
+    -- [Booking].[StartBooking] for why these are defaulted to NULL.
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -22,11 +34,13 @@ BEGIN
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @RowPetParent UNIQUEIDENTIFIER;
     DECLARE @Source NVARCHAR(16);
+    DECLARE @PayoutId NVARCHAR(64);
 
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId],
-           @RowPetParent = [PetParentId], @Source = [Source]
+           @RowPetParent = [PetParentId], @Source = [Source],
+           @PayoutId = [PayoutId]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
 
@@ -55,8 +69,24 @@ BEGIN
         THROW 51162, 'Booking must be completed before it can be marked paid.', 1;
     END
 
+    -- The payout is normally minted at COMPLETED; stamp one here too so a booking
+    -- completed before payout stamping shipped still ends up with a reference
+    -- rather than a settled payout that has no id.
+    IF @PayoutId IS NULL
+    BEGIN
+        DECLARE @PayoutNumber BIGINT;
+        SET @PayoutNumber = NEXT VALUE FOR [Booking].[PayoutNumberSequence];
+        SET @PayoutId = N'PO-' + FORMAT(@PayoutNumber, N'D6');
+    END
+
+    -- Cash-only today, so recording the payment settles the payout in the same
+    -- step: the parent handed the provider the money directly, there is no
+    -- separate transfer leg to wait on.
     UPDATE [Booking].[Bookings]
-    SET [Status] = N'PAID', [UpdatedAtUtc] = @Now
+    SET [Status] = N'PAID',
+        [UpdatedAtUtc] = @Now,
+        [PayoutId] = COALESCE([PayoutId], @PayoutId),
+        [PayoutStatus] = N'Paid'
     WHERE [BookingId] = @BookingId;
 
     INSERT INTO [Booking].[BookingStatusHistory]
@@ -68,6 +98,60 @@ BEGIN
         ([BookingType], [BookingId], [ProviderId], [PetParentId], [Amount], [PawfrontFee], [PaymentMethod], [PaidAtUtc])
     VALUES
         (N'SingleDay', @BookingId, @ProviderId, @RowPetParent, @Amount, @PawfrontFee, @PaymentMethod, @Now);
+
+    -- Raise the two invoices this payment produces (the parent's for the service,
+    -- the provider's for the Pawfront fee), at Status 'Pending'. INSIDE this
+    -- transaction on purpose: the queue message that renders them is sent from C#
+    -- once this commits and can be lost to a crash in that window, but these rows
+    -- cannot be — so the sweep can always recover what the queue dropped. Same
+    -- outbox reasoning as the notification enqueues below. Returns no result set.
+    EXEC [Billing].[RaiseBookingInvoices]
+        @BookingType = N'SingleDay',
+        @BookingId = @BookingId,
+        @ProviderId = @ProviderId,
+        @PetParentId = @RowPetParent,
+        @Amount = @Amount,
+        @PawfrontFee = @PawfrontFee;
+
+    -- Where the provider was when they took the money.
+    IF @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[BookingLocationEvents]
+            ([BookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@BookingId, N'CashReceived', N'Provider', @ProviderId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
+
+    -- The provider recorded the cash, so the parent gets the receipt. The amount
+    -- is the one just written to the ledger, not a re-derivation — the two must
+    -- never disagree.
+    DECLARE @AmountText NVARCHAR(64) =
+        N'CHF ' + CONVERT(NVARCHAR(32), CAST(@Amount AS DECIMAL(12, 2)));
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = N'PetParent',
+        @NotificationType = N'BOOKING_PAID',
+        @Amount = @AmountText;
+
+    -- ...and the PROVIDER gets their invoice (V-S14). This is the moment it is
+    -- settled: the job is COMPLETED, the cash is recorded, the payout above just
+    -- flipped to 'Paid'. Both parties are notified because both did something —
+    -- the relevance rule that suppresses a notification about your own action does
+    -- not apply when the action closes out the other side's money too.
+    --
+    -- Same amount text as the receipt, from the ledger row rather than a second
+    -- derivation: a provider's invoice and a parent's receipt for one payment
+    -- disagreeing about the figure would be the worst possible bug here.
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = N'Provider',
+        @NotificationType = N'INVOICE_ISSUED',
+        @Amount = @AmountText;
 
     SELECT [BookingId],
            [ProviderId],

@@ -21,6 +21,16 @@ CREATE TABLE [Booking].[BookingStartOtps]
         CONSTRAINT [DF_BookingStartOtps_IssuedAtUtc] DEFAULT SYSUTCDATETIME(),
     [ExpiresAtUtc] DATETIME2(7) NOT NULL,
     [ConsumedAtUtc] DATETIME2(7) NULL,
+    -- When the PARENT first actually saw the code — stamped by
+    -- Booking.MarkBookingStartOtpSeen, called from the parent's booking-detail
+    -- read (the only surface that returns the code).
+    --
+    -- Exists to tell two different situations apart, which the V3 spec gives
+    -- separate copy: the parent has not opened the code yet ("You're late for
+    -- your appointment") versus the parent has it but the provider still hasn't
+    -- entered it ("Share your OTP now, or you'll be marked as a no-show").
+    -- Without it, both cases would have to share one vaguer message.
+    [SeenAtUtc] DATETIME2(7) NULL,
 
     CONSTRAINT [PK_BookingStartOtps] PRIMARY KEY CLUSTERED ([BookingStartOtpId] ASC),
     CONSTRAINT [FK_BookingStartOtps_Bookings_BookingId]

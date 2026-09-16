@@ -27,6 +27,19 @@ internal static class ApiResults
     public static IResult Conflict(string code, string message) =>
         Results.Conflict(new ApiResponse<object>(false, default, new ApiError(code, message)));
 
+    /// <summary>
+    /// A 409 that also carries a payload. The envelope keeps its usual shape —
+    /// <c>success: false</c> with the <c>error</c> populated — and <c>data</c>
+    /// carries what the client needs to resolve the conflict, rather than
+    /// stuffing a record into the error's message. Used where a refusal is only
+    /// actionable with the blocking record in hand (a support ticket already open
+    /// for this pair). Mirrors the pet-parent host's helper of the same shape.
+    /// </summary>
+    public static IResult Conflict<T>(string code, string message, T data) =>
+        Results.Json(
+            new ApiResponse<T>(false, data, new ApiError(code, message)),
+            statusCode: StatusCodes.Status409Conflict);
+
     public static IResult Forbidden(string code, string message) =>
         Results.Json(
             new ApiResponse<object>(false, default, new ApiError(code, message)),

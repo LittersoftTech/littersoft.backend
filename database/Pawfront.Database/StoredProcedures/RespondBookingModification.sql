@@ -75,6 +75,18 @@ BEGIN
             DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
                     CAST(@BookingDate AS DATETIME2(7)));
 
+        -- The 24-hour review window is the OTHER deadline (2026-08-04). Whichever
+        -- arrives first ends the proposal, so both are rejected here — without
+        -- this guard the 24-hour rule would only hold to the sweep's granularity
+        -- and a response could land minutes after the day was up.
+        IF EXISTS (
+            SELECT 1 FROM [Booking].[BookingModifications]
+            WHERE [BookingId] = @BookingId
+              AND @Now >= DATEADD(HOUR, 24, [CreatedAtUtc]))
+        BEGIN
+            THROW 51152, 'The modification request timed out after 24 hours and can no longer be answered.', 1;
+        END
+
         IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
         BEGIN
             THROW 51152, 'The modification request expired 2 hours before the service start time and can no longer be answered.', 1;
@@ -116,6 +128,10 @@ BEGIN
     IF @Accept = 1
     BEGIN
         -- Race-safe capacity re-check on the proposed window, excluding this booking.
+        -- Other bookings occupy only up to COALESCE([ActualEndTime], [EndTime]),
+        -- so hours released by a job that finished early are available to a
+        -- reschedule too — the same expression [Booking].[CreateBooking] counts
+        -- with, since a modification competes for exactly the same capacity.
         DECLARE @Concurrent INT;
         SELECT @Concurrent = COUNT(*)
         FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
@@ -124,7 +140,7 @@ BEGIN
           AND [BookingId] <> @BookingId
           AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [StartTime] < @PEnd
-          AND [EndTime] > @PStart;
+          AND COALESCE([ActualEndTime], [EndTime]) > @PStart;
 
         IF @Concurrent >= @Capacity
         BEGIN
@@ -172,6 +188,38 @@ BEGIN
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@BookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- The responder tapped it; the REQUESTER is the one waiting to hear. That is
+    -- the opposite mapping to the request enqueue above, and it is why the
+    -- audience is derived from @Actor here rather than reused.
+    DECLARE @RespAudience NVARCHAR(16) =
+        CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+    DECLARE @RespType NVARCHAR(64) =
+        CASE
+            WHEN @Actor = N'Provider' AND @Accept = 1 THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER'
+            WHEN @Actor = N'Provider'                 THEN N'BOOKING_MODIFICATION_DECLINED_BY_PROVIDER'
+            WHEN @Accept = 1                          THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PARENT'
+            ELSE                                           N'BOOKING_MODIFICATION_DECLINED_BY_PARENT'
+        END;
+
+    -- On accept the booking now HOLDS the new timing, so the helper's serviceDate /
+    -- startTime already read as the new window; newServiceDate/newStartTime are
+    -- passed so the "confirmed: X at Y" copy is explicit either way. On decline the
+    -- booking kept its original window, which is what the copy quotes.
+    -- The proposal as a single UTC instant; the renderer localises it into the
+    -- newServiceDate + newStartTime the copy quotes.
+    DECLARE @RespStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PStart),
+                CAST(@PDate AS DATETIME2(0)));
+    DECLARE @RespDedupe NVARCHAR(64) = CAST(@ModId AS NVARCHAR(36));
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @BookingId,
+        @IsNightStay = 0,
+        @Audience = @RespAudience,
+        @NotificationType = @RespType,
+        @NewServiceStartUtc = @RespStartUtc,
+        @DedupeSuffix = @RespDedupe;
 
     SELECT [BookingId],
            [ProviderId],

@@ -330,6 +330,25 @@ public sealed record UpdateParentEventSqlInput(
 /// listed amenity (ALL-match semantics). <see cref="Title"/>, when supplied,
 /// is a case-insensitive "contains" match on the event title.
 /// </summary>
+/// <param name="IsPaid">
+/// The design's "Free or Paid" filter. <c>false</c> returns only free events,
+/// <c>true</c> only ticketed ones, null both. Applied in SQL — it is a column on
+/// <c>Event.Events</c>, and settling it there keeps the Cosmos hydration that
+/// follows down to the events that survive.
+/// </param>
+/// <param name="MinPrice">
+/// Inclusive lower bound on the ticket price, with a FREE event counted as zero —
+/// so <c>minPrice=0</c> keeps free events, and any positive minimum drops them,
+/// which is the reading a price slider gives.
+/// </param>
+/// <param name="MaxPrice">Inclusive upper bound, same zero-for-free rule.</param>
+/// <param name="City">
+/// The design's "Location". Case-insensitive exact match on the VENUE city, which
+/// lives in the Cosmos extension document — so unlike every other filter here it
+/// is applied after hydration, in <see cref="IEventService.ListAsync"/>. ONLINE
+/// events have no venue and are excluded whenever it is set.
+/// </param>
+/// <param name="SortBy">Null keeps the store's own order (newest start date first).</param>
 public sealed record EventListFilter(
     string? EventCategory,
     string? EventType,
@@ -337,7 +356,13 @@ public sealed record EventListFilter(
     DateOnly? EndDate,
     bool? IsChildFriendly,
     IReadOnlyCollection<string>? Amenities,
-    string? Title = null);
+    string? Title = null,
+    bool? IsPaid = null,
+    decimal? MinPrice = null,
+    decimal? MaxPrice = null,
+    string? City = null,
+    EventSortBy? SortBy = null,
+    Earnings.EarningsSortDirection SortDirection = Earnings.EarningsSortDirection.Descending);
 
 public sealed class EventProviderNotFoundException(Guid providerId)
     : Exception($"Provider profile '{providerId}' was not found.");

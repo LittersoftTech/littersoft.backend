@@ -20,7 +20,8 @@ CREATE TABLE [Provider].[Providers]
     -- Master Active/Inactive switch. When 0, no new bookings can be created on
     -- ANY of this provider's services (Booking.CreateBooking enforces). Flipped
     -- via [Provider].[SetProviderActiveStatus]; the deactivation path rejects
-    -- the toggle if future confirmed bookings still exist.
+    -- the toggle if future confirmed bookings still exist, unless the caller
+    -- passes @AcknowledgeExistingBookings = 1 to honour them.
     [IsActive] BIT NOT NULL
         CONSTRAINT [DF_Providers_IsActive] DEFAULT 1,
     -- Account-deleted marker. The provider app's "Delete account" action

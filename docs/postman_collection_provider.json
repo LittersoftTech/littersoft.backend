@@ -42,6 +42,14 @@
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/health", "host": ["{{baseUrl}}"], "path": ["api","v1","health"] }
           }
+        },
+        {
+          "name": "GET /metadata",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/metadata", "host": ["{{baseUrl}}"], "path": ["api","v1","metadata"] },
+            "description": "Static reference vocabularies for mobile pickers → { animals: [{code, displayName}], behaviours: [{code, displayName}] }. Derived from the Pawfront.Domain.Vocabularies enums (Animal/Behaviour) — the single source of truth for the animals-handled / pets-trained / animals-treated lists (all categories) and the pet-temperament / provider DogTemperaments lists."
+          }
         }
       ]
     },
@@ -155,6 +163,32 @@
             "method": "DELETE",
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}"] },
             "description": "The app's \"Delete account\" action. IRREVERSIBLE — it disables the account you are signed in as. This is an ANONYMISE + DISABLE, not a row delete: the ProviderId stays valid so nothing that references it loses meaning.\n\nRETAINED untouched: single-day and night-stay bookings with all their audit / evidence / OTP / modification / prescription children, the events you organised plus their ticket bookings, and the Booking.BookingPayments ledger. Deleting those would destroy the pet parents' history too, since their bookings reference you.\n\nANONYMISED: the Providers row — name becomes \"Deleted Provider\", gender/DOB/mobile are replaced, banner + mobileVerifiedAtUtc cleared, IsActive → 0 and IsDeleted → 1. IsActive = 0 blocks new bookings (409 ProviderInactive); IsDeleted = 1 is permanent and also blocks reactivation and profile edits (409 ProviderAccountDeleted). The Firebase auth identity is scrubbed too, which severs the login AND frees the real Firebase uid + phone number — so you can sign up again and get a brand-new ProviderId.\n\nDELETED: operational config + media only — device tokens, mobile OTPs, gallery photos, per-service banners, weekly availability, closures, cancellation policy, payout methods, service registration. Bookable services are DEACTIVATED (their rows must stay: bookings FK to ServiceId). The provider's Cosmos offering document (the public listing) is removed, so you drop out of parent-facing discovery, and GET /providers/{providerId} then returns 404 ProviderNotRegistered.\n\nIdempotent: a second call returns the original deletedAtUtc with wasAlreadyDeleted = true. Response carries retained* counts so you can confirm history survived.\n\nThe caller's ProviderId is taken from the JWT and must match the route → 403 Forbidden otherwise. 404 ProviderProfileNotFound when the provider row is missing."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1b. Device Tokens",
+      "description": "An FCM token is not stable (reinstall, cleared app data, restore, Firebase's own rotation) and the sign-in flow only runs at sign in — call POST /device-tokens on every app launch AND from Firebase's onTokenRefresh callback, or a rotated token silently stops receiving notifications. Owner is resolved from the JWT (sub/user_id), never the body.",
+      "item": [
+        {
+          "name": "POST /device-tokens (register/refresh)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/device-tokens", "host": ["{{baseUrl}}"], "path": ["api","v1","device-tokens"] },
+            "body": { "mode": "raw", "raw": "{\n  \"fcmToken\": \"sample-fcm-token-abc123\",\n  \"deviceId\": \"device-uuid-or-installation-id\",\n  \"devicePlatform\": \"Android\"\n}" },
+            "description": "Registers/refreshes the caller's FCM token. NOT scoped under /providers/{id} — the token binds to the auth identity, which exists before the profile (ProviderId is back-filled once the profile completes). Supplying `deviceId` retires every OTHER active token for that physical device (including another account's), which is what makes a reinstall clean up immediately; omit it and nothing is retired since devices can't be told apart. `devicePlatform` is Android|iOS case-insensitive, optional. Returns { deviceTokenId, ownerId (null pre-profile), deviceId, devicePlatform, isActive, retiredTokenCount, lastSeenAtUtc, createdAtUtc, updatedAtUtc } — the FCM token itself is deliberately NOT echoed back. 404 ProviderAuthIdentityNotFound (caller hasn't hit firebase-auth yet); 400 InvalidRequest (blank token / unsupported devicePlatform)."
+          }
+        },
+        {
+          "name": "POST /device-tokens/deactivate (sign-out)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/device-tokens/deactivate", "host": ["{{baseUrl}}"], "path": ["api","v1","device-tokens","deactivate"] },
+            "body": { "mode": "raw", "raw": "{\n  \"fcmToken\": \"sample-fcm-token-abc123\"\n}" },
+            "description": "Sign-out counterpart — flips IsActive = 0 so the handset stops receiving this account's notifications (matters most on a shared/resold device). Scoped to the caller's own auth identity via the JWT, so a caller can't deactivate someone else's token even knowing its value. The row is kept, not deleted (FcmToken is UNIQUE), so signing back in reactivates it in place. POST rather than DELETE, deliberately: minimal APIs refuse an inferred body on DELETE, and putting the token in the URL would leak it into access logs. 404 DeviceTokenNotFound — unknown and not-yours are the same case, by design."
           }
         }
       ]
@@ -401,7 +435,8 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"licenseNumber\": \"TRN-2026-00010\",\n  \"licenseType\": \"State\",\n  \"licenseImageUrl\": \"https://example.com/images/trn-license.jpg\",\n  \"session\": {\n    \"sessionDurationHours\": 1,\n    \"pricePerSession\": 800\n  },\n  \"petsTrained\": [\"Dog\", \"Cat\"],\n  \"ageGroups\": [\"Puppy\", \"Adolescent\", \"Adult\"],\n  \"temperaments\": [\"Calm\", \"Energetic\", \"Anxious\"],\n  \"maxConcurrentSessions\": 5,\n  \"serviceLocations\": [\"TrainingSchool\", \"NatureOrParks\"],\n  \"trainingApproaches\": [\"Positive Reinforcement\", \"Clicker Training\"],\n  \"previousExperience\": [\"5 years military K9\", \"Certified CCPDT-KA\"],\n  \"privateTrainingDescription\": \"1-on-1 sessions tailored to behavioural issues, including reactivity and separation anxiety.\"\n}"
-            }
+            },
+            "description": "`privateTrainingDescription` is OPTIONAL (2026-08-09) — omit it, or send null or an empty string, and an empty string is stored. The two parent-facing surfaces that show it (the top-level `serviceDescription` on GET /providers/{providerId} and the trainers search card) report null rather than an empty block. `previousExperience` is optional too."
           }
         },
         {
@@ -412,8 +447,9 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/services/pet-trainer/freelance/offering", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","services","pet-trainer","freelance","offering"] },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"licenseNumber\": \"TRN-2026-FL05\",\n  \"licenseType\": \"Personal\",\n  \"licenseImageUrl\": \"https://example.com/images/trn-fl.jpg\",\n  \"session\": {\n    \"sessionDurationHours\": 1.5,\n    \"pricePerSession\": 1200\n  },\n  \"petsTrained\": [\"Dog\"],\n  \"ageGroups\": [\"Puppy\", \"Adult\"],\n  \"temperaments\": [\"AllTemperaments\"],\n  \"maxConcurrentSessions\": 1,\n  \"serviceLocations\": [\"CustomerLocation\", \"NatureOrParks\"],\n  \"trainingApproaches\": [\"Force-free\"],\n  \"previousExperience\": null,\n  \"privateTrainingDescription\": \"Custom 1:1 plans for the pet and family at home.\"\n}"
-            }
+              "raw": "{\n  \"licenseNumber\": \"TRN-2026-FL05\",\n  \"licenseType\": \"Personal\",\n  \"licenseImageUrl\": \"https://example.com/images/trn-fl.jpg\",\n  \"session\": {\n    \"sessionDurationHours\": 1.5,\n    \"pricePerSession\": 1200\n  },\n  \"petsTrained\": [\"Dog\"],\n  \"ageGroups\": [\"Puppy\", \"Adult\"],\n  \"temperaments\": [\"AllTemperaments\"],\n  \"maxConcurrentSessions\": 1,\n  \"serviceLocations\": [\"CustomerLocation\", \"NatureOrParks\"],\n  \"trainingApproaches\": [\"Force-free\"],\n  \"previousExperience\": null,\n  \"privateTrainingDescription\": null\n}"
+            },
+            "description": "`privateTrainingDescription` is OPTIONAL (2026-08-09) — this example sends null, which is what a trainer who left the field blank in the app produces. An empty string is stored and the parent-facing surfaces report null. Before 2026-08-09 this returned 400 \"privateTrainingDescription is required\"."
           }
         },
         {
@@ -672,7 +708,7 @@
     },
     {
       "name": "4b. Provider Active Status (master switch)",
-      "description": "Single master Active/Inactive switch above the per-service catalog. When Inactive, every NEW booking is rejected with 409 ProviderInactive. Always returns 200 with a discriminated payload: `status: \"Updated\"` (flag flipped) or `status: \"BookingsExist\"` (deactivation blocked — `conflictingBookings` lists future confirmed bookings; there is NO force override).",
+      "description": "Single master Active/Inactive switch above the per-service catalog. When Inactive, every NEW booking is rejected with 409 ProviderInactive. Always returns 200 with a discriminated payload: `status: \"Updated\"` (flag flipped) or `status: \"BookingsExist\"` (deactivation blocked — `conflictingBookings` lists future confirmed bookings). Two ways past the block: move/cancel the listed bookings, or resubmit with `acknowledgeExistingBookings: true` to stop taking NEW bookings while honouring the existing ones. There is still no force-cancel override.",
       "item": [
         {
           "name": "POST active-status (deactivate)",
@@ -685,6 +721,19 @@
               "raw": "{\n  \"isActive\": false\n}"
             },
             "description": "On deactivation the server checks for future confirmed bookings. If any exist it returns `status: \"BookingsExist\"` (flag NOT flipped) with the conflict list. Otherwise `status: \"Updated\"`."
+          }
+        },
+        {
+          "name": "POST active-status (honour bookings & deactivate)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/active-status", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","active-status"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isActive\": false,\n  \"acknowledgeExistingBookings\": true\n}"
+            },
+            "description": "What the app sends after showing the `BookingsExist` list and the provider taps \"Honor Bookings & Deactivate\". The flag flips immediately — the provider leaves the marketplace and every new booking is refused with 409 ProviderInactive — while the listed jobs carry on untouched: still startable, still completable, still payable (nothing in the job lifecycle reads IsActive). Returns `status: \"Updated\"` with `honouredBookingCount` set to how many jobs the provider just committed to, and a `warningMessage` confirming it."
           }
         },
         {
@@ -1047,6 +1096,14 @@
           }
         },
         {
+          "name": "GET booking terms-changes",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/terms-changes", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","terms-changes"] },
+            "description": "The provider's OWN terms that have drifted since this booking was created (price, cancellation policy, selected-location address) plus rule-violation rows (fixed/minimum duration checked against the booked window). Always 200 → { bookingId, hasChanges, changes: [{ field, changeType (ValueChanged|RuleViolation), bookedValue, currentValue, message }] }; hasChanges: false means nothing drifted, no confirmation sheet needed. Feeds `acknowledgeTermsChanges` on POST .../modifications — proposing a change without it once terms have drifted returns 409 BookingTermsChanged. 404 BookingNotFound when the booking isn't this provider's."
+          }
+        },
+        {
           "name": "POST accept booking → CONFIRMED",
           "request": {
             "method": "POST",
@@ -1125,6 +1182,16 @@
             "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/prescription", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","prescription"] },
             "body": { "mode": "raw", "raw": "{\n  \"prescriptionText\": \"Amoxicillin 250mg twice daily for 7 days.\",\n  \"isPetVaccinated\": true,\n  \"vaccinations\": [\"Rabies\", \"DHPP\"]\n}" },
             "description": "Records/edits the vet's per-visit prescription for a booking (upsert), independent of ending the job. VET bookings only, the booking's provider only, only once the job is IN_PROGRESS or COMPLETED. Returns the saved { prescriptionText, isPetVaccinated, vaccinations, nextConsultationDate } block — nextConsultationDate is the pet's rolling Vet follow-up (Parent.PetNextConsultations), set via /complete, joined here (null when none). The block is surfaced on the booking-detail read (GET /bookings/{id} and the parent host's GET /pet-parents/{id}/bookings/{id}) under `prescription`, null until recorded. 404 BookingNotFound; 403 Forbidden (not this provider's booking); 400 PrescriptionNotVetBooking (not a Vet booking); 409 PrescriptionNotAllowed (job not started/completed)."
+          }
+        },
+        {
+          "name": "POST rate the pet parent (provider) — upsert",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/bookings/{{bookingId}}/rating", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","bookings","{{bookingId}}","rating"] },
+            "body": { "mode": "raw", "raw": "{\n  \"rating\": 5\n}" },
+            "description": "The provider's rating of the PET PARENT on a finished job. Rating ONLY (1..5) — no comment, no photos; this host exposes no comment field, and the sproc's CHECK constraint refuses one if sent anyway. Same eligibility gate as the parent's review: the booking must be COMPLETED or PAID, and an App booking (a Custom walk-in has no pet-parent record → 400 ReviewNotAppBooking). Upsert — 201 on the first rating, 200 on a correction; createdAtUtc does not move on a correction. The caller's ProviderId is resolved from the JWT and must match the route → 403 Forbidden on a mismatch (one of the few ownership-enforced routes on this host, alongside earnings and account-delete — the sproc's party check compares the actor to the booking's ProviderId, so trusting the route would let anyone knowing a provider id and one of their booking ids rate AS that provider). 404 BookingNotFound; 409 BookingNotReviewable; 400 InvalidRequest (rating out of range)."
           }
         },
         {
@@ -1222,6 +1289,14 @@
           }
         },
         {
+          "name": "GET night-stay booking terms-changes",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/terms-changes", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","terms-changes"] },
+            "description": "Night-stay twin of the single-day terms-changes read — the provider's own drifted terms (price, cancellation policy, drop-off/pick-up time, selected-location address) plus rule-violation rows (minimum nights). Always 200 → { bookingId, hasChanges, changes: [...] }. 404 NightStayBookingNotFound when the stay isn't this provider's."
+          }
+        },
+        {
           "name": "POST accept → CONFIRMED",
           "request": {
             "method": "POST",
@@ -1287,6 +1362,16 @@
           }
         },
         {
+          "name": "POST rate the pet parent (provider, night-stay) — upsert",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/night-stay-bookings/{{nightStayBookingId}}/rating", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","night-stay-bookings","{{nightStayBookingId}}","rating"] },
+            "body": { "mode": "raw", "raw": "{\n  \"rating\": 4\n}" },
+            "description": "Night-stay twin of the single-day provider rating above — rating ONLY (1..5), same COMPLETED-or-PAID + App-booking gate, same upsert semantics, same JWT-must-match-route ownership check → 403 Forbidden on a mismatch. 404 NightStayBookingNotFound; 409 BookingNotReviewable; 400 InvalidRequest."
+          }
+        },
+        {
           "name": "POST cancel → PROVIDER_CANCELLED",
           "request": {
             "method": "POST",
@@ -1339,7 +1424,7 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/details", "host": ["{{baseUrl}}"], "path": ["api","v1","pet-parents","{{petParentId}}","details"] },
-            "description": "Provider-facing customer card: profileImageUrl, rating (ALWAYS null for now - reviews not built yet), name, gender, age (full years, computed from dateOfBirth at UTC today), dateOfBirth, address { addressLine, city, zipCode, latitude, longitude }, aboutParent, email, mobileCountryCode/mobileNumber, and pets[] (slim cards: petId, name, petType, breed, gender, age { years, months }, profileImageUrl - drill into GET /pets/{petId} for the full profile).\n\n404 PetParentNotFound when no parent row exists for the id."
+            "description": "Provider-facing customer card: profileImageUrl, rating (the parent's average AS RATED BY providers on completed jobs — null when nobody has rated them yet, since \"no ratings\" and \"a bad average\" are different statements) + ratingCount (travels with rating — \"5.0\" off one rating and \"4.6\" off forty are very different claims), name, gender, age (full years, computed from dateOfBirth at UTC today), dateOfBirth, address { addressLine, city, zipCode, latitude, longitude }, aboutParent, email, mobileCountryCode/mobileNumber, and pets[] (slim cards: petId, name, petType, breed, gender, age { years, months }, profileImageUrl - drill into GET /pets/{petId} for the full profile).\n\n404 PetParentNotFound when no parent row exists for the id."
           }
         },
         {
@@ -1348,6 +1433,30 @@
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/api/v1/pets/{{petId}}", "host": ["{{baseUrl}}"], "path": ["api","v1","pets","{{petId}}"] },
             "description": "Provider-facing full pet profile: profileImageUrl, name, microchipId, petType, gender, weight, age { years, months } + dateOfBirth, breed, aboutPet, healthOfPet (medical history), vaccinationStatus (Vaccinated | NotVaccinated), sterilizationStatus (Sterilized | Intact), vaccinationType/vaccinationDose/prescription, temperament, photos[] (gallery URLs, oldest-first; fetch bytes via POST /blob-images).\n\nMedical fields are null until the parent fills them in the parent app. 404 PetNotFound for an unknown id."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6d. Reviews (received from parents)",
+      "description": "The reviews pet parents have left for this provider — the provider's own \"my reviews\" screen. Identical shape and behaviour to the parent host's public copy of this endpoint (a parent reads it before booking); deliberately NOT ownership-checked here, since these are public data served unfiltered on the parent host too.",
+      "item": [
+        {
+          "name": "GET /providers/{providerId}/reviews",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/reviews?sortBy=Date&sortDirection=Desc&skip=0&take=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","providers","{{providerId}}","reviews"],
+              "query": [
+                { "key": "sortBy", "value": "Date" },
+                { "key": "sortDirection", "value": "Desc" },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "20" }
+              ]
+            },
+            "description": "Returns { providerId, summary { reviewCount, averageRating, fiveStar..oneStar }, reviews: [{ bookingReviewId, bookingType, bookingId, jobId, petParentId, parentName, parentPhotoUrl, rating, comment, photoUrls, createdAtUtc, updatedAtUtc }], skip, take, hasMore }. `summary` is WHOLE-POPULATION, not page-scoped — it's the profile header's \"4.6 (23)\" and must not shift as the reader pages; averageRating is null (not 0.0) when nobody has reviewed yet. `sortBy` is Date|Rating, `sortDirection` Asc|Desc; both carry a bookingReviewId tie-break so OFFSET paging can't repeat/skip rows. `take` caps at 20. parentName/parentPhotoUrl are joined LIVE, so a deleted account reads \"Deleted User\". 400 InvalidRequest on an unknown sortBy/sortDirection."
           }
         }
       ]
@@ -1538,6 +1647,14 @@
           }
         },
         {
+          "name": "GET /event-bookings (my booked events)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/event-bookings", "host": ["{{baseUrl}}"], "path": ["api","v1","event-bookings"] },
+            "description": "The caller's own event-ticket bookings (\"my booked events\") — slim summary cards with the joined event (title, category, eventType, start date/time, banner URL, venue eventLocation for physical events / null for online). Booker is matched by the caller's Firebase EMAIL claim against the free-text BookerEmail on Event.EventBookings (no FK to any user table). Most-recent first, cancelled bookings included. Mirror of the parent host's GET /pet-parents/{petParentId}/event-bookings. 403 EmailClaimMissing when the token carries no email claim."
+          }
+        },
+        {
           "name": "GET event booking by id",
           "request": {
             "method": "GET",
@@ -1650,6 +1767,52 @@
               "raw": "{\n  \"blobUrl\": \"{{blobUrl}}\"\n}"
             },
             "description": "Universal image fetcher for the Flutter app. Accepts any blob URL that lives under the configured provider-images container and streams the raw image bytes back with the original Content-Type (image/jpeg, image/png, …).\n\n**Response is binary** (not the JSON envelope) — Postman shows it under the response **Preview** tab. Errors still use the envelope:\n- 400 InvalidRequest — bad URL, wrong host, or URL not in our container (SSRF guard).\n- 404 BlobNotFound — blob does not exist.\n\nSet the `blobUrl` collection variable to the URL returned by any of the upload endpoints (profile/service/event banner)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "8c. Earnings & Spend Reporting",
+      "description": "The provider earnings screens. All three routes are ownership-enforced from the JWT (the caller's own ProviderId must match the route) → 403 Forbidden on a mismatch — one of the few routes on this host with that check (alongside account-delete and the rating routes). Money is reported three ways because with cash-only payments they differ: grossAmount (what the parent physically hands over), pawfrontFee (the commission owed back), netAmount (gross − fee, the headline) — each split into received* (marked PAID) / awaiting* (COMPLETED, cash not yet recorded). Custom walk-ins are excluded from every total and reported separately as privateJobCount/privateJobAmount.",
+      "item": [
+        {
+          "name": "GET /providers/{providerId}/earnings/overview",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/earnings/overview", "host": ["{{baseUrl}}"], "path": ["api","v1","providers","{{providerId}}","earnings","overview"] },
+            "description": "The earnings landing screen in one call: lifetime totals plus thisWeek/thisMonth/thisYear, all resolved from ONE instant (so the four blocks can't straddle midnight UTC and mix two weeks into one screen). Each block carries counts (completed/paid/awaitingPayment/unpriced) and grossAmount/pawfrontFee/netAmount split into received*/awaiting*, plus privateJobCount/privateJobAmount. 403 Forbidden if the route's providerId isn't the caller's own."
+          }
+        },
+        {
+          "name": "GET /providers/{providerId}/earnings (single period)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/earnings?period=Monthly",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","providers","{{providerId}}","earnings"],
+              "query": [{ "key": "period", "value": "Monthly" }]
+            },
+            "description": "The same totals scoped to ONE calendar period (default AllTime), plus the resolved periodStart/periodEnd so the client can label the screen without redoing calendar maths. Periods are calendar-aligned in UTC (Weekly = Mon–Sun) and cover the WHOLE period, not truncated at today. `period` is Weekly|Monthly|Quarterly|Yearly|AllTime. 400 InvalidRequest on an unknown period; 403 Forbidden."
+          }
+        },
+        {
+          "name": "GET /providers/{providerId}/earnings/bookings",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/earnings/bookings?period=AllTime&sortBy=Date&sortDirection=Desc&skip=0&take=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api","v1","providers","{{providerId}}","earnings","bookings"],
+              "query": [
+                { "key": "period", "value": "AllTime" },
+                { "key": "sortBy", "value": "Date" },
+                { "key": "sortDirection", "value": "Desc" },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "20" }
+              ]
+            },
+            "description": "Which jobs produced the money — single-day and night-stay merged into one feed, `bookingType` discriminates. Explicit `from`/`to` override `period`. `take` caps at 20 server-side; sort defaults to Date/Desc with a BookingId tie-break. Rows carry jobId (PF-000123), payoutId (PO-000123) + payoutStatus, serviceDate, grossAmount/pawfrontFee/netAmount, isPaid, paidAtUtc, paymentMethod, and the customer + pet name. Reconciles exactly with the summary over the same range (both read Booking.BookingAmounts). Custom walk-ins ARE listed but flagged isPrivate — real work, just not part of the platform totals. 400 InvalidRequest (bad period/sortBy/sortDirection, or from > to); 403 Forbidden."
           }
         }
       ]

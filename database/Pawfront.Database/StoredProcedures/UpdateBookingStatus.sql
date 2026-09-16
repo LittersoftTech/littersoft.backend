@@ -15,6 +15,8 @@
 --     it. This guard REJECTS ONLY; it does not write the EXPIRED status. Settling
 --     abandoned bookings on a clock is the scheduled external job's job, and this
 --     sproc no longer changes status on the basis of elapsed time.
+--   * a booking still in CREATED with under 2 hours to the service has expired
+--     for the same reason (THROW 51153) — also REJECT ONLY.
 -- Other THROWs: 51120 booking not found, 51125 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
@@ -29,12 +31,27 @@
 -- kept for legacy rows) → THROW 51149.
 -- Terminal states (no further change): COMPLETED, PROVIDER_DECLINED,
 -- PROVIDER_CANCELLED, PARENT_CANCELLED, PARENT_NO_SHOW, PROVIDER_NO_SHOW.
+--
+-- A geolocation fix may be supplied, and is written only for the NO-SHOW
+-- transitions — the one moment this engine handles that is being evidenced.
+-- Every other status it serves (accept, decline, cancel, the legacy COMPLETED
+-- shim) passes nothing and writes nothing. Both actors reach it: the provider
+-- reporting PARENT_NO_SHOW and the parent reporting PROVIDER_NO_SHOW each record
+-- their own position, so [CapturedByType] is simply @Actor.
 CREATE OR ALTER PROCEDURE [Booking].[UpdateBookingStatus]
     @BookingId UNIQUEIDENTIFIER,
     @NewStatus NVARCHAR(48),
     @Actor NVARCHAR(16),
     @ActorId UNIQUEIDENTIFIER,
-    @Note NVARCHAR(500) = NULL
+    @Note NVARCHAR(500) = NULL,
+    -- The acting party's position. Only ever populated by the two no-show routes
+    -- (and the legacy /status shim when it is used to set a no-show, which the API
+    -- gates identically so that path cannot become a way to skip the capture).
+    -- See [Booking].[StartBooking] for why these are defaulted to NULL.
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -59,6 +76,7 @@ BEGIN
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @BookingDate DATE;
     DECLARE @StartTime TIME(0);
+    DECLARE @EndTime TIME(0);
     DECLARE @CreatedAtUtc DATETIME2(7);
 
     BEGIN TRANSACTION;
@@ -68,6 +86,7 @@ BEGIN
            @PetParentId = [PetParentId],
            @BookingDate = [BookingDate],
            @StartTime = [StartTime],
+           @EndTime = [EndTime],
            @CreatedAtUtc = [CreatedAtUtc]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
@@ -94,6 +113,21 @@ BEGIN
     IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
     BEGIN
         THROW 51129, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
+    END
+
+    -- BR-53: a booking still in CREATED with under 2 hours to the service has
+    -- expired too — the provider is out of time to accept it, and the same
+    -- cutoff (serviceStart - 2h) is the one BR-01 uses to refuse a fresh booking
+    -- for that slot. REJECT ONLY, for the same reason as the guard above: the
+    -- scheduled external job is the single writer of EXPIRED, so the row stays
+    -- in CREATED until it runs. Without this guard the rule would only hold to
+    -- the job's 5-minute granularity, and a provider could accept minutes before
+    -- the service starts.
+    IF @CurrentStatus = N'CREATED'
+       AND DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
+                   CAST(@BookingDate AS DATETIME2(7))) < DATEADD(HOUR, 2, @Now)
+    BEGIN
+        THROW 51153, 'Booking has expired: it was never accepted and the service now starts in under 2 hours.', 1;
     END
 
     -- The status must be one this actor is allowed to set via the engine.
@@ -154,9 +188,44 @@ BEGIN
         END
     END
 
+    -- COMPLETED is reachable here through the legacy /status shim as well as
+    -- through [Booking].[CompleteBooking], so an early finish must release the
+    -- rest of the booked window from BOTH paths — otherwise which endpoint the
+    -- provider happened to tap would decide whether the slot came back. Same
+    -- rule and the same clamps as the dedicated sproc; see it for the reasoning.
+    DECLARE @ActualEndTime TIME(0) = NULL;
+
+    IF @NewStatus = N'COMPLETED' AND CAST(@Now AS DATE) = @BookingDate
+    BEGIN
+        DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
+        IF @NowTime < @EndTime
+        BEGIN
+            SET @ActualEndTime = CASE WHEN @NowTime < @StartTime THEN @StartTime ELSE @NowTime END;
+        END
+    END
+
     UPDATE [Booking].[Bookings]
     SET [Status] = @NewStatus,
         [UpdatedAtUtc] = @Now,
+        -- Only ever written on the COMPLETED transition; every other status
+        -- leaves whatever is there alone (it is NULL for all of them anyway,
+        -- since COMPLETED is terminal apart from the move to PAID).
+        [ActualEndTime] = CASE
+            WHEN @NewStatus = N'COMPLETED' THEN @ActualEndTime
+            ELSE [ActualEndTime]
+        END,
+        -- A no-show ends the job with nobody having performed and nobody owing,
+        -- so the payout is settled as 'NO_PAYOUT' rather than left reading
+        -- 'Pending' forever. Terminal, and safe to overwrite unconditionally
+        -- here: the from-state guards above only admit a no-show from a
+        -- confirmed-equivalent status or START_JOB, none of which can already
+        -- have been paid (PAID is only reachable from COMPLETED, and is itself
+        -- terminal). EXPIRED is settled the same way by the sweep, which is its
+        -- only writer.
+        [PayoutStatus] = CASE
+            WHEN @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW') THEN N'NO_PAYOUT'
+            ELSE [PayoutStatus]
+        END,
         [CancelledAtUtc] = CASE
             WHEN @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') THEN @Now
             ELSE [CancelledAtUtc]
@@ -167,6 +236,56 @@ BEGIN
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@BookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- Where the reporting party was when they marked the counterparty absent.
+    -- Written in the same transaction as the status flip: a no-show is terminal
+    -- and frees capacity, so it must never be possible to have one on record with
+    -- no idea where the person reporting it stood.
+    IF @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
+       AND @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[BookingLocationEvents]
+            ([BookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@BookingId, N'NoShowMarked', @Actor, @ActorId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
+
+    -- Notify the OTHER party, inside this transaction so the notification can
+    -- never exist without the status change (or vice versa). The actor never gets
+    -- one: they tapped it and saw the result — the "relevance rule".
+    DECLARE @NotificationType NVARCHAR(64) =
+        CASE @NewStatus
+            WHEN N'CONFIRMED'          THEN N'BOOKING_ACCEPTED'
+            WHEN N'PROVIDER_DECLINED'  THEN N'BOOKING_DECLINED'
+            WHEN N'PROVIDER_CANCELLED' THEN N'BOOKING_CANCELLED_BY_PROVIDER'
+            WHEN N'PARENT_CANCELLED'   THEN N'BOOKING_CANCELLED_BY_PARENT'
+            WHEN N'COMPLETED'          THEN N'BOOKING_COMPLETED'
+            WHEN N'PARENT_NO_SHOW'     THEN N'BOOKING_NO_SHOW_REPORTED'
+            WHEN N'PROVIDER_NO_SHOW'   THEN N'BOOKING_NO_SHOW_REPORTED'
+        END;
+
+    IF @NotificationType IS NOT NULL
+    BEGIN
+        -- A no-show always names the absent party, which is what lets one
+        -- template read correctly in both directions.
+        DECLARE @AbsentParty NVARCHAR(32) =
+            CASE @NewStatus
+                WHEN N'PARENT_NO_SHOW'   THEN N'the customer'
+                WHEN N'PROVIDER_NO_SHOW' THEN N'the provider'
+            END;
+
+        DECLARE @Audience NVARCHAR(16) =
+            CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @BookingId,
+            @IsNightStay = 0,
+            @Audience = @Audience,
+            @NotificationType = @NotificationType,
+            @AbsentParty = @AbsentParty;
+    END
 
     SELECT [BookingId],
            [ProviderId],

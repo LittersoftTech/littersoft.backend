@@ -1,3 +1,4 @@
+﻿using Pawfront.Application.Blocks;
 using Microsoft.Extensions.Logging;
 using Pawfront.Domain.Events;
 
@@ -7,6 +8,8 @@ internal sealed class EventBookingService(
     IEventService eventService,
     IEventBookingSqlStore sqlStore,
     IEventCosmosStore cosmosStore,
+    ICurrentBlockParty currentBlockParty,
+    IMyBlockLookup blockLookup,
     ILogger<EventBookingService> logger) : IEventBookingService
 {
     private static readonly IReadOnlySet<Guid> EmptyEventIds = new HashSet<Guid>();
@@ -50,6 +53,24 @@ internal sealed class EventBookingService(
             && (organiserId == @event.ProviderId || organiserId == @event.PetParentId))
         {
             throw new EventBookingSelfBookingNotAllowedException(command.EventId);
+        }
+
+        // A blocked pair cannot buy tickets to each other's events either.
+        // Close to unreachable through the apps -- the same block hides the event
+        // from every list and 404s its detail -- but holding an id from before
+        // the block must not be enough, which is the difference between hiding
+        // something and refusing it. The organiser is whichever column is set;
+        // GUIDs are globally unique, so matching on the id alone is conclusive.
+        var me = await currentBlockParty.GetAsync(cancellationToken);
+        if (me is not null)
+        {
+            var blocked = await blockLookup.GetAsync(me.Value, cancellationToken);
+            var organiser = @event.ProviderId ?? @event.PetParentId;
+
+            if (organiser is Guid id && blocked.IsBlocked(id))
+            {
+                throw new EventBookingBlockedException(command.EventId);
+            }
         }
 
         int? maximumCapacity;

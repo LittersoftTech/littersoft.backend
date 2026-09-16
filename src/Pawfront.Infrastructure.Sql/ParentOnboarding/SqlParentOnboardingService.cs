@@ -1,10 +1,11 @@
-using System.Data;
+﻿using System.Data;
 using System.Globalization;
 using System.Security.Cryptography;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Contracts.ParentOnboarding;
+using Pawfront.Infrastructure.Sql.Support;
 
 namespace Pawfront.Infrastructure.Sql.ParentOnboarding;
 
@@ -262,8 +263,9 @@ internal sealed class SqlParentOnboardingService(
 
         try
         {
-            // Two result sets: summary, then the blob URLs to clean up. See the
-            // sproc's header for what is retained vs cleared.
+            // Four result sets: summary, the blob URLs to clean up, the unfinished
+            // jobs that refused the delete, then the open support tickets that
+            // refused it. See the sproc's header for what is retained vs cleared.
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
             if (!await reader.ReadAsync(cancellationToken))
@@ -271,15 +273,24 @@ internal sealed class SqlParentOnboardingService(
                 throw new InvalidOperationException("Pet parent delete summary was not returned.");
             }
 
-            var summary = new DeletePetParentAccountResponse(
-                reader.GetGuid(0),
-                new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
-                reader.GetBoolean(2),
-                reader.GetInt32(3),
-                reader.GetInt32(4),
-                reader.GetInt32(5),
-                reader.GetInt32(6),
-                reader.GetInt32(7));
+            // Read both refusal flags before anything else: when either is set the
+            // account was NOT touched and the rest of this row is meaningless.
+            // BlockedByOpenTickets is ordinal 9 because the sproc appends it LAST,
+            // deliberately, so the retained-count ordinals below did not shift.
+            var blockedByPendingJobs = reader.GetBoolean(3);
+            var blockedByOpenTickets = reader.GetBoolean(9);
+
+            var summary = blockedByPendingJobs || blockedByOpenTickets
+                ? null
+                : new DeletePetParentAccountResponse(
+                    reader.GetGuid(0),
+                    new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
+                    reader.GetBoolean(2),
+                    reader.GetInt32(4),
+                    reader.GetInt32(5),
+                    reader.GetInt32(6),
+                    reader.GetInt32(7),
+                    reader.GetInt32(8));
 
             var blobUrls = new List<string>();
             if (await reader.NextResultAsync(cancellationToken))
@@ -290,7 +301,36 @@ internal sealed class SqlParentOnboardingService(
                 }
             }
 
-            return new PetParentAccountDeletionResult(summary, blobUrls);
+            if (!blockedByPendingJobs && !blockedByOpenTickets)
+            {
+                return new PetParentAccountDeletionResult(summary!, blobUrls);
+            }
+
+            // Result sets 3 and 4 only carry rows on the refusal path. Both have to
+            // be drained before throwing so the reader isn't abandoned mid-stream.
+            var pendingJobs = new List<PendingParentJob>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pendingJobs.Add(PendingJobReader.Read(reader));
+                }
+            }
+
+            var openTickets = await reader.NextResultAsync(cancellationToken)
+                ? await BlockingSupportTicketReader.ReadAllAsync(reader, cancellationToken)
+                : [];
+
+            // Pending jobs are reported first when both apply: the parent can act on
+            // those themselves, whereas only support can close a ticket — so leading
+            // with the ticket would tell them to wait when there is something they
+            // could be getting on with.
+            if (blockedByPendingJobs)
+            {
+                throw new PetParentPendingJobsException(petParentId, pendingJobs);
+            }
+
+            throw new PetParentOpenTicketsException(petParentId, openTickets);
         }
         catch (SqlException exception) when (exception.Number == 51223)
         {

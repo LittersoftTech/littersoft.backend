@@ -69,6 +69,11 @@ BEGIN
     -- BookingDate and the booking's own EndTime.
     UPDATE b
     SET [Status] = CASE WHEN b.[Status] = N'START_JOB' THEN N'PARENT_NO_SHOW' ELSE N'PROVIDER_NO_SHOW' END,
+        -- Nobody performed and nobody owes, so the payout is settled terminally
+        -- rather than left reading 'Pending'. Same value the manual report writes
+        -- in Booking.UpdateBookingStatus — a settled no-show must look identical
+        -- whether a party tapped it or this job derived it.
+        [PayoutStatus] = N'NO_PAYOUT',
         [UpdatedAtUtc] = @Now
     OUTPUT inserted.[BookingId], deleted.[Status], inserted.[Status] INTO @NoShowBookings
     FROM [Booking].[Bookings] b
@@ -89,6 +94,16 @@ BEGIN
     ) AS [Cutoffs]
     WHERE b.[Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
                          N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION', N'START_JOB')
+      -- A Custom walk-in is NEVER settled here (2026-08-24). A no-show is a
+      -- statement that one PARTY failed to appear, and a walk-in has only one
+      -- party: the provider recording their own job. Settling it marked the
+      -- provider a no-show — and stamped NO_PAYOUT — for work they had actually
+      -- done, purely because the walk-in had no way to be started. (It now has
+      -- one: [Booking].[StartBooking] takes it straight to IN_PROGRESS.) A walk-in
+      -- the provider simply never finishes now rests at CONFIRMED, which is honest
+      -- — nobody was stood up — and stays out of every earnings figure until they
+      -- complete it.
+      AND b.[Source] <> N'Custom'
       AND @Now >= (CASE WHEN [Cutoffs].[BookingEndsAtUtc] >= [Cutoffs].[ProviderClosesAtUtc]
                         THEN [Cutoffs].[BookingEndsAtUtc] ELSE [Cutoffs].[ProviderClosesAtUtc] END);
 
@@ -105,6 +120,7 @@ BEGIN
             WHEN [Status] = N'START_JOB' THEN N'PARENT_NO_SHOW'
             ELSE N'PROVIDER_NO_SHOW'
         END,
+        [PayoutStatus] = N'NO_PAYOUT',
         [UpdatedAtUtc] = @Now
     OUTPUT inserted.[NightStayBookingId], deleted.[Status], inserted.[Status] INTO @NoShowNightStays
     WHERE [Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
@@ -116,6 +132,50 @@ BEGIN
     SELECT [NightStayBookingId], [FromStatus], [ToStatus], N'System', NULL,
            CASE WHEN [ToStatus] = N'PARENT_NO_SHOW' THEN @ParentNoShowStayNote ELSE @ProviderNoShowStayNote END
     FROM @NoShowNightStays;
+
+    -- BOTH parties are told, because nobody reported it — the system derived it
+    -- from the job never starting (V3 cards P-S8/V-S9 and P-S12/V-S11). Contrast
+    -- Booking.UpdateBookingStatus, where a party REPORTS the no-show and only the
+    -- counterparty hears about it.
+    DECLARE @BookingId UNIQUEIDENTIFIER;
+    DECLARE @SettledStatus NVARCHAR(48);
+    DECLARE @IsNightStay BIT;
+    DECLARE @AbsentParty NVARCHAR(32);
+
+    DECLARE settled_no_shows CURSOR LOCAL FAST_FORWARD FOR
+        SELECT [BookingId], [ToStatus], 0 FROM @NoShowBookings
+        UNION ALL
+        SELECT [NightStayBookingId], [ToStatus], 1 FROM @NoShowNightStays;
+
+    OPEN settled_no_shows;
+    FETCH NEXT FROM settled_no_shows INTO @BookingId, @SettledStatus, @IsNightStay;
+
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        -- Naming the absent party is what lets one template read correctly on
+        -- both apps and in either direction.
+        SET @AbsentParty = CASE WHEN @SettledStatus = N'PARENT_NO_SHOW'
+                                THEN N'the customer' ELSE N'the provider' END;
+
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @BookingId,
+            @IsNightStay = @IsNightStay,
+            @Audience = N'PetParent',
+            @NotificationType = N'BOOKING_NO_SHOW_AUTO_SETTLED',
+            @AbsentParty = @AbsentParty;
+
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @BookingId,
+            @IsNightStay = @IsNightStay,
+            @Audience = N'Provider',
+            @NotificationType = N'BOOKING_NO_SHOW_AUTO_SETTLED',
+            @AbsentParty = @AbsentParty;
+
+        FETCH NEXT FROM settled_no_shows INTO @BookingId, @SettledStatus, @IsNightStay;
+    END
+
+    CLOSE settled_no_shows;
+    DEALLOCATE settled_no_shows;
 
     COMMIT TRANSACTION;
 

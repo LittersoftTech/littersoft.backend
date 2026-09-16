@@ -45,14 +45,31 @@ public interface INightStayBookingService
 
     // --- Job lifecycle: start-OTP, evidence, modifications ------------------
 
-    Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken);
+    /// <summary>
+    /// Issues (or reuses) the parent-facing start-OTP. <paramref name="location"/>
+    /// is where the parent was when the code went on screen — required, which is
+    /// why this is reached through a dedicated POST rather than the detail GET.
+    /// See <see cref="IBookingService.IssueStartOtpAsync"/>.
+    /// </summary>
+    Task<StartOtpResult> IssueStartOtpAsync(
+        Guid bookingId,
+        CapturedLocation? location,
+        CancellationToken cancellationToken);
 
     /// <summary>Provider taps "Start Job": confirmed-equivalent → START_JOB (working-hours gate) + start-OTP.</summary>
     Task<NightStayBookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken);
 
-    /// <summary>Provider enters the parent's start-OTP: START_JOB → IN_PROGRESS.</summary>
+    /// <summary>
+    /// Provider enters the parent's start-OTP: START_JOB → IN_PROGRESS.
+    /// <paramref name="location"/> is required on the request but stored only on
+    /// the success path — see <see cref="IBookingService.VerifyStartOtpAsync"/>.
+    /// </summary>
     Task<NightStayBookingResult> VerifyStartOtpAsync(
-        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken);
+        Guid bookingId,
+        Guid providerId,
+        string otpCode,
+        CapturedLocation? location,
+        CancellationToken cancellationToken);
 
     /// <summary>Provider completes the job: IN_PROGRESS → COMPLETED (no OTP).</summary>
     Task<NightStayBookingResult> CompleteAsync(
@@ -82,10 +99,15 @@ public interface INightStayBookingService
         Guid bookingId,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Records one job-completion evidence photo. <paramref name="location"/> is
+    /// required and stored with it — one location row per photo.
+    /// </summary>
     Task<BookingEvidenceResult> AddEvidenceAsync(
         Guid bookingId,
         Guid providerId,
         string photoUrl,
+        CapturedLocation? location,
         CancellationToken cancellationToken);
 
     Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(

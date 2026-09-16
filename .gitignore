@@ -69,3 +69,10 @@ local.settings.json
 
 # Coverage
 coverage/
+# Firebase Admin service-account credentials (FCM push).
+# These JSON files contain a private key. Point
+# Notifications:{Provider|PetParent}:CredentialsFilePath at a local copy for
+# development; deployed environments must use CredentialsSecretName (Key Vault).
+firebase-*.json
+*-firebase-adminsdk-*.json
+**/Secrets/*.json

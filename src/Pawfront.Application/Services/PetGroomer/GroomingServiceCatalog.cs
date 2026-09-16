@@ -1,15 +1,23 @@
-namespace Pawfront.Infrastructure.Cosmos.Services.PetGroomer;
+namespace Pawfront.Application.Services.PetGroomer;
 
 /// <summary>
 /// Canonical list of grooming services a Pet Groomer provider can offer.
-/// Server-defined: codes are stable identifiers (used in Cosmos docs +
-/// booking rows + slot queries); display names are what the mobile picker
-/// renders. Durations are per-groomer and live on each provider's offering
+/// Server-defined: codes are stable identifiers (used in Cosmos docs + booking
+/// rows + slot queries); display names are what the mobile picker renders.
+/// Durations and prices are per-groomer and live on each provider's offering
 /// row, NOT here.
+///
+/// Adding a service = a code change and a release.
+///
+/// This lives in Application (rather than in the Cosmos registry that validates
+/// against it) because it is static reference data with no storage dependency,
+/// and because callers outside the offering flow need it too — notification copy
+/// resolves a booking's <c>ServiceItemCode</c> to a display name through
+/// <see cref="TryGetDisplayName"/>.
 /// </summary>
-internal static class GroomingServiceCatalog
+public static class GroomingServiceCatalog
 {
-    public static readonly IReadOnlyList<GroomingCatalogEntry> Entries = new GroomingCatalogEntry[]
+    public static readonly IReadOnlyList<GroomingServiceCatalogEntry> Entries = new GroomingServiceCatalogEntry[]
     {
         new("WireCoatHandStripping",  "Wire Coat Hand Stripping"),
         new("PuppyFirstGroom",        "Puppy First Groom"),
@@ -44,9 +52,8 @@ internal static class GroomingServiceCatalog
                 return true;
             }
         }
+
         displayName = string.Empty;
         return false;
     }
 }
-
-internal sealed record GroomingCatalogEntry(string Code, string DisplayName);

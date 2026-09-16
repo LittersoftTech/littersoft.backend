@@ -28,6 +28,23 @@ CREATE TABLE [Booking].[Bookings]
     [BookingDate] DATE NOT NULL,
     [StartTime] TIME(0) NOT NULL,
     [EndTime] TIME(0) NOT NULL,
+    -- When the job actually finished, if it finished EARLY. Stamped by
+    -- [Booking].[CompleteBooking] and left NULL whenever the booked window ran
+    -- its course (completed at/after [EndTime], or on a later date), so NULL
+    -- reads as "the booking occupied everything it booked".
+    --
+    -- This exists ONLY to release the unused remainder back to the provider's
+    -- capacity: a 6-hour day care wrapped up after 3 hours should not keep the
+    -- other 3 hours blocked. Occupancy is therefore [StartTime, effective end)
+    -- where the effective end is COALESCE([ActualEndTime], [EndTime]) — the
+    -- expression every capacity, slot, and agenda query uses.
+    --
+    -- It is deliberately NOT part of what the booking COST or was AGREED to be.
+    -- Pricing ([Booking].[BookingAmounts], the booking-detail read), the terms
+    -- snapshots, and every wire contract keep reading [EndTime], so finishing
+    -- early frees the slot without re-pricing a job the parent already agreed
+    -- to. Changing that is a product decision, not a capacity one.
+    [ActualEndTime] TIME(0) NULL,
     -- 'App'    = booked via the consumer app by a registered pet parent (PetParentId set)
     -- 'Custom' = provider-added private job for an unregistered walk-in customer
     [Source] NVARCHAR(16) NOT NULL
@@ -68,6 +85,12 @@ CREATE TABLE [Booking].[Bookings]
     -- Payout (capture-only for now — the actual provider-payout execution leg is
     -- not built yet). [PayoutStatus] tracks where the provider's money is in the
     -- payout pipeline; [PayoutId] is the external payout reference once issued.
+    --
+    -- 'NO_PAYOUT' is TERMINAL and means no money can ever move on this booking:
+    -- written when the job ends as PARENT_NO_SHOW / PROVIDER_NO_SHOW / EXPIRED,
+    -- which are exactly the outcomes where nobody performed and nobody owes. It
+    -- exists because 'Pending' read as "the money is on its way" on a job that
+    -- was never going to produce any, and both apps had to special-case it.
     [PayoutStatus] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_Bookings_PayoutStatus] DEFAULT N'Pending',
     [PayoutId] NVARCHAR(64) NULL,
@@ -115,6 +138,8 @@ CREATE TABLE [Booking].[Bookings]
     -- statuses are the two cancelled ones PLUS PROVIDER_DECLINED, the two
     -- no-show statuses, EXPIRED, JOB_EXPIRED, and OTP_MAX_ATTEMPTS_EXCEEDED; every
     -- other status still holds the booking's capacity slot.
+    -- COMPLETED / PAID hold their slot too, but only up to [ActualEndTime] when
+    -- the job finished early — a partial release, not a status-level one.
     [Status] NVARCHAR(48) NOT NULL
         CONSTRAINT [DF_Bookings_Status] DEFAULT N'CREATED',
     [CreatedAtUtc] DATETIME2(7) NOT NULL
@@ -133,6 +158,15 @@ CREATE TABLE [Booking].[Bookings]
     CONSTRAINT [FK_Bookings_Pets_PetId]
         FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]),
     CONSTRAINT [CK_Bookings_TimeOrder] CHECK ([StartTime] < [EndTime]),
+    -- An early finish can only ever SHRINK the occupied window, never extend or
+    -- invert it. Equality with [StartTime] is allowed and means the whole slot is
+    -- released (the job ended before its booked start — possible, since starting
+    -- a job is gated on the service DATE, not the time of day). Equality with
+    -- [EndTime] is allowed but is what NULL already means.
+    CONSTRAINT [CK_Bookings_ActualEndTime] CHECK (
+        [ActualEndTime] IS NULL
+        OR ([ActualEndTime] >= [StartTime] AND [ActualEndTime] <= [EndTime])
+    ),
     CONSTRAINT [CK_Bookings_Status]
         CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED',
                             N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED',
@@ -164,7 +198,7 @@ CREATE TABLE [Booking].[Bookings]
         CHECK ([CancellationPolicyHours] IS NULL
                OR [CancellationPolicyHours] IN (24, 48, 72, 96)),
     CONSTRAINT [CK_Bookings_PayoutStatus]
-        CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed')),
+        CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed', N'NO_PAYOUT')),
     -- Discriminator shape: App rows carry PetParentId only; Custom rows carry
     -- the full custom payload and no PetParentId.
     CONSTRAINT [CK_Bookings_SourceShape] CHECK
@@ -203,9 +237,14 @@ CREATE TABLE [Booking].[Bookings]
 
 GO
 
+-- [ActualEndTime] is INCLUDEd because the race-safe capacity count in
+-- [Booking].[CreateBooking] — the hottest query on this table, running under
+-- UPDLOCK + HOLDLOCK — now reads COALESCE([ActualEndTime], [EndTime]). Without
+-- it every candidate row would need a clustered-index lookup while holding
+-- those locks.
 CREATE INDEX [IX_Bookings_Service_Date_Status]
     ON [Booking].[Bookings] ([ServiceId], [BookingDate], [Status])
-    INCLUDE ([StartTime], [EndTime], [BookingId], [PetParentId], [ProviderId]);
+    INCLUDE ([StartTime], [EndTime], [ActualEndTime], [BookingId], [PetParentId], [ProviderId]);
 
 GO
 

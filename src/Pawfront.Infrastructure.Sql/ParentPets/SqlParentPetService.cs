@@ -1,10 +1,12 @@
-using System.Data;
+﻿using System.Data;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
 using Pawfront.Contracts.ParentPets;
 using Pawfront.Domain.Vocabularies;
+using Pawfront.Infrastructure.Sql.ParentOnboarding;
+using Pawfront.Infrastructure.Sql.Support;
 
 namespace Pawfront.Infrastructure.Sql.ParentPets;
 
@@ -342,6 +344,9 @@ internal sealed class SqlParentPetService(
 
         try
         {
+            // Three result sets: the summary, the unfinished jobs that refused the
+            // delete, then the open support tickets that refused it (both empty on
+            // the normal path).
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
             if (!await reader.ReadAsync(cancellationToken))
@@ -349,10 +354,49 @@ internal sealed class SqlParentPetService(
                 throw new InvalidOperationException("Delete confirmation row was not returned.");
             }
 
-            return new DeletePetResponse(
+            // Read both refusal flags first: when either is set the pet was NOT
+            // touched and the timestamp on this row is meaningless.
+            var blockedByPendingJobs = reader.GetBoolean(4);
+            var blockedByOpenTickets = reader.GetBoolean(5);
+
+            var summary = new DeletePetResponse(
                 PetId: reader.GetGuid(0),
                 PetParentId: reader.GetGuid(1),
-                DeletedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero));
+                DeletedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero),
+                WasAlreadyDeleted: reader.GetBoolean(3));
+
+            if (!blockedByPendingJobs && !blockedByOpenTickets)
+            {
+                return summary;
+            }
+
+            // Drain result set 2 before throwing so the reader isn't abandoned
+            // mid-stream.
+            var pendingJobs = new List<PendingParentJob>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    pendingJobs.Add(PendingJobReader.Read(reader));
+                }
+            }
+
+            // Result set 3, drained for the same reason even when the jobs refusal is
+            // the one being reported.
+            var openTickets = await reader.NextResultAsync(cancellationToken)
+                ? await BlockingSupportTicketReader.ReadAllAsync(reader, cancellationToken)
+                : [];
+
+            // Pending jobs are reported first when both apply: the parent can act on
+            // those themselves, whereas only support can close a ticket — so leading
+            // with the ticket would tell them to wait when there is something they
+            // could be getting on with.
+            if (blockedByPendingJobs)
+            {
+                throw new PetPendingJobsException(petId, pendingJobs);
+            }
+
+            throw new PetOpenTicketsException(petId, openTickets);
         }
         catch (SqlException exception) when (exception.Number == 51214)
         {

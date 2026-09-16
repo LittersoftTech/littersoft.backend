@@ -18,8 +18,14 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @CurrentStatus NVARCHAR(32);
+    DECLARE @EventId UNIQUEIDENTIFIER;
+    DECLARE @BookerName NVARCHAR(200);
+    DECLARE @TicketCount INT;
 
-    SELECT @CurrentStatus = [Status]
+    SELECT @CurrentStatus = [Status],
+           @EventId = [EventId],
+           @BookerName = [BookerName],
+           @TicketCount = [TicketCount]
     FROM [Event].[EventBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId
       AND [BookerEmail] = @BookerEmail;
@@ -35,6 +41,16 @@ BEGIN
         [CancelledAtUtc] = SYSUTCDATETIME(),
         [UpdatedAtUtc] = SYSUTCDATETIME()
     WHERE [BookingId] = @BookingId;
+
+    -- Tell the ORGANISER their seats are free again — they need to know the
+    -- attendee list changed, and they didn't perform this action. The booker gets
+    -- nothing: cancelling is their own tap.
+    EXEC [Notification].[EnqueueEventNotification]
+        @EventId = @EventId,
+        @EventBookingId = @BookingId,
+        @NotificationType = N'EVENT_TICKET_CANCELLED',
+        @BookerName = @BookerName,
+        @TicketCount = @TicketCount;
 
     -- Result set 1: the cancelled booking row (same shape as GetEventBooking RS1).
     SELECT [BookingId],

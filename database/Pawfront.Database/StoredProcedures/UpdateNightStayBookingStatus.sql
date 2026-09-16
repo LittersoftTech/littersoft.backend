@@ -14,6 +14,8 @@
 --     it. This guard REJECTS ONLY; it does not write the EXPIRED status. Settling
 --     abandoned bookings on a clock is the scheduled external job's job, and this
 --     sproc no longer changes status on the basis of elapsed time.
+--   * a stay still in CREATED with under 2 hours to check-in + drop-off has
+--     expired for the same reason (THROW 51273) — also REJECT ONLY.
 -- Other THROWs: 51240 booking not found, 51245 invalid actor/status value.
 --
 -- Engine-settable per actor (other statuses are reached via dedicated sprocs):
@@ -28,12 +30,18 @@
 -- kept for legacy rows) → THROW 51269.
 -- Terminal states: COMPLETED, PROVIDER_DECLINED, PROVIDER_CANCELLED, PARENT_CANCELLED,
 -- PARENT_NO_SHOW, PROVIDER_NO_SHOW.
+-- A geolocation fix may be supplied and is written only for the NO-SHOW
+-- transitions — see [Booking].[UpdateBookingStatus].
 CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
     @NightStayBookingId UNIQUEIDENTIFIER,
     @NewStatus NVARCHAR(48),
     @Actor NVARCHAR(16),
     @ActorId UNIQUEIDENTIFIER,
-    @Note NVARCHAR(500) = NULL
+    @Note NVARCHAR(500) = NULL,
+    @Latitude DECIMAL(9, 6) = NULL,
+    @Longitude DECIMAL(9, 6) = NULL,
+    @AccuracyMetres DECIMAL(9, 2) = NULL,
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -56,6 +64,7 @@ BEGIN
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @CheckInDate DATE;
+    DECLARE @CheckOutDate DATE;
     DECLARE @DropOffTime TIME(0);
     DECLARE @CreatedAtUtc DATETIME2(7);
 
@@ -65,6 +74,7 @@ BEGIN
            @ProviderId = [ProviderId],
            @PetParentId = [PetParentId],
            @CheckInDate = [CheckInDate],
+           @CheckOutDate = [CheckOutDate],
            @DropOffTime = [DropOffTime],
            @CreatedAtUtc = [CreatedAtUtc]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
@@ -91,6 +101,18 @@ BEGIN
     IF @CurrentStatus = N'CREATED' AND @Now >= DATEADD(HOUR, 24, @CreatedAtUtc)
     BEGIN
         THROW 51249, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
+    END
+
+    -- BR-53 (mirror of the single-day 51153 guard): a stay still in CREATED with
+    -- under 2 hours to serviceStart — CheckInDate + DropOffTime for a stay — has
+    -- expired; the provider is out of time to accept it. REJECT ONLY: the
+    -- scheduled external job is the single writer of EXPIRED, so the row stays in
+    -- CREATED until it runs.
+    IF @CurrentStatus = N'CREATED'
+       AND DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+                   CAST(@CheckInDate AS DATETIME2(7))) < DATEADD(HOUR, 2, @Now)
+    BEGIN
+        THROW 51273, 'Booking has expired: it was never accepted and the stay now begins in under 2 hours.', 1;
     END
 
     -- A no-show always names the OTHER party: the provider reports the parent's
@@ -157,9 +179,35 @@ BEGIN
         END
     END
 
+    -- COMPLETED is reachable here through the legacy /status shim as well as
+    -- through [Booking].[CompleteNightStayBooking], so an early pickup must
+    -- release the remaining nights from BOTH paths — otherwise which endpoint
+    -- the provider happened to tap would decide whether the nights came back.
+    -- Same rule and clamps as the dedicated sproc; see it for the reasoning.
+    DECLARE @Today DATE = CAST(@Now AS DATE);
+    DECLARE @ActualCheckOutDate DATE = NULL;
+
+    IF @NewStatus = N'COMPLETED' AND @Today < @CheckOutDate
+    BEGIN
+        SET @ActualCheckOutDate =
+            CASE WHEN @Today <= @CheckInDate THEN DATEADD(DAY, 1, @CheckInDate) ELSE @Today END;
+    END
+
     UPDATE [Booking].[NightStayBookings]
     SET [Status] = @NewStatus,
         [UpdatedAtUtc] = @Now,
+        -- Only ever written on the COMPLETED transition; every other status
+        -- leaves whatever is there alone.
+        [ActualCheckOutDate] = CASE
+            WHEN @NewStatus = N'COMPLETED' THEN @ActualCheckOutDate
+            ELSE [ActualCheckOutDate]
+        END,
+        -- Mirror of Booking.UpdateBookingStatus: a no-show settles the payout as
+        -- 'NO_PAYOUT' instead of leaving it reading 'Pending' forever.
+        [PayoutStatus] = CASE
+            WHEN @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW') THEN N'NO_PAYOUT'
+            ELSE [PayoutStatus]
+        END,
         [CancelledAtUtc] = CASE
             WHEN @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') THEN @Now
             ELSE [CancelledAtUtc]
@@ -170,6 +218,50 @@ BEGIN
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@NightStayBookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- Where the reporting party was when they marked the counterparty absent.
+    IF @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
+       AND @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[NightStayBookingLocationEvents]
+            ([NightStayBookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@NightStayBookingId, N'NoShowMarked', @Actor, @ActorId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
+
+    -- Mirror of Booking.UpdateBookingStatus: notify the OTHER party, in this
+    -- transaction, never the actor who tapped it.
+    DECLARE @NotificationType NVARCHAR(64) =
+        CASE @NewStatus
+            WHEN N'CONFIRMED'          THEN N'BOOKING_ACCEPTED'
+            WHEN N'PROVIDER_DECLINED'  THEN N'BOOKING_DECLINED'
+            WHEN N'PROVIDER_CANCELLED' THEN N'BOOKING_CANCELLED_BY_PROVIDER'
+            WHEN N'PARENT_CANCELLED'   THEN N'BOOKING_CANCELLED_BY_PARENT'
+            WHEN N'COMPLETED'          THEN N'BOOKING_COMPLETED'
+            WHEN N'PARENT_NO_SHOW'     THEN N'BOOKING_NO_SHOW_REPORTED'
+            WHEN N'PROVIDER_NO_SHOW'   THEN N'BOOKING_NO_SHOW_REPORTED'
+        END;
+
+    IF @NotificationType IS NOT NULL
+    BEGIN
+        DECLARE @AbsentParty NVARCHAR(32) =
+            CASE @NewStatus
+                WHEN N'PARENT_NO_SHOW'   THEN N'the customer'
+                WHEN N'PROVIDER_NO_SHOW' THEN N'the provider'
+            END;
+
+        DECLARE @Audience NVARCHAR(16) =
+            CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+
+        EXEC [Notification].[EnqueueBookingNotification]
+            @BookingId = @NightStayBookingId,
+            @IsNightStay = 1,
+            @Audience = @Audience,
+            @NotificationType = @NotificationType,
+            @AbsentParty = @AbsentParty;
+    END
 
     SELECT [NightStayBookingId],
            [ProviderId],

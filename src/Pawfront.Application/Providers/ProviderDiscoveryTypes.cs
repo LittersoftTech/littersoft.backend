@@ -25,6 +25,18 @@ namespace Pawfront.Application.Providers;
 /// offering says "Both" matches either. PetAdoptionAndSale providers have
 /// no offering — they're excluded when this filter is set.
 /// </param>
+/// <param name="DogTemperaments">
+/// Match providers whose offering declares it can handle ANY of the requested
+/// temperaments (OR semantics, same as <paramref name="Animals"/> — a parent
+/// with an anxious dog wants everyone comfortable with anxious dogs). Values
+/// come from <c>Pawfront.Domain.Vocabularies.Behaviour</c>. Null/empty means
+/// "no temperament filter".
+///
+/// Only PetSitter and PetGroomer offerings carry a <c>dogTemperaments</c> list;
+/// the other three categories have no such data, so this filter excludes them
+/// entirely — the same posture <paramref name="Animals"/> takes towards
+/// PetAdoptionAndSale.
+/// </param>
 /// <param name="Skip">Zero-based offset for pagination. Defaults to 0.</param>
 /// <param name="Take">Max rows to return. Clamped 1..200 by the endpoint.</param>
 public sealed record ProviderDiscoveryFilter(
@@ -33,7 +45,8 @@ public sealed record ProviderDiscoveryFilter(
     string? City,
     string? ServiceLocation,
     int Skip,
-    int Take);
+    int Take,
+    IReadOnlyCollection<string>? DogTemperaments = null);
 
 /// <summary>
 /// Wire-level values for the parent-facing serviceLocation filter. The
@@ -70,4 +83,10 @@ public sealed record ProviderSummary(
     // root). Used by the booking-detail location block; not on the discovery
     // card wire shape.
     string? Address = null,
-    string? Zip = null);
+    string? Zip = null,
+    // The dog temperaments this provider says they take. NULL means the CATEGORY
+    // records none at all (vet / trainer / adoption-and-sale offerings have no
+    // such list), which is a different statement from an EMPTY list — a pet
+    // sitter who simply never filled it in. The distinction is what lets a card
+    // report "we cannot answer that" rather than "no".
+    IReadOnlyCollection<string>? DogTemperaments = null);

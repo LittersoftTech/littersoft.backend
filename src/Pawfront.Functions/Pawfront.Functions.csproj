@@ -14,6 +14,40 @@
     <PackageReference Include="Microsoft.ApplicationInsights.WorkerService" Version="3.1.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="2.52.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Timer" Version="4.3.1" />
+    <!-- QueueTrigger for the invoice-generation queue.
+
+         PINNED AT 5.5.4 — DO NOT BUMP TO 5.5.5 without re-checking the host graph.
+         This package also decides which HOST-side WebJobs extension the Functions
+         SDK restores into bin/.azurefunctions, and 5.5.5 pulls
+         Microsoft.Azure.WebJobs.Extensions.Storage.Queues 5.3.8, whose nuspec
+         declares a floor of Microsoft.Extensions.Hosting 10.0.3 on EVERY target
+         framework. That one floor drags the whole Microsoft.Extensions.* graph in
+         that folder up to 10.0.3 — but the Azure Functions v4 host runs on .NET 8
+         and supplies 8.0.x, and those assemblies are not shipped privately in
+         .azurefunctions (the SDK assumes the host provides them). The host then
+         fails to start with:
+
+           Microsoft.Azure.WebJobs.Script: Error configuring services in an
+           external startup class. Microsoft.Azure.WebJobs.Extensions.Storage.Queues:
+           Could not load file or assembly 'Microsoft.Extensions.Options'
+
+         Options is just the first one the loader reaches; 25 assemblies are
+         unsatisfiable in that configuration. 5.5.4 restores WebJobs extension
+         5.3.7, whose floor is Microsoft.Extensions.Hosting 8.0.1, and the whole
+         extension graph stays on 8.x. Revisit when the Functions host itself moves
+         to .NET 10. -->
+    <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Storage.Queues" Version="5.5.4" />
+    <!-- Re-enqueues invoice work the queue lost (the sweep's side of the outbox).
+         Directly used by AzureInvoiceQueuePublisher and InvoiceSweepFunction, so it
+         is referenced explicitly rather than left transitive. 12.21.0 is exactly the
+         floor the queue extension above declares — going lower is an NU1605
+         downgrade error. -->
+    <PackageReference Include="Azure.Storage.Queues" Version="12.21.0" />
+    <!-- Renders the invoice PDFs. Chosen over a headless browser: no native
+         binaries, no ~300MB Chromium download and a fast cold start, which a
+         Consumption-plan Function needs. The cost is that the A4 layout is
+         expressed in C# rather than the supplied HTML. -->
+    <PackageReference Include="QuestPDF" Version="2026.8.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.OpenTelemetry" Version="1.2.0" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
@@ -25,6 +59,12 @@
   <ItemGroup>
     <ProjectReference Include="..\Pawfront.Application\Pawfront.Application.csproj" />
     <ProjectReference Include="..\Pawfront.Infrastructure.Azure\Pawfront.Infrastructure.Azure.csproj" />
+    <!-- The provider's BUSINESS name and address live in their Cosmos offering
+         document, not SQL, and an invoice has to name its issuer. Only the narrow
+         provider-lookup slice is registered (AddPawfrontCosmosProviderLookup) -
+         this host still has no reference to Pawfront.Infrastructure.Sql. -->
+    <ProjectReference Include="..\Pawfront.Infrastructure.Cosmos\Pawfront.Infrastructure.Cosmos.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Firebase\Pawfront.Infrastructure.Firebase.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -32,6 +72,33 @@
          somewhere the published payload carries — same as the two API hosts. -->
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+
+    <!-- Local Firebase service-account JSONs, for development only. The folder is
+         gitignored (**/Secrets/*.json), and CredentialsFilePath resolves a
+         relative path against AppContext.BaseDirectory, so "Secrets/x.json" works.
+         DEPLOYED environments must use CredentialsSecretName + Key Vault instead:
+         anything copied to the output directory ships inside the zip payload, and
+         these files contain a private key. -->
+    <None Update="Secrets\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The Pawfront mark on both invoice letterheads, lifted verbatim from the
+         supplied HTML templates (which carried it as the same base64 PNG).
+         Embedded rather than copied to the output directory so the renderer needs
+         no file system and no network access. -->
+    <EmbeddedResource Include="Invoices\Assets\pawfront-logo.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Secrets\littersoftprovider-firebase-adminsdk-fbsvc-54751b3ba7.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+    <None Update="Secrets\pawfrontparent-89296-firebase-adminsdk-fbsvc-d667471948.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>
 

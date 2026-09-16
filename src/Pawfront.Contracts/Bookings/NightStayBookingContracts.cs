@@ -1,3 +1,5 @@
+using Pawfront.Contracts.Reviews;
+
 namespace Pawfront.Contracts.Bookings;
 
 /// <summary>
@@ -37,7 +39,36 @@ public sealed record NightStayBookingResponse(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? CancelledAtUtc,
-    Guid? PetId);
+    Guid? PetId,
+    // The caller's own open support ticket on this stay — see the trio's full
+    // note on BookingResponse. Mine only, open only, false/null on writes.
+    bool IsTicketRaisedByMe = false,
+    Guid? TicketId = null,
+    string? TicketRef = null,
+    // Whether the OTHER party on this booking is blocked, in either direction.
+    // A booking outlives the block that severs the pair -- the history is real
+    // and both sides keep it -- so the flag exists to let the app label an
+    // existing booking rather than leave the user wondering why they can no
+    // longer message or rebook.
+    bool IsBlocked = false,
+    // True only when the CALLER placed it: the one case where an Unblock action
+    // belongs. A block placed against them reads true/false and should show a
+    // neutral state -- saying more would confirm the other party acted.
+    bool BlockedByMe = false,
+    // The customer card. Boarding is App-only, so this response previously
+    // carried NO customer information at all -- not even a name -- and a
+    // provider's stay list could not be rendered without a per-row call to the
+    // booking detail.
+    //
+    // Populated on the PROVIDER's stay list only; null on the parent's own card
+    // list (the parent IS the customer there) and on the write paths. Resolved
+    // live, so a deleted account reads its anonymised placeholder.
+    string? CustomerName = null,
+    string? CustomerPhotoUrl = null,
+    string? PetName = null,
+    string? AnimalType = null,
+    string? Breed = null,
+    string? PetGender = null);
 
 /// <summary>
 /// Body for a night-stay modification request
@@ -91,7 +122,35 @@ public sealed record NightStayBookingDetailResponse(
     // ProviderLocation). Fields are null when the type is unset or unresolvable.
     BookingLocationDetailsSection Location,
     StartOtpResponse? StartOtp,
-    NightStayBookingModificationResponse? PendingModification);
+    NightStayBookingModificationResponse? PendingModification,
+    // The caller's OWN review of this stay, plus whether it is in a reviewable
+    // state. Same per-host split as the single-day detail: each host reports its
+    // own side only.
+    BookingReviewDetailsSection? Review = null,
+    // The caller's own open support ticket on this stay — see the trio's full
+    // note on BookingResponse.
+    bool IsTicketRaisedByMe = false,
+    Guid? TicketId = null,
+    string? TicketRef = null,
+    // Whether the OTHER party on this booking is blocked, in either direction.
+    // A booking outlives the block that severs the pair -- the history is real
+    // and both sides keep it -- so the flag exists to let the app label an
+    // existing booking rather than leave the user wondering why they can no
+    // longer message or rebook.
+    bool IsBlocked = false,
+    // True only when the CALLER placed it: the one case where an Unblock action
+    // belongs. A block placed against them reads true/false and should show a
+    // neutral state -- saying more would confirm the other party acted.
+    bool BlockedByMe = false,
+    // Has this booking actually been MODIFIED? True once either party accepted a
+    // schedule change, which is the only thing that rewrites the booking's own
+    // date/time. A proposal that was REQUESTED and then declined leaves the terms
+    // exactly as they were, so it deliberately does not count -- for the full
+    // history of proposals, including ones that went nowhere, read
+    // GET .../bookings/{bookingId}/status-history. Unrelated to
+    // pendingModification above, which is the open proposal (if any); a booking
+    // modified last week and untouched since reads true here and null there.
+    bool IsModificationDone = false);
 
 /// <summary>The stay/job facts: identity, the check-in/check-out range + nights,
 /// drop-off/pick-up times, status, and where the provider delivers the service.</summary>
@@ -121,11 +180,20 @@ public sealed record NightStayBookingDetailsSection(
 /// <summary>The money facts for a night stay. <c>PricePerNight</c> is the offering's
 /// per-night rate; <c>TotalAmount</c> is rate × nights; <c>PawfrontFee</c> is
 /// <c>FeePercentage</c> percent of the total. Pricing is null when the offering can't
-/// be resolved. Payout fields are capture-only for now.</summary>
+/// be resolved.
+///
+/// The payout block mirrors <see cref="PaymentDetailsSection"/>: <c>PayoutId</c>
+/// is minted when the stay COMPLETES and <c>PayoutStatus</c> flips from 'Pending'
+/// to 'Paid' when the provider records the payment; <c>PayoutMethod</c> ('Cash' /
+/// 'Digital') and <c>PaidAtUtc</c> come from the payment ledger row and are null
+/// until then. 'NO_PAYOUT' is likewise terminal once the stay ends as
+/// PARENT_NO_SHOW / PROVIDER_NO_SHOW / EXPIRED.</summary>
 public sealed record NightStayPaymentDetailsSection(
     decimal? PricePerNight,
     decimal? TotalAmount,
     decimal? PawfrontFee,
     decimal FeePercentage,
     string PayoutStatus,
-    string? PayoutId);
+    string? PayoutId,
+    string? PayoutMethod = null,
+    DateTimeOffset? PaidAtUtc = null);

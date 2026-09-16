@@ -67,7 +67,11 @@ BEGIN
           -- Full-day closure: ANY active booking on a covered date conflicts.
           @StartTime IS NULL
           -- Partial-day closure: only bookings overlapping the time window conflict.
-          OR (b.[StartTime] < @EndTime AND b.[EndTime] > @StartTime)
+          -- A booking occupies up to COALESCE([ActualEndTime], [EndTime]), the
+          -- same expression the capacity checks use, so a job that finished
+          -- early does not stand in the way of closing the hours it released —
+          -- there is nothing left for the provider to move or cancel.
+          OR (b.[StartTime] < @EndTime AND COALESCE(b.[ActualEndTime], b.[EndTime]) > @StartTime)
       );
 
     IF EXISTS (SELECT 1 FROM @Conflicts)

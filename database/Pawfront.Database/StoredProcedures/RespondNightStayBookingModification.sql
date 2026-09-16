@@ -66,6 +66,16 @@ BEGIN
             DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
                     CAST(@CheckInDate AS DATETIME2(7)));
 
+        -- Mirror of the single-day sproc: the 24-hour review window is the other
+        -- deadline (2026-08-04), and whichever arrives first ends the proposal.
+        IF EXISTS (
+            SELECT 1 FROM [Booking].[NightStayBookingModifications]
+            WHERE [NightStayBookingId] = @NightStayBookingId
+              AND @Now >= DATEADD(HOUR, 24, [CreatedAtUtc]))
+        BEGIN
+            THROW 51272, 'The modification request timed out after 24 hours and can no longer be answered.', 1;
+        END
+
         IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
         BEGIN
             THROW 51272, 'The modification request expired 2 hours before the service start time and can no longer be answered.', 1;
@@ -106,6 +116,10 @@ BEGIN
     IF @Accept = 1
     BEGIN
         -- Per-night capacity re-check on the proposed range, excluding this stay.
+        -- Other stays cover nights only up to
+        -- COALESCE([ActualCheckOutDate], [CheckOutDate]), so nights released by
+        -- an early pickup are available to a reschedule too — the same
+        -- expression [Booking].[CreateNightStayBooking] counts with.
         DECLARE @FullNight DATE;
         ;WITH [Nights] AS
         (
@@ -120,7 +134,7 @@ BEGIN
            AND b.[NightStayBookingId] <> @NightStayBookingId
            AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
            AND b.[CheckInDate] <= n.[Night]
-           AND b.[CheckOutDate] > n.[Night]
+           AND COALESCE(b.[ActualCheckOutDate], b.[CheckOutDate]) > n.[Night]
         GROUP BY n.[Night]
         HAVING COUNT(b.[NightStayBookingId]) >= @Capacity
         OPTION (MAXRECURSION 366);
@@ -168,6 +182,47 @@ BEGIN
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@NightStayBookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- The responder tapped it; the REQUESTER is waiting to hear. Mirror of
+    -- Booking.RespondBookingModification.
+    DECLARE @RespAudience NVARCHAR(16) =
+        CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+    DECLARE @RespType NVARCHAR(64) =
+        CASE
+            WHEN @Actor = N'Provider' AND @Accept = 1 THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER'
+            WHEN @Actor = N'Provider'                 THEN N'BOOKING_MODIFICATION_DECLINED_BY_PROVIDER'
+            WHEN @Accept = 1                          THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PARENT'
+            ELSE                                           N'BOOKING_MODIFICATION_DECLINED_BY_PARENT'
+        END;
+
+    -- Both ends of the proposed stay as UTC instants for the renderer to localise.
+    -- The hand-over times are re-read from the row rather than recomputed from the
+    -- acknowledged-terms CASEs above: on accept the UPDATE has already applied
+    -- them, on decline the row is untouched, so this is correct either way without
+    -- a second copy of that logic. As with the request side, the copy's "new time"
+    -- slot carries the new check-out DATE — the renderer applies that for
+    -- night-stay rows.
+    DECLARE @EffDropOffTime TIME(0), @EffPickUpTime TIME(0);
+    SELECT @EffDropOffTime = [DropOffTime], @EffPickUpTime = [PickUpTime]
+    FROM [Booking].[NightStayBookings]
+    WHERE [NightStayBookingId] = @NightStayBookingId;
+
+    DECLARE @RespStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EffDropOffTime),
+                CAST(@PIn AS DATETIME2(0)));
+    DECLARE @RespCheckOutUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EffPickUpTime),
+                CAST(@POut AS DATETIME2(0)));
+    DECLARE @RespDedupe NVARCHAR(64) = CAST(@ModId AS NVARCHAR(36));
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = @RespAudience,
+        @NotificationType = @RespType,
+        @NewServiceStartUtc = @RespStartUtc,
+        @NewCheckOutUtc = @RespCheckOutUtc,
+        @DedupeSuffix = @RespDedupe;
 
     SELECT [NightStayBookingId],
            [ProviderId],

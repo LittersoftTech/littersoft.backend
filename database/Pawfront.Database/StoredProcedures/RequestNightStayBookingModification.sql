@@ -42,11 +42,15 @@ BEGIN
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @CheckInDate DATE;
     DECLARE @DropOffTime TIME(0);
+    -- Only used to turn the proposed check-out DATE into an instant for the
+    -- notification's timezone conversion.
+    DECLARE @PickUpTime TIME(0);
 
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId],
-           @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime]
+           @CheckInDate = [CheckInDate], @DropOffTime = [DropOffTime],
+           @PickUpTime = [PickUpTime]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -84,6 +88,10 @@ BEGIN
         THROW 51263, 'A modification request is already awaiting a response.', 1;
     END
 
+    -- Captured so the notification's dedupe key scopes to THIS proposal, letting a
+    -- later proposal on the same stay notify again.
+    DECLARE @InsertedModification TABLE ([NightStayBookingModificationId] UNIQUEIDENTIFIER);
+
     INSERT INTO [Booking].[NightStayBookingModifications]
         ([NightStayBookingId], [RequestedByActor], [RequestedByActorId],
          [ProposedCheckInDate], [ProposedCheckOutDate], [RequestNote],
@@ -91,6 +99,7 @@ BEGIN
          [AcknowledgedDropOffTime], [AcknowledgedPickUpTime],
          [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
          [AcknowledgedLatitude], [AcknowledgedLongitude])
+    OUTPUT inserted.[NightStayBookingModificationId] INTO @InsertedModification
     VALUES
         (@NightStayBookingId, @Actor, @ActorId, @ProposedCheckInDate, @ProposedCheckOutDate, @Note,
          ISNULL(@HasAcknowledgedTerms, 0), @AcknowledgedPricePerNight, @AcknowledgedCancellationPolicyHours,
@@ -110,6 +119,48 @@ BEGIN
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     VALUES
         (@NightStayBookingId, @CurrentStatus, @NewStatus, @Actor, @ActorId, @Note);
+
+    -- The counterparty has to review it. Mirror of Booking.RequestBookingModification.
+    DECLARE @ReqAudience NVARCHAR(16) =
+        CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
+    DECLARE @ReqType NVARCHAR(64) =
+        CASE WHEN @Actor = N'Provider'
+             THEN N'BOOKING_MODIFICATION_REQUESTED_BY_PROVIDER'
+             ELSE N'BOOKING_MODIFICATION_REQUESTED_BY_PARENT' END;
+    DECLARE @ReqDedupe NVARCHAR(64) =
+        CAST((SELECT TOP 1 [NightStayBookingModificationId] FROM @InsertedModification) AS NVARCHAR(36));
+
+    -- Both ends of the proposed stay as UTC instants, pinned to the booking's
+    -- hand-over times so the renderer can localise them. A stay is proposed as a
+    -- date range, so the copy's "new time" slot carries the new check-out DATE
+    -- rather than a clock time — the renderer applies that for night-stay rows.
+    DECLARE @ProposedStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+                CAST(@ProposedCheckInDate AS DATETIME2(0)));
+    DECLARE @ProposedCheckOutUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PickUpTime),
+                CAST(@ProposedCheckOutDate AS DATETIME2(0)));
+
+    -- How long the counterparty actually has, as the pair of readings the renderer
+    -- turns into a length. Mirror of Booking.RequestBookingModification — see the
+    -- note there for why a flat "24 hours" is wrong; the only difference is that a
+    -- stay's service starts at drop-off on the check-in day.
+    DECLARE @RequestedAtUtc DATETIME2(0) = @Now;
+    DECLARE @ReviewByUtc DATETIME2(0) =
+        CASE WHEN DATEADD(HOUR, 24, @Now) < DATEADD(HOUR, -2, @StartsAtUtc)
+             THEN DATEADD(HOUR, 24, @Now)
+             ELSE DATEADD(HOUR, -2, @StartsAtUtc) END;
+
+    EXEC [Notification].[EnqueueBookingNotification]
+        @BookingId = @NightStayBookingId,
+        @IsNightStay = 1,
+        @Audience = @ReqAudience,
+        @NotificationType = @ReqType,
+        @NewServiceStartUtc = @ProposedStartUtc,
+        @NewCheckOutUtc = @ProposedCheckOutUtc,
+        @ReviewByUtc = @ReviewByUtc,
+        @RequestedAtUtc = @RequestedAtUtc,
+        @DedupeSuffix = @ReqDedupe;
 
     SELECT [NightStayBookingId],
            [ProviderId],

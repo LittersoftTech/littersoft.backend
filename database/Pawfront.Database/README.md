@@ -292,6 +292,7 @@ erDiagram
         DATE             BookingDate
         TIME             StartTime
         TIME             EndTime
+        TIME             ActualEndTime        "nullable; set only on an EARLY finish"
         NVARCHAR         Status               "Confirmed|Cancelled|Completed|NoShow"
         DATETIME2        CancelledAtUtc       "nullable; required when Status=Cancelled"
     }
@@ -544,6 +545,17 @@ by `POST /api/v1/pet-parents/{petParentId}/pets` (sproc
   joined into the booking-detail `petDetails` section (with `Breed` and
   `VaccinationStatus`) by `Booking.GetBookingDetail` /
   `Booking.GetNightStayBookingDetail`.
+- `IsDeleted` / `DeletedAtUtc` (2026-08-05) — `DELETE /pets/{petId}` is a **soft
+  delete**: the row survives because `Booking.Bookings.PetId` references it and
+  `Booking.GetBookingDetail` resolves `petDetails` through that join, so removing
+  it would blank the pet out of the *provider's* record of a job they performed.
+  `Parent.DeletePetParentPet` scrubs the identifying fields (name → `Deleted Pet`,
+  microchip → NULL, photo / description / free-text medical → NULL) and sets the
+  flag; the animal facts stay. Every parent-facing read, the ownership reader
+  behind `/pets/{petId}/*`, the onboarding-status pet stages, and both booking
+  creates filter on `IsDeleted = 0`. Booking reads deliberately do **not** — that
+  history is the reason the row is kept. `Parent.DeletePetParent` sets the same
+  flag on the parent's pets.
 
 ### `Parent.PetPhotos`
 Pet photos (gallery). One row per uploaded image — a pet can have many
@@ -551,8 +563,10 @@ photos. Inserted by `POST /api/v1/pets/{petId}/photos` (multipart) via
 sproc `Parent.AddPetPhoto`.
 
 - `PetPhotoId` — PK.
-- `PetId` — FK → `Parent.Pets`, `ON DELETE CASCADE` (deleting a pet
-  removes its photo rows; blobs themselves are not cleaned up).
+- `PetId` — FK → `Parent.Pets`, `ON DELETE CASCADE`. The cascade is now
+  vestigial for the pet-delete path — that is a soft delete and removes these
+  rows explicitly — but still covers any genuine row removal. Blobs are not
+  cleaned up either way.
 - `PhotoUrl` — NVARCHAR(1000), the blob URL in the `pet-photos`
   folder of the shared `provider-images` container.
 - Timestamps.
@@ -686,6 +700,37 @@ create names a `PetId`; Custom walk-ins are unaffected. The night-stay twin uses
   bookings remain meaningful even if the provider deregisters or changes
   sub-category.
 - `BookingDate`, `StartTime`, `EndTime` — `StartTime < EndTime` (CHECK).
+- `ActualEndTime` (nullable) — when the job actually finished, **if it finished
+  early**; stamped by `Booking.CompleteBooking` (and the legacy `/status` shim)
+  and left NULL whenever the booked window ran its course. Its twin on
+  `Booking.NightStayBookings` is `ActualCheckOutDate` (nullable DATE — the day
+  the pet actually went home, floored at one night).
+
+  Both exist **only to release the unused remainder back to capacity**: a 6-hour
+  day care wrapped up after 3 hours, or a 3-night stay collected a day early,
+  used to keep the rest blocked so nobody else could book it. Occupancy is
+  therefore `[StartTime, COALESCE(ActualEndTime, EndTime))` and
+  `[CheckInDate, COALESCE(ActualCheckOutDate, CheckOutDate))`, and **every**
+  capacity, slot, agenda, closure-conflict and active-status query uses those
+  exact expressions — `CreateBooking`, `CreateCustomBooking`,
+  `CreateNightStayBooking`, `GetBookingsForDate`, `GetAgendaForDate`,
+  `GetNightStayOccupancy`, both `Respond*Modification` sprocs,
+  `Provider.CreateClosures` and `Provider.SetProviderActiveStatus`. If you add
+  another one, use the same expression.
+
+  They are deliberately **NOT** part of what the booking cost or was agreed to
+  be: pricing (`Booking.BookingAmounts`, the booking-detail reads), the
+  creation-time term snapshots and every wire contract keep reading `EndTime` /
+  `CheckOutDate`, so finishing early frees the slot **without** re-pricing or
+  refunding a job the parent already agreed to. Making it also refund is a
+  product decision, not a capacity one.
+
+  CHECKs clamp them so an early finish can only ever *shrink* the window, never
+  extend or invert it (`ActualEndTime` between `StartTime` and `EndTime`
+  inclusive; `ActualCheckOutDate` strictly after `CheckInDate` and at most
+  `CheckOutDate`). NULL — the value on every pre-existing row — means "occupied
+  everything it booked", so the columns are behaviour-neutral until a job is
+  completed early.
 - `Status` — expanded "job" lifecycle: `CREATED` → `CONFIRMED` →
   `START_JOB` → `IN_PROGRESS` → `COMPLETED` → `PAID` (the provider taps "Start Job" →
   `START_JOB` (start-OTP issued to the parent), enters the parent's start-code →
@@ -751,9 +796,11 @@ create names a `PetId`; Custom walk-ins are unaffected. The night-stay twin uses
   address for `ProviderLocation`). Frozen so a later address edit never moves an
   existing booking; the detail read prefers these and falls back to live resolution
   only for legacy rows (all-NULL). NULL for Custom walk-ins.
-- `PayoutStatus` — `Pending` / `Processing` / `Paid` / `Failed` (CHECK),
-  default `Pending`. Capture-only for now — the actual provider-payout
-  execution leg is not built yet.
+- `PayoutStatus` — `Pending` / `Processing` / `Paid` / `Failed` / `NO_PAYOUT`
+  (CHECK), default `Pending`. Capture-only for now — the actual provider-payout
+  execution leg is not built yet. **`NO_PAYOUT` is terminal**: the job ended as
+  `PARENT_NO_SHOW` / `PROVIDER_NO_SHOW` / `EXPIRED`, so no money can ever move
+  on it.
 - `PayoutId` — external payout reference; NULL until a payout is issued.
 - Customer/pet detail for **App** bookings is NOT stored here (those columns
   are Custom-walk-in only) — the booking-detail read
@@ -833,11 +880,111 @@ booking tables — a payments ledger should outlive booking deletion. Indexed on
 `ProviderId` (`IX_BookingPayments_Provider`) for the per-provider "total received"
 report. Written by `MarkBookingPaid` / `MarkNightStayBookingPaid`.
 
+**Payout tracking (2026-08-05).** The long-dormant `PayoutStatus` / `PayoutId`
+columns on both booking tables are now written. `CompleteBooking` /
+`CompleteNightStayBooking` mint `PayoutId` (`PO-000123`) from the new
+`Booking.PayoutNumberSequence` and leave `PayoutStatus = 'Pending'`; the mark-paid
+sprocs settle it to `'Paid'`. Cash is the only method today, so recording the
+payment settles the payout in the same step — there is no separate transfer leg.
+A SEQUENCE rather than a per-table IDENTITY because both booking kinds share one
+payout namespace, exactly as they share this ledger. **Custom walk-ins are never
+stamped** — they are off-platform, carry no commission, and can never reach `PAID`,
+so a payout on one would sit "awaiting payment" forever.
+
+**`NO_PAYOUT` closes the other end (2026-08-09).** A job that ends as
+`PARENT_NO_SHOW` / `PROVIDER_NO_SHOW` / `EXPIRED` produces no money ever, but its
+`PayoutStatus` kept reading `Pending` — claiming a payout was on its way. Those
+three outcomes now settle it to the terminal `NO_PAYOUT`, written by the same four
+procedures that write the statuses: `UpdateBookingStatus` /
+`UpdateNightStayBookingStatus` (a party reports the no-show),
+`SettleUnstartedJobsAsNoShow` and `ExpireStaleCreatedBookings` (the sweep derives
+it). Both writers of a settled no-show must agree, so a manually reported one and
+an auto-settled one are indistinguishable in the column. Cancellations, declines
+and `OTP_MAX_ATTEMPTS_EXCEEDED` deliberately still read `Pending` — the refund /
+cancellation-fee flow is not built, so it is not yet settled whether money can
+move on those.
+
+`Booking.BookingAmounts` (inline TVF) is the **single definition of what a booking
+is worth**, read by all four earnings/spend sprocs so a provider's "earned" and a
+parent's "spent" on the same booking can never disagree. It unifies both booking
+tables, takes `@ProviderId` **or** `@PetParentId` (the other NULL), and returns
+every booking with `Status`, `IsEarned` (COMPLETED/PAID), `IsPaid`, `IsPrivate`,
+`Amount`, `Fee`. The ledger row wins whenever one exists (its figures are frozen at
+payment time, so a later fee-percentage change can't rewrite history); unpaid
+bookings are priced from the creation-time price-lock, and **that arithmetic
+mirrors `BookingService.GetDetailAsync` / `NightStayBookingService` exactly —
+change the C# and you must change the TVF.** Amounts are attributed to the
+**service** date (`BookingDate` / `CheckOutDate`), never the payment date.
+
+Consumers: `GetProviderEarningsSummary`, `ListProviderEarningsBookings`,
+`GetPetParentBookingSummary`, `ListPetParentBookingHistory` (each paginated pair's
+`WHERE` clause is deliberately identical to its summary's — change one, change the
+other).
+
 `Booking.Bookings.Status`, `NightStayBookings.Status`, and the two history
 tables' `From/ToStatus` columns are `NVARCHAR(48)` and accept the expanded status
 set (decline, the job states `START_JOB` / `IN_PROGRESS`, `PAID`, the retired
 `JOB_STARTED` and `ENDING`, six modification states; `APPROVAL_NEEDED` retained
 for legacy rows).
+
+## Review schema
+
+Reviews exchanged between the two parties to a **finished** booking. Its own schema
+rather than a home under `Booking` because a review is about neither party's profile
+nor the booking itself, and because the subject set is expected to widen (events were
+scoped out of the first cut).
+
+### `Review.BookingReviews`
+**One table holds both directions**, discriminated by `ReviewerType`:
+
+| `ReviewerType` | Author | Subject | Carries |
+|---|---|---|---|
+| `Parent` | the pet parent | the provider | rating 1–5, optional comment, optional photos |
+| `Provider` | the provider | the pet parent | rating 1–5 only |
+
+`{ BookingReviewId, BookingType ('SingleDay' | 'NightStay'), BookingId, ReviewerType,
+ProviderId, PetParentId, Rating TINYINT 1..5, Comment NVARCHAR(1000) NULL,
+CreatedAtUtc, UpdatedAtUtc }`.
+
+- **UNIQUE `(BookingType, BookingId, ReviewerType)`** — one review per booking per
+  direction. The submit endpoint is an **upsert**, so this is also what makes a
+  concurrent double-submit safe rather than duplicating.
+- **No FK on `BookingId`**, the same posture as `Booking.BookingPayments`: one column
+  cannot reference two tables. `Review.UpsertBookingReview` is what proves the booking
+  exists, that the caller is a party to it, and that it has reached
+  **`COMPLETED` or `PAID`**. PAID counts as well as COMPLETED because it sits
+  downstream — gating on COMPLETED alone would close the review window the moment the
+  provider recorded the payment, which for cash is often immediate.
+- **`CK_BookingReviews_ProviderRatingHasNoComment`** refuses a comment on a
+  provider-authored row, which is the product rule ("providers rate, they do not
+  write") made structural.
+- **Both party ids are always stored** whichever direction the review runs in (one is
+  the author, the other the subject), so read paths need no CASE. `PetParentId` is
+  `NOT NULL` because a review requires an **App** booking — a Custom walk-in has no
+  pet-parent record to author or receive one (THROW `51303`).
+- **`CreatedAtUtc` does not move on an edit.** It is the date the review was *given*,
+  which is what the list sorts on and the app displays; `UpdatedAtUtc` is what moves.
+- **Names are NOT denormalised here.** `Review.ListProviderReviews` joins
+  `Parent.PetParents` live, so a parent who deletes their account correctly reads
+  "Deleted User" rather than leaving their real name frozen in every review they wrote.
+- Three **filtered** indexes:
+  `IX_BookingReviews_Provider_Created` (`ProviderId`, `CreatedAtUtc DESC`)
+  `WHERE ReviewerType = 'Parent'` drives the provider-reviews list and its summary;
+  `IX_BookingReviews_PetParent` `WHERE ReviewerType = 'Provider'` drives the parent's
+  aggregate rating on the provider-facing customer card; and
+  `IX_BookingReviews_PetParent_Authored` `WHERE ReviewerType = 'Parent'` drives
+  `Review.ListPetParentBookingReviews`, the `review` block on the parent's two "my
+  bookings" lists. The last two sit on the same column but cannot be merged — each
+  is filtered to the opposite direction, which is the whole point.
+
+### `Review.BookingReviewPhotos`
+`{ BookingReviewPhotoId, BookingReviewId FK → BookingReviews ON DELETE CASCADE,
+PhotoUrl, CreatedAtUtc }` — one row per uploaded photo, same shape as
+`Booking.BookingEvidence`. Blobs live under the `review-photos/<bookingReviewId>/`
+folder, which is **why photos are a second API call after the review exists**: the
+blob path is keyed by the review's own id. Capped at **5 per review**, enforced in
+`Review.AddBookingReviewPhoto` under `UPDLOCK + HOLDLOCK` — the count is a race, so
+C# alone could not hold it. Only parent-authored reviews can carry photos.
 
 ## User-defined types
 
@@ -871,6 +1018,7 @@ so the deploy script always reflects the latest version.
 | `Provider.DeactivateProviderService`| Flip `IsActive = 0` for one (ProviderId, ServiceType). |
 | `Provider.ListProviderServices`     | Returns active rows; `@IncludeInactive = 1` returns all. |
 | `Provider.GetProviderService`       | Point-read by `ServiceId`. |
+| `Provider.SetProviderActiveStatus`  | Flip the master `Providers.IsActive` switch. Deactivation collects the provider's future active bookings under `UPDLOCK + HOLDLOCK` (race-safe against `Booking.CreateBooking`) and returns them as a 10-column conflict result set **without writing**, unless `@AcknowledgeExistingBookings = 1` — "honour bookings & deactivate", which flips the switch anyway and reports the count on the 4-column success set. The honoured bookings are untouched: `IsActive` is read only by the three booking CREATE procedures, so they stay startable and completable. Throws `51100` if the provider is missing, `51115` if the account has been deleted. |
 | `Provider.SaveProviderWeeklyAvailability` | Atomic replace of all 7 day rows. |
 | `Provider.GetProviderWeeklyAvailability`  | Read all rows for a provider. |
 | `Provider.SaveProviderPayoutMethods` | Replace the junction rows. |
@@ -886,7 +1034,7 @@ so the deploy script always reflects the latest version.
 | `Provider.GetActiveClosuresForDate` | Per-service lookup used by the slot service and booking validator. |
 | `Booking.CreateBooking`             | Validates ServiceId belongs to provider + active; race-safe capacity check per service; insert. |
 | `Booking.GetBooking`                | Point-read by `BookingId` (flat row; backs the internal callers). |
-| `Booking.GetBookingDetail`          | Enriched point-read for the booking-detail endpoints — base row + `JobNumber` + payout fields, LEFT JOINed with `Parent.PetParents` + `Parent.Pets`. |
+| `Booking.GetBookingDetail`          | Enriched point-read for the booking-detail endpoints — base row + `JobNumber` + payout fields, LEFT JOINed with `Parent.PetParents` + `Parent.Pets` + `Provider.Providers`, and (2026-08-05) with `Booking.BookingPayments` for `PaymentMethod` / `PaidAtUtc` — the ledger row is the only place the `Cash`/`Digital` is recorded, so both stay NULL until the booking is `PAID`. The pet join is deliberately NOT filtered on `Parent.Pets.IsDeleted`. |
 | `Booking.CancelBooking`             | Booker-only cancellation; throws `51063/51064/51065`. |
 | `Booking.ListBookingsByProvider`    | Optional `@ServiceId` + `@BookingDate` filters. |
 | `Booking.ListBookingsByPetParent`   | Full history for a pet parent. |
@@ -910,7 +1058,14 @@ so the deploy script always reflects the latest version.
 | `Parent.AddPetParentPhoto`          | Insert one general pet-parent gallery photo row. Throws `51212` if the parent is missing. |
 | `Parent.ListPetParentPhotos`        | List the parent's gallery photos, oldest-first. |
 | `Parent.DeletePetParentPhoto`       | Delete one photo scoped by `PetParentId` + `PetParentPhotoId`; returns the URL for blob cleanup. Throws `51213` if missing. |
-| `Parent.DeletePetParent`            | Account delete = **anonymise + permanently disable**, NOT a row delete. Scrubs the personal fields, sets `IsDeleted = 1` + `DeletedAtUtc`, severs the auth identity (freeing the real Firebase uid + mobile number for a fresh sign-up), anonymises the parent's `Pets` in place, and deletes only operational data + media (device tokens, OTPs, identity doc, photo galleries, next-consultations). **Retains** bookings, night-stay bookings, organised events, event tickets and `Booking.BookingPayments` — the `PetParentId` stays valid so neither party loses history. Idempotent. Returns 2 result sets (summary + blob URLs). Throws `51223` if the parent is missing. |
+| `Parent.DeletePetParent`            | Account delete = **anonymise + permanently disable**, NOT a row delete. **Refuses while the parent has unfinished jobs** (any booking of either kind in a non-terminal status) — nothing is scrubbed and the blocking jobs come back in result set 3, which the API surfaces as 409 `PendingJobsExist`; the check runs under the `UPDLOCK + HOLDLOCK` already held on the parent row, so it is race-safe against a concurrent booking create. Otherwise: scrubs the personal fields, sets `IsDeleted = 1` + `DeletedAtUtc`, severs the auth identity (freeing the real Firebase uid + mobile number for a fresh sign-up), anonymises the parent's `Pets` in place (+ marks them `IsDeleted`), and deletes only operational data + media (device tokens, OTPs, identity doc, photo galleries, next-consultations). **Retains** bookings, night-stay bookings, organised events, event tickets and `Booking.BookingPayments` — the `PetParentId` stays valid so neither party loses history. Idempotent. Returns 3 result sets (summary incl. `BlockedByPendingJobs`, blob URLs, pending jobs). Throws `51223` if the parent is missing. |
+
+| `Review.UpsertBookingReview`        | Records or replaces one party's review. **Deliberately ONE procedure for both booking kinds and both directions** rather than the night-stay twin pair used elsewhere — the only difference is which table supplies the party ids and status, so twinning would just be two copies of the same gate. Enforces: booking exists (`51300`), caller is that party (`51301`), status is `COMPLETED` or `PAID` (`51302`), App booking (`51303`). The booking read takes **no** `UPDLOCK` — once reviewable, always reviewable (`COMPLETED` → `PAID` is the only exit and `PAID` is terminal), so a concurrent status change cannot invalidate an accepted review; the lock that matters is `UPDLOCK + HOLDLOCK` over the unique key, which serialises a concurrent double-submit into an update. Returns 2 result sets (review + photos). |
+| `Review.GetBookingReview`           | One party's review of a booking, or an **empty** first result set when they have not written one (the ordinary "not reviewed yet" case, not an error). Returns 2 result sets (review + photos). |
+| `Review.AddBookingReviewPhoto`      | Attach one photo URL to a parent's review. Scoped to the review's own author; the provider direction is rating-only. The `@MaxPhotos` cap is enforced here under `UPDLOCK + HOLDLOCK` because the count is a race. Throws `51305` / `51306`. |
+| `Review.DeleteBookingReviewPhoto`   | Remove one photo scoped by review + author; returns the URL for blob cleanup. The review itself is not deletable, so this never strands a rating. Throws `51307`. |
+| `Review.ListProviderReviews`        | The reviews parents have left for a provider. 3 result sets: **whole-population** summary (count, average, 1–5 histogram — not page-scoped, so the profile header doesn't shift as the reader pages), the ordered page, then that page's photos pre-joined (avoiding an N+1 across the page). `@SortBy` `Date`\|`Rating`, `@SortDirection` `Asc`\|`Desc`, with a `BookingReviewId` tie-break so OFFSET paging can't repeat or skip. Joins `Parent.PetParents` **live** so a deleted account reads "Deleted User". |
+| `Review.GetPetParentRatingSummary`  | A pet parent's average + count as rated BY providers; feeds the `Rating` field on the provider-facing customer card. Always returns exactly one row (NULL average, count 0 when unrated). |
 
 Custom THROW codes used by sprocs:
 
@@ -961,6 +1116,14 @@ Custom THROW codes used by sprocs:
 | 51222 | Mobile number already registered to another pet parent (profile complete) → API `409 MobileNumberAlreadyExists`. |
 | 51223 | Pet parent not found (account delete). |
 | 51224 | Pet parent account has been deleted (anonymised + permanently disabled) — thrown by the profile-update sproc, since an edit would undo the anonymisation → API `409 ParentAccountDeleted`. |
+| 51300 | Booking not found (review submit) → API `404 BookingNotFound` / `404 NightStayBookingNotFound`. |
+| 51301 | Caller is not the party the review direction requires → API `403 Forbidden`. |
+| 51302 | Booking has not reached `COMPLETED` or `PAID` → API `409 BookingNotReviewable`. |
+| 51303 | Custom walk-in — no pet-parent record to author or receive a review → API `400 ReviewNotAppBooking`. |
+| 51304 | Invalid review argument (bad bookingType / reviewerType / rating). Defensive; the API validates first. |
+| 51305 | Review not found for this author (review-photo add). Unknown id and "not yours" are one case, so it can't probe whether a review exists → API `404 ReviewNotFound`. |
+| 51306 | The review already has the maximum number of photos → API `409 ReviewPhotoLimitReached`. |
+| 51307 | Review photo not found for this review + author → API `404 ReviewPhotoNotFound`. |
 
 ## Deployment
 

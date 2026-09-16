@@ -25,6 +25,23 @@ CREATE TABLE [Booking].[NightStayBookings]
     [CheckInDate] DATE NOT NULL,
     -- Checkout day; NOT a stayed night. Stayed nights = [CheckInDate, CheckOutDate).
     [CheckOutDate] DATE NOT NULL,
+    -- The day the pet ACTUALLY went home, if the stay ended early. Stamped by
+    -- [Booking].[CompleteNightStayBooking] and left NULL when the stay ran to
+    -- its booked checkout (or past it), so NULL reads as "occupied every night
+    -- it booked". Same [CheckInDate, X) semantics as [CheckOutDate]: this day is
+    -- the pickup day, not a stayed night.
+    --
+    -- This exists ONLY to release the unused nights back to capacity: a 3-night
+    -- stay collected a day early should not keep that last night blocked.
+    -- Per-night occupancy is therefore
+    -- [CheckInDate, COALESCE([ActualCheckOutDate], [CheckOutDate])) — the
+    -- expression every capacity and availability query uses.
+    --
+    -- Like the single-day [ActualEndTime] it is NOT a re-statement of what the
+    -- stay cost: pricing ([Booking].[BookingAmounts], the detail read) still
+    -- bills [CheckInDate] -> [CheckOutDate], so an early pickup frees the night
+    -- without refunding it. That is a product decision, not a capacity one.
+    [ActualCheckOutDate] DATE NULL,
     -- Snapshot of the offering's drop-off / pick-up times at booking time.
     [DropOffTime] TIME(0) NOT NULL,
     [PickUpTime] TIME(0) NOT NULL,
@@ -56,7 +73,8 @@ CREATE TABLE [Booking].[NightStayBookings]
     [SnapshotLongitude] DECIMAL(9, 6) NULL,
     -- Payout (capture-only for now — mirrors [Booking].[Bookings]). [PayoutStatus]
     -- tracks where the provider's money is in the payout pipeline; [PayoutId] is
-    -- the external payout reference once issued.
+    -- the external payout reference once issued. 'NO_PAYOUT' is TERMINAL — see
+    -- the note on [Booking].[Bookings].[PayoutStatus].
     [PayoutStatus] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_NightStayBookings_PayoutStatus] DEFAULT N'Pending',
     [PayoutId] NVARCHAR(64) NULL,
@@ -66,7 +84,10 @@ CREATE TABLE [Booking].[NightStayBookings]
     -- Capacity-freeing statuses are the two cancelled ones PLUS
     -- PROVIDER_DECLINED, the two no-show statuses, EXPIRED, JOB_EXPIRED, and
     -- OTP_MAX_ATTEMPTS_EXCEEDED; every other status still holds the stay's per-night
-    -- capacity. APPROVAL_NEEDED is deprecated but kept allowed for legacy rows.
+    -- capacity. COMPLETED / PAID hold theirs too, but only up to
+    -- [ActualCheckOutDate] when the pet went home early — a partial release, not
+    -- a status-level one.
+    -- APPROVAL_NEEDED is deprecated but kept allowed for legacy rows.
     [Status] NVARCHAR(48) NOT NULL
         CONSTRAINT [DF_NightStayBookings_Status] DEFAULT N'CREATED',
     [CreatedAtUtc] DATETIME2(7) NOT NULL
@@ -85,6 +106,13 @@ CREATE TABLE [Booking].[NightStayBookings]
     CONSTRAINT [FK_NightStayBookings_Pets_PetId]
         FOREIGN KEY ([PetId]) REFERENCES [Parent].[Pets] ([PetId]),
     CONSTRAINT [CK_NightStayBookings_DateOrder] CHECK ([CheckOutDate] > [CheckInDate]),
+    -- An early pickup can only SHRINK the stay, never extend or invert it. The
+    -- floor is one night: the pet was physically there on the check-in day, so
+    -- that night is never given back even if the stay ended the same day.
+    CONSTRAINT [CK_NightStayBookings_ActualCheckOutDate] CHECK (
+        [ActualCheckOutDate] IS NULL
+        OR ([ActualCheckOutDate] > [CheckInDate] AND [ActualCheckOutDate] <= [CheckOutDate])
+    ),
     CONSTRAINT [CK_NightStayBookings_Status]
         CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED',
                             N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED',
@@ -100,7 +128,7 @@ CREATE TABLE [Booking].[NightStayBookings]
         OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))
     ),
     CONSTRAINT [CK_NightStayBookings_PayoutStatus]
-        CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed')),
+        CHECK ([PayoutStatus] IN (N'Pending', N'Processing', N'Paid', N'Failed', N'NO_PAYOUT')),
     CONSTRAINT [CK_NightStayBookings_CancellationPolicyHours]
         CHECK ([CancellationPolicyHours] IS NULL
                OR [CancellationPolicyHours] IN (24, 48, 72, 96)),
@@ -116,9 +144,12 @@ CREATE UNIQUE INDEX [UX_NightStayBookings_JobNumber]
 
 GO
 
+-- [ActualCheckOutDate] is INCLUDEd because the per-night capacity walk in
+-- [Booking].[CreateNightStayBooking] — which runs under UPDLOCK + HOLDLOCK —
+-- now reads COALESCE([ActualCheckOutDate], [CheckOutDate]) on the join.
 CREATE INDEX [IX_NightStayBookings_Service_Dates_Status]
     ON [Booking].[NightStayBookings] ([ServiceId], [CheckInDate], [CheckOutDate], [Status])
-    INCLUDE ([NightStayBookingId], [PetParentId], [ProviderId]);
+    INCLUDE ([ActualCheckOutDate], [NightStayBookingId], [PetParentId], [ProviderId]);
 
 GO
 

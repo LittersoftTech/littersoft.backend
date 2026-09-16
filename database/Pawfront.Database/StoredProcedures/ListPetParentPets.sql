@@ -28,7 +28,9 @@ BEGIN
            [VaccinationDose],
            [Prescription]
     FROM [Parent].[Pets]
-    WHERE [PetParentId] = @PetParentId
+    -- Soft-deleted pets never appear in the parent's list; the row survives only
+    -- so a past booking's petDetails join still resolves.
+    WHERE [PetParentId] = @PetParentId AND [IsDeleted] = 0
     ORDER BY [CreatedAtUtc] ASC;
 
     -- Result set 2: photos for those pets. Grouped by PetId in the C# layer
@@ -42,7 +44,7 @@ BEGIN
     FROM [Parent].[PetPhotos] AS ph
     INNER JOIN [Parent].[Pets] AS p
         ON p.[PetId] = ph.[PetId]
-    WHERE p.[PetParentId] = @PetParentId
+    WHERE p.[PetParentId] = @PetParentId AND p.[IsDeleted] = 0
     ORDER BY ph.[CreatedAtUtc] ASC;
 
     -- Result set 3: next-consultation dates for those pets, one row per
@@ -53,6 +55,6 @@ BEGIN
     FROM [Parent].[PetNextConsultations] AS c
     INNER JOIN [Parent].[Pets] AS p
         ON p.[PetId] = c.[PetId]
-    WHERE p.[PetParentId] = @PetParentId
+    WHERE p.[PetParentId] = @PetParentId AND p.[IsDeleted] = 0
     ORDER BY c.[ConsultationType] ASC;
 END;

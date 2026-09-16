@@ -4,7 +4,11 @@
 -- application reader (ReadEventRow) is shared. @Take caps the number of rows
 -- (default 20, clamped to 1..100).
 CREATE OR ALTER PROCEDURE [Event].[ListTrendingEvents]
-    @Take INT = 20
+    @Take INT = 20,
+    -- The caller, so a blocked pair never see each other's events. Both NULL
+    -- for a legacy or unauthenticated caller, which filters nothing.
+    @ViewerType      NVARCHAR(16)     = NULL,
+    @ViewerId        UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -30,6 +34,21 @@ BEGIN
               AND eb.[Status] = N'Confirmed'),
            e.[StartDate]
     FROM [Event].[Events] e
+    -- Filtered BEFORE the TOP, so an event the caller cannot see does not
+    -- consume one of the @Take slots and silently shorten their list.
+    -- A block hides each party's events from the other, both ways. The
+    -- organiser is whichever of the two id columns is set (a CHECK enforces
+    -- exactly one), and GUIDs are globally unique, so matching on the id alone
+    -- is safe without branching on organiser type -- the same reasoning the
+    -- self-booking check uses.
+    WHERE (@ViewerId IS NULL OR NOT EXISTS (
+          SELECT 1
+          FROM [Block].[BlockedParticipants] bp
+          WHERE (bp.[BlockerType] = @ViewerType AND bp.[BlockerId] = @ViewerId
+                 AND bp.[BlockedId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+             OR (bp.[BlockedType] = @ViewerType AND bp.[BlockedId] = @ViewerId
+                 AND bp.[BlockerId] = COALESCE(e.[ProviderId], e.[PetParentId]))
+        ))
     ORDER BY e.[ViewCount] + e.[ShareCount] +
              (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
               FROM [Event].[EventBookings] eb

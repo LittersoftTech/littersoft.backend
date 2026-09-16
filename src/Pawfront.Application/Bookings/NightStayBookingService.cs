@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Pawfront.Application.Billing;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Providers;
@@ -17,6 +18,7 @@ internal sealed class NightStayBookingService(
     IProviderDiscoveryService providerDiscovery,
     IProviderServiceLocationRegistry providerLocationRegistry,
     IBookingTermsChangeService termsChangeService,
+    IInvoiceQueuePublisher invoiceQueue,
     IOptions<PawfrontFeeOptions> feeOptions) : INightStayBookingService, INightStayOccupancyReader
 {
     // A stay can span at most this many nights. Matches the cap the night-stay
@@ -203,7 +205,8 @@ internal sealed class NightStayBookingService(
         return new NightStayBookingDetailResult(
             row, jobId, nights, pricePerNight, total, fee, feePercentage,
             serviceLocation, row.CancellationPolicyHours, location,
-            providerSummary?.Address, providerSummary?.City, providerSummary?.Zip);
+            providerSummary?.Address, providerSummary?.City, providerSummary?.Zip,
+            providerSummary?.ImageUrl);
     }
 
     public Task<NightStayBookingResult> CancelAsync(
@@ -230,12 +233,21 @@ internal sealed class NightStayBookingService(
         // Reject an unknown status with a clean 400 before touching SQL; the sproc
         // still enforces role + transition rules authoritatively.
         var newStatus = BookingStatuses.Normalize(command.NewStatus);
+
+        // Mirror of BookingService.UpdateStatusAsync: a no-show cannot be recorded
+        // without a position, enforced here so the legacy /status shim cannot skip it.
+        var location = BookingStatuses.NoShow.Contains(newStatus)
+            ? CapturedLocation.Require(command.Location, "report a no-show")
+            : command.Location;
+        location?.Validate();
+
         return sqlStore.UpdateStatusAsync(
             command.NightStayBookingId,
             newStatus,
             command.Actor,
             command.ActorId,
             command.Note,
+            location,
             cancellationToken);
     }
 
@@ -248,16 +260,29 @@ internal sealed class NightStayBookingService(
 
     private const int StartOtpTtlMinutes = 10;
 
-    public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, CancellationToken cancellationToken)
-        => sqlStore.IssueStartOtpAsync(bookingId, BookingService.GenerateOtpCode(), StartOtpTtlMinutes, cancellationToken);
+    public Task<StartOtpResult> IssueStartOtpAsync(
+        Guid bookingId, CapturedLocation? location, CancellationToken cancellationToken)
+    {
+        var fix = CapturedLocation.Require(location, "show your start code");
+        return sqlStore.IssueStartOtpAsync(
+            bookingId, BookingService.GenerateOtpCode(), StartOtpTtlMinutes, fix, cancellationToken);
+    }
 
     public Task<NightStayBookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken)
-        => sqlStore.StartJobAsync(
-            command.BookingId, command.ProviderId, BookingService.GenerateOtpCode(), StartOtpTtlMinutes, cancellationToken);
+    {
+        var fix = CapturedLocation.Require(command.Location, "start a job");
+        return sqlStore.StartJobAsync(
+            command.BookingId, command.ProviderId, BookingService.GenerateOtpCode(), StartOtpTtlMinutes,
+            fix, cancellationToken);
+    }
 
     public Task<NightStayBookingResult> VerifyStartOtpAsync(
-        Guid bookingId, Guid providerId, string otpCode, CancellationToken cancellationToken)
-        => sqlStore.VerifyStartOtpAsync(bookingId, providerId, (otpCode ?? string.Empty).Trim(), cancellationToken);
+        Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
+    {
+        var fix = CapturedLocation.Require(location, "start a job");
+        return sqlStore.VerifyStartOtpAsync(
+            bookingId, providerId, (otpCode ?? string.Empty).Trim(), fix, cancellationToken);
+    }
 
     public Task<NightStayBookingResult> CompleteAsync(
         Guid bookingId, Guid providerId, CancellationToken cancellationToken)
@@ -267,6 +292,7 @@ internal sealed class NightStayBookingService(
         MarkBookingPaidCommand command, CancellationToken cancellationToken)
     {
         var method = BookingPaymentMethods.Normalize(command.PaymentMethod);
+        var location = CapturedLocation.Require(command.Location, "record a payment");
 
         // The amount is the stay's price-locked total (same figure the detail read
         // shows). The sproc enforces party + from-state (COMPLETED).
@@ -277,13 +303,22 @@ internal sealed class NightStayBookingService(
             throw new BookingNotPriceableException(command.BookingId);
         }
 
-        return await sqlStore.MarkPaidAsync(
+        var result = await sqlStore.MarkPaidAsync(
             command.BookingId,
             command.ProviderId,
             detail.TotalAmount.Value,
             detail.PawfrontFee ?? 0m,
             method,
+            location,
             cancellationToken);
+
+        // Twin of the single-day path - see BookingService.MarkPaidAsync for why
+        // this sits outside the transaction and why the publisher never throws.
+        await invoiceQueue.PublishAsync(
+            new InvoiceGenerationRequest(BookingTypes.NightStay, command.BookingId),
+            cancellationToken);
+
+        return result;
     }
 
     public async Task<NightStayBookingResult> RequestModificationAsync(
@@ -362,8 +397,12 @@ internal sealed class NightStayBookingService(
         => sqlStore.GetPendingModificationAsync(bookingId, cancellationToken);
 
     public Task<BookingEvidenceResult> AddEvidenceAsync(
-        Guid bookingId, Guid providerId, string photoUrl, CancellationToken cancellationToken)
-        => sqlStore.AddEvidenceAsync(bookingId, providerId, photoUrl, cancellationToken);
+        Guid bookingId, Guid providerId, string photoUrl, CapturedLocation? location,
+        CancellationToken cancellationToken)
+    {
+        var fix = CapturedLocation.Require(location, "attach job evidence");
+        return sqlStore.AddEvidenceAsync(bookingId, providerId, photoUrl, fix, cancellationToken);
+    }
 
     public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
         Guid bookingId, CancellationToken cancellationToken)

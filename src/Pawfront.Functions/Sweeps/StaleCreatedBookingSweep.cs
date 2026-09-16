@@ -3,7 +3,12 @@ using Microsoft.Data.SqlClient;
 
 namespace Pawfront.Functions.Sweeps;
 
-/// <summary>BR-17: a booking stuck in CREATED for 24+ hours has expired.</summary>
+/// <summary>
+/// A booking nobody accepted has expired, on either trigger the sproc applies:
+/// BR-17 (stuck in CREATED for 24+ hours) or BR-53 (still in CREATED with under
+/// 2 hours to the service). The counts are totals across both; which trigger
+/// fired is recorded per booking in the status-history note.
+/// </summary>
 internal sealed record StaleCreatedSweepResult(int ExpiredBookings, int ExpiredNightStayBookings);
 
 internal static class StaleCreatedBookingSweep

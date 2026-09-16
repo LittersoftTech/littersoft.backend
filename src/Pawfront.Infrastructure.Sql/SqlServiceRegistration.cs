@@ -1,11 +1,21 @@
+using Pawfront.Application.Blocks;
+using Pawfront.Infrastructure.Sql.Blocks;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
+using Pawfront.Application.Chat;
 using Pawfront.Application.Closures;
 using Pawfront.Application.Configuration;
+using Pawfront.Application.DeviceTokens;
+using Pawfront.Application.Billing;
+using Pawfront.Application.Analytics;
+using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
+using Pawfront.Application.Notifications;
+using Pawfront.Application.Jobs;
 using Pawfront.Application.Onboarding;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.ParentPets;
@@ -17,22 +27,33 @@ using Pawfront.Application.ProviderPhotos;
 using Pawfront.Application.ProviderServiceBanners;
 using Pawfront.Application.Providers;
 using Pawfront.Application.ProviderServices;
+using Pawfront.Application.Reviews;
+using Pawfront.Application.Support;
 using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Infrastructure.Sql.Availability;
 using Pawfront.Infrastructure.Sql.Bookings;
+using Pawfront.Infrastructure.Sql.Chat;
 using Pawfront.Infrastructure.Sql.Closures;
+using Pawfront.Infrastructure.Sql.DeviceTokens;
+using Pawfront.Infrastructure.Sql.Billing;
+using Pawfront.Infrastructure.Sql.Analytics;
+using Pawfront.Infrastructure.Sql.Earnings;
 using Pawfront.Infrastructure.Sql.Events;
+using Pawfront.Infrastructure.Sql.Notifications;
 using Pawfront.Infrastructure.Sql.Onboarding;
 using Pawfront.Infrastructure.Sql.ParentOnboarding;
 using Pawfront.Infrastructure.Sql.ParentPets;
 using Pawfront.Infrastructure.Sql.ParentPhotos;
 using Pawfront.Infrastructure.Sql.Policies;
+using Pawfront.Infrastructure.Sql.Jobs;
 using Pawfront.Infrastructure.Sql.ProviderBanners;
 using Pawfront.Infrastructure.Sql.ProviderOnboarding;
 using Pawfront.Infrastructure.Sql.ProviderPhotos;
 using Pawfront.Infrastructure.Sql.ProviderServiceBanners;
 using Pawfront.Infrastructure.Sql.Providers;
 using Pawfront.Infrastructure.Sql.ProviderServices;
+using Pawfront.Infrastructure.Sql.Reviews;
+using Pawfront.Infrastructure.Sql.Support;
 
 namespace Pawfront.Infrastructure.Sql;
 
@@ -63,10 +84,93 @@ public static class SqlServiceRegistration
             services.AddSingleton<IBookingSqlStore, InMemoryBookingStore>();
             services.AddSingleton<INightStayBookingSqlStore>(sp => sp.GetRequiredService<InMemoryNightStayBookingStore>());
             services.AddSingleton<IProviderClosureSqlStore, InMemoryProviderClosureStore>();
+            // No location-event table to write to. Validates the fix and drops it,
+            // so the flows that now carry one stay usable without a database.
+            services.AddSingleton<IBookingLocationService, NullBookingLocationService>();
             services.AddSingleton<IProviderServiceCatalog, InMemoryProviderServiceCatalog>();
             services.AddSingleton<IPetNextConsultationStore, InMemoryPetNextConsultationStore>();
             services.AddSingleton<IProviderNameReader, NullProviderNameReader>();
             services.AddSingleton<IProviderContactReader, NullProviderContactReader>();
+            // The in-memory provider store has no IsActive concept, so this one
+            // reports everything active — otherwise discovery and all five
+            // searches would come back empty on a dev machine without SQL.
+            services.AddSingleton<IProviderActiveStatusReader, NullProviderActiveStatusReader>();
+            // Functional rather than a Null store: the in-memory policy service DOES
+            // hold payout methods, so the parent-search Payments filter stays
+            // testable on a dev machine without SQL.
+            services.AddSingleton<IProviderPayoutMethodReader, InMemoryProviderPayoutMethodReader>();
+            // Earnings are aggregates over the booking tables joined to the payment
+            // ledger, neither of which the in-memory stores keep — report zeros
+            // rather than 500ing the reporting screens.
+            services.AddSingleton<IProviderEarningsStore, NullProviderEarningsStore>();
+            // Same posture, same reason: the job list joins both booking tables to
+            // the ledger, the service catalog and the live parent/pet rows, and the
+            // in-memory stores hold only some of that.
+            services.AddSingleton<IProviderJobStore, NullProviderJobStore>();
+            services.AddSingleton<IParentSpendStore, NullParentSpendStore>();
+            // Analytics: the view WRITE is accepted and dropped (every provider
+            // profile open now performs one, so failing it would break browsing
+            // without a database); the reads report zeros for the same reason
+            // earnings do.
+            services.AddSingleton<IProviderServiceViewStore, NullProviderServiceViewStore>();
+            services.AddSingleton<IProviderServiceBreakdownStore, NullProviderServiceBreakdownStore>();
+
+            // Nothing in these hosts writes an invoice - they are raised by SQL
+            // inside the mark-paid transaction and rendered by an Azure Function
+            // against blob storage. With neither present there is nothing to serve,
+            // so every download answers 404 rather than fabricating a PDF.
+            services.AddSingleton<IInvoiceStore, NullInvoiceStore>();
+            // The chat thread's "View Jobs" list reads the two booking tables the
+            // in-memory stores do not keep in a form this can query — report an
+            // empty history rather than 500ing the screen, the same posture as
+            // earnings above.
+            services.AddSingleton<IParentProviderBookingReader, NullParentProviderBookingReader>();
+            // No outbox table to write to — log and drop, same posture as the
+            // booking sweeps having no in-memory equivalent.
+            services.AddSingleton<INotificationPublisher, NullNotificationPublisher>();
+            services.AddSingleton<IInstantNotificationSender, NullInstantNotificationSender>();
+
+            // Reviews DO work in-memory (unlike earnings, which report zeros): this
+            // is a write flow, so a store that accepted a submit and never showed it
+            // again would make the feature untestable without SQL. It cannot enforce
+            // the COMPLETED/PAID gate though — that needs the booking tables.
+            services.AddSingleton<InMemoryBookingReviewStore>();
+            services.AddSingleton<IBookingReviewStore>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
+            services.AddSingleton<IPetParentRatingReader>(sp => sp.GetRequiredService<InMemoryBookingReviewStore>());
+
+            // Support tickets, functional for the same reason. Three things it cannot do,
+            // all for want of the other tables: derive the counterparty from the
+            // booking or conversation, enforce the party check, and check that a
+            // reported event exists. The one-open-ticket-per-subject rules and the photo
+            // cap ARE enforced, since all of them are answerable from what it holds.
+            services.AddSingleton<InMemorySupportTicketStore>();
+            services.AddSingleton<ISupportTicketStore>(sp => sp.GetRequiredService<InMemorySupportTicketStore>());
+            services.AddSingleton<ISupportLegalHoldReader>(sp => sp.GetRequiredService<InMemorySupportTicketStore>());
+            services.AddSingleton<IMySupportTicketLookup>(sp => sp.GetRequiredService<InMemorySupportTicketStore>());
+
+            // Blocking, functional for the same reason. It cannot return the pair's
+            // unfinished jobs, having no sight of the booking tables, so a block placed
+            // here severs the pair but cancels nothing.
+            services.AddSingleton<InMemoryBlockStore>();
+            services.AddSingleton<IBlockStore>(sp => sp.GetRequiredService<InMemoryBlockStore>());
+            services.AddSingleton<IMyBlockLookup>(sp => sp.GetRequiredService<InMemoryBlockStore>());
+
+            // Chat works in-memory for the same reason reviews do — it is a write
+            // flow, and a store that swallowed messages would make it untestable
+            // without SQL. Two limits: no outbox, so no pushes are ever queued;
+            // and no profile tables, so the counterparty is unnamed.
+            services.AddSingleton<InMemoryChatPresenceStore>();
+            services.AddSingleton<IChatPresenceStore>(sp => sp.GetRequiredService<InMemoryChatPresenceStore>());
+            services.AddSingleton<IChatConversationStore>(sp =>
+                new InMemoryChatConversationStore(
+                    sp.GetRequiredService<IChatPresenceStore>(),
+                    sp.GetRequiredService<IBlockStore>()));
+
+            // Both hosts' token services share one store here; each host only ever
+            // resolves its own interface, so they never actually mix.
+            services.AddSingleton<InMemoryDeviceTokenStore>();
+            services.AddSingleton<IProviderDeviceTokenService, InMemoryProviderDeviceTokenService>();
+            services.AddSingleton<IPetParentDeviceTokenService, InMemoryPetParentDeviceTokenService>();
         }
         else
         {
@@ -113,6 +217,14 @@ public static class SqlServiceRegistration
 
             services.AddScoped<INightStayBookingSqlStore>(provider =>
                 new SqlNightStayBookingStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Only the standalone geolocation writes come through here — every fix
+            // taken at a status transition is written by that transition's own
+            // procedure, so it cannot be lost after the transition commits.
+            services.AddScoped<IBookingLocationService>(provider =>
+                new SqlBookingLocationService(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
@@ -186,8 +298,79 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            // The jobs behind a chat thread — every booking of either kind
+            // between one provider and one pet parent.
+            services.AddScoped<IParentProviderBookingReader>(provider =>
+                new SqlParentProviderBookingReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
             services.AddScoped<IProviderNameReader>(provider =>
                 new SqlProviderNameReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Backs the discovery/search active filter — the provider's master
+            // Active switch lives here in SQL, not in the Cosmos offering doc
+            // that discovery lists from.
+            services.AddScoped<IProviderActiveStatusReader>(provider =>
+                new SqlProviderActiveStatusReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Backs the parent-search "Payments" filter. Same structural reason as
+            // the active reader above: the accepted methods live in SQL while
+            // discovery lists from Cosmos, so the filter cannot be pushed into the
+            // discovery query.
+            services.AddScoped<IProviderPayoutMethodReader>(provider =>
+                new SqlProviderPayoutMethodReader(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Earnings / spend reporting. Both sides read the shared
+            // Booking.BookingAmounts function, so a provider's "earned" and a
+            // parent's "spent" on the same booking are the same number by
+            // construction.
+            // The provider's job list. Reads Booking.ListProviderJobs, which sits on
+            // the same Booking.BookingAmounts function the earnings sprocs read, so a
+            // job's amount is one number across both screens.
+            services.AddScoped<IProviderJobStore>(provider =>
+                new SqlProviderJobStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IProviderEarningsStore>(provider =>
+                new SqlProviderEarningsStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // The per-service breakdown is one more aggregate over
+            // Booking.BookingAmounts, so the same class serves it -- registered
+            // separately because two different surfaces consume it (the analytics
+            // endpoint and the period-scoped earnings endpoint).
+            services.AddScoped<IProviderServiceBreakdownStore>(provider =>
+                new SqlProviderEarningsStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // The provider view log behind the PawPrints Views card. Written by
+            // the parent host on every provider-profile open, read by the
+            // provider host's analytics endpoints.
+            services.AddScoped<IProviderServiceViewStore>(provider =>
+                new SqlProviderServiceViewStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IParentSpendStore>(provider =>
+                new SqlParentSpendStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Invoice lookup for the two download endpoints. Read-only: raising an
+            // invoice happens inside Booking.MarkBookingPaid and rendering happens
+            // in Pawfront.Functions, so neither path comes through here.
+            services.AddScoped<IInvoiceStore>(provider =>
+                new SqlInvoiceStore(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
@@ -195,6 +378,83 @@ public static class SqlServiceRegistration
                 new SqlProviderContactReader(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
+
+            // Booking reviews. One store serves both interfaces — the provider's
+            // received reviews and a parent's aggregate rating are the two directions
+            // of the same table, so registering the concrete type once and mapping
+            // both interfaces to it keeps them reading the same rows.
+            services.AddScoped(provider =>
+                new SqlBookingReviewStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+            services.AddScoped<IBookingReviewStore>(sp => sp.GetRequiredService<SqlBookingReviewStore>());
+            services.AddScoped<IPetParentRatingReader>(sp => sp.GetRequiredService<SqlBookingReviewStore>());
+
+            // Support tickets. One store serves all three interfaces: the chat host's
+            // legal-hold check and the "have I already reported this?" lookup each ask
+            // Support.Tickets one narrow question, and giving either its own store would
+            // only let them drift apart on what "open" means.
+            services.AddScoped(provider =>
+                new SqlSupportTicketStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+            services.AddScoped<ISupportTicketStore>(sp => sp.GetRequiredService<SqlSupportTicketStore>());
+            services.AddScoped<ISupportLegalHoldReader>(sp => sp.GetRequiredService<SqlSupportTicketStore>());
+            services.AddScoped<IMySupportTicketLookup>(sp => sp.GetRequiredService<SqlSupportTicketStore>());
+
+            // Blocking. One store serves the write side and the per-request
+            // "who am I blocked from" lookup: they are two questions about one table,
+            // and separating them would only duplicate the connection plumbing and let
+            // them drift on what a block means.
+            services.AddScoped(provider =>
+                new SqlBlockStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+            services.AddScoped<IBlockStore>(sp => sp.GetRequiredService<SqlBlockStore>());
+            services.AddScoped<IMyBlockLookup>(sp => sp.GetRequiredService<SqlBlockStore>());
+
+            // Push notifications are enqueued onto Notification.NotificationOutbox
+            // here and dispatched to FCM by Pawfront.Functions — neither API host
+            // talks to Firebase, which keeps the external call off the request
+            // path and lets the SQL-only booking sweeps enqueue identically.
+            services.AddScoped<INotificationPublisher>(provider =>
+                new SqlNotificationPublisher(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>(),
+                    provider.GetRequiredService<ILogger<SqlNotificationPublisher>>()));
+
+            // FCM tokens rotate (reinstall, cleared data, restore), so each app
+            // re-registers its current token independently of the sign-in flow.
+            services.AddScoped<IProviderDeviceTokenService>(provider =>
+                new SqlProviderDeviceTokenService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IPetParentDeviceTokenService>(provider =>
+                new SqlPetParentDeviceTokenService(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Chat's SQL side: the thread index, per-side read state and blocks.
+            // Message bodies are not here — they live in the Cosmos ChatMessages
+            // container, registered by AddPawfrontCosmosInfrastructure.
+            services.AddScoped<IChatConversationStore>(provider =>
+                new SqlChatConversationStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IChatPresenceStore>(provider =>
+                new SqlChatPresenceStore(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>()));
+
+            // Closes out a notification the chat host sent itself, through the
+            // same procedure the scheduled dispatcher uses.
+            services.AddScoped<IInstantNotificationSender>(provider =>
+                new SqlInstantNotificationSender(
+                    sqlConnectionString,
+                    provider.GetService<IPawfrontSecretProvider>(),
+                    provider.GetRequiredService<ILogger<SqlInstantNotificationSender>>()));
         }
 
         return services;

@@ -18,7 +18,10 @@ public sealed record ParentServiceBookingCardResponse(
     // The selected-location address frozen onto the booking at creation. Address
     // fields are null on legacy rows without a snapshot (the booking-detail read
     // is the live-fallback authority) and on Custom walk-ins.
-    BookingLocationDetailsSection Location);
+    BookingLocationDetailsSection Location,
+    // The caller's own review of this booking — see the section's own docs for
+    // why canReview differs from the booking detail's.
+    ParentBookingReviewSection Review);
 
 /// <summary>
 /// A pet parent's "my bookings" card for a multi-night (NightStay) booking.
@@ -35,7 +38,29 @@ public sealed record ParentNightStayBookingCardResponse(
     CancellationPolicyDetailsSection CancellationPolicy,
     // The selected-location address frozen onto the stay at creation; null
     // address fields on legacy rows without a snapshot.
-    BookingLocationDetailsSection Location);
+    BookingLocationDetailsSection Location,
+    ParentBookingReviewSection Review);
+
+/// <summary>
+/// The caller's own review of a booking on their "my bookings" list.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <see cref="CanReview"/> means "show the review prompt", which is deliberately a
+/// DIFFERENT question from the booking detail's <c>review.canReview</c> — that one
+/// stays true after a review exists, because a review can be edited. On a list the
+/// useful signal is whether anything is still outstanding, so this goes false as
+/// soon as <see cref="Rating"/> is populated. Read the two together:
+/// <c>true / null</c> = ask them to review it, <c>false / 4</c> = they gave it
+/// four stars, <c>false / null</c> = the booking is not reviewable (yet).
+/// </para>
+/// <para>
+/// A booking becomes reviewable at COMPLETED or PAID. To edit an existing review,
+/// or to see its comment and photos, go to the booking detail — only the score
+/// travels here.
+/// </para>
+/// </remarks>
+public sealed record ParentBookingReviewSection(bool CanReview, int? Rating);
 
 /// <summary>
 /// The booked provider's display details. <see cref="BusinessName"/> is the

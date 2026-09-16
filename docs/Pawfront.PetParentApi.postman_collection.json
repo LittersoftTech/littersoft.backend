@@ -24,7 +24,9 @@
     { "key": "nightStayBookingId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/night-stay-bookings." },
     { "key": "eventId", "value": "", "description": "Captured by GET /events (first hit) and POST /pet-parents/{petParentId}/events." },
     { "key": "eventBookingId", "value": "", "description": "Captured by POST /events/{eventId}/bookings." },
-    { "key": "blobUrl", "value": "", "description": "Set to any URL returned by an upload endpoint to test POST /blob-images." }
+    { "key": "blobUrl", "value": "", "description": "Set to any URL returned by an upload endpoint to test POST /blob-images." },
+    { "key": "bookingReviewPhotoId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/bookings/{bookingId}/review/photos." },
+    { "key": "nightStayBookingReviewPhotoId", "value": "", "description": "Captured by POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/review/photos." }
   ],
   "item": [
     {
@@ -36,6 +38,15 @@
             "method": "GET",
             "header": [],
             "url": { "raw": "{{baseUrl}}/api/v1/health", "host": ["{{baseUrl}}"], "path": ["api", "v1", "health"] }
+          }
+        },
+        {
+          "name": "GET /metadata",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/api/v1/metadata", "host": ["{{baseUrl}}"], "path": ["api", "v1", "metadata"] },
+            "description": "Static reference vocabularies for mobile pickers → { animals: [{code, displayName}], behaviours: [{code, displayName}] }. Derived from the Pawfront.Domain.Vocabularies enums (Animal/Behaviour). Not ownership-filtered — needed during onboarding, before a profile exists."
           }
         }
       ]
@@ -121,6 +132,46 @@
       ]
     },
     {
+      "name": "1b. Device Tokens",
+      "description": "An FCM token is not stable (reinstall, cleared app data, restore, Firebase's own rotation) and the sign-in flow only runs at sign in — call POST /device-tokens on every app launch AND from Firebase's onTokenRefresh callback, or a rotated token silently stops receiving notifications. Owner is resolved from the JWT (sub/user_id), never the body.",
+      "item": [
+        {
+          "name": "POST /device-tokens (register/refresh)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fcmToken\": \"sample-fcm-token-abc123\",\n  \"deviceId\": \"device-uuid-1a2b-3c4d\",\n  \"devicePlatform\": \"iOS\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/device-tokens",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "device-tokens"]
+            },
+            "description": "Registers/refreshes the caller's FCM token. NOT ownership-filtered — the token binds to the auth identity, which exists before the profile does (a parent mid-onboarding can register; PetParentId is back-filled by profile completion). Supplying `deviceId` retires every OTHER active token for that physical device (including another account's), so a reinstall retires the old token immediately; omit it and nothing is retired. `devicePlatform` is Android|iOS case-insensitive, optional. Returns { deviceTokenId, ownerId (null pre-profile), deviceId, devicePlatform, isActive, retiredTokenCount, lastSeenAtUtc, createdAtUtc, updatedAtUtc } — the FCM token itself is deliberately NOT echoed back. 404 ParentAuthIdentityNotFound when the caller hasn't hit firebase-auth yet."
+          }
+        },
+        {
+          "name": "POST /device-tokens/deactivate (sign-out)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fcmToken\": \"sample-fcm-token-abc123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/device-tokens/deactivate",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "device-tokens", "deactivate"]
+            },
+            "description": "Sign-out counterpart — flips IsActive = 0, scoped to the caller's own auth identity via the JWT. The row is kept, not deleted (FcmToken is UNIQUE), so signing back in reactivates it in place. POST rather than DELETE: minimal APIs refuse an inferred body on DELETE, and the token would otherwise have to go in the URL. 404 DeviceTokenNotFound — unknown and not-yours are the same case, by design."
+          }
+        }
+      ]
+    },
+    {
       "name": "2. Pet Parent Profile",
       "item": [
         {
@@ -163,7 +214,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pet-parents", "{{petParentId}}"]
             },
-            "description": "\"Delete account\" = ANONYMISE + permanently DISABLE, NOT a row delete. Scrubs the personal fields (name → \"Deleted User\", mobile/address/DOB replaced, about + profile photo cleared), severs the Firebase login (freeing the real uid AND mobile number for a fresh sign-up), anonymises the parent's pets in place (name → \"Deleted Pet\"), and deletes device tokens, OTPs, the identity document and every photo gallery.\n\nRETAINED: bookings, night-stay bookings, organised events, event tickets and the payment ledger — that history belongs to the PROVIDER too.\n\nIdempotent. Returns { petParentId, deletedAtUtc, wasAlreadyDeleted, anonymisedPetCount, retainedBookingCount, retainedNightStayBookingCount, retainedEventCount, retainedPaymentCount }. 404 PetParentNotFound.\n\nAfter this runs the caller's token no longer resolves, so every /pet-parents/* route answers 403 ParentProfileNotCompleted."
+            "description": "\"Delete account\" = ANONYMISE + permanently DISABLE, NOT a row delete. Scrubs the personal fields (name → \"Deleted User\", mobile/address/DOB replaced, about + profile photo cleared), severs the Firebase login (freeing the real uid AND mobile number for a fresh sign-up), anonymises the parent's pets in place (name → \"Deleted Pet\"), and deletes device tokens, OTPs, the identity document and every photo gallery.\n\nRETAINED: bookings, night-stay bookings, organised events, event tickets and the payment ledger — that history belongs to the PROVIDER too.\n\n**409 PendingJobsExist (2026-08-05)** when the parent still has UNFINISHED jobs — any booking of either kind in a non-terminal status (a request the provider hasn't answered, a confirmed job still to come, one underway, or one with an open modification proposal). Nothing is scrubbed in that case; the response keeps the standard envelope with the list in `data`: { petParentId, pendingJobs: [{ bookingId, bookingType (SingleDay|NightStay), jobId, providerId, providerName, providerProfilePhotoUrl, serviceCategory, subCategory, status, serviceDate, checkOutDate, startTime, endTime, petName, serviceId, serviceItemCode, price: { pricePerUnit, priceUnit, totalAmount, pawfrontFee, feePercentage } }] }, soonest first. No force override — the check runs inside the same transaction that already holds a lock on the parent row, so a booking landing at the same instant serialises rather than slipping past.\n\nIdempotent (when it succeeds). Returns { petParentId, deletedAtUtc, wasAlreadyDeleted, anonymisedPetCount, retainedBookingCount, retainedNightStayBookingCount, retainedEventCount, retainedPaymentCount }. 404 PetParentNotFound.\n\nAfter this runs the caller's token no longer resolves, so every /pet-parents/* route answers 403 ParentProfileNotCompleted."
           }
         },
         {
@@ -502,7 +553,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "pets", "{{petId}}"]
             },
-            "description": "Permanently removes the pet. Photo rows cascade (blobs left for a future sweep); bookings that referenced the pet are detached (their petId set null, snapshots preserved). Ownership-filtered. Returns { petId, petParentId, deletedAtUtc }. 404 PetNotFound for unknown pet; 403 Forbidden for someone else's pet."
+            "description": "**SOFT-deletes the pet (2026-08-05)** — an ANONYMISE + HIDE, not a row delete, the same shape as the account deletes. The row survives on purpose: Booking.Bookings.PetId references it and the provider's booking detail resolves petDetails through that join, so a real delete would silently erase the pet from the PROVIDER's record of a job they actually performed. What goes: name → \"Deleted Pet\", microchipId → NULL (frees the chip for re-registration), profile photo, description and the free-text medical fields, plus the photo gallery and next-consultation rows outright. What stays: type, breed, gender, DOB, weight and the vaccination/sterilization/temperament statuses — the facts that keep a past booking meaningful. IsDeleted = 1 then hides the pet everywhere that matters (every /pets/{petId}/* route 404s, it drops out of GET /pet-parents/{id}/pets, onboarding-status, discovery/search, and both booking creates) — booking READS deliberately do NOT filter on it.\n\n**409 PendingJobsExist (2026-08-09)** when THIS PET still has unfinished jobs — any booking of either kind naming it in a non-terminal status. Nothing is scrubbed; the response keeps the standard envelope with { petId, pendingJobs: [...] } in `data`, the identical job shape the account delete returns above. No force override.\n\nReturns { petId, petParentId, deletedAtUtc, wasAlreadyDeleted }. Ownership-filtered → 404 PetNotFound for unknown pet, 403 Forbidden for someone else's pet. A second DELETE 404s (not wasAlreadyDeleted: true) because the ownership filter already can't find a live pet — the sproc's idempotency mainly protects against races, not direct repeat calls."
           }
         },
         {
@@ -756,7 +807,43 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "providers", "{{providerId}}"]
             },
-            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff, minimumHoursBeforeCancellation (null|24|48|72|96), acceptedPaymentMethods ([\"Cash\"|\"Digital\"], [] when unset), `completedBookings` (bookings explicitly COMPLETED or already served — window ended, not cancelled/no-show/expired — across all the provider's services, spanning both single-day and multi-night boarding stays; same figure as the search cards), top-level `description` (the freelancer's about-you text; null for business sub-categories) + `servicesDescription` (the business branch's description; null for freelancers), `profilePhotoUrl` (the provider's profile/business image; null when none), `galleryImages` ([] the provider's gallery photos), top-level `email` + `mobileCountryCode` + `mobileNumber` (a business reports the contact it registered; a FREELANCER registers none, so theirs falls back to their account e-mail + verified mobile — same fallback when a business left the optional telephone blank), and reviews (always [] for now — review feature not built yet). 404 ProviderNotRegistered."
+            "description": "Parent-facing provider profile: registration, category-specific offering, workingHours (7 days), timeOff, minimumHoursBeforeCancellation (null|24|48|72|96), acceptedPaymentMethods ([\"Cash\"|\"Digital\"], [] when unset), `completedBookings` (bookings explicitly COMPLETED or already served — window ended, not cancelled/no-show/expired — across all the provider's services, spanning both single-day and multi-night boarding stays; same figure as the search cards), top-level `description` (the freelancer's about-you text; null for business sub-categories) + `servicesDescription` (the business branch's description; null for freelancers), `profilePhotoUrl` (the provider's profile/business image; null when none), `galleryImages` ([] the provider's gallery photos), top-level `email` + `mobileCountryCode` + `mobileNumber` (a business reports the contact it registered; a FREELANCER registers none, so theirs falls back to their account e-mail + verified mobile — same fallback when a business left the optional telephone blank), `reviewSummary` (2026-08-08; { reviewCount, averageRating, fiveStar..oneStar } over EVERY review the provider has received — averageRating is null, not 0.0, when nobody has reviewed), and `reviews` (the newest 10, a PREVIEW for this screen — page through the full list with GET /providers/{providerId}/reviews below). 404 ProviderNotRegistered."
+          }
+        },
+        {
+          "name": "GET /providers/{providerId}/agenda",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/agenda?serviceId={{serviceId}}&date=2026-07-15",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "{{providerId}}", "agenda"],
+              "query": [
+                { "key": "serviceId", "value": "{{serviceId}}" },
+                { "key": "date", "value": "2026-07-15" }
+              ]
+            },
+            "description": "The provider's day for ONE service, laid out as a contiguous timeline of blocks so the parent can see the shape of the day and pick a slot — needs NO duration (unlike /availability/slots), which is the point: browse first, then ask for exact slots once you know what you want. Returns { providerId, serviceId, date, serviceCategory, subCategory, serviceType, capacity, isOpen, isClosedForDay, openingTime, closingTime, entries: [{ startTime, endTime, entryType (Free|Booked|Break|Closed), status, jobId, bookingId, remainingCapacity, isBookable }] }. `entries` never overlaps and merges neighbours that read alike (an untouched morning is ONE block). **Other parents' jobs are masked** — `status`/`jobId`/`bookingId` are only real for a booking belonging to the caller (resolved from the JWT); anyone else's reads `status: \"BOOKED\"` with null ids. NightStay collapses to a single whole-day block (openingTime/closingTime null). 400 InvalidServiceId / OfferingNotConfigured / InvalidRequest; 404 ServiceNotRegistered. Not ownership-filtered — it's someone else's calendar, same posture as the rest of /providers/*."
+          }
+        },
+        {
+          "name": "GET /providers/{providerId}/reviews",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/providers/{{providerId}}/reviews?sortBy=Date&sortDirection=Desc&skip=0&take=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "providers", "{{providerId}}", "reviews"],
+              "query": [
+                { "key": "sortBy", "value": "Date" },
+                { "key": "sortDirection", "value": "Desc" },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "20" }
+              ]
+            },
+            "description": "The reviews other parents have left for this provider — what a parent reads before booking. Returns { providerId, summary { reviewCount, averageRating, fiveStar..oneStar }, reviews: [{ bookingReviewId, bookingType, bookingId, jobId, petParentId, parentName, parentPhotoUrl, rating, comment, photoUrls, createdAtUtc, updatedAtUtc }], skip, take, hasMore }. `summary` is WHOLE-POPULATION, not page-scoped — it's the header's \"4.6 (23)\" and must not shift as the reader pages; averageRating is null (not 0.0) when nobody has reviewed. `sortBy` is Date|Rating, `sortDirection` Asc|Desc, both with a bookingReviewId tie-break. `take` caps at 20. parentName/photo are joined LIVE, so a deleted account reads \"Deleted User\". NOT ownership-filtered — someone else's public profile data. 400 InvalidRequest on an unknown sortBy/sortDirection."
           }
         },
         {
@@ -896,6 +983,19 @@
           }
         },
         {
+          "name": "GET /pet-parents/{petParentId}/bookings/{bookingId}/terms-changes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/terms-changes",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "terms-changes"]
+            },
+            "description": "The provider's terms that changed since this booking was created (price, cancellation policy, selected-location address) plus rule-violation rows (fixed/minimum duration checked against the booked window). Always 200 → { bookingId, hasChanges, changes: [{ field, changeType (ValueChanged|RuleViolation), bookedValue, currentValue, message }] }; hasChanges: false means no confirmation sheet is needed. Feeds `acknowledgeTermsChanges` on POST .../modifications — proposing a change without it once terms have drifted returns 409 BookingTermsChanged. 404 BookingNotFound when the booking isn't yours."
+          }
+        },
+        {
           "name": "GET /pet-parents/{petParentId}/bookings/{bookingId} (detail + start-OTP)",
           "request": {
             "method": "GET",
@@ -987,6 +1087,77 @@
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "evidence"]
             },
             "description": "Read-only: the provider-uploaded job-completion photos, oldest-first (parents view the proof; the provider uploads them)."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/review (submit/edit)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"rating\": 5,\n  \"comment\": \"Bruno came back happy and tired - will book again!\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/review",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "review"]
+            },
+            "description": "The parent's review of the provider for a finished booking. `rating` 1..5; `comment` optional, max 1000 characters (blank/omitted stores nothing and reads back null). Reviewable = the booking is COMPLETED or PAID and is an App booking (not a Custom walk-in). **Upsert** — resubmitting replaces rating + comment on the same row, so a corrected star doesn't duplicate: 201 on the first review, 200 on an edit. createdAtUtc does NOT move on an edit (it's the date given, which is what the review list sorts on); updatedAtUtc does. The author is the route's petParentId (ownership-filtered, never from the body). Photos are attached separately below, since the blob path is keyed by the review id this call mints. 404 BookingNotFound; 403 Forbidden (not your booking); 409 BookingNotReviewable; 400 ReviewNotAppBooking (Custom walk-in) / InvalidRequest (rating out of range, comment too long). Night-stay twin: POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/review."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/bookings/{bookingId}/review (mine)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/review",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "review"]
+            },
+            "description": "The caller's own review of this booking, with its photos. 404 ReviewNotFound when they haven't written one yet — the booking detail's `review` section reports the same fact as a nullable field instead of a 404. Night-stay twin under /night-stay-bookings/."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/bookings/{bookingId}/review/photos",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.bookingReviewPhotoId) {",
+                  "  pm.collectionVariables.set('bookingReviewPhotoId', json.data.bookingReviewPhotoId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": [] }]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/review/photos",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "review", "photos"]
+            },
+            "description": "multipart { file } — one photo per call, ≤3 MB, JPEG/PNG/WebP. Max 5 photos per review, enforced race-safely in SQL and pre-checked here so a caller at the cap isn't charged an upload first. Captures `bookingReviewPhotoId`. 404 ReviewNotFound (\"submit your review before attaching photos\" — the review must exist to own the blob path); 409 ReviewPhotoLimitReached; 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat. Night-stay twin under /night-stay-bookings/."
+          }
+        },
+        {
+          "name": "DELETE /pet-parents/{petParentId}/bookings/{bookingId}/review/photos/{photoId}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/{{bookingId}}/review/photos/{{bookingReviewPhotoId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "{{bookingId}}", "review", "photos", "{{bookingReviewPhotoId}}"]
+            },
+            "description": "Removes one photo (scoped by review + author) + best-effort blob delete. Returns { bookingReviewPhotoId, bookingReviewId, photoUrl, deletedAtUtc }. The review itself is NOT deletable — only its photos — so a rating is never stranded. 404 ReviewPhotoNotFound (unknown id, wrong review, and \"not yours\" are one case). Night-stay twin under /night-stay-bookings/."
           }
         }
       ]
@@ -1083,6 +1254,19 @@
           }
         },
         {
+          "name": "GET /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/terms-changes",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/terms-changes",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "terms-changes"]
+            },
+            "description": "Night-stay twin of the single-day terms-changes read — drifted price, cancellation policy, drop-off/pick-up time, selected-location address, plus rule-violation rows (minimum nights). Always 200 → { bookingId, hasChanges, changes: [...] }. 404 NightStayBookingNotFound when the stay isn't yours."
+          }
+        },
+        {
           "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/cancel",
           "request": {
             "method": "POST",
@@ -1161,6 +1345,117 @@
               "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "evidence"]
             },
             "description": "Read-only: the provider-uploaded job-completion photos for the stay, oldest-first."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/review (submit/edit)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"rating\": 5,\n  \"comment\": \"Great boarding stay, Bruno was well looked after.\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/review",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "review"]
+            },
+            "description": "Night-stay twin of the single-day review submit above — same rating (1..5) + optional 1000-char comment, same COMPLETED-or-PAID + App-booking gate, same upsert semantics (201 first time, 200 on an edit). 404 NightStayBookingNotFound; 403 Forbidden; 409 BookingNotReviewable; 400 ReviewNotAppBooking / InvalidRequest."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/review (mine)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/review",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "review"]
+            },
+            "description": "The caller's own review of this stay, with its photos. 404 ReviewNotFound when they haven't written one yet."
+          }
+        },
+        {
+          "name": "POST /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/review/photos",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.bookingReviewPhotoId) {",
+                  "  pm.collectionVariables.set('nightStayBookingReviewPhotoId', json.data.bookingReviewPhotoId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": [] }]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/review/photos",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "review", "photos"]
+            },
+            "description": "Night-stay twin of the single-day review-photo upload — same ≤3 MB / JPEG/PNG/WebP / 5-photo cap. Captures `nightStayBookingReviewPhotoId`. 404 ReviewNotFound; 409 ReviewPhotoLimitReached; 400 InvalidFile / ImageTooLarge / UnsupportedImageFormat."
+          }
+        },
+        {
+          "name": "DELETE /pet-parents/{petParentId}/night-stay-bookings/{bookingId}/review/photos/{photoId}",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/night-stay-bookings/{{nightStayBookingId}}/review/photos/{{nightStayBookingReviewPhotoId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "night-stay-bookings", "{{nightStayBookingId}}", "review", "photos", "{{nightStayBookingReviewPhotoId}}"]
+            },
+            "description": "Removes one photo (scoped by review + author) + best-effort blob delete. 404 ReviewPhotoNotFound (unknown id, wrong review, and \"not yours\" are one case)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6c. Bookings Summary & History",
+      "description": "Reporting surfaces over the parent's own bookings, both single-day and night-stay merged into ONE feed (a parent thinks \"my bookings\", not \"my two kinds of bookings\") — `bookingType` discriminates and the other kind's fields are null. Additive: the existing unpaginated GET /pet-parents/{id}/bookings and /night-stay-bookings above are unchanged.",
+      "item": [
+        {
+          "name": "GET /pet-parents/{petParentId}/bookings/summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/summary?period=Monthly",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "summary"],
+              "query": [{ "key": "period", "value": "Monthly", "description": "Weekly|Monthly|Quarterly|Yearly|AllTime, default Monthly. Or use from/to/petId/status instead." }]
+            },
+            "description": "Counts + spend for the parent's bookings over a period. Returns { period, periodStart, periodEnd, totalBookings, singleDayBookings, nightStayBookings, completedBookings, upcomingBookings, cancelledBookings, paidBookings, awaitingPaymentBookings, unpricedBookings, amountSpent, upcomingAmount }. The three status buckets are mutually exclusive and sum to totalBookings — declines, no-shows and expiries all count as cancelled. `amountSpent` covers COMPLETED or PAID (the parent already handed over cash even if the provider hasn't tapped \"mark paid\"); `upcomingAmount` is what confirmed future bookings will cost and is deliberately NOT part of amountSpent. `status` accepts a comma-separated mix of the friendly groups Completed/Upcoming/Cancelled and raw lifecycle statuses. Same filters — and the identical WHERE clause — as /history below, so the two always describe the same set. 400 InvalidRequest (bad period/status, or from > to)."
+          }
+        },
+        {
+          "name": "GET /pet-parents/{petParentId}/bookings/history",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/pet-parents/{{petParentId}}/bookings/history?period=AllTime&sortBy=Date&sortDirection=Desc&skip=0&take=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "pet-parents", "{{petParentId}}", "bookings", "history"],
+              "query": [
+                { "key": "period", "value": "AllTime" },
+                { "key": "sortBy", "value": "Date", "description": "Date|Amount" },
+                { "key": "sortDirection", "value": "Desc" },
+                { "key": "skip", "value": "0" },
+                { "key": "take", "value": "20", "description": "capped at 20 server-side" }
+              ]
+            },
+            "description": "Paginated history, single-day + night-stay merged. Unlike the provider earnings list this is NOT restricted to completed bookings — cancelled and upcoming ones belong in a history screen too, each carrying its expected `amount`. Explicit from/to override period. Sort defaults to Date/Desc with a BookingId tie-break. Rows carry jobId, status, serviceDate, providerId + providerName, pet name + photo, isCompleted, isPaid, amount, paidAtUtc, paymentMethod. The Pawfront commission is deliberately absent — the parent pays `amount` either way. 400 InvalidRequest."
           }
         }
       ]

@@ -3,7 +3,10 @@
 -- [@CheckInDate, @CheckOutDate) rather than by time-overlap on a single date.
 -- THROWs: 51230 provider not found, 51231 provider inactive, 51232 pet parent
 -- not found, 51233 pet not found / not owned, 51234 service unknown/inactive/
--- not owned/not a NightStay service, 51235 no capacity on one or more nights.
+-- not owned/not a NightStay service, 51235 no capacity on one or more nights,
+-- 51370 / 51371 one of the two has blocked the other (which code says which
+-- side placed it, so the API can name the caller's own block and stay neutral
+-- about one placed against them).
 CREATE OR ALTER PROCEDURE [Booking].[CreateNightStayBooking]
     @ProviderId UNIQUEIDENTIFIER,
     @PetParentId UNIQUEIDENTIFIER,
@@ -70,6 +73,49 @@ BEGIN
         THROW 51232, 'Pet parent was not found.', 1;
     END
 
+    -- Either party having blocked the other refuses the booking. A block is no
+    -- longer the chat-only remedy it began as: it severs the pair across the
+    -- product, and a new booking is the most consequential thing it has to stop.
+    --
+    -- HOLDLOCK, not a plain read. [Block].[BlockParticipant] takes UPDLOCK +
+    -- HOLDLOCK over this same key range before it captures the unfinished jobs it
+    -- is about to cancel, so the range lock here is what makes the two serialise:
+    -- without it a booking created at that instant would commit after the block
+    -- and after the job list was taken, and would survive it.
+    --
+    -- The two directions THROW DIFFERENT codes so the API can word the refusal
+    -- without leaking. Only the caller's OWN block may be named ("unblock to
+    -- book"); one placed against them must read as a neutral "not available",
+    -- because naming it would confirm the other party acted -- the one thing a
+    -- block must never do. SQL reports which side acted and C# decides what this
+    -- actor is allowed to know, because this procedure is called by BOTH hosts and
+    -- has no actor of its own.
+    --
+    -- If the two have blocked each other, the parent's is reported. That is
+    -- deterministic rather than meaningful: the pair is severed either way, and
+    -- the only cost is that a provider in a mutual block reads the neutral wording
+    -- instead of being told about their own block.
+    DECLARE @BlockedByParent BIT = 0;
+    DECLARE @BlockedByProvider BIT = 0;
+
+    SELECT @BlockedByParent = MAX(CASE WHEN [BlockerType] = N'PetParent' THEN 1 ELSE 0 END),
+           @BlockedByProvider = MAX(CASE WHEN [BlockerType] = N'Provider' THEN 1 ELSE 0 END)
+    FROM [Block].[BlockedParticipants] WITH (HOLDLOCK)
+    WHERE ([BlockerType] = N'PetParent' AND [BlockerId] = @PetParentId
+           AND [BlockedType] = N'Provider' AND [BlockedId] = @ProviderId)
+       OR ([BlockerType] = N'Provider' AND [BlockerId] = @ProviderId
+           AND [BlockedType] = N'PetParent' AND [BlockedId] = @PetParentId);
+
+    IF @BlockedByParent = 1
+    BEGIN
+        THROW 51370, 'The pet parent has blocked this provider.', 1;
+    END
+
+    IF @BlockedByProvider = 1
+    BEGIN
+        THROW 51371, 'The provider has blocked this pet parent.', 1;
+    END
+
     -- Defense-in-depth: the API validates pet ownership before calling, but a
     -- direct sproc caller must not be able to pin someone else's pet on a stay.
     IF @PetId IS NOT NULL AND NOT EXISTS (
@@ -77,6 +123,9 @@ BEGIN
         FROM [Parent].[Pets]
         WHERE [PetId] = @PetId
           AND [PetParentId] = @PetParentId
+          -- A soft-deleted pet can't be booked. The row survives only to keep
+          -- EXISTING stays readable; it is not a pet the parent still has.
+          AND [IsDeleted] = 0
     )
     BEGIN
         THROW 51233, 'Pet was not found or does not belong to the pet parent.', 1;
@@ -100,7 +149,10 @@ BEGIN
     -- (non-cancelled) stay on THIS service whose date range overlaps
     -- [@CheckInDate, @CheckOutDate), block it — a pet can't board in two places at
     -- once. Ranges overlap when existing.CheckInDate < @CheckOutDate AND
-    -- existing.CheckOutDate > @CheckInDate (checkout day is not a stayed night).
+    -- existing effective checkout > @CheckInDate (checkout day is not a stayed
+    -- night). The existing stay's range ends at
+    -- COALESCE([ActualCheckOutDate], [CheckOutDate]): once the pet has actually
+    -- gone home it is free to board again on the nights that were released.
     -- Enforced under UPDLOCK + HOLDLOCK so a concurrent duplicate serialises.
     IF @PetId IS NOT NULL AND EXISTS (
         SELECT 1
@@ -109,7 +161,7 @@ BEGIN
           AND [PetId] = @PetId
           AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [CheckInDate] < @CheckOutDate
-          AND [CheckOutDate] > @CheckInDate
+          AND COALESCE([ActualCheckOutDate], [CheckOutDate]) > @CheckInDate
     )
     BEGIN
         THROW 51239, 'This pet already has a booking for these dates.', 1;
@@ -117,7 +169,11 @@ BEGIN
 
     -- Per-night capacity check. Enumerate every stayed night in
     -- [@CheckInDate, @CheckOutDate) and count active bookings whose range
-    -- covers that night (existing.CheckInDate <= night < existing.CheckOutDate).
+    -- covers that night (existing.CheckInDate <= night < existing effective
+    -- checkout). A stay that ended EARLY covers nights only up to
+    -- COALESCE([ActualCheckOutDate], [CheckOutDate]), so the nights it gave back
+    -- are genuinely bookable here — matching what
+    -- [Booking].[GetNightStayOccupancy] showed the parent.
     -- UPDLOCK + HOLDLOCK serialises concurrent creates on this service so the
     -- (N+1)-th overlapping stay is rejected once a night is full.
     DECLARE @FullNight DATE;
@@ -136,7 +192,7 @@ BEGIN
         ON b.[ServiceId] = @ServiceId
        AND b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
        AND b.[CheckInDate] <= n.[Night]
-       AND b.[CheckOutDate] > n.[Night]
+       AND COALESCE(b.[ActualCheckOutDate], b.[CheckOutDate]) > n.[Night]
     GROUP BY n.[Night]
     HAVING COUNT(b.[NightStayBookingId]) >= @Capacity
     OPTION (MAXRECURSION 366);
