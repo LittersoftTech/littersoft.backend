@@ -10,11 +10,24 @@ BEGIN
     SELECT pp.[PetParentId],
            pp.[ProfilePhotoUrl],
            pp.[MobileVerifiedAtUtc],
-           pai.[IsEmailVerified]
+           pai.[IsEmailVerified],
+           CAST(CASE WHEN
+               NULLIF(LTRIM(RTRIM(pp.[FirstName])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[LastName])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[Gender])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[MobileCountryCode])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[MobileNumber])), N'') IS NOT NULL
+               AND pp.[DateOfBirth] > '00010101'
+               AND NULLIF(LTRIM(RTRIM(pp.[AddressLine])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[ZipCode])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[City])), N'') IS NOT NULL
+               AND pp.[Latitude] IS NOT NULL AND pp.[Longitude] IS NOT NULL
+               AND (pp.[Latitude] <> 0 OR pp.[Longitude] <> 0)
+               THEN 1 ELSE 0 END AS BIT) AS [IsBasicInfoComplete]
     FROM [Parent].[PetParents] AS pp
     INNER JOIN [Parent].[ParentAuthIdentities] AS pai
         ON pai.[ParentAuthIdentityId] = pp.[ParentAuthIdentityId]
-    WHERE pp.[PetParentId] = @PetParentId;
+    WHERE pp.[PetParentId] = @PetParentId AND pp.[IsDeleted] = 0;
 
     -- Result set 2: pets summary. Each row carries a server-computed flag
     -- for whether the two required medical fields are populated.
@@ -23,23 +36,22 @@ BEGIN
     SELECT [PetId],
            [PetName],
            CASE
-               WHEN [VaccinationStatus]   IS NOT NULL
-                AND [SterilizationStatus] IS NOT NULL
+               WHEN NULLIF(LTRIM(RTRIM([VaccinationStatus])), N'') IS NOT NULL
+                AND NULLIF(LTRIM(RTRIM([SterilizationStatus])), N'') IS NOT NULL
                THEN CAST(1 AS BIT)
                ELSE CAST(0 AS BIT)
            END AS [IsMedicalInfoComplete],
-           -- APPENDED LAST so the existing reader ordinals stay stable.
-           -- Reported so the app can name which section of a pet is
-           -- unfinished and deep-link straight to it; it deliberately does
-           -- NOT gate onboarding, exactly as the parent's own profile photo
-           -- does not. There is no basic-info flag because every basic-info
-           -- column on [Parent].[Pets] is NOT NULL -- a pet that exists
-           -- always has them, and a section that can never be missing would
-           -- be noise.
            CAST(CASE
                     WHEN [ProfilePhotoUrl] IS NULL OR LTRIM(RTRIM([ProfilePhotoUrl])) = N'' THEN 0
                     ELSE 1
-                END AS BIT) AS [HasProfilePhoto]
+                END AS BIT) AS [HasProfilePhoto],
+           CAST(CASE WHEN
+               NULLIF(LTRIM(RTRIM([PetName])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM([PetType])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM([Breed])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM([Gender])), N'') IS NOT NULL
+               AND [DateOfBirth] > '00010101'
+               THEN 1 ELSE 0 END AS BIT) AS [IsDetailsComplete]
     FROM [Parent].[Pets]
     -- Soft-deleted pets don't count towards onboarding: the parent no longer
     -- has them, and their (retained) medical fields would otherwise keep the

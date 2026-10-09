@@ -82,7 +82,7 @@ BEGIN
            -- so adding them shifted no existing reader ordinal.
            [Category],
            [Reason],
-           [EventId]
+           [EventId], [EventBookingId]
     FROM [Support].[Tickets]
     WHERE [TicketId] = @TicketId;
 

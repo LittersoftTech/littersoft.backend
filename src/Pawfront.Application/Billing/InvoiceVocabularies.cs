@@ -71,5 +71,5 @@ public static class InvoiceLimits
     /// queue lost. A booking paid seconds ago is almost certainly mid-render, and
     /// re-enqueuing it would only collide on the claim.
     /// </summary>
-    public const int SweepGraceMinutes = 5;
+    public const int SweepGraceMinutes = 1;
 }

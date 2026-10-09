@@ -12,7 +12,7 @@ public sealed record CreateEventBookingCommand(
     // parent host. Null when the caller has no organiser profile (then they
     // can't be the event's organiser anyway). Used to block an organiser from
     // booking tickets to their own event.
-    Guid? BookerOrganiserId = null);
+    Guid? BookerOrganiserId = null, string BookerType = "PetParent");
 
 public sealed record EventBookingResult(
     Guid BookingId,
@@ -29,12 +29,12 @@ public sealed record EventBookingResult(
     IReadOnlyList<EventBookingTicket> Tickets,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? CancelledAtUtc);
+    DateTimeOffset? CancelledAtUtc, int ConsecutiveNegativeMarks = 0, bool HasReported = false);
 
 public sealed record EventBookingTicket(
     Guid TicketId,
     int TicketNumber,
-    string AttendeeName);
+    string AttendeeName, string PaymentStatus = "Pending", decimal Amount = 0);
 
 /// <summary>
 /// Wire shape sent from <see cref="EventBookingService"/> to <see cref="IEventBookingSqlStore"/>.
@@ -50,7 +50,7 @@ public sealed record CreateEventBookingSqlInput(
     // its capacity check when this is null.
     int? MaximumCapacity,
     decimal TotalAmount,
-    IReadOnlyList<string> AttendeeNames);
+    IReadOnlyList<string> AttendeeNames, Guid? BookerAccountId = null, string BookerType = "PetParent");
 
 public sealed class EventBookingEventNotFoundException(Guid eventId)
     : Exception($"Event '{eventId}' was not found.");

@@ -13,7 +13,7 @@ BEGIN
     UPDATE [Parent].[Pets]
     SET [ProfilePhotoUrl] = @ProfilePhotoUrl,
         [UpdatedAtUtc] = SYSUTCDATETIME()
-    WHERE [PetId] = @PetId;
+    WHERE [PetId] = @PetId AND [IsDeleted] = 0;
 
     IF @@ROWCOUNT = 0
     BEGIN
@@ -22,7 +22,9 @@ BEGIN
 
     SELECT [PetId],
            [ProfilePhotoUrl],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [PetName], [PetType], [Breed], [Gender], [DateOfBirth],
+           [VaccinationStatus], [SterilizationStatus]
     FROM [Parent].[Pets]
-    WHERE [PetId] = @PetId;
+    WHERE [PetId] = @PetId AND [IsDeleted] = 0;
 END;

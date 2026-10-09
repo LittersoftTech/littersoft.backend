@@ -16,7 +16,8 @@ public sealed record PushMessage(
     string Title,
     string Body,
     IReadOnlyDictionary<string, string> Data,
-    string? ImageUrl);
+    string? ImageUrl,
+    string? FirebaseUserId = null);
 
 /// <summary>
 /// The result of one fan-out.
@@ -44,10 +45,8 @@ public sealed record PushSendResult(
 }
 
 /// <summary>
-/// Sends an assembled push to FCM. The only abstraction over Firebase in the
-/// codebase — implemented once, in Pawfront.Infrastructure.Firebase, and resolved
-/// only by the Pawfront.Functions dispatcher. Neither API host references it,
-/// which is a deliberate consequence of the outbox design.
+/// Sends an assembled push and mirrors its inbox entry. Called by the Functions
+/// dispatcher and ChatApi background worker, outside API request handling.
 /// </summary>
 public interface IPushSender
 {

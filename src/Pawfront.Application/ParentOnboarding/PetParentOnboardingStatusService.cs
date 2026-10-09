@@ -15,9 +15,8 @@ internal sealed class PetParentOnboardingStatusService(
             throw new PetParentOnboardingStatusNotFoundException(petParentId);
         }
 
-        // Stage 1 — BasicInfo: always Complete once the parent profile row
-        // exists (which is the precondition for this endpoint resolving).
-        var basicInfo = new PetParentOnboardingStage(OnboardingStageStatuses.Complete);
+        var basicInfo = new PetParentOnboardingStage(snapshot.IsBasicInfoComplete
+            ? OnboardingStageStatuses.Complete : OnboardingStageStatuses.Remaining);
 
         // Stage 2 — ProfilePhoto: nullable URL is the source of truth.
         var profilePhoto = new PetParentOnboardingStage(
@@ -50,9 +49,9 @@ internal sealed class PetParentOnboardingStatusService(
             firstIncomplete?.PetName,
             firstIncomplete?.MissingSections);
 
-        // Stage 4 — PetMedicalInfo: every pet has VaccinationStatus,
-        // SterilizationStatus, and Temperament set (free-text MedicalHistory
-        // is optional and not part of the completion check — the sproc CASE
+        // Stage 4 — PetMedicalInfo: every pet has VaccinationStatus and
+        // SterilizationStatus set (Temperament and MedicalHistory
+        // are optional and not part of the completion check — the sproc CASE
         // applies the same rule).
         var allPetsMedicalComplete = petsWithSections.Length > 0
             && petsWithSections.All(p => p.IsMedicalInfoComplete);
@@ -110,12 +109,15 @@ internal sealed class PetParentOnboardingStatusService(
     /// The list mixes gating and non-gating sections on purpose: the app decides
     /// how hard to push, and hiding the photo prompt here would mean the only way
     /// to discover it was to fetch the pet. Only <c>MedicalInfo</c> affects
-    /// <c>isFullyOnboarded</c>. No basic-info section exists — those columns are
-    /// NOT NULL, so a pet that exists always has them.
+    /// <c>isFullyOnboarded</c>. Details checks also catch legacy blank values.
     /// </remarks>
     private static IReadOnlyCollection<string> MissingSectionsFor(PetMedicalInfoCompletion pet)
     {
-        var missing = new List<string>(2);
+        var missing = new List<string>(3);
+        if (!pet.IsDetailsComplete)
+        {
+            missing.Add(PetProfileSections.Details);
+        }
         if (!pet.IsMedicalInfoComplete)
         {
             missing.Add(PetProfileSections.MedicalInfo);

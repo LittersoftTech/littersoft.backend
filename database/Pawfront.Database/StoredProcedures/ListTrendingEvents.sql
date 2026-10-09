@@ -31,7 +31,7 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed'),
+              AND eb.[Status] IN (N'Confirmed',N'Attended')),
            e.[StartDate]
     FROM [Event].[Events] e
     -- Filtered BEFORE the TOP, so an event the caller cannot see does not
@@ -41,7 +41,7 @@ BEGIN
     -- exactly one), and GUIDs are globally unique, so matching on the id alone
     -- is safe without branching on organiser type -- the same reasoning the
     -- self-booking check uses.
-    WHERE (@ViewerId IS NULL OR NOT EXISTS (
+    WHERE e.EventStatus=N'Active' AND (@ViewerId IS NULL OR NOT EXISTS (
           SELECT 1
           FROM [Block].[BlockedParticipants] bp
           WHERE (bp.[BlockerType] = @ViewerType AND bp.[BlockerId] = @ViewerId
@@ -53,7 +53,7 @@ BEGIN
              (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
               FROM [Event].[EventBookings] eb
               WHERE eb.[EventId] = e.[EventId]
-                AND eb.[Status] = N'Confirmed') DESC,
+                AND eb.[Status] IN (N'Confirmed',N'Attended')) DESC,
              e.[StartDate] DESC,
              e.[EventId] ASC;
 
@@ -71,8 +71,15 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     INNER JOIN @TopEvents te ON te.[EventId] = e.[EventId]
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]

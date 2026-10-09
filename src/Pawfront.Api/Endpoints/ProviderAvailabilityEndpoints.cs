@@ -24,6 +24,9 @@ internal static class ProviderAvailabilityEndpoints
         IProviderAvailabilityService availabilityService,
         CancellationToken cancellationToken)
     {
+        if (request?.Days is null)
+            return ApiResults.BadRequest("InvalidRequest", "Days must contain exactly 7 entries.");
+
         try
         {
             var result = await availabilityService.SaveAsync(
@@ -32,7 +35,7 @@ internal static class ProviderAvailabilityEndpoints
                     request.Days
                         .Select(d => new DayAvailabilityInput(
                             d.DayOfWeek, d.IsOpen, d.StartTime, d.EndTime, d.BreakStartTime, d.BreakEndTime))
-                        .ToList()),
+                        .ToList(), request.TimeZone),
                 cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
@@ -122,7 +125,7 @@ internal static class ProviderAvailabilityEndpoints
             result.Days
                 .Select(d => new DayAvailabilityResponse(
                     d.DayOfWeek, d.IsOpen, d.StartTime, d.EndTime, d.BreakStartTime, d.BreakEndTime))
-                .ToList());
+                .ToList(), result.TimeZone);
     }
 
     private static AvailableSlotsResponse ToResponse(AvailableSlotsResult result)

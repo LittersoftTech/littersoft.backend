@@ -90,19 +90,15 @@ BEGIN
     -- The job can only be started while the provider is inside their own weekly
     -- working hours. 1970-01-04 was a Sunday, so the modulo gives 0 = Sunday
     -- (matching System.DayOfWeek / the [DayOfWeek] column) independently of DATEFIRST.
-    DECLARE @DayOfWeek TINYINT = CAST(DATEDIFF(DAY, '19700104', CAST(@Now AS DATE)) % 7 AS TINYINT);
-    DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
-    DECLARE @IsOpen BIT, @OpensAt TIME(0), @ClosesAt TIME(0);
-
-    SELECT @IsOpen = [IsOpen], @OpensAt = [StartTime], @ClosesAt = [EndTime]
-    FROM [Provider].[ProviderWeeklyAvailability]
-    WHERE [ProviderId] = @ProviderId AND [DayOfWeek] = @DayOfWeek;
+    DECLARE @IsOpen BIT, @OpensAt DATETIME2(7), @ClosesAt DATETIME2(7);
+    SELECT @IsOpen = [IsOpen], @OpensAt = [OpensAtUtc], @ClosesAt = [ClosesAtUtc]
+    FROM [Provider].[WorkingHoursAtUtc](@ProviderId, @Now);
 
     -- A provider who has never saved their weekly hours is not gated — nor is a
     -- Custom walk-in, which is precisely the customer who turns up outside the
     -- hours the provider advertised.
     IF @Source <> N'Custom'
-       AND @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @NowTime < @OpensAt OR @NowTime > @ClosesAt)
+       AND @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @Now < @OpensAt OR @Now > @ClosesAt)
     BEGIN
         THROW 51137, 'The job can only be started during your working hours.', 1;
     END

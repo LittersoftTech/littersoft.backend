@@ -96,8 +96,9 @@ BEGIN
             @TDropOff TIME(0), @TPickUp TIME(0),
             @TAddressLine NVARCHAR(500), @TCity NVARCHAR(200), @TZipCode NVARCHAR(32),
             @TLatitude DECIMAL(9, 6), @TLongitude DECIMAL(9, 6);
+    -- Only parent proposals may adopt new terms, including for proposals staged before this fix.
     SELECT @ModId = [NightStayBookingModificationId], @PIn = [ProposedCheckInDate], @POut = [ProposedCheckOutDate],
-           @HasTerms = [HasAcknowledgedTerms], @TPrice = [AcknowledgedPricePerNight],
+           @HasTerms = CASE WHEN [RequestedByActor] = N'Parent' THEN [HasAcknowledgedTerms] ELSE 0 END, @TPrice = [AcknowledgedPricePerNight],
            @TPolicyHours = [AcknowledgedCancellationPolicyHours],
            @TDropOff = [AcknowledgedDropOffTime], @TPickUp = [AcknowledgedPickUpTime],
            @TAddressLine = [AcknowledgedAddressLine], @TCity = [AcknowledgedCity],

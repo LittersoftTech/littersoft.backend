@@ -11,7 +11,8 @@ public sealed record ClaimedNotification(
     string? DataJson,
     string? ImageUrl,
     int AttemptCount,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    string? FirebaseUserId = null);
 
 /// <summary>One active device to push to.</summary>
 public sealed record RecipientDeviceToken(

@@ -250,7 +250,7 @@ internal static class EventEndpoints
                     request.Price.Or(current.Price),
                     request.CancellationPolicy.Or(current.CancellationPolicy),
                     request.EventLink.Or(current.EventLink),
-                    MergePhysical(request.Physical, current.Physical)),
+                    MergePhysical(request.Physical, current.Physical, request.MaximumCapacity)),
                 cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
@@ -431,16 +431,16 @@ internal static class EventEndpoints
                 result.Organizer.Id,
                 result.Organizer.Name,
                 result.Organizer.ImageUrl,
-                result.Organizer.TotalEventsOrganized),
+                result.Organizer.TotalEventsOrganized, result.Organizer.EventsCancelledCount),
             new EventBookingStatsResponse(
                 // "Max bookings" = the physical venue capacity; null/unlimited
                 // for online events.
                 result.Physical?.MaximumCapacity,
                 result.TotalBookings),
-            isBookable,
+            isBookable && result.EventStatus == "Active",
             result.PaymentOptions,
             result.Attendees?
-                .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber))
+                .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber, ProfileImageUrl: a.ProfileImageUrl))
                 .ToArray(),
             result.CreatedAtUtc,
             result.UpdatedAtUtc,
@@ -449,7 +449,8 @@ internal static class EventEndpoints
             // takes there.
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
-            TicketRef: myTicket?.TicketRef);
+            TicketRef: myTicket?.TicketRef, EventStatus: result.EventStatus, IsCancelledByHost: result.EventStatus == "Cancelled",
+            AttendedCount: result.AttendedCount, EarnedAmount: result.EarnedAmount);
     }
 
     /// <summary>
@@ -460,8 +461,14 @@ internal static class EventEndpoints
     /// </summary>
     private static PhysicalEventInput? MergePhysical(
         Optional<PhysicalEventRequest?> patched,
-        PhysicalEventResult? current)
+        PhysicalEventResult? current, Optional<int> capacity = default)
     {
+        if (capacity.IsSet)
+        {
+            var merged = MergePhysical(patched, current);
+            if (merged is null) throw new ArgumentException("maximumCapacity requires a physical event.");
+            return merged with { MaximumCapacity = capacity.Value };
+        }
         if (patched.IsSet)
         {
             return patched.Value is null

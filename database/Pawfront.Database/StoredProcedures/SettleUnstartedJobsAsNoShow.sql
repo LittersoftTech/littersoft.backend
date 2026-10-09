@@ -77,9 +77,9 @@ BEGIN
         [UpdatedAtUtc] = @Now
     OUTPUT inserted.[BookingId], deleted.[Status], inserted.[Status] INTO @NoShowBookings
     FROM [Booking].[Bookings] b
-    LEFT JOIN [Provider].[ProviderWeeklyAvailability] wa
-        ON wa.[ProviderId] = b.[ProviderId]
-       AND wa.[DayOfWeek] = CAST(DATEDIFF(DAY, '19700104', b.[BookingDate]) % 7 AS TINYINT)
+    OUTER APPLY [Provider].[WorkingHoursAtUtc](b.[ProviderId],
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), b.[StartTime]),
+            CAST(b.[BookingDate] AS DATETIME2(7)))) wa
     CROSS APPLY (
         SELECT
             [BookingEndsAtUtc] =
@@ -87,8 +87,7 @@ BEGIN
                         CAST(b.[BookingDate] AS DATETIME2(7))),
             [ProviderClosesAtUtc] = CASE
                 WHEN wa.[IsOpen] = 1
-                    THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), wa.[EndTime]),
-                                 CAST(b.[BookingDate] AS DATETIME2(7)))
+                    THEN wa.[ClosesAtUtc]
                 ELSE DATEADD(DAY, 1, CAST(b.[BookingDate] AS DATETIME2(7)))
             END
     ) AS [Cutoffs]

@@ -459,21 +459,23 @@ in the app".
 
 ## 4. In-app inbox
 
-Every notification is also an inbox row — the outbox table is the read model, so
-nothing is stored twice and the bell list always matches what was pushed.
+The mobile apps can read their notification lists directly from **Firestore** or
+through `GET /api/v1/notifications` on their respective API host. See the
+[notification list API](notification-list-api.md) for authentication and pagination.
+Mark-read updates use Firestore directly. Each Firebase project contains its own
+`users/{firebaseUid}/notifications/{notificationId}` collection. The shared
+background push sender copies the rendered notification and complete push data
+map, with a server creation timestamp and `isRead: false`. The app updates
+`isRead` directly under owner-only security rules.
 
-Endpoints land in phase 7 (`GET /notifications`,
-`POST /notifications/{id}/read`). The SQL behind them
-(`Notification.ListNotifications`, `Notification.MarkNotificationsRead`) is
-already deployed-ready.
+Firestore writes are best effort and create-only, preserving read state on
+retries. They mirror attempted pushes, including failed FCM attempts. Notifications
+skipped before sending (for example, no active devices) remain in SQL but do not
+create Firestore documents. Existing SQL inbox procedures remain available and
+their read state is independent of Firestore.
 
-Two behaviours to expect:
-
-- A notification whose recipient had **no active device** is still in the inbox
-  (status `NoDevice`). It happened; it just had nowhere to be pushed. Do not
-  treat the inbox as "things that were delivered."
-- A row appears in the inbox only once the dispatcher has rendered it — up to
-  ~1 minute after the event. It is never shown blank.
+See [Firestore notification setup](firestore-notifications.md) for deployment
+order, permissions, rules, failure behavior, and verification.
 
 ---
 

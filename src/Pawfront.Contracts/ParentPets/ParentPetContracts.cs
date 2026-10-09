@@ -36,7 +36,12 @@ public sealed record PetParentPetResponse(
     // Free-text medical extras, captured via PATCH /pets/{petId}/medical-info.
     string? VaccinationType,
     string? VaccinationDose,
-    string? Prescription);
+    string? Prescription)
+{
+    public bool IsPetProfileComplete => PetProfileCompletion.IsComplete(
+        PetName, PetType, Breed, Gender, DateOfBirth,
+        VaccinationStatus, SterilizationStatus, ProfilePhotoUrl);
+}
 
 public sealed record UpdatePetMedicalInfoRequest(
     string VaccinationStatus,
@@ -145,7 +150,12 @@ public sealed record PetParentPetWithPhotosResponse(
     string? Prescription,
     // Next-consultation dates proposed by providers on booking completion —
     // one entry per provider type (Groomer | Vet | Trainer). [] when none.
-    IReadOnlyList<PetNextConsultationResponse> NextConsultations);
+    IReadOnlyList<PetNextConsultationResponse> NextConsultations)
+{
+    public bool IsPetProfileComplete => PetProfileCompletion.IsComplete(
+        PetName, PetType, Breed, Gender, DateOfBirth,
+        VaccinationStatus, SterilizationStatus, ProfilePhotoUrl);
+}
 
 /// <summary>
 /// Returned by <c>POST /pets/{petId}/profile-image</c>. Slim confirmation —
@@ -154,5 +164,6 @@ public sealed record PetParentPetWithPhotosResponse(
 /// </summary>
 public sealed record UpdatePetProfilePhotoResponse(
     Guid PetId,
-    string ProfilePhotoUrl,
-    DateTimeOffset UpdatedAtUtc);
+    string? ProfilePhotoUrl,
+    DateTimeOffset UpdatedAtUtc,
+    bool IsPetProfileComplete = false);

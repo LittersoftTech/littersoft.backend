@@ -7,6 +7,7 @@
 -- shape ("4 tickets, 4 entries") can be served without joining back.
 CREATE TABLE [Event].[EventBookingTickets]
 (
+    [PaymentStatus] NVARCHAR(16) NOT NULL CONSTRAINT DF_EventBookingTickets_Payment DEFAULT N'Pending',
     [TicketId] UNIQUEIDENTIFIER NOT NULL
         CONSTRAINT [DF_EventBookingTickets_TicketId] DEFAULT NEWSEQUENTIALID(),
     [BookingId] UNIQUEIDENTIFIER NOT NULL,

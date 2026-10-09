@@ -20,6 +20,11 @@ Tables are organised into four schemas:
 Deployment is a single idempotent script:
 [`Deployment/DeployAll.sql`](Deployment/DeployAll.sql). Re-runnable; uses
 `IF NOT EXISTS` guards on tables/indexes and `CREATE OR ALTER` on sprocs.
+It includes the event preflight, schema upgrades, verified booking-owner mappings,
+functions and all procedures in dependency order. The individual object files
+under `Tables/`, `Functions/` and `StoredProcedures/` are maintenance sources;
+you do not execute them separately when deploying. `TruncateAll.sql` is a separate
+data-reset utility and is never part of deployment.
 
 ## ER diagram
 
@@ -608,9 +613,7 @@ paid too.
 
 - `EventId` — PK.
 - `ProviderId` — FK.
-- `EventCategory` — one of 8 values: `AdoptionAndRescue`, `PetTraining`,
-  `Charity`, `Volunteering`, `HealthAndWellness`, `SocialAndCultural`,
-  `OutdoorActivities`, `ParentEducation`.
+- `EventCategory` — one of 10 values: `MeetupsAndSocials`, `WalksAndOutdoors`, `TrainingAndWorkshops`, `SportsAndCompetitions`, `ShowsAndDemonstrations`, `TalksAndLearning`, `HealthAndWellness`, `AdoptionAndRescue`, `CharityAndVolunteering`, `Celebrations`.
 - `IsChildFriendly`.
 - `Title`, `Description` (NVARCHAR(MAX)), `BannerImageUrl` (nullable).
 - `EventType` — `Physical` or `Online`.
@@ -1131,10 +1134,24 @@ Re-run safely after any change:
 
 ```powershell
 sqlcmd -S <server> -d <database> -U <user> -P "<password>" `
-       -i Deployment\DeployAll.sql
+       -I -b -i Deployment\DeployAll.sql
 ```
 
 Or open `Deployment/DeployAll.sql` in SSMS / Azure Data Studio and Execute.
+Run during a maintenance window. All database changes are committed together at
+the end. On any error in SSMS, stop execution and roll back any open transaction.
+A preflight rejection disables later batches; run `SET NOEXEC OFF` or reconnect
+before retrying in the same SSMS session.
+
+Existing event data is checked automatically. Retired categories need the
+coordinated SQL/Cosmos migration documented in
+[`Deployment/EventLifecycleRollout.md`](Deployment/EventLifecycleRollout.md).
+For ambiguous legacy booking owners, fill `#VerifiedEventBookingMappings` near
+the top of a private copy of `DeployAll.sql` with verified booking/account IDs
+and account types. A unique email match is backfilled automatically; unresolved
+active bookings or invalid mappings fail the deployment and roll it back.
+Keep private mappings outside source control. No separate preflight or event
+deployment script is required.
 
 When **adding or modifying** a table or sproc:
 

@@ -134,7 +134,8 @@ public sealed class NotificationDispatcher(
                 rendered.Title,
                 rendered.Body,
                 payload,
-                notification.ImageUrl),
+                notification.ImageUrl,
+                notification.FirebaseUserId),
             cancellationToken);
 
         foreach (var invalidToken in sendResult.InvalidTokens)

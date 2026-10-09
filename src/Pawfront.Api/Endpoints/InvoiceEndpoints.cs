@@ -103,7 +103,13 @@ internal static class InvoiceEndpoints
         {
             // Raised but still rendering. 409 rather than 404 because this one is
             // worth retrying in a moment and a 404 never is.
-            return ApiResults.Conflict("InvoiceNotReady", exception.Message);
+            if (exception.Status != InvoiceStatuses.Failed)
+            {
+                httpContext.Response.Headers.RetryAfter = "2";
+            }
+            return ApiResults.Conflict(
+                exception.Status == InvoiceStatuses.Failed ? "InvoiceGenerationFailed" : "InvoiceNotReady",
+                exception.Message);
         }
         catch (InvoiceFileMissingException exception)
         {

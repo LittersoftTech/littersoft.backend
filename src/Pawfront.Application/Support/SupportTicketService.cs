@@ -301,7 +301,8 @@ internal sealed class SupportTicketService(
             BookingType = bookingType,
             BookingId = bookingId,
             ConversationId = conversationId,
-            EventId = eventId
+            EventId = eventId,
+            EventBookingId = command.TicketType == SupportTicketTypes.EventIncident ? command.EventBookingId : null
         };
     }
 

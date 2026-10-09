@@ -79,18 +79,23 @@ BEGIN
     INTO @Claimed;
 
     -- Result set 1 — the work.
-    SELECT [NotificationId],
-           [Audience],
-           [RecipientId],
-           [NotificationType],
-           [EntityType],
-           [EntityId],
-           [DataJson],
-           [ImageUrl],
-           [AttemptCount],
-           [CreatedAtUtc]
-    FROM @Claimed
-    ORDER BY [CreatedAtUtc] ASC;
+    SELECT c.[NotificationId],
+           c.[Audience],
+           c.[RecipientId],
+           c.[NotificationType],
+           c.[EntityType],
+           c.[EntityId],
+           c.[DataJson],
+           c.[ImageUrl],
+           c.[AttemptCount],
+           c.[CreatedAtUtc],
+           COALESCE(pa.[FirebaseUserId], pr.[FirebaseUserId]) AS [FirebaseUserId]
+    FROM @Claimed c
+    LEFT JOIN [Parent].[ParentAuthIdentities] pa
+        ON c.[Audience] = N'PetParent' AND pa.[PetParentId] = c.[RecipientId]
+    LEFT JOIN [Provider].[ProviderAuthIdentities] pr
+        ON c.[Audience] = N'Provider' AND pr.[ProviderId] = c.[RecipientId]
+    ORDER BY c.[CreatedAtUtc] ASC;
 
     -- Result set 2 — the devices to push to. DISTINCT because several claimed
     -- notifications commonly share one recipient.

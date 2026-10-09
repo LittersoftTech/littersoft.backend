@@ -8,6 +8,7 @@
   <ItemGroup>
     <Content Include="Security\*.sql" />
     <Content Include="Tables\*.sql" />
+    <Content Include="Functions\*.sql" />
     <Content Include="StoredProcedures\*.sql" />
   </ItemGroup>
 

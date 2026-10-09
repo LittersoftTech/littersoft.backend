@@ -4,6 +4,7 @@ using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
 using Pawfront.Infrastructure.Cosmos;
 using Pawfront.Infrastructure.Sql;
+using Pawfront.Infrastructure.Firebase;
 using Pawfront.PetParentApi;
 using Pawfront.PetParentApi.Auth;
 using Pawfront.PetParentApi.Endpoints;
@@ -42,6 +43,8 @@ builder.Services.AddScoped<ICurrentPetParentContext, CurrentPetParentContext>();
 builder.Services.AddTransient<OwnedPetParentFilter>();
 builder.Services.AddTransient<OwnedPetFilter>();
 
+builder.Services.AddPawfrontFirestoreInbox(builder.Configuration);
+
 var app = builder.Build();
 
 app.UseExceptionHandler();
@@ -64,6 +67,7 @@ api.MapParentOnboardingEndpoints();
 // FCM token register/refresh + sign-out. Not ownership-filtered — a token is
 // bound to the auth identity, which exists before the profile does.
 api.MapDeviceTokenEndpoints();
+api.MapNotificationEndpoints();
 api.MapPetParentEndpoints();
 api.MapParentSpendEndpoints();
 // Parent reviews a provider after a finished booking (rating + comment + photos),

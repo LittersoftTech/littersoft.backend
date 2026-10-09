@@ -332,8 +332,15 @@ public sealed record VerifyStartOtpRequest(
     string OtpCode,
     CapturedLocationRequest? Location = null);
 
+/// <summary>Provider schedule-only proposal. Acceptance preserves the booked terms.</summary>
+public sealed record RequestProviderBookingModificationRequest(
+    DateOnly BookingDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    string? Note);
+
 /// <summary>
-/// Body for a single-day modification request
+/// Body for a parent single-day modification request
 /// (<c>POST .../bookings/{bookingId}/modifications</c>). Editing is limited to the
 /// schedule — date + time window only.
 /// </summary>

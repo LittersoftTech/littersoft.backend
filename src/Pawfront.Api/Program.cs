@@ -7,6 +7,7 @@ using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
 using Pawfront.Infrastructure.Cosmos;
 using Pawfront.Infrastructure.Sql;
+using Pawfront.Infrastructure.Firebase;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -25,6 +26,8 @@ builder.Services
 // Platform fee (% of booking total) surfaced on the booking-detail payment block.
 builder.Services.Configure<PawfrontFeeOptions>(
     builder.Configuration.GetSection(PawfrontFeeOptions.SectionName));
+
+builder.Services.AddPawfrontFirestoreInbox(builder.Configuration);
 
 var app = builder.Build();
 
@@ -48,6 +51,7 @@ api.MapProviderOnboardingEndpoints();
 // FCM token register/refresh + sign-out. Not scoped under /providers/{id} — a
 // token is bound to the auth identity, which exists before the profile does.
 api.MapDeviceTokenEndpoints();
+api.MapNotificationEndpoints();
 api.MapProviderEndpoints();
 api.MapProviderServiceCatalogEndpoints();
 api.MapProviderPolicyEndpoints();

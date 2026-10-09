@@ -108,9 +108,10 @@ BEGIN
     DECLARE @HasTerms BIT, @TPrice DECIMAL(10, 2), @TPolicyHours INT,
             @TAddressLine NVARCHAR(500), @TCity NVARCHAR(200), @TZipCode NVARCHAR(32),
             @TLatitude DECIMAL(9, 6), @TLongitude DECIMAL(9, 6);
+    -- Only parent proposals may adopt new terms, including for proposals staged before this fix.
     SELECT @ModId = [BookingModificationId], @PDate = [ProposedBookingDate],
            @PStart = [ProposedStartTime], @PEnd = [ProposedEndTime],
-           @HasTerms = [HasAcknowledgedTerms], @TPrice = [AcknowledgedPricePerHour],
+           @HasTerms = CASE WHEN [RequestedByActor] = N'Parent' THEN [HasAcknowledgedTerms] ELSE 0 END, @TPrice = [AcknowledgedPricePerHour],
            @TPolicyHours = [AcknowledgedCancellationPolicyHours],
            @TAddressLine = [AcknowledgedAddressLine], @TCity = [AcknowledgedCity],
            @TZipCode = [AcknowledgedZipCode], @TLatitude = [AcknowledgedLatitude],

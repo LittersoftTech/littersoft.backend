@@ -91,6 +91,7 @@ CREATE TABLE [Support].[Tickets]
     -- Event incidents only. No FK, same posture as every other subject column
     -- here — and the event outlives the ticket's usefulness either way.
     [EventId] UNIQUEIDENTIFIER NULL,
+    [EventBookingId] UNIQUEIDENTIFIER NULL,
 
     -- How the reporter classified the incident, alongside the free-text account
     -- that goes to the Cosmos narrative: [Category] is what kind of problem it is,

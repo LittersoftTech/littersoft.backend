@@ -26,13 +26,27 @@ internal static class EventBookingEndpoints
 
         builder.MapGet("/event-bookings/{bookingId:guid}", GetById);
         builder.MapDelete("/event-bookings/{bookingId:guid}", Cancel);
+        builder.MapPatch("/event-bookings/{bookingId:guid}/tickets/{ticketNumber:int}", async (
+            Guid bookingId, int ticketNumber, TicketPaymentRequest request, ICurrentPetParentContext current,
+            IEventLifecycleStore lifecycle, CancellationToken ct) =>
+        {
+            var id = await current.GetPetParentIdAsync(ct);
+            if (id is null) return ApiResults.Forbidden("ProfileRequired", "A parent profile is required.");
+            if (request.PaymentStatus is not ("Pending" or "CashReceived"))
+                return ApiResults.BadRequest("InvalidRequest", "paymentStatus must be Pending or CashReceived.");
+            await lifecycle.SetTicketPaymentAsync(bookingId, ticketNumber, id.Value, request.PaymentStatus, ct);
+            return ApiResults.Ok(new { bookingId, ticketNumber, request.PaymentStatus });
+        });
 
         return builder;
     }
 
+    public sealed record TicketPaymentRequest(string PaymentStatus);
+
     private static async Task<IResult> Create(
         Guid eventId,
         CreateEventBookingRequest request,
+        HttpContext httpContext,
         ICurrentPetParentContext currentParent,
         IEventBookingService bookingService,
         CancellationToken cancellationToken)
@@ -49,7 +63,7 @@ internal static class EventBookingEndpoints
                 new CreateEventBookingCommand(
                     eventId,
                     request.BookerName,
-                    request.BookerEmail,
+                    httpContext.User.FindFirstValue("email") ?? throw new ArgumentException("Email claim is required."),
                     request.BookerMobile,
                     request.AttendeeNames,
                     request.PaymentMethod,
@@ -94,11 +108,12 @@ internal static class EventBookingEndpoints
 
     private static async Task<IResult> GetById(
         Guid bookingId,
+        HttpContext httpContext,
         IEventBookingService bookingService,
         CancellationToken cancellationToken)
     {
         var result = await bookingService.GetAsync(bookingId, cancellationToken);
-        return result is null
+        return result is null || !string.Equals(result.BookerEmail, httpContext.User.FindFirstValue("email"), StringComparison.OrdinalIgnoreCase)
             ? ApiResults.NotFound("EventBookingNotFound", $"Event booking '{bookingId}' was not found.")
             : ApiResults.Ok(ToResponse(result));
     }
@@ -145,7 +160,7 @@ internal static class EventBookingEndpoints
         var tickets = new List<EventBookingTicketResponse>(result.Tickets.Count);
         foreach (var ticket in result.Tickets)
         {
-            tickets.Add(new EventBookingTicketResponse(ticket.TicketId, ticket.TicketNumber, ticket.AttendeeName));
+            tickets.Add(new EventBookingTicketResponse(ticket.TicketId, ticket.TicketNumber, ticket.AttendeeName, ticket.PaymentStatus, ticket.Amount));
         }
 
         return new EventBookingResponse(
@@ -163,6 +178,6 @@ internal static class EventBookingEndpoints
             tickets,
             result.CreatedAtUtc,
             result.UpdatedAtUtc,
-            result.CancelledAtUtc);
+            result.CancelledAtUtc, result.ConsecutiveNegativeMarks, result.HasReported);
     }
 }

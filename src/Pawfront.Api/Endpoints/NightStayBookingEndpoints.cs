@@ -387,7 +387,7 @@ internal static class NightStayBookingEndpoints
     }
 
     private static async Task<IResult> RequestModification(
-        Guid providerId, Guid bookingId, RequestNightStayBookingModificationRequest request,
+        Guid providerId, Guid bookingId, RequestProviderNightStayBookingModificationRequest request,
         INightStayBookingService bookingService, CancellationToken cancellationToken)
     {
         if (request is null)
@@ -400,7 +400,7 @@ internal static class NightStayBookingEndpoints
             var result = await bookingService.RequestModificationAsync(
                 new RequestNightStayBookingModificationCommand(
                     bookingId, BookingStatusActor.Provider, providerId, request.CheckInDate, request.CheckOutDate,
-                    request.Note, request.AcknowledgeTermsChanges),
+                    request.Note),
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
@@ -574,10 +574,10 @@ internal static class NightStayBookingEndpoints
         or InvalidStartOtpException or StartOtpExpiredException or OtpAttemptsExceededException
         or BookingNotCompletableException or BookingNotModifiableException
         or BookingModificationConflictException or NoPendingModificationException
-        or BookingModificationCapacityException or BookingTermsChangedException
+        or BookingModificationCapacityException
         or BookingModificationWindowClosedException or BookingModificationExpiredException
         or InvalidNightStayDatesException
-        or ProviderClosedOnDateException or BookingOfferingNotConfiguredException
+        or BookingLeadTimeTooShortException or ProviderClosedOnDateException or BookingOfferingNotConfiguredException
         or BookingStatusNotAllowedException or BookingStatusTerminalException
         or BookingStatusUnchangedException or BookingNoShowTooEarlyException or BookingExpiredException
         or BookingNotPayableException or BookingAlreadyPaidException or BookingNotPriceableException
@@ -602,11 +602,11 @@ internal static class NightStayBookingEndpoints
         BookingModificationConflictException e => ApiResults.Conflict("ModificationAlreadyPending", e.Message),
         NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
         BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
-        BookingTermsChangedException e => ApiResults.Conflict("BookingTermsChanged", e.Message),
         BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
         BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         InvalidNightStayDatesException e => ApiResults.BadRequest("InvalidNightStayDates", e.Message),
-        ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
+        BookingLeadTimeTooShortException e => ApiResults.BadRequest("BookingLeadTimeTooShort", e.Message),
+        ProviderClosedOnDateException e => ApiResults.BadRequest("ServiceClosed", e.Message),
         BookingOfferingNotConfiguredException e => ApiResults.BadRequest("OfferingNotConfigured", e.Message),
         BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),
         BookingStatusTerminalException e => ApiResults.Conflict("BookingStatusTerminal", e.Message),

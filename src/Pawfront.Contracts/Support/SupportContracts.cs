@@ -89,7 +89,7 @@ public sealed record ReportEventIncidentRequest(
     Guid EventId,
     string? Comment = null,
     string? Category = null,
-    string? Reason = null);
+    string? Reason = null, Guid? BookingId = null);
 
 /// <summary>
 /// Body for "Report Chat" — <c>POST .../support-tickets/report-chat</c> on either host.
@@ -177,7 +177,7 @@ public sealed record SupportTicketResponse(
     IReadOnlyList<SupportTicketPhotoResponse> Photos,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? ClosedAtUtc);
+    DateTimeOffset? ClosedAtUtc, Guid? EventBookingId = null);
 
 public sealed record SupportTicketPhotoResponse(
     Guid TicketPhotoId,

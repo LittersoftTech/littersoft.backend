@@ -657,6 +657,7 @@ public sealed record StartBookingCommand(
 /// re-checked race-safely.
 /// </summary>
 /// <param name="AcknowledgeTermsChanges">
+/// Applies only to parent proposals; ignored for provider schedule-only proposals.
 /// The requester has seen and accepted the provider's terms as they stand now.
 /// Required only when those terms have drifted from what the booking froze at
 /// creation (price, cancellation policy, the selected-location address) — an

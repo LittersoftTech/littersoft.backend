@@ -153,7 +153,7 @@ internal static class SupportTicketEndpoints
         }
 
         return CreateAsync(
-            NewEventReport(petParentId, request.EventId, request.Comment, request.Category, request.Reason),
+            NewEventReport(petParentId, request.EventId, request.Comment, request.Category, request.Reason) with { EventBookingId = request.BookingId },
             petParentId,
             ticketService,
             cancellationToken);

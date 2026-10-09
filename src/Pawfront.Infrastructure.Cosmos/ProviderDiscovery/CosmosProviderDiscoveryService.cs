@@ -196,7 +196,7 @@ internal sealed class CosmosProviderDiscoveryService(
                     continue;
                 }
                 if (cityFilter is not null
-                    && !string.Equals(summary.City, cityFilter, StringComparison.OrdinalIgnoreCase))
+                    && !string.Equals(summary.City?.Trim(), cityFilter, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }

@@ -30,6 +30,8 @@ internal sealed class SqlEventBookingStore(
 
         command.Parameters.AddWithValue("@EventId", input.EventId);
         command.Parameters.AddWithValue("@BookerName", input.BookerName);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)input.BookerAccountId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", input.BookerType);
         command.Parameters.AddWithValue("@BookerEmail", input.BookerEmail);
         command.Parameters.AddWithValue("@BookerMobile", DbValue(input.BookerMobile));
         command.Parameters.AddWithValue("@PaymentMethod", input.PaymentMethod);
@@ -239,7 +241,7 @@ internal sealed class SqlEventBookingStore(
                 tickets.Add(new EventBookingTicket(
                     TicketId: reader.GetGuid(0),
                     TicketNumber: reader.GetInt32(3),
-                    AttendeeName: reader.GetString(4)));
+                    AttendeeName: reader.GetString(4), PaymentStatus: reader.GetString(6), Amount: reader.GetDecimal(7)));
             }
         }
 
@@ -265,7 +267,9 @@ internal sealed class SqlEventBookingStore(
             UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero),
             CancelledAtUtc: reader.IsDBNull(13)
                 ? null
-                : new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero));
+                : new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero),
+            ConsecutiveNegativeMarks: reader.FieldCount > 14 ? reader.GetInt32(14) : 0,
+            HasReported: reader.FieldCount > 15 && reader.GetBoolean(15));
     }
 
     private static IEnumerable<SqlDataRecord> BuildAttendeeTable(IReadOnlyList<string> attendeeNames)

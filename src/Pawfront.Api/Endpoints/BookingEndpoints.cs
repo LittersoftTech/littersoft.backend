@@ -150,7 +150,7 @@ internal static class BookingEndpoints
         }
         catch (ProviderClosedOnDateException exception)
         {
-            return ApiResults.Conflict("ServiceClosed", exception.Message);
+            return ApiResults.BadRequest("ServiceClosed", exception.Message);
         }
         catch (InvalidBookingTimeException exception)
         {
@@ -158,7 +158,7 @@ internal static class BookingEndpoints
         }
         catch (BookingLeadTimeTooShortException exception)
         {
-            return ApiResults.Conflict("BookingLeadTimeTooShort", exception.Message);
+            return ApiResults.BadRequest("BookingLeadTimeTooShort", exception.Message);
         }
         catch (BookingNightStayUseDedicatedEndpointException exception)
         {
@@ -287,7 +287,7 @@ internal static class BookingEndpoints
         }
         catch (ProviderClosedOnDateException exception)
         {
-            return ApiResults.Conflict("ServiceClosed", exception.Message);
+            return ApiResults.BadRequest("ServiceClosed", exception.Message);
         }
         catch (InvalidBookingTimeException exception)
         {
@@ -787,7 +787,7 @@ internal static class BookingEndpoints
     }
 
     private static async Task<IResult> RequestModification(
-        Guid providerId, Guid bookingId, RequestBookingModificationRequest request, IBookingService bookingService, CancellationToken cancellationToken)
+        Guid providerId, Guid bookingId, RequestProviderBookingModificationRequest request, IBookingService bookingService, CancellationToken cancellationToken)
     {
         if (request is null)
         {
@@ -799,8 +799,7 @@ internal static class BookingEndpoints
             var result = await bookingService.RequestModificationAsync(
                 new RequestBookingModificationCommand(
                     bookingId, BookingStatusActor.Provider, providerId,
-                    request.BookingDate, request.StartTime, request.EndTime, request.Note,
-                    request.AcknowledgeTermsChanges),
+                    request.BookingDate, request.StartTime, request.EndTime, request.Note),
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
@@ -985,7 +984,7 @@ internal static class BookingEndpoints
         or InvalidStartOtpException or StartOtpExpiredException or OtpAttemptsExceededException
         or BookingNotCompletableException or BookingNotModifiableException
         or BookingModificationConflictException or NoPendingModificationException
-        or BookingModificationCapacityException or BookingTermsChangedException
+        or BookingModificationCapacityException
         or BookingModificationWindowClosedException or BookingModificationExpiredException
         or BookingServiceInvalidException
         or BookingOfferingNotConfiguredException or BookingGroomingItemCodeRequiredException
@@ -1025,7 +1024,6 @@ internal static class BookingEndpoints
         BookingModificationConflictException e => ApiResults.Conflict("ModificationAlreadyPending", e.Message),
         NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
         BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
-        BookingTermsChangedException e => ApiResults.Conflict("BookingTermsChanged", e.Message),
         BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
         BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         BookingServiceInvalidException e => ApiResults.BadRequest("InvalidServiceId", e.Message),
@@ -1033,9 +1031,9 @@ internal static class BookingEndpoints
         BookingGroomingItemCodeRequiredException e => ApiResults.BadRequest("ServiceItemCodeRequired", e.Message),
         BookingGroomingItemNotOfferedException e => ApiResults.BadRequest("ServiceItemNotOffered", e.Message),
         BookingGroomingItemInactiveException e => ApiResults.Conflict("ServiceItemInactive", e.Message),
-        ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
+        ProviderClosedOnDateException e => ApiResults.BadRequest("ServiceClosed", e.Message),
         InvalidBookingTimeException e => ApiResults.BadRequest("InvalidBookingTime", e.Message),
-        BookingLeadTimeTooShortException e => ApiResults.Conflict("BookingLeadTimeTooShort", e.Message),
+        BookingLeadTimeTooShortException e => ApiResults.BadRequest("BookingLeadTimeTooShort", e.Message),
         BookingNightStayUseDedicatedEndpointException e => ApiResults.BadRequest("UseNightStayEndpoint", e.Message),
         BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),
         BookingStatusTerminalException e => ApiResults.Conflict("BookingStatusTerminal", e.Message),

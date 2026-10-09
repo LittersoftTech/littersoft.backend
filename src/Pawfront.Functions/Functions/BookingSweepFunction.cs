@@ -46,6 +46,15 @@ public sealed class BookingSweepFunction(
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
 
+        await using (var attendance = new SqlCommand("Event.SettleEventAttendance", connection)
+        {
+            CommandType = System.Data.CommandType.StoredProcedure,
+            CommandTimeout = 120
+        })
+        {
+            await attendance.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         // BR-17 + BR-53 first (they free an unaccepted CREATED booking
         // outright), then BR-30 BEFORE BR-38 — a booking whose modification
         // proposal expires AND whose provider's working day has also ended

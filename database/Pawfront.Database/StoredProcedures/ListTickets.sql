@@ -53,7 +53,7 @@ BEGIN
            -- positionally, so the two must move together.
            t.[Category],
            t.[Reason],
-           t.[EventId],
+           t.[EventId], t.[EventBookingId],
            COUNT(*) OVER () AS [TotalCount]
     FROM [Support].[Tickets] AS t
     WHERE ((@ActorType = N'Provider'  AND t.[ProviderId]  = @ActorId)

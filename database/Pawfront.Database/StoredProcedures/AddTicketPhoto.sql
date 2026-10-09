@@ -101,7 +101,7 @@ BEGIN
            -- Appended LAST, here and in every other procedure projecting this row,
            -- so adding them shifted no existing reader ordinal.
            [Category],
-           [Reason]
+           [Reason], [EventId], [EventBookingId]
     FROM [Support].[Tickets]
     WHERE [TicketId] = @TicketId;
 

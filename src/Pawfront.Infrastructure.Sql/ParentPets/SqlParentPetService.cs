@@ -534,10 +534,10 @@ internal sealed class SqlParentPetService(
 
     public async Task<UpdatePetProfilePhotoResponse> UpdateProfilePhotoAsync(
         Guid petId,
-        string profilePhotoUrl,
+        string? profilePhotoUrl,
         CancellationToken cancellationToken)
     {
-        var url = Required(profilePhotoUrl, nameof(profilePhotoUrl));
+        var url = profilePhotoUrl is null ? null : Required(profilePhotoUrl, nameof(profilePhotoUrl));
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -547,7 +547,7 @@ internal sealed class SqlParentPetService(
             "Parent.UpdatePetProfilePhoto");
 
         command.Parameters.AddWithValue("@PetId", petId);
-        command.Parameters.AddWithValue("@ProfilePhotoUrl", url);
+        command.Parameters.AddWithValue("@ProfilePhotoUrl", DbValue(url));
 
         try
         {
@@ -560,8 +560,14 @@ internal sealed class SqlParentPetService(
 
             return new UpdatePetProfilePhotoResponse(
                 PetId: reader.GetGuid(0),
-                ProfilePhotoUrl: reader.GetString(1),
-                UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero));
+                ProfilePhotoUrl: reader.IsDBNull(1) ? null : reader.GetString(1),
+                UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero),
+                IsPetProfileComplete: PetProfileCompletion.IsComplete(
+                    reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
+                    DateOnly.FromDateTime(reader.GetDateTime(7)),
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9),
+                    reader.IsDBNull(1) ? null : reader.GetString(1)));
         }
         catch (SqlException exception) when (exception.Number == 51220)
         {

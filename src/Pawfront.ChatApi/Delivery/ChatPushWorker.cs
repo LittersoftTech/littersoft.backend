@@ -122,7 +122,8 @@ internal sealed class ChatPushWorker(
                 rendered.Title,
                 rendered.Body,
                 payload,
-                ImageUrl: null),
+                ImageUrl: null,
+                FirebaseUserId: item.FirebaseUserId),
             cancellationToken);
 
         // Dead tokens are deliberately NOT deactivated here. That is the

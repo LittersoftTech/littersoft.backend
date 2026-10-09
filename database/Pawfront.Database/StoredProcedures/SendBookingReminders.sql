@@ -88,16 +88,11 @@ BEGIN
                    CAST(b.[BookingDate] AS DATETIME2(7))),
            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[EndTime]),
                    CAST(b.[BookingDate] AS DATETIME2(7))),
-           CASE WHEN w.[EndTime] IS NOT NULL
-                THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), w.[EndTime]),
-                             CAST(b.[BookingDate] AS DATETIME2(7))) END
+           CASE WHEN w.[IsOpen] = 1 THEN w.[ClosesAtUtc] END
     FROM [Booking].[Bookings] b
-    LEFT JOIN [Provider].[ProviderWeeklyAvailability] w
-        ON w.[ProviderId] = b.[ProviderId]
-       -- DATEPART(WEEKDAY) is @@DATEFIRST-dependent; this arithmetic is not.
-       -- 0 = Sunday, matching how the availability rows are stored.
-       AND w.[DayOfWeek] = (DATEDIFF(DAY, '19000107', b.[BookingDate]) % 7)
-       AND w.[IsOpen] = 1
+    OUTER APPLY [Provider].[WorkingHoursAtUtc](b.[ProviderId],
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), b.[StartTime]),
+            CAST(b.[BookingDate] AS DATETIME2(7)))) w
     WHERE b.[BookingDate] BETWEEN @WindowFrom AND @WindowTo
       AND (b.[Status] IN (SELECT [Status] FROM @Live)
            OR b.[Status] IN (N'START_JOB', N'IN_PROGRESS'));

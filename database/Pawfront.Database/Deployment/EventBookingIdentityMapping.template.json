@@ -1,0 +1,18 @@
+{
+  "status": "Verified mapping required; no live identifiers exported",
+  "activeBookingsRequiringVerification": 21,
+  "candidateMatchCounts": [
+    { "accountsMatchingEmail": 2, "bookings": 5 },
+    { "accountsMatchingEmail": 3, "bookings": 5 },
+    { "accountsMatchingEmail": 4, "bookings": 1 },
+    { "accountsMatchingEmail": 5, "bookings": 10 }
+  ],
+  "entries": [],
+  "entryShape": {
+    "bookingId": "verified booking UUID",
+    "accountId": "verified account UUID",
+    "accountType": "PetParent or Provider"
+  },
+  "verificationRequirement": "Confirm each booking's authenticated owner using an authorized internal source. An email match alone is not sufficient.",
+  "apply": false
+}

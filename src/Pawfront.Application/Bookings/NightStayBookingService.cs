@@ -1,3 +1,4 @@
+using Pawfront.Application.Availability;
 using Microsoft.Extensions.Options;
 using Pawfront.Application.Billing;
 using Pawfront.Application.Closures;
@@ -15,6 +16,7 @@ internal sealed class NightStayBookingService(
     IProviderServiceCatalog serviceCatalog,
     IPetSitterServiceRegistry petSitterRegistry,
     IProviderClosureReader closureReader,
+    IProviderAvailabilityService availabilityService,
     IProviderDiscoveryService providerDiscovery,
     IProviderServiceLocationRegistry providerLocationRegistry,
     IBookingTermsChangeService termsChangeService,
@@ -79,19 +81,9 @@ internal sealed class NightStayBookingService(
         BookingLeadTime.EnsureFarEnoughAhead(
             command.CheckInDate, nightStay.DropOffTime, DateTimeOffset.UtcNow);
 
-        // 4. Per-night closure check. A full-day closure on this service on any
-        // stayed night blocks the booking. (Partial-day closures don't apply to an
-        // overnight stay — the night-stay model is date-granular, not time-window.)
-        for (var night = command.CheckInDate; night < command.CheckOutDate; night = night.AddDays(1))
-        {
-            var closures = await closureReader.GetActiveClosuresForDateAsync(
-                command.ServiceId, night, cancellationToken);
-            var fullDay = closures.FirstOrDefault(c => c.IsFullDay);
-            if (fullDay is not null)
-            {
-                throw new ProviderClosedOnDateException(command.ServiceId, night, fullDay.Reason);
-            }
-        }
+        await ProviderDateAvailability.EnsureOpenAsync(
+            availabilityService, closureReader, command.ProviderId, command.ServiceId,
+            command.CheckInDate, command.CheckOutDate, cancellationToken);
 
         // 5. Snapshot the provider's business address for a ProviderLocation stay
         // (Cosmos + registration), so a later address edit never moves this booking.
@@ -339,33 +331,26 @@ internal sealed class NightStayBookingService(
         var booking = await sqlStore.GetAsync(command.NightStayBookingId, cancellationToken)
             ?? throw new NightStayBookingNotFoundException(command.NightStayBookingId);
 
-        // Per-night full-day closure check on the proposed range (same as create).
-        for (var night = command.CheckInDate; night < command.CheckOutDate; night = night.AddDays(1))
-        {
-            var closures = await closureReader.GetActiveClosuresForDateAsync(
-                booking.ServiceId, night, cancellationToken);
-            var fullDay = closures.FirstOrDefault(c => c.IsFullDay);
-            if (fullDay is not null)
-            {
-                throw new ProviderClosedOnDateException(booking.ServiceId, night, fullDay.Reason);
-            }
-        }
+        BookingLeadTime.EnsureFarEnoughAhead(command.CheckInDate, booking.DropOffTime, DateTimeOffset.UtcNow);
+        await ProviderDateAvailability.EnsureOpenAsync(
+            availabilityService, closureReader, booking.ProviderId, booking.ServiceId,
+            command.CheckInDate, command.CheckOutDate, cancellationToken);
 
-        // Mirror of the single-day path: a stay that froze the provider's terms at
-        // creation can only be rescheduled once the requester has confirmed any
-        // drift in them (price per night, cancellation policy, drop-off / pick-up
-        // times, the selected-location address).
-        var drift = await termsChangeService.GetForNightStayBookingAsync(
-            command.NightStayBookingId, cancellationToken);
+        // Provider proposals change only the schedule and preserve all frozen terms.
+        // Parent proposals retain the existing drift acknowledgment behavior.
         BookingAcknowledgedTerms? acknowledgedTerms = null;
-        if (drift.HasChanges)
+        if (command.Actor == BookingStatusActor.Parent)
         {
-            if (!command.AcknowledgeTermsChanges)
+            var drift = await termsChangeService.GetForNightStayBookingAsync(command.NightStayBookingId, cancellationToken);
+            if (drift.HasChanges)
             {
-                throw new BookingTermsChangedException(command.NightStayBookingId);
-            }
+                if (!command.AcknowledgeTermsChanges)
+                {
+                    throw new BookingTermsChangedException(command.NightStayBookingId);
+                }
 
-            acknowledgedTerms = drift.AcknowledgedTerms;
+                acknowledgedTerms = drift.AcknowledgedTerms;
+            }
         }
 
         return await sqlStore.RequestModificationAsync(
@@ -383,6 +368,13 @@ internal sealed class NightStayBookingService(
         {
             var booking = await sqlStore.GetAsync(command.BookingId, cancellationToken)
                 ?? throw new NightStayBookingNotFoundException(command.BookingId);
+            var pending = await sqlStore.GetPendingModificationAsync(command.BookingId, cancellationToken)
+                ?? throw new NoPendingModificationException(command.BookingId);
+            BookingLeadTime.EnsureFarEnoughAhead(
+                pending.ProposedCheckInDate, booking.DropOffTime, DateTimeOffset.UtcNow);
+            await ProviderDateAvailability.EnsureOpenAsync(
+                availabilityService, closureReader, booking.ProviderId, booking.ServiceId,
+                pending.ProposedCheckInDate, pending.ProposedCheckOutDate, cancellationToken);
             var doc = await petSitterRegistry.GetAsync(booking.ProviderId, cancellationToken);
             var offering = doc?.PetHotel?.Offering ?? doc?.Freelance?.Offering;
             capacity = offering?.MaxPetsAtOneTime

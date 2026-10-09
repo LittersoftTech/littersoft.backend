@@ -72,6 +72,7 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48);
+    DECLARE @Source NVARCHAR(16);
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @BookingDate DATE;
@@ -82,6 +83,7 @@ BEGIN
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status],
+           @Source = [Source],
            @ProviderId = [ProviderId],
            @PetParentId = [PetParentId],
            @BookingDate = [BookingDate],
@@ -102,6 +104,9 @@ BEGIN
     BEGIN
         THROW 51121, 'You are not a party to this booking.', 1;
     END
+
+    IF @Source = N'Custom' AND (@Actor <> N'Provider' OR @NewStatus NOT IN (N'COMPLETED', N'PROVIDER_CANCELLED'))
+        THROW 51122, 'Custom bookings only allow provider completion or cancellation on this route.', 1;
 
     -- A booking left pending (CREATED) for 24+ hours has expired: reject the
     -- attempted transition — the provider can no longer accept it.
@@ -142,7 +147,7 @@ BEGIN
     END
 
     -- A booking in a terminal state can't change further.
-    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+    IF @CurrentStatus IN (N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                           N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51123, 'Booking is in a terminal state and cannot change.', 1;
@@ -156,7 +161,7 @@ BEGIN
     -- From-state rules for the engine transitions.
     IF (@NewStatus = N'CONFIRMED'        AND @CurrentStatus <> N'CREATED')
        OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
-       OR (@NewStatus = N'COMPLETED'     AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
+       OR (@NewStatus = N'COMPLETED' AND @Source <> N'Custom' AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
        OR (@NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
            AND @CurrentStatus NOT IN (N'CONFIRMED',
                                       N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
@@ -169,7 +174,7 @@ BEGIN
     -- A cancel is allowed from any non-terminal state EXCEPT once the job is
     -- actively underway (IN_PROGRESS; the retired ENDING kept for legacy rows)
     -- — by then it runs to completion.
-    IF @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+    IF @Source <> N'Custom' AND @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
        AND @CurrentStatus IN (N'IN_PROGRESS', N'ENDING')
     BEGIN
         THROW 51149, 'The job is already in progress and can no longer be cancelled.', 1;
@@ -195,7 +200,7 @@ BEGIN
     -- rule and the same clamps as the dedicated sproc; see it for the reasoning.
     DECLARE @ActualEndTime TIME(0) = NULL;
 
-    IF @NewStatus = N'COMPLETED' AND CAST(@Now AS DATE) = @BookingDate
+    IF @Source <> N'Custom' AND @NewStatus = N'COMPLETED' AND CAST(@Now AS DATE) = @BookingDate
     BEGIN
         DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
         IF @NowTime < @EndTime
@@ -211,7 +216,7 @@ BEGIN
         -- leaves whatever is there alone (it is NULL for all of them anyway,
         -- since COMPLETED is terminal apart from the move to PAID).
         [ActualEndTime] = CASE
-            WHEN @NewStatus = N'COMPLETED' THEN @ActualEndTime
+            WHEN @NewStatus = N'COMPLETED' AND @Source <> N'Custom' THEN @ActualEndTime
             ELSE [ActualEndTime]
         END,
         -- A no-show ends the job with nobody having performed and nobody owing,
@@ -266,7 +271,7 @@ BEGIN
             WHEN N'PROVIDER_NO_SHOW'   THEN N'BOOKING_NO_SHOW_REPORTED'
         END;
 
-    IF @NotificationType IS NOT NULL
+    IF @Source <> N'Custom' AND @NotificationType IS NOT NULL
     BEGIN
         -- A no-show always names the absent party, which is what lets one
         -- template read correctly in both directions.

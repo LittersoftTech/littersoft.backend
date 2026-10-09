@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using Microsoft.Extensions.Logging;
 using Pawfront.Domain.Events;
 
@@ -14,14 +14,16 @@ internal sealed class EventService(
 {
     private static readonly IReadOnlySet<string> AllowedCategories = new HashSet<string>(StringComparer.Ordinal)
     {
-        nameof(EventCategory.AdoptionAndRescue),
-        nameof(EventCategory.PetTraining),
-        nameof(EventCategory.Charity),
-        nameof(EventCategory.Volunteering),
+        nameof(EventCategory.MeetupsAndSocials),
+        nameof(EventCategory.WalksAndOutdoors),
+        nameof(EventCategory.TrainingAndWorkshops),
+        nameof(EventCategory.SportsAndCompetitions),
+        nameof(EventCategory.ShowsAndDemonstrations),
+        nameof(EventCategory.TalksAndLearning),
         nameof(EventCategory.HealthAndWellness),
-        nameof(EventCategory.SocialAndCultural),
-        nameof(EventCategory.OutdoorActivities),
-        nameof(EventCategory.ParentEducation)
+        nameof(EventCategory.AdoptionAndRescue),
+        nameof(EventCategory.CharityAndVolunteering),
+        nameof(EventCategory.Celebrations)
     };
 
     private static readonly IReadOnlySet<string> AllowedEventTypes = new HashSet<string>(StringComparer.Ordinal)
@@ -34,6 +36,8 @@ internal sealed class EventService(
     {
         nameof(EventCancellationPolicy.FullRefundUpTo4Hours),
         nameof(EventCancellationPolicy.FullRefundUpTo2Hours),
+        nameof(EventCancellationPolicy.FullRefundUpTo24Hours),
+        nameof(EventCancellationPolicy.FullRefundUpTo48Hours),
         nameof(EventCancellationPolicy.NoRefund)
     };
 
@@ -78,7 +82,7 @@ internal sealed class EventService(
                 validated.IsPaid,
                 validated.Price,
                 validated.CancellationPolicy,
-                validated.EventLink),
+                validated.EventLink, validated.PhysicalInput?.MaximumCapacity),
             cancellationToken);
 
         var physicalResult = await WritePhysicalExtensionAsync(
@@ -113,7 +117,7 @@ internal sealed class EventService(
                 validated.IsPaid,
                 validated.Price,
                 validated.CancellationPolicy,
-                validated.EventLink),
+                validated.EventLink, validated.PhysicalInput?.MaximumCapacity),
             cancellationToken);
 
         var physicalResult = await WritePhysicalExtensionAsync(
@@ -151,7 +155,7 @@ internal sealed class EventService(
                 validated.IsPaid,
                 validated.Price,
                 validated.CancellationPolicy,
-                validated.EventLink),
+                validated.EventLink, validated.PhysicalInput?.MaximumCapacity),
             cancellationToken);
 
         var physicalResult = await ReconcilePhysicalAsync(
@@ -171,6 +175,14 @@ internal sealed class EventService(
 
         var previous = await sqlStore.GetAsync(command.EventId, cancellationToken);
 
+        if (previous is not null && command.Physical is not null)
+        {
+            var existingPhysical = await cosmosStore.GetPhysicalAsync(command.EventId, previous.EventCategory, cancellationToken);
+            if (existingPhysical?.Location is { } location && command.Physical.Location != new EventLocationInput(
+                location.HouseNumber, location.Street, location.City, location.Zip, location.Country, location.Latitude, location.Longitude))
+                throw new ArgumentException("The venue of a posted event cannot be changed.");
+        }
+
         var snapshot = await sqlStore.UpdateByParentAsync(
             new UpdateParentEventSqlInput(
                 command.EventId,
@@ -189,7 +201,7 @@ internal sealed class EventService(
                 validated.IsPaid,
                 validated.Price,
                 validated.CancellationPolicy,
-                validated.EventLink),
+                validated.EventLink, validated.PhysicalInput?.MaximumCapacity),
             cancellationToken);
 
         var physicalResult = await ReconcilePhysicalAsync(
@@ -668,14 +680,14 @@ internal sealed class EventService(
             snapshot.Price,
             snapshot.CancellationPolicy,
             snapshot.EventLink,
-            physical,
+            physical is not null && snapshot.MaximumCapacity is int cap ? physical with { MaximumCapacity = cap } : physical,
             snapshot.CreatedAtUtc,
             snapshot.UpdatedAtUtc,
             snapshot.Counters,
             BuildOrganizer(snapshot, organizerTotalEvents),
             snapshot.TotalBookings,
             snapshot.PaymentOptions,
-            snapshot.Attendees);
+            snapshot.Attendees, snapshot.EventStatus, snapshot.AttendedCount, snapshot.EarnedAmount, snapshot.EventsCancelledCount, snapshot.MaximumCapacity);
     }
 
     /// <summary>
@@ -688,13 +700,13 @@ internal sealed class EventService(
     {
         return snapshot.ProviderId is Guid providerId
             ? new EventOrganizer(
-                "Provider", providerId, snapshot.OrganizerName, snapshot.OrganizerImageUrl, totalEventsOrganized)
+                "Provider", providerId, snapshot.OrganizerName, snapshot.OrganizerImageUrl, totalEventsOrganized, snapshot.EventsCancelledCount)
             : new EventOrganizer(
                 "PetParent",
                 snapshot.PetParentId ?? Guid.Empty,
                 snapshot.OrganizerName,
                 snapshot.OrganizerImageUrl,
-                totalEventsOrganized);
+                totalEventsOrganized, snapshot.EventsCancelledCount);
     }
 
     private static (bool IsPaid, decimal? Price) ValidateTicketing(bool isPaid, decimal? price)

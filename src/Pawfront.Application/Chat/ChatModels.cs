@@ -239,7 +239,8 @@ public sealed record ChatAppendResult(
     bool RecipientIsMuted,
     Guid? NotificationId,
     IReadOnlyList<string> RecipientTokens,
-    string? NotificationDataJson);
+    string? NotificationDataJson,
+    string? RecipientFirebaseUserId = null);
 
 /// <summary>What a caller asks to send.</summary>
 public sealed record SendChatMessageCommand(

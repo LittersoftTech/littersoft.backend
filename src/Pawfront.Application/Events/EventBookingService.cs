@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using Microsoft.Extensions.Logging;
 using Pawfront.Domain.Events;
 
@@ -109,7 +109,7 @@ internal sealed class EventBookingService(
                 paymentMethod,
                 maximumCapacity,
                 totalAmount,
-                attendeeNames),
+                attendeeNames, command.BookerOrganiserId, command.BookerType),
             cancellationToken);
     }
 

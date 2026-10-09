@@ -10,5 +10,5 @@ BEGIN
     SELECT DISTINCT b.[EventId]
     FROM [Event].[EventBookings] AS b
     WHERE b.[BookerEmail] = @BookerEmail
-      AND b.[Status] = N'Confirmed';
+      AND b.[Status] IN (N'Confirmed',N'Attended');
 END;

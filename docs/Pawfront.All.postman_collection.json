@@ -1452,7 +1452,7 @@
                   "query": [
                     {
                       "key": "eventCategory",
-                      "value": "PetTraining",
+                      "value": "TrainingAndWorkshops",
                       "disabled": true
                     },
                     {
@@ -1580,7 +1580,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"eventCategory\": \"PetTraining\",\n  \"isChildFriendly\": \"string\",\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": \"string\",\n  \"eventType\": \"Physical\",\n  \"startDate\": \"string\",\n  \"endDate\": \"string\",\n  \"startTime\": \"string\",\n  \"endTime\": \"string\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": \"string\"\n}",
+                  "raw": "{\n  \"eventCategory\": \"TrainingAndWorkshops\",\n  \"isChildFriendly\": \"string\",\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": \"string\",\n  \"eventType\": \"Physical\",\n  \"startDate\": \"string\",\n  \"endDate\": \"string\",\n  \"startTime\": \"string\",\n  \"endTime\": \"string\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": \"string\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -1648,7 +1648,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"eventCategory\": \"PetTraining\",\n  \"isChildFriendly\": false,\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": [\n    \"string\"\n  ],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-09-01\",\n  \"endDate\": \"2026-09-01\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"10:00:00\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": {\n    \"maximumCapacity\": 0,\n    \"location\": {\n      \"houseNumber\": \"string\",\n      \"street\": \"string\",\n      \"city\": \"Zurich\",\n      \"zip\": \"string\",\n      \"country\": \"string\",\n      \"latitude\": 47.3769,\n      \"longitude\": 8.5417\n    }\n  }\n}",
+                  "raw": "{\n  \"eventCategory\": \"TrainingAndWorkshops\",\n  \"isChildFriendly\": false,\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": [\n    \"string\"\n  ],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-09-01\",\n  \"endDate\": \"2026-09-01\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"10:00:00\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": {\n    \"maximumCapacity\": 0,\n    \"location\": {\n      \"houseNumber\": \"string\",\n      \"street\": \"string\",\n      \"city\": \"Zurich\",\n      \"zip\": \"string\",\n      \"country\": \"string\",\n      \"latitude\": 47.3769,\n      \"longitude\": 8.5417\n    }\n  }\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -1714,7 +1714,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"eventCategory\": \"PetTraining\",\n  \"isChildFriendly\": false,\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": [\n    \"string\"\n  ],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-09-01\",\n  \"endDate\": \"2026-09-01\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"10:00:00\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": {\n    \"maximumCapacity\": 0,\n    \"location\": {\n      \"houseNumber\": \"string\",\n      \"street\": \"string\",\n      \"city\": \"Zurich\",\n      \"zip\": \"string\",\n      \"country\": \"string\",\n      \"latitude\": 47.3769,\n      \"longitude\": 8.5417\n    }\n  }\n}",
+                  "raw": "{\n  \"eventCategory\": \"TrainingAndWorkshops\",\n  \"isChildFriendly\": false,\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": [\n    \"string\"\n  ],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-09-01\",\n  \"endDate\": \"2026-09-01\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"10:00:00\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": {\n    \"maximumCapacity\": 0,\n    \"location\": {\n      \"houseNumber\": \"string\",\n      \"street\": \"string\",\n      \"city\": \"Zurich\",\n      \"zip\": \"string\",\n      \"country\": \"string\",\n      \"latitude\": 47.3769,\n      \"longitude\": 8.5417\n    }\n  }\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -5320,7 +5320,7 @@
                   "query": [
                     {
                       "key": "eventCategory",
-                      "value": "PetTraining",
+                      "value": "TrainingAndWorkshops",
                       "disabled": true
                     },
                     {
@@ -5448,7 +5448,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"eventCategory\": \"PetTraining\",\n  \"isChildFriendly\": \"string\",\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": \"string\",\n  \"eventType\": \"Physical\",\n  \"startDate\": \"string\",\n  \"endDate\": \"string\",\n  \"startTime\": \"string\",\n  \"endTime\": \"string\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": \"string\"\n}",
+                  "raw": "{\n  \"eventCategory\": \"TrainingAndWorkshops\",\n  \"isChildFriendly\": \"string\",\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": \"string\",\n  \"eventType\": \"Physical\",\n  \"startDate\": \"string\",\n  \"endDate\": \"string\",\n  \"startTime\": \"string\",\n  \"endTime\": \"string\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": \"string\"\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -5516,7 +5516,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"eventCategory\": \"PetTraining\",\n  \"isChildFriendly\": false,\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": [\n    \"string\"\n  ],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-09-01\",\n  \"endDate\": \"2026-09-01\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"10:00:00\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": {\n    \"maximumCapacity\": 0,\n    \"location\": {\n      \"houseNumber\": \"string\",\n      \"street\": \"string\",\n      \"city\": \"Zurich\",\n      \"zip\": \"string\",\n      \"country\": \"string\",\n      \"latitude\": 47.3769,\n      \"longitude\": 8.5417\n    }\n  }\n}",
+                  "raw": "{\n  \"eventCategory\": \"TrainingAndWorkshops\",\n  \"isChildFriendly\": false,\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": [\n    \"string\"\n  ],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-09-01\",\n  \"endDate\": \"2026-09-01\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"10:00:00\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": {\n    \"maximumCapacity\": 0,\n    \"location\": {\n      \"houseNumber\": \"string\",\n      \"street\": \"string\",\n      \"city\": \"Zurich\",\n      \"zip\": \"string\",\n      \"country\": \"string\",\n      \"latitude\": 47.3769,\n      \"longitude\": 8.5417\n    }\n  }\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -5582,7 +5582,7 @@
                 },
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"eventCategory\": \"PetTraining\",\n  \"isChildFriendly\": false,\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": [\n    \"string\"\n  ],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-09-01\",\n  \"endDate\": \"2026-09-01\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"10:00:00\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": {\n    \"maximumCapacity\": 0,\n    \"location\": {\n      \"houseNumber\": \"string\",\n      \"street\": \"string\",\n      \"city\": \"Zurich\",\n      \"zip\": \"string\",\n      \"country\": \"string\",\n      \"latitude\": 47.3769,\n      \"longitude\": 8.5417\n    }\n  }\n}",
+                  "raw": "{\n  \"eventCategory\": \"TrainingAndWorkshops\",\n  \"isChildFriendly\": false,\n  \"title\": \"Puppy Social Meetup\",\n  \"description\": \"Short free-text description.\",\n  \"bannerImageUrl\": \"string\",\n  \"amenities\": [\n    \"string\"\n  ],\n  \"eventType\": \"Physical\",\n  \"startDate\": \"2026-09-01\",\n  \"endDate\": \"2026-09-01\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"10:00:00\",\n  \"isPaid\": false,\n  \"price\": 25.0,\n  \"cancellationPolicy\": \"NoRefund\",\n  \"eventLink\": \"string\",\n  \"physical\": {\n    \"maximumCapacity\": 0,\n    \"location\": {\n      \"houseNumber\": \"string\",\n      \"street\": \"string\",\n      \"city\": \"Zurich\",\n      \"zip\": \"string\",\n      \"country\": \"string\",\n      \"latitude\": 47.3769,\n      \"longitude\": 8.5417\n    }\n  }\n}",
                   "options": {
                     "raw": {
                       "language": "json"

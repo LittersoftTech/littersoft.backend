@@ -33,6 +33,7 @@ internal sealed class SqlPetParentOnboardingStatusReader(
         var profilePhotoUrl = reader.IsDBNull(1) ? null : reader.GetString(1);
         var isMobileVerified = !reader.IsDBNull(2);
         var isEmailVerified = reader.GetBoolean(3);
+        var isBasicInfoComplete = reader.GetBoolean(4);
 
         // Result set 2: pets summary.
         var pets = new List<PetMedicalInfoCompletion>();
@@ -47,7 +48,8 @@ internal sealed class SqlPetParentOnboardingStatusReader(
                     // Appended LAST to the sproc's projection, so the ordinals
                     // above did not move. MissingSections is derived by the
                     // orchestrator, not read.
-                    HasProfilePhoto: reader.GetBoolean(3)));
+                    HasProfilePhoto: reader.GetBoolean(3),
+                    IsDetailsComplete: reader.GetBoolean(4)));
             }
         }
 
@@ -68,7 +70,8 @@ internal sealed class SqlPetParentOnboardingStatusReader(
             isEmailVerified,
             isMobileVerified,
             pets,
-            identityType);
+            identityType,
+            isBasicInfoComplete);
     }
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)

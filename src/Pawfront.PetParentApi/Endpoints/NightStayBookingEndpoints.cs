@@ -174,7 +174,7 @@ internal static class NightStayBookingEndpoints
         }
         catch (ProviderClosedOnDateException exception)
         {
-            return ApiResults.Conflict("ServiceClosed", exception.Message);
+            return ApiResults.BadRequest("ServiceClosed", exception.Message);
         }
         catch (InvalidNightStayDatesException exception)
         {
@@ -182,7 +182,7 @@ internal static class NightStayBookingEndpoints
         }
         catch (BookingLeadTimeTooShortException exception)
         {
-            return ApiResults.Conflict("BookingLeadTimeTooShort", exception.Message);
+            return ApiResults.BadRequest("BookingLeadTimeTooShort", exception.Message);
         }
         catch (UnsupportedBookingLocationTypeException exception)
         {
@@ -650,8 +650,8 @@ internal static class NightStayBookingEndpoints
         BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
         BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         InvalidNightStayDatesException e => ApiResults.BadRequest("InvalidNightStayDates", e.Message),
-        BookingLeadTimeTooShortException e => ApiResults.Conflict("BookingLeadTimeTooShort", e.Message),
-        ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
+        BookingLeadTimeTooShortException e => ApiResults.BadRequest("BookingLeadTimeTooShort", e.Message),
+        ProviderClosedOnDateException e => ApiResults.BadRequest("ServiceClosed", e.Message),
         BookingOfferingNotConfiguredException e => ApiResults.BadRequest("OfferingNotConfigured", e.Message),
         BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),
         BookingStatusTerminalException e => ApiResults.Conflict("BookingStatusTerminal", e.Message),

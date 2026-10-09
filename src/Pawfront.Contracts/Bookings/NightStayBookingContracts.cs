@@ -70,8 +70,14 @@ public sealed record NightStayBookingResponse(
     string? Breed = null,
     string? PetGender = null);
 
+/// <summary>Provider schedule-only proposal. Acceptance preserves the booked terms.</summary>
+public sealed record RequestProviderNightStayBookingModificationRequest(
+    DateOnly CheckInDate,
+    DateOnly CheckOutDate,
+    string? Note);
+
 /// <summary>
-/// Body for a night-stay modification request
+/// Body for a parent night-stay modification request
 /// (<c>POST .../night-stay-bookings/{bookingId}/modifications</c>). The proposed
 /// check-in / check-out range. Accept/decline reuses
 /// <see cref="RespondBookingModificationRequest"/>.

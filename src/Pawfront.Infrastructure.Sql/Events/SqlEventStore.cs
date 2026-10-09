@@ -38,6 +38,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
         command.Parameters.AddWithValue("@CancellationPolicy", DbValue(input.CancellationPolicy));
         command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
+        command.Parameters.AddWithValue("@MaximumCapacity", (object?)input.MaximumCapacity ?? DBNull.Value);
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
         try
@@ -87,6 +88,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
         command.Parameters.AddWithValue("@CancellationPolicy", DbValue(input.CancellationPolicy));
         command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
+        command.Parameters.AddWithValue("@MaximumCapacity", (object?)input.MaximumCapacity ?? DBNull.Value);
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
         try
@@ -152,6 +154,8 @@ internal sealed class SqlEventStore(
             input.Description, input.BannerImageUrl, input.EventType, input.StartDate, input.EndDate,
             input.StartTime, input.EndTime, input.IsPaid, input.Price, input.CancellationPolicy,
             input.Amenities);
+        command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
+        command.Parameters.AddWithValue("@MaximumCapacity", (object?)input.MaximumCapacity ?? DBNull.Value);
 
         try
         {
@@ -186,6 +190,8 @@ internal sealed class SqlEventStore(
             input.Description, input.BannerImageUrl, input.EventType, input.StartDate, input.EndDate,
             input.StartTime, input.EndTime, input.IsPaid, input.Price, input.CancellationPolicy,
             input.Amenities);
+        command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
+        command.Parameters.AddWithValue("@MaximumCapacity", (object?)input.MaximumCapacity ?? DBNull.Value);
 
         try
         {
@@ -255,7 +261,7 @@ internal sealed class SqlEventStore(
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                attendees.Add(new EventAttendeeSummary(reader.GetString(0), reader.GetInt32(1)));
+                attendees.Add(new EventAttendeeSummary(reader.GetString(0), reader.GetInt32(1), reader.GetGuid(2), reader.GetString(3), reader.GetDecimal(4), reader.IsDBNull(5) ? null : reader.GetString(5)));
             }
         }
 
@@ -534,7 +540,9 @@ internal sealed class SqlEventStore(
             OrganizerImageUrl: reader.IsDBNull(22) ? null : reader.GetString(22),
             // Total tickets booked (non-cancelled) — last column of result set 1
             // in every event-returning sproc.
-            TotalBookings: reader.GetInt32(23));
+            TotalBookings: reader.GetInt32(23), EventStatus: reader.GetString(25),
+            AttendedCount: reader.GetInt32(26), EarnedAmount: reader.GetDecimal(27), EventsCancelledCount: reader.GetInt32(28),
+            MaximumCapacity: reader.IsDBNull(29) ? null : reader.GetInt32(29));
     }
 
     private static async Task<List<string>> ReadAmenitiesAsync(

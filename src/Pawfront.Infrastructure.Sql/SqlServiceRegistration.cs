@@ -200,6 +200,8 @@ public static class SqlServiceRegistration
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
 
+            services.AddScoped<IEventLifecycleStore>(provider => new SqlEventLifecycleStore(sqlConnectionString, provider.GetService<IPawfrontSecretProvider>()));
+
             services.AddScoped<IEventBookingSqlStore>(provider =>
                 new SqlEventBookingStore(
                     sqlConnectionString,

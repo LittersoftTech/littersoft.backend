@@ -243,7 +243,7 @@ public sealed record SupportTicketRecord(
     IReadOnlyList<SupportTicketPhotoRecord> Photos,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? ClosedAtUtc)
+    DateTimeOffset? ClosedAtUtc, Guid? EventBookingId = null)
 {
     /// <summary>
     /// True for everything but <c>CLOSED</c>. This is the predicate the per-subject
@@ -361,7 +361,7 @@ public sealed record CreateSupportTicketCommand(
     string? Comment,
     string? Category,
     string? Reason,
-    Guid? EventId = null);
+    Guid? EventId = null, Guid? EventBookingId = null);
 
 /// <summary>
 /// What <c>Support.CreateTicket</c> decided. <see cref="Created"/> means the ticket was

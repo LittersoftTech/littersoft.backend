@@ -899,6 +899,8 @@ internal sealed class BookingService(
             };
         }
 
+        BookingLeadTime.EnsureFarEnoughAhead(command.BookingDate, command.StartTime, DateTimeOffset.UtcNow);
+
         var durationHours = (decimal)(command.EndTime - command.StartTime).TotalHours;
         ValidateDuration(durationHours, offering);
 
@@ -907,21 +909,21 @@ internal sealed class BookingService(
         await ValidateAgainstClosuresAsync(
             booking.ServiceId, command.BookingDate, command.StartTime, command.EndTime, cancellationToken);
 
-        // The booking froze the provider's terms at creation. If they have drifted
-        // since, the requester must have seen and confirmed the new ones — the app
-        // shows them from the terms-changes endpoint. An un-acknowledged request
-        // against a drifted booking is rejected rather than silently proposing a
-        // schedule under terms the requester never saw.
-        var drift = await termsChangeService.GetForBookingAsync(command.BookingId, cancellationToken);
+        // Provider proposals change only the schedule and preserve all frozen terms.
+        // Parent proposals retain the existing drift acknowledgment behavior.
         BookingAcknowledgedTerms? acknowledgedTerms = null;
-        if (drift.HasChanges)
+        if (command.Actor == BookingStatusActor.Parent)
         {
-            if (!command.AcknowledgeTermsChanges)
+            var drift = await termsChangeService.GetForBookingAsync(command.BookingId, cancellationToken);
+            if (drift.HasChanges)
             {
-                throw new BookingTermsChangedException(command.BookingId);
-            }
+                if (!command.AcknowledgeTermsChanges)
+                {
+                    throw new BookingTermsChangedException(command.BookingId);
+                }
 
-            acknowledgedTerms = drift.AcknowledgedTerms;
+                acknowledgedTerms = drift.AcknowledgedTerms;
+            }
         }
 
         return await sqlStore.RequestModificationAsync(
@@ -944,6 +946,14 @@ internal sealed class BookingService(
         {
             var booking = await sqlStore.GetAsync(command.BookingId, cancellationToken)
                 ?? throw new BookingNotFoundException(command.BookingId);
+            var pending = await sqlStore.GetPendingModificationAsync(command.BookingId, cancellationToken)
+                ?? throw new NoPendingModificationException(command.BookingId);
+            BookingLeadTime.EnsureFarEnoughAhead(
+                pending.ProposedBookingDate, pending.ProposedStartTime, DateTimeOffset.UtcNow);
+            await ValidateAgainstAvailabilityAsync(booking.ProviderId, pending.ProposedBookingDate,
+                pending.ProposedStartTime, pending.ProposedEndTime, cancellationToken);
+            await ValidateAgainstClosuresAsync(booking.ServiceId, pending.ProposedBookingDate,
+                pending.ProposedStartTime, pending.ProposedEndTime, cancellationToken);
             var resolution = await offeringResolver.ResolveAsync(booking.ServiceId, cancellationToken);
             capacity = resolution is OfferingResolution.Resolved r
                 ? r.Capacity
@@ -992,19 +1002,9 @@ internal sealed class BookingService(
         CancellationToken cancellationToken)
     {
         var closures = await closureReader.GetActiveClosuresForDateAsync(serviceId, bookingDate, cancellationToken);
-        foreach (var closure in closures)
+        if (closures.Count > 0)
         {
-            // Full-day closure on this service blocks any booking on the date.
-            if (closure.IsFullDay)
-            {
-                throw new ProviderClosedOnDateException(serviceId, bookingDate, closure.Reason);
-            }
-
-            // Partial-day closure: standard half-open overlap test.
-            if (closure.StartTime!.Value < endTime && closure.EndTime!.Value > startTime)
-            {
-                throw new ProviderClosedOnDateException(serviceId, bookingDate, closure.Reason);
-            }
+            throw new ProviderClosedOnDateException(serviceId, bookingDate, closures[0].Reason);
         }
     }
 
@@ -1117,32 +1117,13 @@ internal sealed class BookingService(
         TimeOnly endTime,
         CancellationToken cancellationToken)
     {
+        if (bookingDate < DateOnly.FromDateTime(DateTime.UtcNow))
+            throw new InvalidBookingTimeException("Booking date cannot be in the past.");
+
         var weekly = await availabilityService.GetAsync(providerId, cancellationToken);
-        var dayOfWeek = (int)bookingDate.DayOfWeek;
-        var day = weekly.Days.FirstOrDefault(d => d.DayOfWeek == dayOfWeek);
-
-        if (day is null || !day.IsOpen || day.StartTime is null || day.EndTime is null)
-        {
+        var windows = ProviderWorkingHours.Windows(weekly, bookingDate);
+        if (!windows.Any(w => startTime >= w.Start && endTime <= w.End && startTime < endTime))
             throw new InvalidBookingTimeException(
-                $"Provider is not open on {bookingDate:yyyy-MM-dd}.");
-        }
-
-        if (startTime < day.StartTime || endTime > day.EndTime)
-        {
-            throw new InvalidBookingTimeException(
-                $"Booking window must fit inside the provider's working hours " +
-                $"{day.StartTime}-{day.EndTime} on {bookingDate:yyyy-MM-dd}.");
-        }
-
-        if (day.BreakStartTime is not null && day.BreakEndTime is not null)
-        {
-            // Booking cannot straddle the break.
-            if (startTime < day.BreakEndTime && endTime > day.BreakStartTime)
-            {
-                throw new InvalidBookingTimeException(
-                    $"Booking window overlaps the provider's break " +
-                    $"({day.BreakStartTime}-{day.BreakEndTime}) on {bookingDate:yyyy-MM-dd}.");
-            }
-        }
+                $"Provider is closed or the booking overlaps non-working hours on {bookingDate:yyyy-MM-dd}.");
     }
 }

@@ -177,7 +177,7 @@ internal static class SupportTicketEndpoints
         }
 
         return await CreateAsync(
-            NewEventReport(providerId, request.EventId, request.Comment, request.Category, request.Reason),
+            NewEventReport(providerId, request.EventId, request.Comment, request.Category, request.Reason) with { EventBookingId = request.BookingId },
             providerId,
             ticketService,
             cancellationToken);

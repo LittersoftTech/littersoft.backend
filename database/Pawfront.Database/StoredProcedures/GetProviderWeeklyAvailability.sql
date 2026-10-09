@@ -12,7 +12,8 @@ BEGIN
            [BreakStartTime],
            [BreakEndTime],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [TimeZone]
     FROM [Provider].[ProviderWeeklyAvailability]
     WHERE [ProviderId] = @ProviderId
     ORDER BY [DayOfWeek];

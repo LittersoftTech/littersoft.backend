@@ -215,6 +215,7 @@ public sealed record UpdateNightStayBookingStatusCommand(
 /// command.
 /// </summary>
 /// <param name="AcknowledgeTermsChanges">
+/// Applies only to parent proposals; ignored for provider schedule-only proposals.
 /// The requester has seen and accepted the provider's current terms — see
 /// <see cref="RequestBookingModificationCommand.AcknowledgeTermsChanges"/>. For a
 /// stay the drifting set also covers the offering's drop-off / pick-up times.

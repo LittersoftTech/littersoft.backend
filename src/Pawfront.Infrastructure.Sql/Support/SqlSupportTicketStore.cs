@@ -50,6 +50,7 @@ internal sealed class SqlSupportTicketStore(
             "@Reason", (object?)command.Reason ?? DBNull.Value);
         sqlCommand.Parameters.AddWithValue(
             "@EventId", (object?)command.EventId ?? DBNull.Value);
+        sqlCommand.Parameters.AddWithValue("@EventBookingId", (object?)command.EventBookingId ?? DBNull.Value);
 
         try
         {
@@ -169,7 +170,7 @@ internal sealed class SqlSupportTicketStore(
             // Ordinal 17, not 14: [Category], [Reason] and [EventId] are appended to the
             // ticket block ahead of it so that block stays identical to the other five
             // procedures'.
-            totalCount = reader.GetInt32(17);
+            totalCount = reader.GetInt32(reader.GetOrdinal("TotalCount"));
         }
 
         // The list carries no photos: the card shows type, status and subject, all of which
@@ -387,7 +388,8 @@ internal sealed class SqlSupportTicketStore(
             UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(offset + 12), TimeSpan.Zero),
             ClosedAtUtc: reader.IsDBNull(offset + 13)
                 ? null
-                : new DateTimeOffset(reader.GetDateTime(offset + 13), TimeSpan.Zero));
+                : new DateTimeOffset(reader.GetDateTime(offset + 13), TimeSpan.Zero),
+            EventBookingId: reader.IsDBNull(reader.GetOrdinal("EventBookingId")) ? null : reader.GetGuid(reader.GetOrdinal("EventBookingId")));
 
     private static async Task<IReadOnlyList<SupportTicketPhotoRecord>> ReadPhotosAsync(
         SqlDataReader reader,

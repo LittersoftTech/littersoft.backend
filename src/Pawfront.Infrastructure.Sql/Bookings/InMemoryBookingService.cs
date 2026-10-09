@@ -496,6 +496,10 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
             throw BookingExpiredException.ServiceTooClose(bookingId);
         }
 
+        if (row.Source == "Custom" && (actor != BookingStatusActor.Provider
+            || newStatus is not (BookingStatuses.Completed or BookingStatuses.ProviderCancelled)))
+            throw new BookingStatusNotAllowedException(newStatus, actor);
+
         var allowed = actor == BookingStatusActor.Provider
             ? BookingStatuses.ProviderSettable
             : BookingStatuses.ParentSettable;

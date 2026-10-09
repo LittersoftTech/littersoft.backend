@@ -18,7 +18,8 @@ public sealed record ChatPushWorkItem(
     Guid RecipientId,
     Guid ConversationId,
     string? DataJson,
-    IReadOnlyList<string> Tokens);
+    IReadOnlyList<string> Tokens,
+    string? FirebaseUserId = null);
 
 /// <summary>
 /// Hands a queued push to whatever will actually send it.

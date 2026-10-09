@@ -5,12 +5,13 @@ namespace Pawfront.Infrastructure.Sql.Availability;
 
 internal sealed class InMemoryProviderAvailabilityService : IProviderAvailabilityService
 {
-    private readonly ConcurrentDictionary<Guid, List<DayAvailabilityResult>> store = new();
+    private readonly ConcurrentDictionary<Guid, ProviderWeeklyAvailabilityResult> store = new();
 
     public Task<ProviderWeeklyAvailabilityResult> SaveAsync(
         SaveProviderWeeklyAvailabilityCommand command,
         CancellationToken cancellationToken)
     {
+        ProviderWorkingHours.ResolveTimeZone(command.TimeZone);
         ValidateCommand(command);
 
         var days = command.Days
@@ -19,20 +20,18 @@ internal sealed class InMemoryProviderAvailabilityService : IProviderAvailabilit
                 d.DayOfWeek, d.IsOpen, d.StartTime, d.EndTime, d.BreakStartTime, d.BreakEndTime))
             .ToList();
 
-        store[command.ProviderId] = days;
+        var result = new ProviderWeeklyAvailabilityResult(command.ProviderId, days, command.TimeZone);
+        store[command.ProviderId] = result;
 
-        return Task.FromResult(new ProviderWeeklyAvailabilityResult(command.ProviderId, days));
+        return Task.FromResult(result);
     }
 
     public Task<ProviderWeeklyAvailabilityResult> GetAsync(
         Guid providerId,
         CancellationToken cancellationToken)
     {
-        var days = store.TryGetValue(providerId, out var existing)
-            ? existing
-            : new List<DayAvailabilityResult>();
-
-        return Task.FromResult(new ProviderWeeklyAvailabilityResult(providerId, days));
+        return Task.FromResult(store.GetValueOrDefault(providerId)
+            ?? new ProviderWeeklyAvailabilityResult(providerId, []));
     }
 
     private static void ValidateCommand(SaveProviderWeeklyAvailabilityCommand command)

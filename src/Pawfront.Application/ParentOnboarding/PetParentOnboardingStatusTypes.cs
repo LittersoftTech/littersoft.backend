@@ -60,12 +60,12 @@ public sealed record PetParentPetsStage(
 /// missing.
 /// </summary>
 /// <remarks>
-/// There is deliberately no <c>BasicInfo</c> value: every basic-info column on
-/// <c>Parent.Pets</c> is NOT NULL, so a pet that exists always has it, and a
-/// section that can never be missing would be noise on every response.
+/// Details checks required saved values, including legacy records with blank fields.
 /// </remarks>
 public static class PetProfileSections
 {
+    public const string Details = "Details";
+
     /// <summary>
     /// Vaccination + sterilization status. The ONLY section that gates
     /// <c>isFullyOnboarded</c>; free-text medical history and temperament are
@@ -94,7 +94,8 @@ public sealed record PetMedicalInfoCompletion(
     string PetName,
     bool IsMedicalInfoComplete,
     bool HasProfilePhoto = false,
-    IReadOnlyCollection<string>? MissingSections = null);
+    IReadOnlyCollection<string>? MissingSections = null,
+    bool IsDetailsComplete = true);
 
 public sealed record PetParentVerificationStatus(
     bool IsEmailVerified,
@@ -111,7 +112,8 @@ public sealed record PetParentOnboardingStatusSnapshot(
     bool IsEmailVerified,
     bool IsMobileVerified,
     IReadOnlyCollection<PetMedicalInfoCompletion> Pets,
-    string? IdentityType);
+    string? IdentityType,
+    bool IsBasicInfoComplete = true);
 
 public sealed class PetParentOnboardingStatusNotFoundException(Guid petParentId)
     : Exception($"Pet parent '{petParentId}' was not found.");

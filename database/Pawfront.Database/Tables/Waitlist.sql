@@ -1,0 +1,6 @@
+CREATE TABLE [Event].[Waitlist] (
+ EventId UNIQUEIDENTIFIER NOT NULL REFERENCES [Event].[Events](EventId),
+ PetParentId UNIQUEIDENTIFIER NOT NULL REFERENCES [Parent].[PetParents](PetParentId),
+ JoinedAtUtc DATETIME2(7) NOT NULL DEFAULT SYSUTCDATETIME(),
+ PRIMARY KEY (EventId, PetParentId)
+);

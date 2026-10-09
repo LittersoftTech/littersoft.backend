@@ -49,12 +49,7 @@ internal sealed class ProviderAvailabilitySlotService(
             _ => throw new InvalidOperationException("Unknown offering resolution.")
         };
 
-        // 1a. NightStay is DATE-granular, not hourly: a stay occupies whole
-        // nights and capacity (maxPetsAtOneTime) is per night. Instead of the
-        // hourly slot walk the result carries per-night remaining capacity —
-        // durationHours / granularity / the weekly time grid don't apply
-        // (mirrors the create path, which checks closures + per-night capacity
-        // but never working hours).
+        // NightStay uses nightly capacity, while respecting weekly days off and time off.
         if (offering.ServiceType == ProviderServiceTypes.NightStay)
         {
             return await GetNightAvailabilityAsync(providerId, serviceId, offering, date, endDate, cancellationToken);
@@ -101,32 +96,19 @@ internal sealed class ProviderAvailabilitySlotService(
 
         // 3. Read the weekly schedule and find this date's weekday row.
         var weekly = await availabilityService.GetAsync(providerId, cancellationToken);
-        var dayOfWeek = (int)date.DayOfWeek;
-        var daySchedule = weekly.Days.FirstOrDefault(d => d.DayOfWeek == dayOfWeek);
-
-        if (daySchedule is null
-            || !daySchedule.IsOpen
-            || daySchedule.StartTime is null
-            || daySchedule.EndTime is null)
-        {
+        var windows = ProviderWorkingHours.Windows(weekly, date);
+        if (windows.Count == 0)
             return EmptySlots(providerId, serviceId, offering, date, durationHours, granularityMinutes);
-        }
 
-        // 3b. Apply any ad-hoc closures FOR THIS SERVICE. A full-day closure on
-        //     this service short-circuits to zero slots; partial-day closures are
-        //     treated as extra breaks that carve the working windows further. A
-        //     closure on a sibling service (e.g. NightStay when computing DayCare
-        //     slots) does NOT affect this query.
+        // Any service time off on the requested date makes it unavailable.
         var closures = await closureReader.GetActiveClosuresForDateAsync(serviceId, date, cancellationToken);
-        if (closures.Any(c => c.IsFullDay))
+        if (closures.Count > 0)
         {
             return EmptySlots(providerId, serviceId, offering, date, durationHours, granularityMinutes);
         }
 
-        // 4. Build the working windows (split around break if set, then split
-        //    again around any partial-day closure windows).
-        var windows = BuildWorkingWindows(daySchedule);
-        windows = SubtractClosureWindows(windows, closures);
+        // 4. Split working hours around the provider's regular break.
+        // Windows already exclude local breaks and are projected to this UTC date.
 
         // 5. Read confirmed bookings for this service+date so we can subtract overlapping slots.
         var existingBookings = await bookingReader.GetBookingsForDateAsync(serviceId, date, cancellationToken);
@@ -186,10 +168,8 @@ internal sealed class ProviderAvailabilitySlotService(
     /// Date-granular NightStay availability: one entry per night in
     /// [<paramref name="fromNight"/>, <paramref name="toNight"/>] with the
     /// night's active-stay count and remaining capacity. A night is unavailable
-    /// when a full-day closure covers it, occupancy has reached the offering's
-    /// per-night capacity, or the stay would begin inside the booking lead-time
-    /// window — exactly the gates the create path enforces (partial-day closures
-    /// and the weekly time grid don't apply to an overnight stay).
+    /// when a weekly day off or service time off covers it, capacity is exhausted,
+    /// or the stay would begin inside the booking lead-time window.
     /// </summary>
     private async Task<AvailableSlotsResult> GetNightAvailabilityAsync(
         Guid providerId,
@@ -222,11 +202,13 @@ internal sealed class ProviderAvailabilitySlotService(
         var earliestStart = BookingLeadTime.EarliestBookableStart(DateTimeOffset.UtcNow);
         var dropOff = offering.DropOffTime ?? TimeOnly.MinValue;
 
+        var weekly = await availabilityService.GetAsync(providerId, cancellationToken);
         var nights = new List<NightAvailability>();
         for (var night = fromNight; night <= lastNight; night = night.AddDays(1))
         {
             var closures = await closureReader.GetActiveClosuresForDateAsync(serviceId, night, cancellationToken);
-            var isClosed = closures.Any(c => c.IsFullDay);
+            var isClosed = closures.Count > 0
+                || !weekly.Days.Any(d => d.DayOfWeek == (int)night.DayOfWeek && d.IsOpen);
             var isTooSoon = BookingLeadTime.ServiceStartUtc(night, dropOff) < earliestStart;
 
             var activeStays = occupancy.TryGetValue(night, out var count) ? count : 0;
@@ -287,84 +269,6 @@ internal sealed class ProviderAvailabilitySlotService(
             }
         }
         return count;
-    }
-
-    /// <summary>
-    /// Removes each partial-day closure window from the working windows. A closure
-    /// that lies fully inside a window splits it in two; one that overlaps an edge
-    /// trims the edge; one that covers a window removes it entirely.
-    /// </summary>
-    private static List<(TimeOnly Start, TimeOnly End)> SubtractClosureWindows(
-        List<(TimeOnly Start, TimeOnly End)> windows,
-        IReadOnlyList<ActiveClosure> closures)
-    {
-        if (closures.Count == 0)
-        {
-            return windows;
-        }
-
-        var current = windows;
-        foreach (var closure in closures)
-        {
-            // Full-day closures are already handled upstream — defensive skip.
-            if (closure.StartTime is null || closure.EndTime is null) continue;
-
-            var cs = closure.StartTime.Value;
-            var ce = closure.EndTime.Value;
-            var next = new List<(TimeOnly Start, TimeOnly End)>(current.Count);
-
-            foreach (var (ws, we) in current)
-            {
-                // No overlap → keep window unchanged.
-                if (ce <= ws || cs >= we)
-                {
-                    next.Add((ws, we));
-                    continue;
-                }
-
-                // Closure covers the whole window → drop it.
-                if (cs <= ws && ce >= we)
-                {
-                    continue;
-                }
-
-                // Left fragment.
-                if (cs > ws)
-                {
-                    next.Add((ws, cs));
-                }
-
-                // Right fragment.
-                if (ce < we)
-                {
-                    next.Add((ce, we));
-                }
-            }
-
-            current = next;
-        }
-
-        return current;
-    }
-
-    private static List<(TimeOnly Start, TimeOnly End)> BuildWorkingWindows(DayAvailabilityResult day)
-    {
-        var windows = new List<(TimeOnly, TimeOnly)>();
-
-        if (day.BreakStartTime is null || day.BreakEndTime is null)
-        {
-            windows.Add((day.StartTime!.Value, day.EndTime!.Value));
-        }
-        else
-        {
-            var firstWindow = (day.StartTime!.Value, day.BreakStartTime.Value);
-            var secondWindow = (day.BreakEndTime.Value, day.EndTime!.Value);
-
-            if (firstWindow.Item1 < firstWindow.Item2) windows.Add(firstWindow);
-            if (secondWindow.Item1 < secondWindow.Item2) windows.Add(secondWindow);
-        }
-
-        return windows;
     }
 
     private static void ValidateDuration(decimal durationHours, OfferingResolution.Resolved offering)

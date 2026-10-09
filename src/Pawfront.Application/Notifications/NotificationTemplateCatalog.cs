@@ -344,6 +344,10 @@ public static class NotificationTemplateCatalog
                 NotificationRoutes.EventBookingDetail,
                 Event),
 
+            [NotificationTypes.EventCancelled] = new(
+                "Event cancelled", "The host cancelled {eventTitle}.", NotificationRoutes.EventBookingDetail, Event),
+            [NotificationTypes.EventSeatsAvailable] = new(
+                "Places available", "A place has opened up at {eventTitle}. Book while places are available.", NotificationRoutes.EventDetail, Event),
             [NotificationTypes.EventTicketSold] = new(
                 "Tickets sold",
                 "{parentName} booked {ticketCount} ticket(s) for {eventTitle}.",

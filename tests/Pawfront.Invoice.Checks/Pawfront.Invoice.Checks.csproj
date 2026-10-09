@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Pawfront.Application/Pawfront.Application.csproj" />
+    <PackageReference Include="QuestPDF" Version="2026.8.0" />
+    <Compile Include="../../src/Pawfront.Application/Billing/InvoiceService.cs" Link="InvoiceService.cs" />
+    <Compile Include="../../src/Pawfront.Functions/Invoices/*.cs" Exclude="../../src/Pawfront.Functions/Invoices/SqlInvoiceGenerationStore.cs;../../src/Pawfront.Functions/Invoices/InvoiceGenerator.cs" Link="Invoices/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../src/Pawfront.Functions/Invoices/Assets/pawfront-logo.png" />
+  </ItemGroup>
+</Project>

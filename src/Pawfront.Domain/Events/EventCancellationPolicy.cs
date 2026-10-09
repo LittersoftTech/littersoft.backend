@@ -15,5 +15,11 @@ public enum EventCancellationPolicy
     FullRefundUpTo2Hours = 1,
 
     /// <summary>No refund under any circumstances.</summary>
-    NoRefund = 2
+    NoRefund = 2,
+
+    /// <summary>Full refund if cancelled at least 24 hours before the event.</summary>
+    FullRefundUpTo24Hours = 3,
+
+    /// <summary>Full refund if cancelled at least 48 hours before the event.</summary>
+    FullRefundUpTo48Hours = 4
 }

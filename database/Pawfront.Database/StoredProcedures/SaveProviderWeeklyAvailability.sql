@@ -1,6 +1,8 @@
 CREATE OR ALTER PROCEDURE [Provider].[SaveProviderWeeklyAvailability]
     @ProviderId UNIQUEIDENTIFIER,
-    @AvailabilityJson NVARCHAR(MAX)   -- JSON array of 7 day rows; each: { dayOfWeek, isOpen, startTime?, endTime?, breakStartTime?, breakEndTime? }
+    @AvailabilityJson NVARCHAR(MAX),
+    @TimeZone NVARCHAR(128) = N'UTC',
+    @WindowsTimeZone NVARCHAR(128) = N'UTC'
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -24,6 +26,8 @@ BEGIN
     INSERT INTO [Provider].[ProviderWeeklyAvailability]
     (
         [ProviderId],
+        [TimeZone],
+        [WindowsTimeZone],
         [DayOfWeek],
         [IsOpen],
         [StartTime],
@@ -31,7 +35,7 @@ BEGIN
         [BreakStartTime],
         [BreakEndTime]
     )
-    SELECT @ProviderId,
+    SELECT @ProviderId, @TimeZone, @WindowsTimeZone,
            CAST(JSON_VALUE([value], '$.dayOfWeek') AS TINYINT),
            CAST(JSON_VALUE([value], '$.isOpen') AS BIT),
            CAST(JSON_VALUE([value], '$.startTime') AS TIME(0)),
@@ -48,7 +52,8 @@ BEGIN
            [BreakStartTime],
            [BreakEndTime],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [TimeZone]
     FROM [Provider].[ProviderWeeklyAvailability]
     WHERE [ProviderId] = @ProviderId
     ORDER BY [DayOfWeek];

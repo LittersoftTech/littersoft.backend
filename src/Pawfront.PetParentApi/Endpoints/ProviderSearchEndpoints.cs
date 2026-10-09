@@ -1,3 +1,5 @@
+using Pawfront.Application.Locations;
+using Pawfront.Application.Services.ProviderServiceLocations;
 using Pawfront.Application.Earnings;
 using Pawfront.Application.ParentOnboarding;
 using Pawfront.Application.Providers;
@@ -19,9 +21,8 @@ namespace Pawfront.PetParentApi.Endpoints;
 /// ones, all shared by every search here and all handled by
 /// <see cref="BuildRefinements"/>: provider type (registered business vs
 /// freelancer), accepted payment methods, dog temperament, and a sort key.
-/// "Location" on that sheet is the pre-existing <c>city</c> parameter — the four
-/// cities it offers are the app's own picker, deliberately not a server-side
-/// enum, so a new city is a mobile release rather than a backend one.
+/// "Location" uses the <c>city</c> parameter. Available cities are read from
+/// provider addresses through <c>/providers/search/cities</c>.
 ///
 /// DOG TEMPERAMENT is exposed on the day-care, night-stay and groomer searches
 /// only: those are the two categories whose offerings record a
@@ -40,6 +41,11 @@ internal static class ProviderSearchEndpoints
 
     public static IEndpointRouteBuilder MapProviderSearchEndpoints(this IEndpointRouteBuilder builder)
     {
+        builder.MapGet("/providers/search/cities", async (
+            IProviderDiscoveryService discovery, CancellationToken cancellationToken) =>
+        {
+            return ApiResults.Ok(await ProviderCities.ListAsync(discovery, cancellationToken));
+        });
         builder.MapGet("/providers/search/day-care", SearchDayCare);
         builder.MapGet("/providers/search/night-stay", SearchNightStay);
         builder.MapGet("/providers/search/groomers", SearchGroomers);
@@ -64,11 +70,19 @@ internal static class ProviderSearchEndpoints
         string? sortDirection,
         int? skip,
         int? take,
+        double? latitude,
+        double? longitude,
+        string? distanceUnit,
+        IProviderServiceLocationRegistry locations,
         IProviderSearchService searchService,
         ICurrentPetParentContext currentPetParent,
         IPetParentOwnershipReader ownershipReader,
         CancellationToken cancellationToken)
     {
+        SearchDistance distance;
+        try { distance = new SearchDistance(latitude, longitude, distanceUnit); }
+        catch (ArgumentException exception) { return ApiResults.BadRequest("InvalidRequest", exception.Message); }
+
         string? normalisedLocation;
         try
         {
@@ -112,7 +126,7 @@ internal static class ProviderSearchEndpoints
                 clampedSkip, clampedTake, refinements, petTemperament),
             cancellationToken);
 
-        return ApiResults.Ok(results.Select(ToResponse).ToArray());
+        return ApiResults.Ok(await WithDistancesAsync(results, distance, locations, cancellationToken));
     }
 
     private static async Task<IResult> SearchNightStay(
@@ -130,11 +144,19 @@ internal static class ProviderSearchEndpoints
         string? sortDirection,
         int? skip,
         int? take,
+        double? latitude,
+        double? longitude,
+        string? distanceUnit,
+        IProviderServiceLocationRegistry locations,
         IProviderSearchService searchService,
         ICurrentPetParentContext currentPetParent,
         IPetParentOwnershipReader ownershipReader,
         CancellationToken cancellationToken)
     {
+        SearchDistance distance;
+        try { distance = new SearchDistance(latitude, longitude, distanceUnit); }
+        catch (ArgumentException exception) { return ApiResults.BadRequest("InvalidRequest", exception.Message); }
+
         string? normalisedLocation;
         try
         {
@@ -186,7 +208,7 @@ internal static class ProviderSearchEndpoints
                 clampedSkip, clampedTake, refinements, petTemperament),
             cancellationToken);
 
-        return ApiResults.Ok(results.Select(ToResponse).ToArray());
+        return ApiResults.Ok(await WithDistancesAsync(results, distance, locations, cancellationToken));
     }
 
     private static async Task<IResult> SearchGroomers(
@@ -204,12 +226,20 @@ internal static class ProviderSearchEndpoints
         string? sortDirection,
         int? skip,
         int? take,
+        double? latitude,
+        double? longitude,
+        string? distanceUnit,
+        IProviderServiceLocationRegistry locations,
         IProviderSearchService searchService,
         IPetGroomerServiceRegistry petGroomerRegistry,
         ICurrentPetParentContext currentPetParent,
         IPetParentOwnershipReader ownershipReader,
         CancellationToken cancellationToken)
     {
+        SearchDistance distance;
+        try { distance = new SearchDistance(latitude, longitude, distanceUnit); }
+        catch (ArgumentException exception) { return ApiResults.BadRequest("InvalidRequest", exception.Message); }
+
         string? normalisedLocation;
         try
         {
@@ -253,7 +283,7 @@ internal static class ProviderSearchEndpoints
                 clampedSkip, clampedTake, refinements, petTemperament),
             cancellationToken);
 
-        return ApiResults.Ok(results.Select(ToResponse).ToArray());
+        return ApiResults.Ok(await WithDistancesAsync(results, distance, locations, cancellationToken));
     }
 
     private static async Task<IResult> SearchVets(
@@ -269,11 +299,19 @@ internal static class ProviderSearchEndpoints
         string? sortDirection,
         int? skip,
         int? take,
+        double? latitude,
+        double? longitude,
+        string? distanceUnit,
+        IProviderServiceLocationRegistry locations,
         IProviderSearchService searchService,
         ICurrentPetParentContext currentPetParent,
         IPetParentOwnershipReader ownershipReader,
         CancellationToken cancellationToken)
     {
+        SearchDistance distance;
+        try { distance = new SearchDistance(latitude, longitude, distanceUnit); }
+        catch (ArgumentException exception) { return ApiResults.BadRequest("InvalidRequest", exception.Message); }
+
         string? normalisedLocation;
         try
         {
@@ -305,7 +343,7 @@ internal static class ProviderSearchEndpoints
                 petTemperament),
             cancellationToken);
 
-        return ApiResults.Ok(results.Select(ToResponse).ToArray());
+        return ApiResults.Ok(await WithDistancesAsync(results, distance, locations, cancellationToken));
     }
 
     private static async Task<IResult> SearchTrainers(
@@ -321,11 +359,19 @@ internal static class ProviderSearchEndpoints
         string? sortDirection,
         int? skip,
         int? take,
+        double? latitude,
+        double? longitude,
+        string? distanceUnit,
+        IProviderServiceLocationRegistry locations,
         IProviderSearchService searchService,
         ICurrentPetParentContext currentPetParent,
         IPetParentOwnershipReader ownershipReader,
         CancellationToken cancellationToken)
     {
+        SearchDistance distance;
+        try { distance = new SearchDistance(latitude, longitude, distanceUnit); }
+        catch (ArgumentException exception) { return ApiResults.BadRequest("InvalidRequest", exception.Message); }
+
         string? normalisedLocation;
         try
         {
@@ -357,7 +403,7 @@ internal static class ProviderSearchEndpoints
                 petTemperament),
             cancellationToken);
 
-        return ApiResults.Ok(results.Select(ToResponse).ToArray());
+        return ApiResults.Ok(await WithDistancesAsync(results, distance, locations, cancellationToken));
     }
 
     /// <summary>
@@ -516,6 +562,30 @@ internal static class ProviderSearchEndpoints
             var unsupported => throw new ArgumentException(
                 $"Service location '{unsupported}' is not supported. Use ParentsPlace or ProvidersPlace.")
         };
+    }
+
+    private static async Task<ProviderSearchResultResponse[]> WithDistancesAsync(
+        IEnumerable<ProviderSearchResult> results, SearchDistance distance,
+        IProviderServiceLocationRegistry locations, CancellationToken cancellationToken)
+    {
+        // Enrich only the returned page; reuse a location for repeated provider cards.
+        var cache = new Dictionary<Guid, ProviderServiceLocation?>();
+        var responses = new List<ProviderSearchResultResponse>();
+        foreach (var result in results)
+        {
+            ProviderServiceLocation? location = null;
+            if (distance.HasOrigin && !cache.TryGetValue(result.ProviderId, out location))
+            {
+                location = await locations.GetByProviderIdAsync(result.ProviderId, cancellationToken);
+                cache[result.ProviderId] = location;
+            }
+            responses.Add(ToResponse(result) with
+            {
+                Distance = distance.To((double?)location?.Latitude, (double?)location?.Longitude),
+                DistanceUnit = distance.Unit
+            });
+        }
+        return responses.ToArray();
     }
 
     private static ProviderSearchResultResponse ToResponse(ProviderSearchResult result) =>

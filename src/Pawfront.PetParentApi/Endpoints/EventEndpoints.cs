@@ -1,3 +1,4 @@
+using Pawfront.Application.Locations;
 using System.Security.Claims;
 using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
@@ -56,8 +57,36 @@ internal static class EventEndpoints
         parentScoped.MapGet("/", ListByPetParent);
         parentScoped.MapPut("/{eventId:guid}", Update);
         parentScoped.MapPatch("/{eventId:guid}", Patch);
+        parentScoped.MapPost("/{eventId:guid}/cancel", async (Guid petParentId, Guid eventId, IEventLifecycleStore lifecycle, IEventService events, CancellationToken ct) =>
+        {
+            await lifecycle.CancelAsync(eventId, petParentId, ct);
+            return ApiResults.Ok(ToResponse((await events.GetAsync(eventId, ct))!));
+        });
+        parentScoped.MapDelete("/{eventId:guid}", async (Guid petParentId, Guid eventId, IEventLifecycleStore lifecycle, CancellationToken ct) =>
+        {
+            await lifecycle.RemoveAsync(eventId, petParentId, ct);
+            return Results.NoContent();
+        });
+        builder.MapGet("/me/reliability", async (ICurrentPetParentContext current, IEventLifecycleStore lifecycle, CancellationToken ct) =>
+        {
+            var id = await current.GetPetParentIdAsync(ct);
+            return id is null ? ApiResults.Forbidden("ProfileRequired", "A parent profile is required.") : ApiResults.Ok(await lifecycle.GetReliabilityAsync(id.Value, ct));
+        });
+        eventScoped.MapPost("/waitlist", (Guid eventId, ICurrentPetParentContext current, IEventService events, IEventLifecycleStore lifecycle, CancellationToken ct) => SetWaitlist(eventId, true, current, events, lifecycle, ct));
+        eventScoped.MapDelete("/waitlist", (Guid eventId, ICurrentPetParentContext current, IEventService events, IEventLifecycleStore lifecycle, CancellationToken ct) => SetWaitlist(eventId, false, current, events, lifecycle, ct));
 
         return builder;
+    }
+
+    private static async Task<IResult> SetWaitlist(Guid eventId, bool join, ICurrentPetParentContext current,
+        IEventService events, IEventLifecycleStore lifecycle, CancellationToken ct)
+    {
+        var id = await current.GetPetParentIdAsync(ct);
+        if (id is null) return ApiResults.Forbidden("ProfileRequired", "A parent profile is required.");
+        var ev = await events.GetAsync(eventId, ct);
+        if (ev is null) return ApiResults.NotFound("EventNotFound", "Event was not found.");
+        await lifecycle.SetWaitlistAsync(eventId, id.Value, join, ev.Physical?.MaximumCapacity, ct);
+        return ApiResults.Ok(new { eventId, isOnWaitlist = join });
     }
 
     private static async Task<IResult> UploadBanner(
@@ -188,6 +217,10 @@ internal static class EventEndpoints
         IEventService eventService,
         CancellationToken cancellationToken)
     {
+        if (request.EventCategory.IsSet || request.IsChildFriendly.IsSet || request.Title.IsSet || request.EventType.IsSet
+            || request.StartDate.IsSet || request.EndDate.IsSet || request.StartTime.IsSet || request.EndTime.IsSet
+            || request.IsPaid.IsSet || request.Price.IsSet || request.CancellationPolicy.IsSet || request.EventLink.IsSet || request.Physical.IsSet)
+            return ApiResults.BadRequest("EventFieldNotEditable", "Only bannerImageUrl, description, maximumCapacity and amenities can be edited.");
         var current = await eventService.GetAsync(eventId, cancellationToken);
         if (current is null)
         {
@@ -215,7 +248,7 @@ internal static class EventEndpoints
                     request.Price.Or(current.Price),
                     request.CancellationPolicy.Or(current.CancellationPolicy),
                     request.EventLink.Or(current.EventLink),
-                    MergePhysical(request.Physical, current.Physical)),
+                    MergePhysical(request.Physical, current.Physical, request.MaximumCapacity)),
                 cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
@@ -258,6 +291,9 @@ internal static class EventEndpoints
         decimal? minPrice,
         decimal? maxPrice,
         string? city,
+        double? latitude,
+        double? longitude,
+        string? distanceUnit,
         // Date | Price | SeatsLeft, with sortDirection Asc | Desc. Omit both to
         // keep the existing order (newest start date first).
         string? sortBy,
@@ -267,10 +303,12 @@ internal static class EventEndpoints
         IEventBookingService bookingService,
         ICurrentPetParentContext currentParent,
         IMySupportTicketLookup ticketLookup,
+        IEventLifecycleStore lifecycle,
         CancellationToken cancellationToken)
     {
         try
         {
+            var distance = new SearchDistance(latitude, longitude, distanceUnit);
             var results = await eventService.ListAsync(
                 new EventListFilter(
                     eventCategory,
@@ -295,12 +333,18 @@ internal static class EventEndpoints
 
             // One read for the whole page — the caller's own open tickets, keyed by
             // subject.
+            var callerId = await currentParent.GetPetParentIdAsync(cancellationToken);
+            var waitlist = callerId is Guid id ? await lifecycle.GetWaitlistAsync(id, cancellationToken) : new HashSet<Guid>();
             var myTickets = await MySupportTickets.ForCallerAsync(
                 currentParent, ticketLookup, cancellationToken);
 
             return ApiResults.Ok(results
                 .Select(r => ToResponse(
-                    r, !bookedEventIds.Contains(r.EventId), myTickets.ForEvent(r.EventId)))
+                    r, !bookedEventIds.Contains(r.EventId), myTickets.ForEvent(r.EventId)) with
+                {
+                    Distance = distance.To(r.Physical?.Location?.Latitude, r.Physical?.Location?.Longitude),
+                    DistanceUnit = distance.Unit, IsOnWaitlist = waitlist.Contains(r.EventId)
+                })
                 .ToArray());
         }
         catch (ArgumentException exception)
@@ -316,6 +360,7 @@ internal static class EventEndpoints
         IEventBookingService bookingService,
         ICurrentPetParentContext currentParent,
         IMySupportTicketLookup ticketLookup,
+        IEventLifecycleStore lifecycle,
         CancellationToken cancellationToken)
     {
         var result = await eventService.GetAsync(eventId, cancellationToken);
@@ -326,11 +371,13 @@ internal static class EventEndpoints
 
         var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
             httpContext.User.FindFirstValue("email"), cancellationToken);
+        var callerId = await currentParent.GetPetParentIdAsync(cancellationToken);
+        var waitlist = callerId is Guid id ? await lifecycle.GetWaitlistAsync(id, cancellationToken) : new HashSet<Guid>();
         var myTickets = await MySupportTickets.ForCallerAsync(
             currentParent, ticketLookup, cancellationToken);
 
         return ApiResults.Ok(ToResponse(
-            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId)));
+            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId), callerId is not null && result.PetParentId == callerId) with { IsOnWaitlist = waitlist.Contains(result.EventId) });
     }
 
     private static async Task<IResult> Trending(
@@ -340,6 +387,7 @@ internal static class EventEndpoints
         IEventBookingService bookingService,
         ICurrentPetParentContext currentParent,
         IMySupportTicketLookup ticketLookup,
+        IEventLifecycleStore lifecycle,
         CancellationToken cancellationToken)
     {
         // Default to 20; the sproc clamps to 1..100.
@@ -349,12 +397,14 @@ internal static class EventEndpoints
         // Booker identity is the caller's Firebase email claim.
         var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
             httpContext.User.FindFirstValue("email"), cancellationToken);
+        var callerId = await currentParent.GetPetParentIdAsync(cancellationToken);
+        var waitlist = callerId is Guid id ? await lifecycle.GetWaitlistAsync(id, cancellationToken) : new HashSet<Guid>();
         var myTickets = await MySupportTickets.ForCallerAsync(
             currentParent, ticketLookup, cancellationToken);
 
         return ApiResults.Ok(results
             .Select(r => ToResponse(
-                r, !bookedEventIds.Contains(r.EventId), myTickets.ForEvent(r.EventId)))
+                r, !bookedEventIds.Contains(r.EventId), myTickets.ForEvent(r.EventId)) with { IsOnWaitlist = waitlist.Contains(r.EventId) })
             .ToArray());
     }
 
@@ -411,7 +461,7 @@ internal static class EventEndpoints
     private static EventResponse ToResponse(
         EventResult result,
         bool isBookable = true,
-        MySupportTicketRef? myTicket = null)
+        MySupportTicketRef? myTicket = null, bool includeHostAttendance = false)
     {
         return new EventResponse(
             result.EventId,
@@ -446,16 +496,16 @@ internal static class EventEndpoints
                 result.Organizer.Id,
                 result.Organizer.Name,
                 result.Organizer.ImageUrl,
-                result.Organizer.TotalEventsOrganized),
+                result.Organizer.TotalEventsOrganized, result.Organizer.EventsCancelledCount),
             new EventBookingStatsResponse(
                 // "Max bookings" = the physical venue capacity; null/unlimited
                 // for online events.
                 result.Physical?.MaximumCapacity,
                 result.TotalBookings),
-            isBookable,
+            isBookable && result.EventStatus == "Active",
             result.PaymentOptions,
             result.Attendees?
-                .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber))
+                .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber, includeHostAttendance ? a.BookingId : null, includeHostAttendance ? a.PaymentStatus : null, includeHostAttendance ? a.Amount : null, a.ProfileImageUrl))
                 .ToArray(),
             result.CreatedAtUtc,
             result.UpdatedAtUtc,
@@ -464,7 +514,8 @@ internal static class EventEndpoints
             // takes there.
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
-            TicketRef: myTicket?.TicketRef);
+            TicketRef: myTicket?.TicketRef, EventStatus: result.EventStatus, IsCancelledByHost: result.EventStatus == "Cancelled",
+            AttendedCount: result.AttendedCount, EarnedAmount: result.EarnedAmount);
     }
 
     /// <summary>
@@ -475,8 +526,14 @@ internal static class EventEndpoints
     /// </summary>
     private static PhysicalEventInput? MergePhysical(
         Optional<PhysicalEventRequest?> patched,
-        PhysicalEventResult? current)
+        PhysicalEventResult? current, Optional<int> capacity = default)
     {
+        if (capacity.IsSet)
+        {
+            var merged = MergePhysical(patched, current);
+            if (merged is null) throw new ArgumentException("maximumCapacity requires a physical event.");
+            return merged with { MaximumCapacity = capacity.Value };
+        }
         if (patched.IsSet)
         {
             return patched.Value is null

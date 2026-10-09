@@ -104,6 +104,7 @@ internal static class PetParentEndpoints
         pets.MapPatch("/medical-info", UpdatePetMedicalInfo);
         pets.MapDelete("/", DeletePet);
         pets.MapPost("/profile-image", UploadPetProfilePhoto).DisableAntiforgery();
+        pets.MapDelete("/profile-image", DeletePetProfilePhoto);
         pets.MapPost("/photos", UploadPetPhoto).DisableAntiforgery();
         pets.MapDelete("/photos/{photoId:guid}", DeletePetPhoto);
 
@@ -378,7 +379,7 @@ internal static class PetParentEndpoints
         }
         catch (ProviderClosedOnDateException exception)
         {
-            return ApiResults.Conflict("ServiceClosed", exception.Message);
+            return ApiResults.BadRequest("ServiceClosed", exception.Message);
         }
         catch (InvalidBookingTimeException exception)
         {
@@ -386,7 +387,7 @@ internal static class PetParentEndpoints
         }
         catch (BookingLeadTimeTooShortException exception)
         {
-            return ApiResults.Conflict("BookingLeadTimeTooShort", exception.Message);
+            return ApiResults.BadRequest("BookingLeadTimeTooShort", exception.Message);
         }
         catch (BookingNightStayUseDedicatedEndpointException exception)
         {
@@ -818,9 +819,9 @@ internal static class PetParentEndpoints
         BookingGroomingItemCodeRequiredException e => ApiResults.BadRequest("ServiceItemCodeRequired", e.Message),
         BookingGroomingItemNotOfferedException e => ApiResults.BadRequest("ServiceItemNotOffered", e.Message),
         BookingGroomingItemInactiveException e => ApiResults.Conflict("ServiceItemInactive", e.Message),
-        ProviderClosedOnDateException e => ApiResults.Conflict("ServiceClosed", e.Message),
+        ProviderClosedOnDateException e => ApiResults.BadRequest("ServiceClosed", e.Message),
         InvalidBookingTimeException e => ApiResults.BadRequest("InvalidBookingTime", e.Message),
-        BookingLeadTimeTooShortException e => ApiResults.Conflict("BookingLeadTimeTooShort", e.Message),
+        BookingLeadTimeTooShortException e => ApiResults.BadRequest("BookingLeadTimeTooShort", e.Message),
         BookingNightStayUseDedicatedEndpointException e => ApiResults.BadRequest("UseNightStayEndpoint", e.Message),
         BookingStatusNotAllowedException e => ApiResults.BadRequest("BookingStatusNotAllowed", e.Message),
         BookingStatusTerminalException e => ApiResults.Conflict("BookingStatusTerminal", e.Message),
@@ -1231,6 +1232,21 @@ internal static class PetParentEndpoints
                 status.Verification.IsEmailVerified,
                 status.Verification.IsMobileVerified),
             status.IsFullyOnboarded);
+    }
+
+    private static async Task<IResult> DeletePetProfilePhoto(
+        Guid petId,
+        IParentPetService petService,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return ApiResults.Ok(await petService.UpdateProfilePhotoAsync(petId, null, cancellationToken));
+        }
+        catch (PetNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetNotFound", exception.Message);
+        }
     }
 
     private static async Task<IResult> UploadPetProfilePhoto(

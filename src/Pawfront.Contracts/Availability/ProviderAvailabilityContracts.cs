@@ -1,7 +1,8 @@
 namespace Pawfront.Contracts.Availability;
 
 public sealed record SaveProviderWeeklyAvailabilityRequest(
-    IReadOnlyList<DayAvailabilityRequest> Days);
+    IReadOnlyList<DayAvailabilityRequest> Days,
+    string TimeZone = "UTC");
 
 public sealed record DayAvailabilityRequest(
     int DayOfWeek,              // 0 = Sunday .. 6 = Saturday
@@ -13,7 +14,8 @@ public sealed record DayAvailabilityRequest(
 
 public sealed record ProviderWeeklyAvailabilityResponse(
     Guid ProviderId,
-    IReadOnlyList<DayAvailabilityResponse> Days);
+    IReadOnlyList<DayAvailabilityResponse> Days,
+    string TimeZone = "UTC");
 
 public sealed record DayAvailabilityResponse(
     int DayOfWeek,

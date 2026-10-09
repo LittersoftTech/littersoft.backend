@@ -64,7 +64,8 @@ CREATE OR ALTER PROCEDURE [Support].[CreateTicket]
     @ConversationId UNIQUEIDENTIFIER = NULL,
     @Category NVARCHAR(100) = NULL,
     @Reason NVARCHAR(500) = NULL,
-    @EventId UNIQUEIDENTIFIER = NULL
+    @EventId UNIQUEIDENTIFIER = NULL,
+    @EventBookingId UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -82,6 +83,11 @@ BEGIN
     BEGIN
         THROW 51343, 'Invalid support ticket request.', 1;
     END
+
+    IF @EventBookingId IS NOT NULL AND (@TicketType<>N'EventIncident' OR NOT EXISTS (
+        SELECT 1 FROM [Event].[EventBookings] WHERE BookingId=@EventBookingId AND EventId=@EventId
+            AND BookerAccountId=@ActorId AND BookerType=@RaisedByType))
+        THROW 51343, 'The event booking does not belong to this reporter or event.', 1;
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @ProviderId UNIQUEIDENTIFIER;
@@ -226,7 +232,7 @@ BEGIN
         SELECT @ExistingTicketId = [TicketId]
         FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [EventId] = @EventId
-          AND [Status] <> N'CLOSED'
+          AND ((@EventBookingId IS NOT NULL AND EventBookingId=@EventBookingId) OR [Status] <> N'CLOSED')
           AND ((@RaisedByType = N'Provider'  AND [ProviderId]  = @ActorId)
             OR (@RaisedByType = N'PetParent' AND [PetParentId] = @ActorId));
     END
@@ -253,12 +259,12 @@ BEGIN
         -- until support decides otherwise off-platform.
         INSERT INTO [Support].[Tickets]
             ([TicketType], [ProviderId], [PetParentId], [RaisedByType],
-             [BookingType], [BookingId], [PetId], [ConversationId], [EventId],
+             [BookingType], [BookingId], [PetId], [ConversationId], [EventId], [EventBookingId],
              [Category], [Reason], [Status], [CreatedAtUtc], [UpdatedAtUtc])
         OUTPUT inserted.[TicketId] INTO @Inserted
         VALUES
             (@TicketType, @ProviderId, @PetParentId, @RaisedByType,
-             @BookingType, @BookingId, @PetId, @ConversationId, @EventId,
+             @BookingType, @BookingId, @PetId, @ConversationId, @EventId, @EventBookingId,
              @Category, @Reason, N'OPENED', @Now, @Now);
 
         SELECT @TicketId = [TicketId] FROM @Inserted;
@@ -284,7 +290,7 @@ BEGIN
            -- the existing reader ordinals did not shift when they were added.
            t.[Category],
            t.[Reason],
-           t.[EventId]
+           t.[EventId], t.[EventBookingId]
     FROM [Support].[Tickets] AS t
     WHERE t.[TicketId] = @TicketId;
 

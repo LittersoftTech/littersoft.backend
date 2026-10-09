@@ -32,18 +32,20 @@ internal static class InvoiceEndpoints
         group.MapGet("/bookings/{bookingId:guid}/invoice", (
             Guid petParentId,
             Guid bookingId,
+            HttpContext httpContext,
             IInvoiceService invoiceService,
             CancellationToken cancellationToken)
-            => DownloadAsync(petParentId, BookingTypes.SingleDay, bookingId, invoiceService, cancellationToken));
+            => DownloadAsync(petParentId, BookingTypes.SingleDay, bookingId, httpContext, invoiceService, cancellationToken));
 
         // Separate route rather than a discriminator: the two booking kinds live in
         // separate tables and share no id space.
         group.MapGet("/night-stay-bookings/{bookingId:guid}/invoice", (
             Guid petParentId,
             Guid bookingId,
+            HttpContext httpContext,
             IInvoiceService invoiceService,
             CancellationToken cancellationToken)
-            => DownloadAsync(petParentId, BookingTypes.NightStay, bookingId, invoiceService, cancellationToken));
+            => DownloadAsync(petParentId, BookingTypes.NightStay, bookingId, httpContext, invoiceService, cancellationToken));
 
         return builder;
     }
@@ -52,6 +54,7 @@ internal static class InvoiceEndpoints
         Guid petParentId,
         string bookingType,
         Guid bookingId,
+        HttpContext httpContext,
         IInvoiceService invoiceService,
         CancellationToken cancellationToken)
     {
@@ -77,7 +80,13 @@ internal static class InvoiceEndpoints
         }
         catch (InvoiceNotReadyException exception)
         {
-            return ApiResults.Conflict("InvoiceNotReady", exception.Message);
+            if (exception.Status != InvoiceStatuses.Failed)
+            {
+                httpContext.Response.Headers.RetryAfter = "2";
+            }
+            return ApiResults.Conflict(
+                exception.Status == InvoiceStatuses.Failed ? "InvoiceGenerationFailed" : "InvoiceNotReady",
+                exception.Message);
         }
         catch (InvoiceFileMissingException exception)
         {

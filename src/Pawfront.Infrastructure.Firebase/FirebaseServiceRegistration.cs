@@ -7,17 +7,25 @@ namespace Pawfront.Infrastructure.Firebase;
 
 public static class FirebaseServiceRegistration
 {
+    /// <summary>Inbox reads and persisted read-status updates for the mobile API hosts.</summary>
+    public static IServiceCollection AddPawfrontFirestoreInbox(
+        this IServiceCollection services, IConfiguration configuration)
+    {
+        services.Configure<NotificationOptions>(configuration.GetSection(NotificationOptions.SectionName));
+        services.TryAddSingleton<FirebaseAppRegistry>();
+        services.TryAddSingleton<INotificationInboxReader, FirestoreNotificationReader>();
+        services.TryAddSingleton<INotificationReadStateStore, FirestoreNotificationReadStateStore>();
+        return services;
+    }
+
     /// <summary>
     /// Registers FCM sending, bound from the <c>Notifications</c> configuration
     /// section.
     ///
-    /// Only <c>Pawfront.Functions</c> calls this. Neither API host references
-    /// Firebase at all — that falls out of the outbox design, where the hosts only
-    /// ever write a row and the dispatcher owns delivery.
+    /// Used by Pawfront.Functions and the ChatApi background worker. Request
+    /// handlers only enqueue; background delivery sends FCM and writes Firestore.
     ///
-    /// Both are singletons: <see cref="FirebaseAppRegistry"/> caches the two
-    /// initialised Firebase apps, which are expensive to build and hold their own
-    /// OAuth token cache.
+    /// Singleton clients share each audience's Firebase app and credential cache.
     /// </summary>
     public static IServiceCollection AddPawfrontFirebaseMessaging(
         this IServiceCollection services,
@@ -26,7 +34,12 @@ public static class FirebaseServiceRegistration
         services.Configure<NotificationOptions>(configuration.GetSection(NotificationOptions.SectionName));
 
         services.TryAddSingleton<FirebaseAppRegistry>();
-        services.TryAddSingleton<IPushSender, FirebasePushSender>();
+        services.TryAddSingleton<FirebasePushSender>();
+        services.TryAddSingleton<INotificationInboxWriter, FirestoreNotificationWriter>();
+        services.TryAddSingleton<IPushSender>(provider => new InboxPushSender(
+            provider.GetRequiredService<FirebasePushSender>(),
+            provider.GetRequiredService<INotificationInboxWriter>(),
+            provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<InboxPushSender>>()));
 
         return services;
     }

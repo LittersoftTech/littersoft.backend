@@ -14,7 +14,7 @@ public sealed record ConfirmEventBookingPaymentRequest(
 public sealed record EventBookingTicketResponse(
     Guid TicketId,
     int TicketNumber,
-    string AttendeeName);
+    string AttendeeName, string PaymentStatus = "Pending", decimal Amount = 0);
 
 public sealed record EventBookingResponse(
     Guid BookingId,
@@ -31,7 +31,10 @@ public sealed record EventBookingResponse(
     IReadOnlyList<EventBookingTicketResponse> Tickets,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? CancelledAtUtc);
+    DateTimeOffset? CancelledAtUtc, int ConsecutiveNegativeMarks = 0, bool HasReported = false)
+{
+    public DateTimeOffset? CancelledAt => CancelledAtUtc;
+}
 
 /// <summary>
 /// Slim summary card returned by the parent host's "my event bookings"
@@ -61,4 +64,7 @@ public sealed record EventBookingSummaryResponse(
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? CancelledAtUtc);
+    DateTimeOffset? CancelledAtUtc)
+{
+    public DateTimeOffset? CancelledAt => CancelledAtUtc;
+}

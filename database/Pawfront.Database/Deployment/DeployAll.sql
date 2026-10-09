@@ -6,7 +6,7 @@
   and stored procedures in the correct dependency order.
 
   Usage:
-      sqlcmd -S <server> -d <database> -U <user> -P <password> -i DeployAll.sql
+      sqlcmd -S <server> -d <database> -U <user> -P <password> -I -b -i DeployAll.sql
       (or paste into SSMS / Azure Data Studio and Execute)
 
   Notes:
@@ -14,11 +14,90 @@
       Azure Data Studio, or sqlcmd. If you run it via ADO.NET, split on /^GO$/.
     * Stored procedures use CREATE OR ALTER, so they always reflect the latest
       version on re-run.
+    * This is the only deployment file to execute. Event preflight, schema
+      upgrades, identity mappings, functions and procedures are included below.
+    * Retired event categories require the coordinated SQL/Cosmos migration
+      described in EventLifecycleRollout.md before running this file.
+    * For ambiguous legacy booking owners, fill the verified mapping table below
+      in a private copy of this file. Never commit live identity mappings.
+    * Run during a maintenance window. On any error, stop execution and roll back
+      any open transaction in SSMS; sqlcmd -b stops automatically.
+      A preflight rejection disables later batches in SSMS; run SET NOEXEC OFF
+      or reconnect before retrying.
 ================================================================================
 */
 
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
+SET QUOTED_IDENTIFIER ON;
+
+-- Optional verified legacy booking owners. Leave empty for fresh installations
+-- and upgrades where each booking email matches exactly one account.
+IF OBJECT_ID(N'tempdb..#VerifiedEventBookingMappings') IS NOT NULL
+    DROP TABLE #VerifiedEventBookingMappings;
+CREATE TABLE #VerifiedEventBookingMappings (
+    BookingId UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+    AccountId UNIQUEIDENTIFIER NOT NULL,
+    AccountType NVARCHAR(16) NOT NULL CHECK (AccountType IN (N'PetParent', N'Provider')),
+    CHECK (BookingId <> '00000000-0000-0000-0000-000000000000'),
+    CHECK (AccountId <> '00000000-0000-0000-0000-000000000000')
+);
+-- In a private copy, insert one verified row per ambiguous booking here:
+-- INSERT #VerifiedEventBookingMappings (BookingId, AccountId, AccountType)
+-- VALUES ('<booking UUID>', '<account UUID>', N'PetParent');
+GO
+
+BEGIN TRANSACTION;
+DECLARE @DeploymentLockResult INT;
+EXEC @DeploymentLockResult = sys.sp_getapplock @Resource=N'EventLifecycle',
+    @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+IF @DeploymentLockResult < 0
+BEGIN
+    ROLLBACK TRANSACTION;
+    RAISERROR ('Event rollout is busy. Retry when current event operations finish.', 16, 1);
+    SET NOEXEC ON;
+    RETURN;
+END;
+
+-- Built-in read-only preflight. Dynamic SQL also supports a fresh database,
+-- where the event tables do not exist yet. Only aggregate counts are returned.
+SELECT DB_NAME() AS DatabaseName;
+DECLARE @HasRetiredEventCategories BIT = 0;
+IF OBJECT_ID(N'Event.Events', N'U') IS NOT NULL
+BEGIN
+    EXEC(N'SELECT EventCategory, COUNT(*) AS EventCount
+        FROM [Event].[Events] GROUP BY EventCategory ORDER BY EventCategory;');
+    EXEC sys.sp_executesql N'SELECT @HasRetired = CASE WHEN EXISTS (
+        SELECT 1 FROM [Event].[Events] WHERE EventCategory NOT IN (
+        N''MeetupsAndSocials'',N''WalksAndOutdoors'',N''TrainingAndWorkshops'',N''SportsAndCompetitions'',
+        N''ShowsAndDemonstrations'',N''TalksAndLearning'',N''HealthAndWellness'',N''AdoptionAndRescue'',
+        N''CharityAndVolunteering'',N''Celebrations'')) THEN 1 ELSE 0 END;',
+        N'@HasRetired BIT OUTPUT', @HasRetired = @HasRetiredEventCategories OUTPUT;
+END;
+IF @HasRetiredEventCategories = 1
+BEGIN
+    ROLLBACK TRANSACTION;
+    RAISERROR ('Retired event categories require the coordinated SQL and Cosmos migration in EventLifecycleRollout.md before deployment.', 16, 1);
+    SET NOEXEC ON;
+    RETURN;
+END;
+IF OBJECT_ID(N'Event.EventBookings', N'U') IS NOT NULL
+   AND COL_LENGTH(N'Parent.PetParents', N'ParentAuthIdentityId') IS NOT NULL
+   AND COL_LENGTH(N'Provider.Providers', N'ProviderAuthIdentityId') IS NOT NULL
+BEGIN
+    EXEC(N'WITH Accounts AS (
+        SELECT p.PetParentId AS Id,a.Email FROM [Parent].[PetParents] p
+        JOIN [Parent].[ParentAuthIdentities] a ON a.ParentAuthIdentityId=p.ParentAuthIdentityId
+        UNION ALL
+        SELECT p.ProviderId,a.Email FROM [Provider].[Providers] p
+        JOIN [Provider].[ProviderAuthIdentities] a ON a.ProviderAuthIdentityId=p.ProviderAuthIdentityId
+    ), Matches AS (
+        SELECT b.BookingId,COUNT(a.Id) AS AccountMatches
+        FROM [Event].[EventBookings] b LEFT JOIN Accounts a ON a.Email=b.BookerEmail
+        WHERE b.Status IN (N''Confirmed'',N''Attended'') GROUP BY b.BookingId
+    ) SELECT AccountMatches,COUNT(*) AS BookingCount FROM Matches GROUP BY AccountMatches;');
+    SELECT COL_LENGTH(N'Event.EventBookings',N'BookerAccountId') AS BookerAccountIdColumnSize;
+END;
 
 PRINT '--- Pawfront deployment starting ---';
 GO
@@ -2051,8 +2130,7 @@ BEGIN
          OR ([ProviderId] IS NULL AND [PetParentId] IS NOT NULL)
         ),
         CONSTRAINT [CK_Events_EventCategory] CHECK ([EventCategory] IN (
-            N'AdoptionAndRescue', N'PetTraining', N'Charity', N'Volunteering',
-            N'HealthAndWellness', N'SocialAndCultural', N'OutdoorActivities', N'ParentEducation')),
+            N'MeetupsAndSocials', N'WalksAndOutdoors', N'TrainingAndWorkshops', N'SportsAndCompetitions', N'ShowsAndDemonstrations', N'TalksAndLearning', N'HealthAndWellness', N'AdoptionAndRescue', N'CharityAndVolunteering', N'Celebrations')),
         CONSTRAINT [CK_Events_EventType] CHECK ([EventType] IN (N'Physical', N'Online')),
         CONSTRAINT [CK_Events_DateRange] CHECK ([StartDate] <= [EndDate]),
         CONSTRAINT [CK_Events_Ticketing] CHECK (
@@ -2060,7 +2138,7 @@ BEGIN
          OR ([IsPaid] = 1 AND [Price] IS NOT NULL AND [Price] >= 0)
         ),
         CONSTRAINT [CK_Events_CancellationPolicy] CHECK ([CancellationPolicy] IN (
-            N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'NoRefund'))
+            N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'FullRefundUpTo24Hours', N'FullRefundUpTo48Hours', N'NoRefund'))
     );
     PRINT 'Created table [Event].[Events].';
 END
@@ -2070,6 +2148,18 @@ BEGIN
 END
 GO
 
+-- Refresh the category constraint for existing installations.
+-- Existing events using retired codes must be recategorised before deployment.
+SET XACT_ABORT ON;
+BEGIN TRANSACTION;
+ALTER TABLE [Event].[Events] DROP CONSTRAINT [CK_Events_EventCategory];
+ALTER TABLE [Event].[Events] WITH CHECK
+    ADD CONSTRAINT [CK_Events_EventCategory] CHECK ([EventCategory] IN (
+        N'MeetupsAndSocials', N'WalksAndOutdoors', N'TrainingAndWorkshops',
+        N'SportsAndCompetitions', N'ShowsAndDemonstrations', N'TalksAndLearning',
+        N'HealthAndWellness', N'AdoptionAndRescue', N'CharityAndVolunteering', N'Celebrations'));
+COMMIT TRANSACTION;
+GO
 -- 2.10b Retrofit: support parent-organised events alongside provider ones.
 -- ProviderId becomes nullable, PetParentId column + FK is added, the
 -- exactly-one CHECK is enforced for future inserts. Done as a sequence of
@@ -2270,6 +2360,18 @@ BEGIN
 END
 GO
 
+-- Refresh older policy constraints so existing databases accept the new options.
+IF EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE [name] = N'CK_Events_CancellationPolicy'
+      AND [parent_object_id] = OBJECT_ID(N'[Event].[Events]')
+      AND ([definition] NOT LIKE N'%FullRefundUpTo24Hours%'
+           OR [definition] NOT LIKE N'%FullRefundUpTo48Hours%'))
+BEGIN
+    ALTER TABLE [Event].[Events] DROP CONSTRAINT [CK_Events_CancellationPolicy];
+END
+GO
+
 IF NOT EXISTS (
     SELECT 1 FROM sys.check_constraints
     WHERE [name] = N'CK_Events_CancellationPolicy'
@@ -2282,7 +2384,7 @@ BEGIN
     -- NoRefund and already satisfy the rule). Future writes are checked.
     ALTER TABLE [Event].[Events] WITH NOCHECK
         ADD CONSTRAINT [CK_Events_CancellationPolicy] CHECK ([CancellationPolicy] IN (
-            N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'NoRefund'));
+            N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'FullRefundUpTo24Hours', N'FullRefundUpTo48Hours', N'NoRefund'));
     PRINT 'Added CHECK [CK_Events_CancellationPolicy].';
 END
 GO
@@ -5807,6 +5909,136 @@ GO
 --------------------------------------------------------------------------------
 
 -- 3.1 SaveProviderAuthIdentity ------------------------------------------------
+-- Event lifecycle upgrade. Run before the updated event procedures.
+IF COL_LENGTH(N'Event.Events', N'EventStatus') IS NULL
+    ALTER TABLE [Event].[Events] ADD [EventStatus] NVARCHAR(16) NOT NULL CONSTRAINT DF_Events_Status DEFAULT N'Active';
+GO
+IF COL_LENGTH(N'Event.Events', N'RemovedByHost') IS NULL
+    ALTER TABLE [Event].[Events] ADD [RemovedByHost] BIT NOT NULL CONSTRAINT DF_Events_Removed DEFAULT 0;
+GO
+IF COL_LENGTH(N'Event.Events', N'CancelledWithBookings') IS NULL
+    ALTER TABLE [Event].[Events] ADD [CancelledWithBookings] BIT NOT NULL CONSTRAINT DF_Events_CancelledBooked DEFAULT 0;
+GO
+IF COL_LENGTH(N'Event.Events', N'MaximumCapacity') IS NULL
+    ALTER TABLE [Event].[Events] ADD [MaximumCapacity] INT NULL;
+GO
+IF COL_LENGTH(N'Event.EventBookings', N'BookerAccountId') IS NULL
+    ALTER TABLE [Event].[EventBookings] ADD [BookerAccountId] UNIQUEIDENTIFIER NULL;
+GO
+IF COL_LENGTH(N'Event.EventBookings', N'BookerType') IS NULL
+    ALTER TABLE [Event].[EventBookings] ADD [BookerType] NVARCHAR(16) NULL;
+GO
+IF COL_LENGTH(N'Event.EventBookings', N'ReliabilitySettled') IS NULL
+BEGIN
+    ALTER TABLE [Event].[EventBookings] ADD [ReliabilitySettled] BIT NOT NULL CONSTRAINT DF_EventBookings_Settled DEFAULT 0;
+    -- One-time rollout baseline only. Historical bookings have no attendance evidence.
+    EXEC(N'UPDATE b SET ReliabilitySettled=1 FROM [Event].[EventBookings] b
+        JOIN [Event].[Events] e ON e.EventId=b.EventId
+        WHERE e.EndDate < CAST(SYSUTCDATETIME() AT TIME ZONE ''UTC'' AT TIME ZONE ''W. Europe Standard Time'' AS DATE)');
+END;
+GO
+IF COL_LENGTH(N'Event.EventBookingTickets', N'PaymentStatus') IS NULL
+    ALTER TABLE [Event].[EventBookingTickets] ADD [PaymentStatus] NVARCHAR(16) NOT NULL CONSTRAINT DF_EventBookingTickets_Payment DEFAULT N'Pending';
+GO
+ALTER TABLE [Event].[EventBookings] DROP CONSTRAINT [CK_EventBookings_Status];
+ALTER TABLE [Event].[EventBookings] ADD CONSTRAINT [CK_EventBookings_Status] CHECK ([Status] IN (N'Confirmed', N'Cancelled', N'CancelledByParent', N'EventCancelled', N'Attended', N'NoShow'));
+GO
+IF OBJECT_ID(N'Event.Reliability', N'U') IS NULL
+BEGIN
+CREATE TABLE [Event].[Reliability] (
+ AccountId UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+ LastNegativeAtUtc DATETIME2(7) NULL,
+ ConsecutiveNegativeMarks INT NOT NULL DEFAULT 0 CHECK (ConsecutiveNegativeMarks BETWEEN 0 AND 1),
+ RedFlagExpiresAt DATETIME2(7) NULL,
+ ConsecutivePaidEventsAttended INT NOT NULL DEFAULT 0 CHECK (ConsecutivePaidEventsAttended BETWEEN 0 AND 2)
+);
+END;
+GO
+IF OBJECT_ID(N'Event.ReliabilityOutcomes', N'U') IS NULL
+BEGIN
+CREATE TABLE [Event].[ReliabilityOutcomes] (
+ BookingId UNIQUEIDENTIFIER NOT NULL PRIMARY KEY REFERENCES [Event].[EventBookings](BookingId),
+ AccountId UNIQUEIDENTIFIER NOT NULL,
+ Outcome NVARCHAR(16) NOT NULL CHECK (Outcome IN (N'Negative', N'PaidAttendance', N'Attendance')),
+ RecordedAtUtc DATETIME2(7) NOT NULL DEFAULT SYSUTCDATETIME()
+);
+END;
+GO
+IF OBJECT_ID(N'Event.Waitlist', N'U') IS NULL
+BEGIN
+CREATE TABLE [Event].[Waitlist] (
+ EventId UNIQUEIDENTIFIER NOT NULL REFERENCES [Event].[Events](EventId),
+ PetParentId UNIQUEIDENTIFIER NOT NULL REFERENCES [Parent].[PetParents](PetParentId),
+ JoinedAtUtc DATETIME2(7) NOT NULL DEFAULT SYSUTCDATETIME(),
+ PRIMARY KEY (EventId, PetParentId)
+);
+END;
+GO
+IF COL_LENGTH(N'Support.Tickets', N'EventBookingId') IS NULL
+ ALTER TABLE [Support].[Tickets] ADD EventBookingId UNIQUEIDENTIFIER NULL;
+GO
+-- Verified mappings take precedence over email inference. Apply them first so
+-- a deliberately selected owner is not overwritten by a future email change.
+IF EXISTS (
+ SELECT 1 FROM #VerifiedEventBookingMappings m
+ LEFT JOIN [Event].[EventBookings] b ON b.BookingId=m.BookingId
+ WHERE b.BookingId IS NULL OR (b.BookerAccountId IS NOT NULL AND
+     (b.BookerAccountId<>m.AccountId OR ISNULL(b.BookerType,N'')<>m.AccountType))
+ OR NOT EXISTS (
+     SELECT 1 FROM [Parent].[PetParents] p JOIN [Parent].[ParentAuthIdentities] a ON a.ParentAuthIdentityId=p.ParentAuthIdentityId
+     WHERE m.AccountType=N'PetParent' AND p.PetParentId=m.AccountId AND a.Email=b.BookerEmail
+     UNION ALL
+     SELECT 1 FROM [Provider].[Providers] p JOIN [Provider].[ProviderAuthIdentities] a ON a.ProviderAuthIdentityId=p.ProviderAuthIdentityId
+     WHERE m.AccountType=N'Provider' AND p.ProviderId=m.AccountId AND a.Email=b.BookerEmail))
+BEGIN
+ ROLLBACK TRANSACTION;
+ RAISERROR ('A verified identity mapping is missing, conflicts with an existing owner, or is not a matching account.', 16, 1);
+ SET NOEXEC ON;
+ RETURN;
+END;
+UPDATE b SET BookerAccountId=m.AccountId,BookerType=m.AccountType
+FROM [Event].[EventBookings] b JOIN #VerifiedEventBookingMappings m ON m.BookingId=b.BookingId
+WHERE b.BookerAccountId IS NULL;
+
+GO
+
+;WITH Accounts AS (
+ SELECT p.PetParentId AS Id, a.Email, N'PetParent' AS Kind FROM [Parent].[PetParents] p JOIN [Parent].[ParentAuthIdentities] a ON a.ParentAuthIdentityId=p.ParentAuthIdentityId
+ UNION ALL SELECT p.ProviderId, a.Email, N'Provider' FROM [Provider].[Providers] p JOIN [Provider].[ProviderAuthIdentities] a ON a.ProviderAuthIdentityId=p.ProviderAuthIdentityId
+), UniqueAccounts AS (
+ SELECT *, COUNT(*) OVER (PARTITION BY Email) AS Matches FROM Accounts WHERE Email IS NOT NULL
+)
+UPDATE b SET BookerAccountId=a.Id, BookerType=a.Kind
+FROM [Event].[EventBookings] b JOIN UniqueAccounts a ON a.Email=b.BookerEmail AND a.Matches=1
+WHERE b.BookerAccountId IS NULL;
+GO
+
+IF EXISTS (SELECT 1 FROM [Event].[EventBookings]
+ WHERE Status IN (N'Confirmed',N'Attended') AND (BookerAccountId IS NULL OR BookerType IS NULL))
+BEGIN
+ ROLLBACK TRANSACTION;
+ RAISERROR ('Active legacy bookings require verified account identities. Fill #VerifiedEventBookingMappings in a private copy of DeployAll.sql.', 16, 1);
+ SET NOEXEC ON;
+ RETURN;
+END;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'Event.EventBookings') AND name=N'IX_EventBookings_Account_Status')
+ CREATE INDEX IX_EventBookings_Account_Status ON [Event].[EventBookings](BookerAccountId,Status) INCLUDE(EventId);
+GO
+
+UPDATE [Event].[EventBookings] SET Status=N'CancelledByParent' WHERE Status=N'Cancelled';
+GO
+
+CREATE OR ALTER FUNCTION [Event].[EventStartUtc](@Date DATE, @Time TIME(0))
+RETURNS DATETIME2(7)
+AS
+BEGIN
+ RETURN CONVERT(DATETIME2(7), (DATEADD(second,DATEDIFF(second,CAST('00:00' AS TIME),@Time),CAST(@Date AS DATETIME2))
+     AT TIME ZONE 'W. Europe Standard Time') AT TIME ZONE 'UTC');
+END;
+
+GO
 CREATE OR ALTER PROCEDURE [Provider].[SaveProviderAuthIdentity]
     @FirebaseUserId NVARCHAR(128),
     @FirebaseTenantId NVARCHAR(128) = NULL,
@@ -6246,7 +6478,7 @@ BEGIN
     UPDATE [Parent].[Pets]
     SET [ProfilePhotoUrl] = @ProfilePhotoUrl,
         [UpdatedAtUtc] = SYSUTCDATETIME()
-    WHERE [PetId] = @PetId;
+    WHERE [PetId] = @PetId AND [IsDeleted] = 0;
 
     IF @@ROWCOUNT = 0
     BEGIN
@@ -6255,9 +6487,11 @@ BEGIN
 
     SELECT [PetId],
            [ProfilePhotoUrl],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [PetName], [PetType], [Breed], [Gender], [DateOfBirth],
+           [VaccinationStatus], [SterilizationStatus]
     FROM [Parent].[Pets]
-    WHERE [PetId] = @PetId;
+    WHERE [PetId] = @PetId AND [IsDeleted] = 0;
 END;
 GO
 PRINT 'Created/updated [Parent].[UpdatePetProfilePhoto].';
@@ -6661,11 +6895,24 @@ BEGIN
     SELECT pp.[PetParentId],
            pp.[ProfilePhotoUrl],
            pp.[MobileVerifiedAtUtc],
-           pai.[IsEmailVerified]
+           pai.[IsEmailVerified],
+           CAST(CASE WHEN
+               NULLIF(LTRIM(RTRIM(pp.[FirstName])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[LastName])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[Gender])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[MobileCountryCode])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[MobileNumber])), N'') IS NOT NULL
+               AND pp.[DateOfBirth] > '00010101'
+               AND NULLIF(LTRIM(RTRIM(pp.[AddressLine])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[ZipCode])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM(pp.[City])), N'') IS NOT NULL
+               AND pp.[Latitude] IS NOT NULL AND pp.[Longitude] IS NOT NULL
+               AND (pp.[Latitude] <> 0 OR pp.[Longitude] <> 0)
+               THEN 1 ELSE 0 END AS BIT) AS [IsBasicInfoComplete]
     FROM [Parent].[PetParents] AS pp
     INNER JOIN [Parent].[ParentAuthIdentities] AS pai
         ON pai.[ParentAuthIdentityId] = pp.[ParentAuthIdentityId]
-    WHERE pp.[PetParentId] = @PetParentId;
+    WHERE pp.[PetParentId] = @PetParentId AND pp.[IsDeleted] = 0;
 
     -- Result set 2: pets summary. Each row carries a server-computed flag
     -- for whether the two required medical fields are populated.
@@ -6674,23 +6921,22 @@ BEGIN
     SELECT [PetId],
            [PetName],
            CASE
-               WHEN [VaccinationStatus]   IS NOT NULL
-                AND [SterilizationStatus] IS NOT NULL
+               WHEN NULLIF(LTRIM(RTRIM([VaccinationStatus])), N'') IS NOT NULL
+                AND NULLIF(LTRIM(RTRIM([SterilizationStatus])), N'') IS NOT NULL
                THEN CAST(1 AS BIT)
                ELSE CAST(0 AS BIT)
            END AS [IsMedicalInfoComplete],
-           -- APPENDED LAST so the existing reader ordinals stay stable.
-           -- Reported so the app can name which section of a pet is
-           -- unfinished and deep-link straight to it; it deliberately does
-           -- NOT gate onboarding, exactly as the parent's own profile photo
-           -- does not. There is no basic-info flag because every basic-info
-           -- column on [Parent].[Pets] is NOT NULL -- a pet that exists
-           -- always has them, and a section that can never be missing would
-           -- be noise.
            CAST(CASE
                     WHEN [ProfilePhotoUrl] IS NULL OR LTRIM(RTRIM([ProfilePhotoUrl])) = N'' THEN 0
                     ELSE 1
-                END AS BIT) AS [HasProfilePhoto]
+                END AS BIT) AS [HasProfilePhoto],
+           CAST(CASE WHEN
+               NULLIF(LTRIM(RTRIM([PetName])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM([PetType])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM([Breed])), N'') IS NOT NULL
+               AND NULLIF(LTRIM(RTRIM([Gender])), N'') IS NOT NULL
+               AND [DateOfBirth] > '00010101'
+               THEN 1 ELSE 0 END AS BIT) AS [IsDetailsComplete]
     FROM [Parent].[Pets]
     -- Soft-deleted pets don't count towards onboarding: the parent no longer
     -- has them, and their (retained) medical fields would otherwise keep the
@@ -9256,10 +9502,47 @@ PRINT 'Created/updated [Provider].[GetProviderOnboardingStatus].';
 GO
 
 
+-- Preserve existing UTC schedules; clients opt into local times by resaving all seven days.
+IF COL_LENGTH(N'Provider.ProviderWeeklyAvailability', N'TimeZone') IS NULL
+    ALTER TABLE [Provider].[ProviderWeeklyAvailability] ADD [TimeZone] NVARCHAR(128) NOT NULL
+        CONSTRAINT [DF_ProviderWeeklyAvailability_TimeZone] DEFAULT N'UTC' WITH VALUES;
+IF COL_LENGTH(N'Provider.ProviderWeeklyAvailability', N'WindowsTimeZone') IS NULL
+    ALTER TABLE [Provider].[ProviderWeeklyAvailability] ADD [WindowsTimeZone] NVARCHAR(128) NOT NULL
+        CONSTRAINT [DF_ProviderWeeklyAvailability_WindowsTimeZone] DEFAULT N'UTC' WITH VALUES;
+GO
+
+-- Weekly rows are local wall-clock values. UTC is the default for legacy rows.
+-- Keep SQL lifecycle jobs on the same calendar as the API availability reader.
+CREATE OR ALTER FUNCTION [Provider].[WorkingHoursAtUtc]
+(
+    @ProviderId UNIQUEIDENTIFIER,
+    @AtUtc DATETIME2(7)
+)
+RETURNS TABLE
+AS
+RETURN
+(
+    SELECT w.[IsOpen],
+           [OpensAtUtc] = CAST((
+               DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), w.[StartTime]), localDay.[Day])
+               AT TIME ZONE w.[WindowsTimeZone]) AT TIME ZONE 'UTC' AS DATETIME2(7)),
+           [ClosesAtUtc] = CAST((
+               DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), w.[EndTime]), localDay.[Day])
+               AT TIME ZONE w.[WindowsTimeZone]) AT TIME ZONE 'UTC' AS DATETIME2(7))
+    FROM [Provider].[ProviderWeeklyAvailability] w
+    CROSS APPLY (SELECT CAST(CAST((@AtUtc AT TIME ZONE 'UTC') AT TIME ZONE w.[WindowsTimeZone] AS DATE) AS DATETIME2(7)) AS [Day]) localDay
+    WHERE w.[ProviderId] = @ProviderId
+      AND w.[DayOfWeek] = ((DATEDIFF(DAY, '19000107', localDay.[Day]) % 7 + 7) % 7)
+);
+
+GO
+
 -- 3.13 SaveProviderWeeklyAvailability ----------------------------------------
 CREATE OR ALTER PROCEDURE [Provider].[SaveProviderWeeklyAvailability]
     @ProviderId UNIQUEIDENTIFIER,
-    @AvailabilityJson NVARCHAR(MAX)
+    @AvailabilityJson NVARCHAR(MAX),
+    @TimeZone NVARCHAR(128) = N'UTC',
+    @WindowsTimeZone NVARCHAR(128) = N'UTC'
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -9276,15 +9559,23 @@ BEGIN
         THROW 51050, 'Provider profile was not found.', 1;
     END
 
+    -- Replace all 7 day rows atomically.
     DELETE FROM [Provider].[ProviderWeeklyAvailability]
     WHERE [ProviderId] = @ProviderId;
 
     INSERT INTO [Provider].[ProviderWeeklyAvailability]
     (
-        [ProviderId], [DayOfWeek], [IsOpen],
-        [StartTime], [EndTime], [BreakStartTime], [BreakEndTime]
+        [ProviderId],
+        [TimeZone],
+        [WindowsTimeZone],
+        [DayOfWeek],
+        [IsOpen],
+        [StartTime],
+        [EndTime],
+        [BreakStartTime],
+        [BreakEndTime]
     )
-    SELECT @ProviderId,
+    SELECT @ProviderId, @TimeZone, @WindowsTimeZone,
            CAST(JSON_VALUE([value], '$.dayOfWeek') AS TINYINT),
            CAST(JSON_VALUE([value], '$.isOpen') AS BIT),
            CAST(JSON_VALUE([value], '$.startTime') AS TIME(0)),
@@ -9293,9 +9584,16 @@ BEGIN
            CAST(JSON_VALUE([value], '$.breakEndTime') AS TIME(0))
     FROM OPENJSON(@AvailabilityJson);
 
-    SELECT [ProviderId], [DayOfWeek], [IsOpen],
-           [StartTime], [EndTime], [BreakStartTime], [BreakEndTime],
-           [CreatedAtUtc], [UpdatedAtUtc]
+    SELECT [ProviderId],
+           [DayOfWeek],
+           [IsOpen],
+           [StartTime],
+           [EndTime],
+           [BreakStartTime],
+           [BreakEndTime],
+           [CreatedAtUtc],
+           [UpdatedAtUtc],
+           [TimeZone]
     FROM [Provider].[ProviderWeeklyAvailability]
     WHERE [ProviderId] = @ProviderId
     ORDER BY [DayOfWeek];
@@ -9314,9 +9612,16 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT [ProviderId], [DayOfWeek], [IsOpen],
-           [StartTime], [EndTime], [BreakStartTime], [BreakEndTime],
-           [CreatedAtUtc], [UpdatedAtUtc]
+    SELECT [ProviderId],
+           [DayOfWeek],
+           [IsOpen],
+           [StartTime],
+           [EndTime],
+           [BreakStartTime],
+           [BreakEndTime],
+           [CreatedAtUtc],
+           [UpdatedAtUtc],
+           [TimeZone]
     FROM [Provider].[ProviderWeeklyAvailability]
     WHERE [ProviderId] = @ProviderId
     ORDER BY [DayOfWeek];
@@ -10547,6 +10852,7 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48);
+    DECLARE @Source NVARCHAR(16);
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @BookingDate DATE;
@@ -10557,6 +10863,7 @@ BEGIN
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status],
+           @Source = [Source],
            @ProviderId = [ProviderId],
            @PetParentId = [PetParentId],
            @BookingDate = [BookingDate],
@@ -10577,6 +10884,9 @@ BEGIN
     BEGIN
         THROW 51121, 'You are not a party to this booking.', 1;
     END
+
+    IF @Source = N'Custom' AND (@Actor <> N'Provider' OR @NewStatus NOT IN (N'COMPLETED', N'PROVIDER_CANCELLED'))
+        THROW 51122, 'Custom bookings only allow provider completion or cancellation on this route.', 1;
 
     -- A booking left pending (CREATED) for 24+ hours has expired: reject the
     -- attempted transition — the provider can no longer accept it.
@@ -10617,7 +10927,7 @@ BEGIN
     END
 
     -- A booking in a terminal state can't change further.
-    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+    IF @CurrentStatus IN (N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                           N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51123, 'Booking is in a terminal state and cannot change.', 1;
@@ -10631,7 +10941,7 @@ BEGIN
     -- From-state rules for the engine transitions.
     IF (@NewStatus = N'CONFIRMED'        AND @CurrentStatus <> N'CREATED')
        OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
-       OR (@NewStatus = N'COMPLETED'     AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
+       OR (@NewStatus = N'COMPLETED' AND @Source <> N'Custom' AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
        OR (@NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
            AND @CurrentStatus NOT IN (N'CONFIRMED',
                                       N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
@@ -10644,7 +10954,7 @@ BEGIN
     -- A cancel is allowed from any non-terminal state EXCEPT once the job is
     -- actively underway (IN_PROGRESS; the retired ENDING kept for legacy rows)
     -- — by then it runs to completion.
-    IF @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+    IF @Source <> N'Custom' AND @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
        AND @CurrentStatus IN (N'IN_PROGRESS', N'ENDING')
     BEGIN
         THROW 51149, 'The job is already in progress and can no longer be cancelled.', 1;
@@ -10670,7 +10980,7 @@ BEGIN
     -- rule and the same clamps as the dedicated sproc; see it for the reasoning.
     DECLARE @ActualEndTime TIME(0) = NULL;
 
-    IF @NewStatus = N'COMPLETED' AND CAST(@Now AS DATE) = @BookingDate
+    IF @Source <> N'Custom' AND @NewStatus = N'COMPLETED' AND CAST(@Now AS DATE) = @BookingDate
     BEGIN
         DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
         IF @NowTime < @EndTime
@@ -10686,7 +10996,7 @@ BEGIN
         -- leaves whatever is there alone (it is NULL for all of them anyway,
         -- since COMPLETED is terminal apart from the move to PAID).
         [ActualEndTime] = CASE
-            WHEN @NewStatus = N'COMPLETED' THEN @ActualEndTime
+            WHEN @NewStatus = N'COMPLETED' AND @Source <> N'Custom' THEN @ActualEndTime
             ELSE [ActualEndTime]
         END,
         -- A no-show ends the job with nobody having performed and nobody owing,
@@ -10741,7 +11051,7 @@ BEGIN
             WHEN N'PROVIDER_NO_SHOW'   THEN N'BOOKING_NO_SHOW_REPORTED'
         END;
 
-    IF @NotificationType IS NOT NULL
+    IF @Source <> N'Custom' AND @NotificationType IS NOT NULL
     BEGIN
         -- A no-show always names the absent party, which is what lets one
         -- template read correctly in both directions.
@@ -12046,9 +12356,9 @@ BEGIN
         [UpdatedAtUtc] = @Now
     OUTPUT inserted.[BookingId], deleted.[Status], inserted.[Status] INTO @NoShowBookings
     FROM [Booking].[Bookings] b
-    LEFT JOIN [Provider].[ProviderWeeklyAvailability] wa
-        ON wa.[ProviderId] = b.[ProviderId]
-       AND wa.[DayOfWeek] = CAST(DATEDIFF(DAY, '19700104', b.[BookingDate]) % 7 AS TINYINT)
+    OUTER APPLY [Provider].[WorkingHoursAtUtc](b.[ProviderId],
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), b.[StartTime]),
+            CAST(b.[BookingDate] AS DATETIME2(7)))) wa
     CROSS APPLY (
         SELECT
             [BookingEndsAtUtc] =
@@ -12056,8 +12366,7 @@ BEGIN
                         CAST(b.[BookingDate] AS DATETIME2(7))),
             [ProviderClosesAtUtc] = CASE
                 WHEN wa.[IsOpen] = 1
-                    THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), wa.[EndTime]),
-                                 CAST(b.[BookingDate] AS DATETIME2(7)))
+                    THEN wa.[ClosesAtUtc]
                 ELSE DATEADD(DAY, 1, CAST(b.[BookingDate] AS DATETIME2(7)))
             END
     ) AS [Cutoffs]
@@ -12236,16 +12545,11 @@ BEGIN
                    CAST(b.[BookingDate] AS DATETIME2(7))),
            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[EndTime]),
                    CAST(b.[BookingDate] AS DATETIME2(7))),
-           CASE WHEN w.[EndTime] IS NOT NULL
-                THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), w.[EndTime]),
-                             CAST(b.[BookingDate] AS DATETIME2(7))) END
+           CASE WHEN w.[IsOpen] = 1 THEN w.[ClosesAtUtc] END
     FROM [Booking].[Bookings] b
-    LEFT JOIN [Provider].[ProviderWeeklyAvailability] w
-        ON w.[ProviderId] = b.[ProviderId]
-       -- DATEPART(WEEKDAY) is @@DATEFIRST-dependent; this arithmetic is not.
-       -- 0 = Sunday, matching how the availability rows are stored.
-       AND w.[DayOfWeek] = (DATEDIFF(DAY, '19000107', b.[BookingDate]) % 7)
-       AND w.[IsOpen] = 1
+    OUTER APPLY [Provider].[WorkingHoursAtUtc](b.[ProviderId],
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), b.[StartTime]),
+            CAST(b.[BookingDate] AS DATETIME2(7)))) w
     WHERE b.[BookingDate] BETWEEN @WindowFrom AND @WindowTo
       AND (b.[Status] IN (SELECT [Status] FROM @Live)
            OR b.[Status] IN (N'START_JOB', N'IN_PROGRESS'));
@@ -12753,19 +13057,15 @@ BEGIN
     -- The job can only be started while the provider is inside their own weekly
     -- working hours. 1970-01-04 was a Sunday, so the modulo gives 0 = Sunday
     -- (matching System.DayOfWeek / the [DayOfWeek] column) independently of DATEFIRST.
-    DECLARE @DayOfWeek TINYINT = CAST(DATEDIFF(DAY, '19700104', CAST(@Now AS DATE)) % 7 AS TINYINT);
-    DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
-    DECLARE @IsOpen BIT, @OpensAt TIME(0), @ClosesAt TIME(0);
-
-    SELECT @IsOpen = [IsOpen], @OpensAt = [StartTime], @ClosesAt = [EndTime]
-    FROM [Provider].[ProviderWeeklyAvailability]
-    WHERE [ProviderId] = @ProviderId AND [DayOfWeek] = @DayOfWeek;
+    DECLARE @IsOpen BIT, @OpensAt DATETIME2(7), @ClosesAt DATETIME2(7);
+    SELECT @IsOpen = [IsOpen], @OpensAt = [OpensAtUtc], @ClosesAt = [ClosesAtUtc]
+    FROM [Provider].[WorkingHoursAtUtc](@ProviderId, @Now);
 
     -- A provider who has never saved their weekly hours is not gated — nor is a
     -- Custom walk-in, which is precisely the customer who turns up outside the
     -- hours the provider advertised.
     IF @Source <> N'Custom'
-       AND @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @NowTime < @OpensAt OR @NowTime > @ClosesAt)
+       AND @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @Now < @OpensAt OR @Now > @ClosesAt)
     BEGIN
         THROW 51137, 'The job can only be started during your working hours.', 1;
     END
@@ -13461,9 +13761,10 @@ BEGIN
     DECLARE @HasTerms BIT, @TPrice DECIMAL(10, 2), @TPolicyHours INT,
             @TAddressLine NVARCHAR(500), @TCity NVARCHAR(200), @TZipCode NVARCHAR(32),
             @TLatitude DECIMAL(9, 6), @TLongitude DECIMAL(9, 6);
+    -- Only parent proposals may adopt new terms, including for proposals staged before this fix.
     SELECT @ModId = [BookingModificationId], @PDate = [ProposedBookingDate],
            @PStart = [ProposedStartTime], @PEnd = [ProposedEndTime],
-           @HasTerms = [HasAcknowledgedTerms], @TPrice = [AcknowledgedPricePerHour],
+           @HasTerms = CASE WHEN [RequestedByActor] = N'Parent' THEN [HasAcknowledgedTerms] ELSE 0 END, @TPrice = [AcknowledgedPricePerHour],
            @TPolicyHours = [AcknowledgedCancellationPolicyHours],
            @TAddressLine = [AcknowledgedAddressLine], @TCity = [AcknowledgedCity],
            @TZipCode = [AcknowledgedZipCode], @TLatitude = [AcknowledgedLatitude],
@@ -14006,16 +14307,12 @@ BEGIN
     -- The job can only be started while the provider is inside their own weekly
     -- working hours. 1970-01-04 was a Sunday, so the modulo gives 0 = Sunday
     -- (matching System.DayOfWeek / the [DayOfWeek] column) independently of DATEFIRST.
-    DECLARE @DayOfWeek TINYINT = CAST(DATEDIFF(DAY, '19700104', CAST(@Now AS DATE)) % 7 AS TINYINT);
-    DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
-    DECLARE @IsOpen BIT, @OpensAt TIME(0), @ClosesAt TIME(0);
-
-    SELECT @IsOpen = [IsOpen], @OpensAt = [StartTime], @ClosesAt = [EndTime]
-    FROM [Provider].[ProviderWeeklyAvailability]
-    WHERE [ProviderId] = @ProviderId AND [DayOfWeek] = @DayOfWeek;
+    DECLARE @IsOpen BIT, @OpensAt DATETIME2(7), @ClosesAt DATETIME2(7);
+    SELECT @IsOpen = [IsOpen], @OpensAt = [OpensAtUtc], @ClosesAt = [ClosesAtUtc]
+    FROM [Provider].[WorkingHoursAtUtc](@ProviderId, @Now);
 
     -- A provider who has never saved their weekly hours is not gated.
-    IF @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @NowTime < @OpensAt OR @NowTime > @ClosesAt)
+    IF @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @Now < @OpensAt OR @Now > @ClosesAt)
     BEGIN
         THROW 51257, 'The job can only be started during your working hours.', 1;
     END
@@ -14921,8 +15218,9 @@ BEGIN
             @TDropOff TIME(0), @TPickUp TIME(0),
             @TAddressLine NVARCHAR(500), @TCity NVARCHAR(200), @TZipCode NVARCHAR(32),
             @TLatitude DECIMAL(9, 6), @TLongitude DECIMAL(9, 6);
+    -- Only parent proposals may adopt new terms, including for proposals staged before this fix.
     SELECT @ModId = [NightStayBookingModificationId], @PIn = [ProposedCheckInDate], @POut = [ProposedCheckOutDate],
-           @HasTerms = [HasAcknowledgedTerms], @TPrice = [AcknowledgedPricePerNight],
+           @HasTerms = CASE WHEN [RequestedByActor] = N'Parent' THEN [HasAcknowledgedTerms] ELSE 0 END, @TPrice = [AcknowledgedPricePerNight],
            @TPolicyHours = [AcknowledgedCancellationPolicyHours],
            @TDropOff = [AcknowledgedDropOffTime], @TPickUp = [AcknowledgedPickUpTime],
            @TAddressLine = [AcknowledgedAddressLine], @TCity = [AcknowledgedCity],
@@ -15160,13 +15458,18 @@ CREATE OR ALTER PROCEDURE [Event].[CreateEvent]
     @Price DECIMAL(18, 2) = NULL,
     @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
-    @AmenitiesJson NVARCHAR(MAX) = N'[]'
+    @AmenitiesJson NVARCHAR(MAX) = N'[]',
+    @MaximumCapacity INT = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     IF NOT EXISTS (
         SELECT 1
@@ -15177,20 +15480,49 @@ BEGIN
         THROW 51030, 'Provider profile was not found.', 1;
     END
 
+    IF EXISTS (SELECT 1 FROM [Event].[Reliability] WHERE AccountId=@ProviderId AND RedFlagExpiresAt>SYSUTCDATETIME())
+        THROW 51464, 'Red-flagged accounts cannot create events.', 1;
+
     DECLARE @InsertedEventId TABLE (EventId UNIQUEIDENTIFIER);
 
     INSERT INTO [Event].[Events]
     (
-        [ProviderId], [EventCategory], [IsChildFriendly], [Title], [Description],
-        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime],
-        [IsPaid], [Price], [CancellationPolicy], [EventLink]
+        [MaximumCapacity],
+        [ProviderId],
+        [EventCategory],
+        [IsChildFriendly],
+        [Title],
+        [Description],
+        [BannerImageUrl],
+        [EventType],
+        [StartDate],
+        [EndDate],
+        [StartTime],
+        [EndTime],
+        [IsPaid],
+        [Price],
+        [CancellationPolicy],
+        [EventLink]
     )
     OUTPUT inserted.[EventId] INTO @InsertedEventId
     VALUES
     (
-        @ProviderId, @EventCategory, @IsChildFriendly, @Title, @Description,
-        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime,
-        @IsPaid, CASE WHEN @IsPaid = 1 THEN @Price ELSE NULL END, @CancellationPolicy, @EventLink
+        @MaximumCapacity,
+        @ProviderId,
+        @EventCategory,
+        @IsChildFriendly,
+        @Title,
+        @Description,
+        @BannerImageUrl,
+        @EventType,
+        @StartDate,
+        @EndDate,
+        @StartTime,
+        @EndTime,
+        @IsPaid,
+        CASE WHEN @IsPaid = 1 THEN @Price ELSE NULL END,
+        @CancellationPolicy,
+        @EventLink
     );
 
     DECLARE @EventId UNIQUEIDENTIFIER = (SELECT TOP (1) [EventId] FROM @InsertedEventId);
@@ -15200,23 +15532,49 @@ BEGIN
     FROM OPENJSON(@AmenitiesJson)
     WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
 
-    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
-           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
-           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
-           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+    -- Result set 1: event row (both organiser columns surfaced; PetParentId is NULL for provider-created events)
+    SELECT e.[EventId],
+           e.[ProviderId],
+           e.[PetParentId],
+           e.[EventCategory],
+           e.[IsChildFriendly],
+           e.[Title],
+           e.[Description],
+           e.[BannerImageUrl],
+           e.[EventType],
+           e.[StartDate],
+           e.[EndDate],
+           e.[StartTime],
+           e.[EndTime],
+           e.[CreatedAtUtc],
+           e.[UpdatedAtUtc],
+           e.[ViewCount],
+           e.[ShareCount],
+           e.[InquiryCount],
+           e.[IsPaid],
+           e.[Price],
+           e.[CancellationPolicy],
            COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
                     org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
            org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
     WHERE e.[EventId] = @EventId;
 
+    -- Result set 2: amenities (zero or more rows)
     SELECT [Amenity]
     FROM [Event].[EventAmenities]
     WHERE [EventId] = @EventId
@@ -15248,13 +15606,18 @@ CREATE OR ALTER PROCEDURE [Event].[CreatePetParentEvent]
     @Price DECIMAL(18, 2) = NULL,
     @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
-    @AmenitiesJson NVARCHAR(MAX) = N'[]'
+    @AmenitiesJson NVARCHAR(MAX) = N'[]',
+    @MaximumCapacity INT = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     IF NOT EXISTS (
         SELECT 1
@@ -15265,20 +15628,49 @@ BEGIN
         THROW 51207, 'Pet parent was not found.', 1;
     END
 
+    IF EXISTS (SELECT 1 FROM [Event].[Reliability] WHERE AccountId=@PetParentId AND RedFlagExpiresAt>SYSUTCDATETIME())
+        THROW 51464, 'Red-flagged accounts cannot create events.', 1;
+
     DECLARE @InsertedEventId TABLE (EventId UNIQUEIDENTIFIER);
 
     INSERT INTO [Event].[Events]
     (
-        [PetParentId], [EventCategory], [IsChildFriendly], [Title], [Description],
-        [BannerImageUrl], [EventType], [StartDate], [EndDate], [StartTime], [EndTime],
-        [IsPaid], [Price], [CancellationPolicy], [EventLink]
+        [MaximumCapacity],
+        [PetParentId],
+        [EventCategory],
+        [IsChildFriendly],
+        [Title],
+        [Description],
+        [BannerImageUrl],
+        [EventType],
+        [StartDate],
+        [EndDate],
+        [StartTime],
+        [EndTime],
+        [IsPaid],
+        [Price],
+        [CancellationPolicy],
+        [EventLink]
     )
     OUTPUT inserted.[EventId] INTO @InsertedEventId
     VALUES
     (
-        @PetParentId, @EventCategory, @IsChildFriendly, @Title, @Description,
-        @BannerImageUrl, @EventType, @StartDate, @EndDate, @StartTime, @EndTime,
-        @IsPaid, CASE WHEN @IsPaid = 1 THEN @Price ELSE NULL END, @CancellationPolicy, @EventLink
+        @MaximumCapacity,
+        @PetParentId,
+        @EventCategory,
+        @IsChildFriendly,
+        @Title,
+        @Description,
+        @BannerImageUrl,
+        @EventType,
+        @StartDate,
+        @EndDate,
+        @StartTime,
+        @EndTime,
+        @IsPaid,
+        CASE WHEN @IsPaid = 1 THEN @Price ELSE NULL END,
+        @CancellationPolicy,
+        @EventLink
     );
 
     DECLARE @EventId UNIQUEIDENTIFIER = (SELECT TOP (1) [EventId] FROM @InsertedEventId);
@@ -15288,23 +15680,49 @@ BEGIN
     FROM OPENJSON(@AmenitiesJson)
     WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
 
-    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
-           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
-           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
-           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+    -- Result set 1: event row (both organiser columns surfaced; one is NULL)
+    SELECT e.[EventId],
+           e.[ProviderId],
+           e.[PetParentId],
+           e.[EventCategory],
+           e.[IsChildFriendly],
+           e.[Title],
+           e.[Description],
+           e.[BannerImageUrl],
+           e.[EventType],
+           e.[StartDate],
+           e.[EndDate],
+           e.[StartTime],
+           e.[EndTime],
+           e.[CreatedAtUtc],
+           e.[UpdatedAtUtc],
+           e.[ViewCount],
+           e.[ShareCount],
+           e.[InquiryCount],
+           e.[IsPaid],
+           e.[Price],
+           e.[CancellationPolicy],
            COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
                     org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
            org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
     WHERE e.[EventId] = @EventId;
 
+    -- Result set 2: amenities
     SELECT [Amenity]
     FROM [Event].[EventAmenities]
     WHERE [EventId] = @EventId
@@ -15378,8 +15796,15 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
@@ -15400,11 +15825,13 @@ BEGIN
     -- Result set 4: attendees — names only (+ ticket number), non-cancelled
     -- bookings. Booker contact / payment stay on the organiser-only dashboard.
     SELECT t.[AttendeeName],
-           t.[TicketNumber]
+           t.[TicketNumber], b.BookingId, t.PaymentStatus,
+           CAST(b.TotalAmount/b.TicketCount AS DECIMAL(18,2)) AS Amount,
+           (SELECT ProfilePhotoUrl FROM [Parent].[PetParents] WHERE PetParentId=b.BookerAccountId) AS ProfileImageUrl
     FROM [Event].[EventBookingTickets] t
     INNER JOIN [Event].[EventBookings] b ON b.[BookingId] = t.[BookingId]
     WHERE t.[EventId] = @EventId
-      AND b.[Status] = N'Confirmed'
+      AND b.[Status] IN (N'Confirmed',N'Attended',N'NoShow')
     ORDER BY b.[CreatedAtUtc] ASC, t.[TicketNumber] ASC;
 END;
 GO
@@ -15433,24 +15860,38 @@ CREATE OR ALTER PROCEDURE [Event].[UpdateEvent]
     @Price DECIMAL(18, 2) = NULL,
     @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
-    @AmenitiesJson NVARCHAR(MAX) = N'[]'
+    @AmenitiesJson NVARCHAR(MAX) = N'[]',
+    @MaximumCapacity INT = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     IF NOT EXISTS (
-        SELECT 1 FROM [Event].[Events]
+        SELECT 1
+        FROM [Event].[Events]
         WHERE [EventId] = @EventId AND [ProviderId] = @ProviderId
     )
     BEGIN
         THROW 51216, 'Event was not found for this provider.', 1;
     END
 
+
+    IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId)
+        THROW 51465, 'Events are locked after the first booking, including cancelled bookings.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus<>N'Active')
+        THROW 51465, 'Cancelled events cannot be edited.', 1;
+    DECLARE @PreviousCapacity INT=(SELECT MaximumCapacity FROM [Event].[Events] WHERE EventId=@EventId);
+
     UPDATE [Event].[Events]
-    SET [EventCategory]      = @EventCategory,
+    SET [MaximumCapacity] = @MaximumCapacity,
+        [EventCategory]      = @EventCategory,
         [IsChildFriendly]    = @IsChildFriendly,
         [Title]              = @Title,
         [Description]        = @Description,
@@ -15467,52 +15908,86 @@ BEGIN
         [UpdatedAtUtc]       = SYSUTCDATETIME()
     WHERE [EventId] = @EventId;
 
+    -- Replace amenities wholesale.
     DELETE FROM [Event].[EventAmenities] WHERE [EventId] = @EventId;
     INSERT INTO [Event].[EventAmenities] ([EventId], [Amenity])
     SELECT DISTINCT @EventId, [value]
     FROM OPENJSON(@AmenitiesJson)
     WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
 
+    -- Payout methods only apply to paid events — drop any stale rows if this
+    -- edit turned the event free.
     IF @IsPaid = 0
     BEGIN
         DELETE FROM [Event].[EventPayoutMethods] WHERE [EventId] = @EventId;
     END
 
-    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
-           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
-           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
-           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+    -- Result set 1: event row (incl. TotalBookings).
+    SELECT e.[EventId],
+           e.[ProviderId],
+           e.[PetParentId],
+           e.[EventCategory],
+           e.[IsChildFriendly],
+           e.[Title],
+           e.[Description],
+           e.[BannerImageUrl],
+           e.[EventType],
+           e.[StartDate],
+           e.[EndDate],
+           e.[StartTime],
+           e.[EndTime],
+           e.[CreatedAtUtc],
+           e.[UpdatedAtUtc],
+           e.[ViewCount],
+           e.[ShareCount],
+           e.[InquiryCount],
+           e.[IsPaid],
+           e.[Price],
+           e.[CancellationPolicy],
            COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
                     org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
            org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
     WHERE e.[EventId] = @EventId;
 
+    -- Result set 2: amenities.
     SELECT [Amenity]
     FROM [Event].[EventAmenities]
     WHERE [EventId] = @EventId
     ORDER BY [Amenity];
 
+    -- Result set 3: payment options (payout methods).
     SELECT [PayoutMethod]
     FROM [Event].[EventPayoutMethods]
     WHERE [EventId] = @EventId
     ORDER BY [PayoutMethod];
 
+    -- Result set 4: attendees — names only (+ ticket number), non-cancelled.
     SELECT t.[AttendeeName],
-           t.[TicketNumber]
+           t.[TicketNumber], b.BookingId, t.PaymentStatus,
+           CAST(b.TotalAmount/b.TicketCount AS DECIMAL(18,2)) AS Amount,
+           (SELECT ProfilePhotoUrl FROM [Parent].[PetParents] WHERE PetParentId=b.BookerAccountId) AS ProfileImageUrl
     FROM [Event].[EventBookingTickets] t
     INNER JOIN [Event].[EventBookings] b ON b.[BookingId] = t.[BookingId]
     WHERE t.[EventId] = @EventId
-      AND b.[Status] = N'Confirmed'
+      AND b.[Status] IN (N'Confirmed',N'Attended',N'NoShow')
     ORDER BY b.[CreatedAtUtc] ASC, t.[TicketNumber] ASC;
 
+    IF @MaximumCapacity>@PreviousCapacity EXEC [Event].[NotifyEventWaitlist] @EventId;
     COMMIT TRANSACTION;
 END;
 GO
@@ -15539,24 +16014,44 @@ CREATE OR ALTER PROCEDURE [Event].[UpdatePetParentEvent]
     @Price DECIMAL(18, 2) = NULL,
     @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
-    @AmenitiesJson NVARCHAR(MAX) = N'[]'
+    @AmenitiesJson NVARCHAR(MAX) = N'[]',
+    @MaximumCapacity INT = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     IF NOT EXISTS (
-        SELECT 1 FROM [Event].[Events]
+        SELECT 1
+        FROM [Event].[Events]
         WHERE [EventId] = @EventId AND [PetParentId] = @PetParentId
     )
     BEGIN
         THROW 51217, 'Event was not found for this pet parent.', 1;
     END
 
+
+    IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId)
+        THROW 51465, 'Events are locked after the first booking, including cancelled bookings.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus<>N'Active')
+        THROW 51465, 'Cancelled events cannot be edited.', 1;
+    IF EXISTS (
+        SELECT @EventCategory,@IsChildFriendly,@Title,@EventType,@StartDate,@EndDate,@StartTime,@EndTime,@IsPaid,@Price,@CancellationPolicy,@EventLink
+        EXCEPT
+        SELECT EventCategory,IsChildFriendly,Title,EventType,StartDate,EndDate,StartTime,EndTime,IsPaid,Price,CancellationPolicy,EventLink
+        FROM [Event].[Events] WHERE EventId=@EventId)
+        THROW 51468, 'Only banner, description, capacity and amenities can be edited.', 1;
+    DECLARE @PreviousCapacity INT=(SELECT MaximumCapacity FROM [Event].[Events] WHERE EventId=@EventId);
+
     UPDATE [Event].[Events]
-    SET [EventCategory]      = @EventCategory,
+    SET [MaximumCapacity] = @MaximumCapacity,
+        [EventCategory]      = @EventCategory,
         [IsChildFriendly]    = @IsChildFriendly,
         [Title]              = @Title,
         [Description]        = @Description,
@@ -15573,52 +16068,85 @@ BEGIN
         [UpdatedAtUtc]       = SYSUTCDATETIME()
     WHERE [EventId] = @EventId;
 
+    -- Replace amenities wholesale.
     DELETE FROM [Event].[EventAmenities] WHERE [EventId] = @EventId;
     INSERT INTO [Event].[EventAmenities] ([EventId], [Amenity])
     SELECT DISTINCT @EventId, [value]
     FROM OPENJSON(@AmenitiesJson)
     WHERE [value] IS NOT NULL AND LEN(LTRIM(RTRIM([value]))) > 0;
 
+    -- Payout methods only apply to paid events.
     IF @IsPaid = 0
     BEGIN
         DELETE FROM [Event].[EventPayoutMethods] WHERE [EventId] = @EventId;
     END
 
-    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
-           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
-           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
-           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+    -- Result set 1: event row (incl. TotalBookings).
+    SELECT e.[EventId],
+           e.[ProviderId],
+           e.[PetParentId],
+           e.[EventCategory],
+           e.[IsChildFriendly],
+           e.[Title],
+           e.[Description],
+           e.[BannerImageUrl],
+           e.[EventType],
+           e.[StartDate],
+           e.[EndDate],
+           e.[StartTime],
+           e.[EndTime],
+           e.[CreatedAtUtc],
+           e.[UpdatedAtUtc],
+           e.[ViewCount],
+           e.[ShareCount],
+           e.[InquiryCount],
+           e.[IsPaid],
+           e.[Price],
+           e.[CancellationPolicy],
            COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
                     org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
            org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
     WHERE e.[EventId] = @EventId;
 
+    -- Result set 2: amenities.
     SELECT [Amenity]
     FROM [Event].[EventAmenities]
     WHERE [EventId] = @EventId
     ORDER BY [Amenity];
 
+    -- Result set 3: payment options (payout methods).
     SELECT [PayoutMethod]
     FROM [Event].[EventPayoutMethods]
     WHERE [EventId] = @EventId
     ORDER BY [PayoutMethod];
 
+    -- Result set 4: attendees — names only (+ ticket number), non-cancelled.
     SELECT t.[AttendeeName],
-           t.[TicketNumber]
+           t.[TicketNumber], b.BookingId, t.PaymentStatus,
+           CAST(b.TotalAmount/b.TicketCount AS DECIMAL(18,2)) AS Amount,
+           (SELECT ProfilePhotoUrl FROM [Parent].[PetParents] WHERE PetParentId=b.BookerAccountId) AS ProfileImageUrl
     FROM [Event].[EventBookingTickets] t
     INNER JOIN [Event].[EventBookings] b ON b.[BookingId] = t.[BookingId]
     WHERE t.[EventId] = @EventId
-      AND b.[Status] = N'Confirmed'
+      AND b.[Status] IN (N'Confirmed',N'Attended',N'NoShow')
     ORDER BY b.[CreatedAtUtc] ASC, t.[TicketNumber] ASC;
 
+    IF @MaximumCapacity>@PreviousCapacity EXEC [Event].[NotifyEventWaitlist] @EventId;
     COMMIT TRANSACTION;
 END;
 GO
@@ -15633,28 +16161,56 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
-           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
-           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
-           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+    -- Result set 1: event rows (PetParentId is always NULL on rows
+    -- returned here because the filter is on ProviderId — but included
+    -- for column-shape consistency with GetEvent / ListEvents readers).
+    SELECT e.[EventId],
+           e.[ProviderId],
+           e.[PetParentId],
+           e.[EventCategory],
+           e.[IsChildFriendly],
+           e.[Title],
+           e.[Description],
+           e.[BannerImageUrl],
+           e.[EventType],
+           e.[StartDate],
+           e.[EndDate],
+           e.[StartTime],
+           e.[EndTime],
+           e.[CreatedAtUtc],
+           e.[UpdatedAtUtc],
+           e.[ViewCount],
+           e.[ShareCount],
+           e.[InquiryCount],
+           e.[IsPaid],
+           e.[Price],
+           e.[CancellationPolicy],
            COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
                     org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
            org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
-    WHERE e.[ProviderId] = @ProviderId
+    WHERE e.[ProviderId] = @ProviderId AND e.RemovedByHost=0
     ORDER BY e.[StartDate] DESC, e.[StartTime] DESC;
 
+    -- Result set 2: amenities for this provider's events (EventId + Amenity)
     SELECT a.[EventId], a.[Amenity]
     FROM [Event].[EventAmenities] a
     INNER JOIN [Event].[Events] e ON e.[EventId] = a.[EventId]
-    WHERE e.[ProviderId] = @ProviderId
+    WHERE e.[ProviderId] = @ProviderId AND e.RemovedByHost=0
     ORDER BY a.[EventId], a.[Amenity];
 END;
 GO
@@ -15669,28 +16225,56 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT e.[EventId], e.[ProviderId], e.[PetParentId], e.[EventCategory], e.[IsChildFriendly], e.[Title],
-           e.[Description], e.[BannerImageUrl], e.[EventType], e.[StartDate], e.[EndDate],
-           e.[StartTime], e.[EndTime], e.[CreatedAtUtc], e.[UpdatedAtUtc],
-           e.[ViewCount], e.[ShareCount], e.[InquiryCount], e.[IsPaid], e.[Price], e.[CancellationPolicy],
+    -- Result set 1: event rows (ProviderId is always NULL on rows returned
+    -- here because the filter is on PetParentId — but included for
+    -- column-shape consistency with GetEvent / ListEvents readers).
+    SELECT e.[EventId],
+           e.[ProviderId],
+           e.[PetParentId],
+           e.[EventCategory],
+           e.[IsChildFriendly],
+           e.[Title],
+           e.[Description],
+           e.[BannerImageUrl],
+           e.[EventType],
+           e.[StartDate],
+           e.[EndDate],
+           e.[StartTime],
+           e.[EndTime],
+           e.[CreatedAtUtc],
+           e.[UpdatedAtUtc],
+           e.[ViewCount],
+           e.[ShareCount],
+           e.[InquiryCount],
+           e.[IsPaid],
+           e.[Price],
+           e.[CancellationPolicy],
            COALESCE(org_pr.[FirstName] + N' ' + org_pr.[LastName],
                     org_pp.[FirstName] + N' ' + org_pp.[LastName]) AS [OrganizerName],
            org_pp.[ProfilePhotoUrl] AS [OrganizerImageUrl],
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
-    WHERE e.[PetParentId] = @PetParentId
+    WHERE e.[PetParentId] = @PetParentId AND e.RemovedByHost=0
     ORDER BY e.[StartDate] DESC, e.[StartTime] DESC;
 
+    -- Result set 2: amenities for this parent's events (EventId + Amenity)
     SELECT a.[EventId], a.[Amenity]
     FROM [Event].[EventAmenities] a
     INNER JOIN [Event].[Events] e ON e.[EventId] = a.[EventId]
-    WHERE e.[PetParentId] = @PetParentId
+    WHERE e.[PetParentId] = @PetParentId AND e.RemovedByHost=0
     ORDER BY a.[EventId], a.[Amenity];
 END;
 GO
@@ -15762,7 +16346,7 @@ BEGIN
     (
         SELECT e.[EventId]
         FROM [Event].[Events] e
-        WHERE (@EventCategory   IS NULL OR e.[EventCategory]   = @EventCategory)
+        WHERE e.EventStatus=N'Active' AND (@EventCategory   IS NULL OR e.[EventCategory]   = @EventCategory)
           AND (@EventType       IS NULL OR e.[EventType]       = @EventType)
           AND (@IsChildFriendly IS NULL OR e.[IsChildFriendly] = @IsChildFriendly)
           AND (@TitlePattern IS NULL OR LOWER(e.[Title]) LIKE @TitlePattern ESCAPE N'\')
@@ -15807,8 +16391,15 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     INNER JOIN FilteredEvents f ON f.[EventId] = e.[EventId]
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
@@ -15819,7 +16410,7 @@ BEGIN
     SELECT a.[EventId], a.[Amenity]
     FROM [Event].[EventAmenities] a
     INNER JOIN [Event].[Events] e ON e.[EventId] = a.[EventId]
-    WHERE (@EventCategory   IS NULL OR e.[EventCategory]   = @EventCategory)
+    WHERE e.EventStatus=N'Active' AND (@EventCategory   IS NULL OR e.[EventCategory]   = @EventCategory)
       AND (@EventType       IS NULL OR e.[EventType]       = @EventType)
       AND (@IsChildFriendly IS NULL OR e.[IsChildFriendly] = @IsChildFriendly)
       AND (@TitlePattern IS NULL OR LOWER(e.[Title]) LIKE @TitlePattern ESCAPE N'\')
@@ -15889,7 +16480,7 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed'),
+              AND eb.[Status] IN (N'Confirmed',N'Attended')),
            e.[StartDate]
     FROM [Event].[Events] e
     -- Filtered BEFORE the TOP, so an event the caller cannot see does not
@@ -15899,7 +16490,7 @@ BEGIN
     -- exactly one), and GUIDs are globally unique, so matching on the id alone
     -- is safe without branching on organiser type -- the same reasoning the
     -- self-booking check uses.
-    WHERE (@ViewerId IS NULL OR NOT EXISTS (
+    WHERE e.EventStatus=N'Active' AND (@ViewerId IS NULL OR NOT EXISTS (
           SELECT 1
           FROM [Block].[BlockedParticipants] bp
           WHERE (bp.[BlockerType] = @ViewerType AND bp.[BlockerId] = @ViewerId
@@ -15911,7 +16502,7 @@ BEGIN
              (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
               FROM [Event].[EventBookings] eb
               WHERE eb.[EventId] = e.[EventId]
-                AND eb.[Status] = N'Confirmed') DESC,
+                AND eb.[Status] IN (N'Confirmed',N'Attended')) DESC,
              e.[StartDate] DESC,
              e.[EventId] ASC;
 
@@ -15929,8 +16520,15 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     INNER JOIN @TopEvents te ON te.[EventId] = e.[EventId]
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
@@ -16249,7 +16847,8 @@ CREATE OR ALTER PROCEDURE [Event].[CreateEventBooking]
     -- online booking is capped to one ticket by the application layer).
     @MaximumCapacity INT = NULL,
     @TotalAmount DECIMAL(18, 2),
-    @AttendeeNames [Event].[EventBookingAttendeeNames] READONLY
+    @AttendeeNames [Event].[EventBookingAttendeeNames] READONLY,
+    @BookerAccountId UNIQUEIDENTIFIER=NULL, @BookerType NVARCHAR(16)=NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -16263,6 +16862,10 @@ BEGIN
     END
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     IF NOT EXISTS (
         SELECT 1 FROM [Event].[Events] WHERE [EventId] = @EventId
@@ -16271,6 +16874,27 @@ BEGIN
         THROW 51090, 'Event was not found.', 1;
     END
 
+
+    IF @BookerAccountId IS NULL OR @BookerType NOT IN (N'PetParent',N'Provider')
+        THROW 51468, 'An authenticated account profile is required to book events.', 1;
+    IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus=N'Active'
+        AND [Event].[EventStartUtc](StartDate,StartTime)>SYSUTCDATETIME())
+        THROW 51461, 'Cancelled or started events cannot be booked.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId AND BookerAccountId=@BookerAccountId AND Status IN (N'Confirmed',N'Attended'))
+        THROW 51469, 'You already hold a booking for this event.', 1;
+    DECLARE @ActiveCount INT=(SELECT COUNT(*) FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+        WHERE b.BookerAccountId=@BookerAccountId AND b.Status=N'Confirmed' AND e.EventStatus=N'Active'
+        AND [Event].[EventStartUtc](e.StartDate,e.StartTime)>SYSUTCDATETIME());
+    DECLARE @HeldCount INT=(SELECT COUNT(*) FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+        WHERE b.BookerAccountId=@BookerAccountId AND b.Status IN (N'Confirmed',N'Attended') AND e.EventStatus=N'Active'
+          AND [Event].[EventStartUtc](DATEADD(day,1,e.EndDate),'00:00')>SYSUTCDATETIME());
+    IF @HeldCount>=1 AND EXISTS (SELECT 1 FROM [Event].[Reliability] WHERE AccountId=@BookerAccountId AND RedFlagExpiresAt>SYSUTCDATETIME())
+        THROW 51463, 'Red-flagged accounts may hold only one upcoming booking.', 1;
+    IF @ActiveCount>=5 THROW 51462, 'An account may hold at most five upcoming event bookings.', 1;
+    SELECT @MaximumCapacity=CASE WHEN EventType=N'Online' THEN NULL ELSE COALESCE(MaximumCapacity,@MaximumCapacity) END,
+        @TotalAmount=CASE WHEN IsPaid=1 THEN ISNULL(Price,0)*@TicketCount ELSE 0 END
+    FROM [Event].[Events] WHERE EventId=@EventId;
+
     -- Race-safe capacity check. UPDLOCK + HOLDLOCK on the SUM forces
     -- concurrent CreateEventBooking calls for the same event to serialise,
     -- so two buyers can't both claim the last seat.
@@ -16278,7 +16902,7 @@ BEGIN
     SELECT @ReservedTickets = ISNULL(SUM([TicketCount]), 0)
     FROM [Event].[EventBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [EventId] = @EventId
-      AND [Status] = N'Confirmed';
+      AND [Status] IN (N'Confirmed',N'Attended');
 
     IF @MaximumCapacity IS NOT NULL AND @ReservedTickets + @TicketCount > @MaximumCapacity
     BEGIN
@@ -16290,6 +16914,7 @@ BEGIN
     INSERT INTO [Event].[EventBookings]
     (
         [EventId],
+        [BookerAccountId], [BookerType],
         [BookerName],
         [BookerEmail],
         [BookerMobile],
@@ -16301,6 +16926,7 @@ BEGIN
     VALUES
     (
         @EventId,
+        @BookerAccountId, @BookerType,
         @BookerName,
         @BookerEmail,
         @BookerMobile,
@@ -16318,7 +16944,7 @@ BEGIN
 
     -- Tell the ORGANISER somebody bought tickets. No self-notification risk: an
     -- organiser is blocked from booking their own event (403 SelfBookingNotAllowed),
-    -- so the buyer is always someone else. The buyer gets nothing here â€” buying is
+    -- so the buyer is always someone else. The buyer gets nothing here — buying is
     -- their own action, and they saw the confirmation on screen.
     EXEC [Notification].[EnqueueEventNotification]
         @EventId = @EventId,
@@ -16327,31 +16953,9 @@ BEGIN
         @BookerName = @BookerName,
         @TicketCount = @TicketCount;
 
-    -- Result set 1: the booking row.
-    SELECT [BookingId],
-           [EventId],
-           [BookerName],
-           [BookerEmail],
-           [BookerMobile],
-           [TicketCount],
-           [PaymentMethod],
-           [PaymentStatus],
-           [PaymentReference],
-           [TotalAmount],
-           [Status],
-           [CreatedAtUtc],
-           [UpdatedAtUtc],
-           [CancelledAtUtc]
-    FROM [Event].[EventBookings]
-    WHERE [BookingId] = @BookingId;
-
-    -- Result set 2: the ticket rows (ordered by TicketNumber).
-    SELECT [TicketId], [BookingId], [EventId], [TicketNumber], [AttendeeName], [CreatedAtUtc]
-    FROM [Event].[EventBookingTickets]
-    WHERE [BookingId] = @BookingId
-    ORDER BY [TicketNumber];
-
+    DELETE FROM [Event].[Waitlist] WHERE EventId=@EventId AND PetParentId=@BookerAccountId;
     COMMIT TRANSACTION;
+    EXEC [Event].[GetEventBooking] @BookingId;
 END;
 GO
 PRINT 'Created/updated [Event].[CreateEventBooking].';
@@ -16365,13 +16969,30 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    SELECT [BookingId], [EventId], [BookerName], [BookerEmail], [BookerMobile],
-           [TicketCount], [PaymentMethod], [PaymentStatus], [PaymentReference],
-           [TotalAmount], [Status], [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
-    FROM [Event].[EventBookings]
+    -- Result set 1: booking row (zero or one).
+    SELECT [BookingId],
+           [EventId],
+           [BookerName],
+           [BookerEmail],
+           [BookerMobile],
+           [TicketCount],
+           [PaymentMethod],
+           [PaymentStatus],
+           [PaymentReference],
+           [TotalAmount],
+           [Status],
+           [CreatedAtUtc],
+           [UpdatedAtUtc],
+           [CancelledAtUtc],
+           ISNULL((SELECT CASE WHEN LastNegativeAtUtc>=DATEADD(day,-30,SYSUTCDATETIME()) AND (RedFlagExpiresAt IS NULL OR RedFlagExpiresAt>SYSUTCDATETIME()) THEN ConsecutiveNegativeMarks ELSE 0 END
+             FROM [Event].[Reliability] r WHERE r.AccountId=b.BookerAccountId),0) AS ConsecutiveNegativeMarks,
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Support].[Tickets] t WHERE t.EventBookingId=b.BookingId) THEN 1 ELSE 0 END AS BIT) AS HasReported
+    FROM [Event].[EventBookings] b
     WHERE [BookingId] = @BookingId;
 
-    SELECT [TicketId], [BookingId], [EventId], [TicketNumber], [AttendeeName], [CreatedAtUtc]
+    -- Result set 2: tickets (zero or more, ordered by TicketNumber).
+    SELECT [TicketId], [BookingId], [EventId], [TicketNumber], [AttendeeName], [CreatedAtUtc], PaymentStatus,
+        CAST((SELECT TotalAmount/TicketCount FROM [Event].[EventBookings] WHERE BookingId=@BookingId) AS DECIMAL(18,2)) AS Amount
     FROM [Event].[EventBookingTickets]
     WHERE [BookingId] = @BookingId
     ORDER BY [TicketNumber];
@@ -16392,9 +17013,15 @@ BEGIN
     SET XACT_ABORT ON;
 
     IF @PaymentStatus NOT IN (N'Paid', N'Failed')
+    BEGIN
         THROW 51094, 'PaymentStatus must be Paid or Failed.', 1;
+    END
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     DECLARE @CurrentStatus NVARCHAR(32);
     DECLARE @CurrentReference NVARCHAR(200);
@@ -16404,11 +17031,15 @@ BEGIN
     WHERE [BookingId] = @BookingId;
 
     IF @CurrentStatus IS NULL
+    BEGIN
         THROW 51092, 'Event booking was not found.', 1;
+    END
 
+    -- Idempotent re-delivery: same terminal state + same reference is a no-op.
     IF @CurrentStatus = @PaymentStatus
        AND ISNULL(@CurrentReference, N'') = ISNULL(@PaymentReference, N'')
     BEGIN
+        -- Fall through to the SELECT below.
         SET @PaymentStatus = @CurrentStatus;
     END
     ELSE IF @CurrentStatus IN (N'Paid', N'Failed')
@@ -16417,16 +17048,30 @@ BEGIN
     END
     ELSE
     BEGIN
-        UPDATE [Event].[EventBookings]
+        IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE BookingId=@BookingId AND Status NOT IN (N'Confirmed',N'Attended'))
+        THROW 51468, 'This booking cannot accept payment.', 1;
+
+    UPDATE [Event].[EventBookings]
         SET [PaymentStatus]    = @PaymentStatus,
             [PaymentReference] = @PaymentReference,
             [UpdatedAtUtc]     = SYSUTCDATETIME()
         WHERE [BookingId] = @BookingId;
     END
 
-    SELECT [BookingId], [EventId], [BookerName], [BookerEmail], [BookerMobile],
-           [TicketCount], [PaymentMethod], [PaymentStatus], [PaymentReference],
-           [TotalAmount], [Status], [CreatedAtUtc], [UpdatedAtUtc], [CancelledAtUtc]
+    SELECT [BookingId],
+           [EventId],
+           [BookerName],
+           [BookerEmail],
+           [BookerMobile],
+           [TicketCount],
+           [PaymentMethod],
+           [PaymentStatus],
+           [PaymentReference],
+           [TotalAmount],
+           [Status],
+           [CreatedAtUtc],
+           [UpdatedAtUtc],
+           [CancelledAtUtc]
     FROM [Event].[EventBookings]
     WHERE [BookingId] = @BookingId;
 
@@ -16688,10 +17333,13 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
+    -- Distinct events the caller currently holds tickets for. Cancelled
+    -- bookings are excluded (cancelling frees the seat, so the event becomes
+    -- bookable again). Powers the IsBookable flag on event list / detail reads.
     SELECT DISTINCT b.[EventId]
     FROM [Event].[EventBookings] AS b
     WHERE b.[BookerEmail] = @BookerEmail
-      AND b.[Status] = N'Confirmed';
+      AND b.[Status] IN (N'Confirmed',N'Attended');
 END;
 GO
 PRINT 'Created/updated [Event].[ListBookedEventIdsByBookerEmail].';
@@ -16704,71 +17352,36 @@ GO
 -- (CreateEventBooking only SUMs Confirmed rows). THROW 51218 not found for
 -- booker; 51219 already cancelled.
 CREATE OR ALTER PROCEDURE [Event].[CancelEventBooking]
-    @BookingId UNIQUEIDENTIFIER,
-    @BookerEmail NVARCHAR(320)
+ @BookingId UNIQUEIDENTIFIER, @BookerEmail NVARCHAR(320)
 AS
 BEGIN
-    SET NOCOUNT ON;
+ SET NOCOUNT ON;
+ SET XACT_ABORT ON;
+ BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
 
-    DECLARE @CurrentStatus NVARCHAR(32);
-    DECLARE @EventId UNIQUEIDENTIFIER;
-    DECLARE @BookerName NVARCHAR(200);
-    DECLARE @TicketCount INT;
-
-    SELECT @CurrentStatus = [Status],
-           @EventId = [EventId],
-           @BookerName = [BookerName],
-           @TicketCount = [TicketCount]
-    FROM [Event].[EventBookings] WITH (UPDLOCK, HOLDLOCK)
-    WHERE [BookingId] = @BookingId
-      AND [BookerEmail] = @BookerEmail;
-
-    IF @CurrentStatus IS NULL
-        THROW 51218, 'Event booking was not found for this booker.', 1;
-
-    IF @CurrentStatus = N'Cancelled'
-        THROW 51219, 'Event booking is already cancelled.', 1;
-
-    UPDATE [Event].[EventBookings]
-    SET [Status] = N'Cancelled',
-        [CancelledAtUtc] = SYSUTCDATETIME(),
-        [UpdatedAtUtc] = SYSUTCDATETIME()
-    WHERE [BookingId] = @BookingId;
-
-    -- Tell the ORGANISER their seats are free again â€” they need to know the
-    -- attendee list changed, and they didn't perform this action. The booker gets
-    -- nothing: cancelling is their own tap.
-    EXEC [Notification].[EnqueueEventNotification]
-        @EventId = @EventId,
-        @EventBookingId = @BookingId,
-        @NotificationType = N'EVENT_TICKET_CANCELLED',
-        @BookerName = @BookerName,
-        @TicketCount = @TicketCount;
-
-    -- Result set 1: the cancelled booking row (same shape as GetEventBooking RS1).
-    SELECT [BookingId],
-           [EventId],
-           [BookerName],
-           [BookerEmail],
-           [BookerMobile],
-           [TicketCount],
-           [PaymentMethod],
-           [PaymentStatus],
-           [PaymentReference],
-           [TotalAmount],
-           [Status],
-           [CreatedAtUtc],
-           [UpdatedAtUtc],
-           [CancelledAtUtc]
-    FROM [Event].[EventBookings]
-    WHERE [BookingId] = @BookingId;
-
-    -- Result set 2: tickets (zero or more, ordered by TicketNumber) so the
-    -- response carries the full shape the client got on create / GET.
-    SELECT [TicketId], [BookingId], [EventId], [TicketNumber], [AttendeeName], [CreatedAtUtc]
-    FROM [Event].[EventBookingTickets]
-    WHERE [BookingId] = @BookingId
-    ORDER BY [TicketNumber];
+ DECLARE @Status NVARCHAR(32), @EventId UNIQUEIDENTIFIER, @Name NVARCHAR(200), @Count INT;
+ SELECT @Status=Status,@EventId=EventId,@Name=BookerName,@Count=TicketCount FROM [Event].[EventBookings]
+ WHERE BookingId=@BookingId AND BookerEmail=@BookerEmail;
+ IF @Status IS NULL THROW 51218, 'Event booking was not found for this booker.', 1;
+ IF @Status IN (N'Cancelled',N'CancelledByParent',N'EventCancelled') THROW 51219, 'Event booking is already cancelled.', 1;
+ IF @Status<>N'Confirmed' OR EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND [Event].[EventStartUtc](StartDate,StartTime)<=SYSUTCDATETIME())
+     THROW 51468, 'Only bookings for events that have not started can be cancelled.', 1;
+ DECLARE @Hours INT,@Start DATETIME2(7);
+ SELECT @Hours=CASE CancellationPolicy WHEN N'FullRefundUpTo48Hours' THEN 48 WHEN N'FullRefundUpTo24Hours' THEN 24
+     WHEN N'FullRefundUpTo4Hours' THEN 4 WHEN N'FullRefundUpTo2Hours' THEN 2 ELSE 0 END,
+     @Start=[Event].[EventStartUtc](StartDate,StartTime) FROM [Event].[Events] WHERE EventId=@EventId;
+ UPDATE [Event].[EventBookings] SET Status=N'CancelledByParent',CancelledAtUtc=SYSUTCDATETIME(),UpdatedAtUtc=SYSUTCDATETIME()
+ WHERE BookingId=@BookingId;
+ IF @Hours>0 AND SYSUTCDATETIME()>DATEADD(hour,-@Hours,@Start)
+     EXEC [Event].[RecordReliabilityOutcome] @BookingId,N'Negative';
+ EXEC [Notification].[EnqueueEventNotification] @EventId=@EventId,@EventBookingId=@BookingId,
+     @NotificationType=N'EVENT_TICKET_CANCELLED',@BookerName=@Name,@TicketCount=@Count;
+ EXEC [Event].[NotifyEventWaitlist] @EventId;
+ COMMIT TRANSACTION;
+ EXEC [Event].[GetEventBooking] @BookingId;
 END;
 GO
 PRINT 'Created/updated [Event].[CancelEventBooking].';
@@ -17439,7 +18052,7 @@ BEGIN
         @DedupeKey = @DedupeKey,
         -- The callers return their own result sets; a nested one would corrupt them.
         @SuppressResultSet = 1;
-END;
+END
 GO
 PRINT 'Created/updated [Notification].[EnqueueEventNotification].';
 GO
@@ -17508,10 +18121,15 @@ BEGIN
            inserted.[CreatedAtUtc]
     INTO @Claimed;
 
-    SELECT [NotificationId], [Audience], [RecipientId], [NotificationType],
-           [EntityType], [EntityId], [DataJson], [ImageUrl], [AttemptCount], [CreatedAtUtc]
-    FROM @Claimed
-    ORDER BY [CreatedAtUtc] ASC;
+    SELECT c.[NotificationId], c.[Audience], c.[RecipientId], c.[NotificationType],
+           c.[EntityType], c.[EntityId], c.[DataJson], c.[ImageUrl], c.[AttemptCount], c.[CreatedAtUtc],
+           COALESCE(pa.[FirebaseUserId], pr.[FirebaseUserId]) AS [FirebaseUserId]
+    FROM @Claimed c
+    LEFT JOIN [Parent].[ParentAuthIdentities] pa
+        ON c.[Audience] = N'PetParent' AND pa.[PetParentId] = c.[RecipientId]
+    LEFT JOIN [Provider].[ProviderAuthIdentities] pr
+        ON c.[Audience] = N'Provider' AND pr.[ProviderId] = c.[RecipientId]
+    ORDER BY c.[CreatedAtUtc] ASC;
 
     SELECT DISTINCT
            N'Provider' AS [Audience],
@@ -20229,7 +20847,13 @@ BEGIN
            @NotificationId AS [NotificationId],
            @DataJson AS [DataJson],
            @Sequence AS [Sequence],
-           @ReservedAtUtc AS [CreatedAtUtc];
+           @ReservedAtUtc AS [CreatedAtUtc],
+           CASE WHEN @RecipientType = N'Provider'
+                THEN (SELECT [FirebaseUserId] FROM [Provider].[ProviderAuthIdentities]
+                      WHERE [ProviderId] = @RecipientId)
+                ELSE (SELECT [FirebaseUserId] FROM [Parent].[ParentAuthIdentities]
+                      WHERE [PetParentId] = @RecipientId)
+           END AS [RecipientFirebaseUserId];
 
     -- Result set 2 — the devices to push to. Empty when no notification was
     -- queued, so the caller can branch on row count alone.
@@ -21467,9 +22091,6 @@ GO
 PRINT 'Created/updated [Block].[ListMyBlockedCounterparties].';
 GO
 
-PRINT '--- Pawfront deployment complete ---';
-GO
-
 -- Raises a support ticket against the counterparty.
 --
 -- Reporting somebody does NOT block them. Nothing here writes to
@@ -21536,7 +22157,8 @@ CREATE OR ALTER PROCEDURE [Support].[CreateTicket]
     @ConversationId UNIQUEIDENTIFIER = NULL,
     @Category NVARCHAR(100) = NULL,
     @Reason NVARCHAR(500) = NULL,
-    @EventId UNIQUEIDENTIFIER = NULL
+    @EventId UNIQUEIDENTIFIER = NULL,
+    @EventBookingId UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -21554,6 +22176,11 @@ BEGIN
     BEGIN
         THROW 51343, 'Invalid support ticket request.', 1;
     END
+
+    IF @EventBookingId IS NOT NULL AND (@TicketType<>N'EventIncident' OR NOT EXISTS (
+        SELECT 1 FROM [Event].[EventBookings] WHERE BookingId=@EventBookingId AND EventId=@EventId
+            AND BookerAccountId=@ActorId AND BookerType=@RaisedByType))
+        THROW 51343, 'The event booking does not belong to this reporter or event.', 1;
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @ProviderId UNIQUEIDENTIFIER;
@@ -21698,7 +22325,7 @@ BEGIN
         SELECT @ExistingTicketId = [TicketId]
         FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [EventId] = @EventId
-          AND [Status] <> N'CLOSED'
+          AND ((@EventBookingId IS NOT NULL AND EventBookingId=@EventBookingId) OR [Status] <> N'CLOSED')
           AND ((@RaisedByType = N'Provider'  AND [ProviderId]  = @ActorId)
             OR (@RaisedByType = N'PetParent' AND [PetParentId] = @ActorId));
     END
@@ -21725,12 +22352,12 @@ BEGIN
         -- until support decides otherwise off-platform.
         INSERT INTO [Support].[Tickets]
             ([TicketType], [ProviderId], [PetParentId], [RaisedByType],
-             [BookingType], [BookingId], [PetId], [ConversationId], [EventId],
+             [BookingType], [BookingId], [PetId], [ConversationId], [EventId], [EventBookingId],
              [Category], [Reason], [Status], [CreatedAtUtc], [UpdatedAtUtc])
         OUTPUT inserted.[TicketId] INTO @Inserted
         VALUES
             (@TicketType, @ProviderId, @PetParentId, @RaisedByType,
-             @BookingType, @BookingId, @PetId, @ConversationId, @EventId,
+             @BookingType, @BookingId, @PetId, @ConversationId, @EventId, @EventBookingId,
              @Category, @Reason, N'OPENED', @Now, @Now);
 
         SELECT @TicketId = [TicketId] FROM @Inserted;
@@ -21756,7 +22383,7 @@ BEGIN
            -- the existing reader ordinals did not shift when they were added.
            t.[Category],
            t.[Reason],
-           t.[EventId]
+           t.[EventId], t.[EventBookingId]
     FROM [Support].[Tickets] AS t
     WHERE t.[TicketId] = @TicketId;
 
@@ -21820,7 +22447,7 @@ BEGIN
            -- so adding them shifted no existing reader ordinal.
            [Category],
            [Reason],
-           [EventId]
+           [EventId], [EventBookingId]
     FROM [Support].[Tickets]
     WHERE [TicketId] = @TicketId;
 
@@ -21891,7 +22518,7 @@ BEGIN
            -- positionally, so the two must move together.
            t.[Category],
            t.[Reason],
-           t.[EventId],
+           t.[EventId], t.[EventBookingId],
            COUNT(*) OVER () AS [TotalCount]
     FROM [Support].[Tickets] AS t
     WHERE ((@ActorType = N'Provider'  AND t.[ProviderId]  = @ActorId)
@@ -22015,7 +22642,7 @@ BEGIN
            -- Appended LAST, here and in every other procedure projecting this row,
            -- so adding them shifted no existing reader ordinal.
            [Category],
-           [Reason]
+           [Reason], [EventId], [EventBookingId]
     FROM [Support].[Tickets]
     WHERE [TicketId] = @TicketId;
 
@@ -22117,7 +22744,7 @@ BEGIN
            -- so adding them shifted no existing reader ordinal.
            [Category],
            [Reason],
-           [EventId]
+           [EventId], [EventBookingId]
     FROM [Support].[Tickets]
     WHERE [TicketId] = @TicketId;
 
@@ -22289,7 +22916,7 @@ BEGIN
            -- so adding them shifted no existing reader ordinal.
            [Category],
            [Reason],
-           [EventId]
+           [EventId], [EventBookingId]
     FROM [Support].[Tickets]
     WHERE [TicketId] = @TicketId;
 
@@ -23425,3 +24052,283 @@ GO
 PRINT 'Created/updated [Booking].[GetProviderBookingsByService].';
 GO
 
+
+-- Event lifecycle procedures
+CREATE OR ALTER PROCEDURE [Event].[CancelHostedEvent]
+    @EventId UNIQUEIDENTIFIER, @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
+    IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND PetParentId=@PetParentId)
+        THROW 51460, 'Event was not found for this host.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus=N'Active')
+    BEGIN
+        IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND [Event].[EventStartUtc](StartDate,StartTime)<=SYSUTCDATETIME())
+            THROW 51468, 'An event that has started cannot be cancelled.', 1;
+        UPDATE [Event].[Events] SET EventStatus=N'Cancelled', UpdatedAtUtc=SYSUTCDATETIME(),
+            CancelledWithBookings=CASE WHEN EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId) THEN 1 ELSE 0 END
+        WHERE EventId=@EventId;
+        DECLARE @Recipients TABLE (BookingId UNIQUEIDENTIFIER, AccountId UNIQUEIDENTIFIER, Audience NVARCHAR(16));
+        UPDATE [Event].[EventBookings] SET Status=N'EventCancelled', CancelledAtUtc=SYSUTCDATETIME(), UpdatedAtUtc=SYSUTCDATETIME()
+        OUTPUT inserted.BookingId,inserted.BookerAccountId,inserted.BookerType INTO @Recipients
+        WHERE EventId=@EventId AND Status=N'Confirmed';
+        DECLARE @BookingId UNIQUEIDENTIFIER, @AccountId UNIQUEIDENTIFIER, @Audience NVARCHAR(16), @Key NVARCHAR(200);
+        DECLARE recipients CURSOR LOCAL FAST_FORWARD FOR SELECT BookingId,AccountId,Audience FROM @Recipients WHERE AccountId IS NOT NULL;
+        OPEN recipients; FETCH NEXT FROM recipients INTO @BookingId,@AccountId,@Audience;
+        WHILE @@FETCH_STATUS=0
+        BEGIN
+            SET @Key=CONCAT(N'EVENT_CANCELLED:',@BookingId);
+            EXEC [Event].[NotifyEventAccount] @EventId,@AccountId,@Audience,N'EVENT_CANCELLED',@Key,@BookingId;
+            FETCH NEXT FROM recipients INTO @BookingId,@AccountId,@Audience;
+        END
+        CLOSE recipients; DEALLOCATE recipients;
+        DELETE FROM [Event].[Waitlist] WHERE EventId=@EventId;
+    END
+
+    COMMIT TRANSACTION;
+END;
+
+GO
+
+CREATE OR ALTER PROCEDURE [Event].[GetReliability]
+    @AccountId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Now DATETIME2(7)=SYSUTCDATETIME();
+    SELECT CAST(CASE WHEN r.RedFlagExpiresAt>@Now THEN 1 ELSE 0 END AS BIT) AS IsRedFlagged,
+        CASE WHEN r.RedFlagExpiresAt>@Now THEN r.RedFlagExpiresAt END AS RedFlagExpiresAt,
+        CASE WHEN r.RedFlagExpiresAt<=@Now THEN 0 ELSE ISNULL(r.ConsecutivePaidEventsAttended,0) END AS ConsecutivePaidEventsAttended,
+        (SELECT COUNT(*) FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+         WHERE b.BookerAccountId=@AccountId AND b.Status IN (N'Confirmed',N'Attended') AND e.EventStatus=N'Active'
+           AND [Event].[EventStartUtc](DATEADD(day,1,e.EndDate),'00:00')>@Now) AS ActiveBookingCount,
+        CASE WHEN r.LastNegativeAtUtc>=DATEADD(day,-30,@Now) AND (r.RedFlagExpiresAt IS NULL OR r.RedFlagExpiresAt>@Now)
+            THEN ISNULL(r.ConsecutiveNegativeMarks,0) ELSE 0 END AS ConsecutiveNegativeMarks
+    FROM (SELECT @AccountId AS Id) a LEFT JOIN [Event].[Reliability] r ON r.AccountId=a.Id;
+
+END;
+GO
+
+CREATE OR ALTER PROCEDURE [Event].[NotifyEventAccount]
+    @EventId UNIQUEIDENTIFIER, @AccountId UNIQUEIDENTIFIER, @Audience NVARCHAR(16),
+    @NotificationType NVARCHAR(64), @DedupeKey NVARCHAR(200), @BookingId UNIQUEIDENTIFIER=NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Title NVARCHAR(200)=(SELECT Title FROM [Event].[Events] WHERE EventId=@EventId);
+    DECLARE @Data NVARCHAR(MAX)=(SELECT N'EVENT' AS category, @Title AS eventTitle,
+        CONVERT(NVARCHAR(36),@EventId) AS eventId, CONVERT(NVARCHAR(36),@BookingId) AS eventBookingId
+        FOR JSON PATH, WITHOUT_ARRAY_WRAPPER);
+    EXEC [Notification].[EnqueueNotification] @Audience=@Audience, @RecipientId=@AccountId,
+        @NotificationType=@NotificationType, @EntityType=N'Event', @EntityId=@EventId,
+        @DataJson=@Data, @DedupeKey=@DedupeKey, @SuppressResultSet=1;
+
+END;
+
+GO
+
+CREATE OR ALTER PROCEDURE [Event].[NotifyEventWaitlist]
+    @EventId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @Id UNIQUEIDENTIFIER, @Key NVARCHAR(200), @ReleaseId UNIQUEIDENTIFIER=NEWID();
+    DECLARE recipients CURSOR LOCAL FAST_FORWARD FOR SELECT PetParentId FROM [Event].[Waitlist] WHERE EventId=@EventId;
+    OPEN recipients; FETCH NEXT FROM recipients INTO @Id;
+    WHILE @@FETCH_STATUS=0
+    BEGIN
+        SET @Key=CONCAT(N'EVENT_SEATS_AVAILABLE:',@EventId,N':',@Id,N':',@ReleaseId);
+        EXEC [Event].[NotifyEventAccount] @EventId,@Id,N'PetParent',N'EVENT_SEATS_AVAILABLE',@Key;
+        FETCH NEXT FROM recipients INTO @Id;
+    END
+    CLOSE recipients; DEALLOCATE recipients;
+
+END;
+
+GO
+
+CREATE OR ALTER PROCEDURE [Event].[RecordReliabilityOutcome]
+    @BookingId UNIQUEIDENTIFIER, @Outcome NVARCHAR(16)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
+    DECLARE @AccountId UNIQUEIDENTIFIER, @Now DATETIME2(7)=SYSUTCDATETIME();
+    SELECT @AccountId=BookerAccountId FROM [Event].[EventBookings] WHERE BookingId=@BookingId;
+    IF @AccountId IS NOT NULL AND NOT EXISTS (SELECT 1 FROM [Event].[ReliabilityOutcomes] WHERE BookingId=@BookingId)
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM [Event].[Reliability] WHERE AccountId=@AccountId)
+            INSERT [Event].[Reliability](AccountId) VALUES (@AccountId);
+        UPDATE [Event].[Reliability] SET RedFlagExpiresAt=NULL, ConsecutivePaidEventsAttended=0,
+            ConsecutiveNegativeMarks=0, LastNegativeAtUtc=NULL
+        WHERE AccountId=@AccountId AND RedFlagExpiresAt <= @Now;
+        INSERT [Event].[ReliabilityOutcomes](BookingId,AccountId,Outcome) VALUES (@BookingId,@AccountId,@Outcome);
+        IF @Outcome=N'Negative'
+        BEGIN
+            UPDATE [Event].[Reliability] SET
+                RedFlagExpiresAt=CASE WHEN RedFlagExpiresAt>@Now THEN RedFlagExpiresAt
+                    WHEN ConsecutiveNegativeMarks=1 AND LastNegativeAtUtc>=DATEADD(day,-30,@Now) THEN DATEADD(day,30,@Now) ELSE NULL END,
+                ConsecutiveNegativeMarks=CASE WHEN ConsecutiveNegativeMarks=1 AND LastNegativeAtUtc>=DATEADD(day,-30,@Now) THEN 0 ELSE 1 END,
+                LastNegativeAtUtc=@Now, ConsecutivePaidEventsAttended=0
+            WHERE AccountId=@AccountId;
+        END
+        ELSE
+        BEGIN
+            UPDATE [Event].[Reliability] SET
+                RedFlagExpiresAt=CASE WHEN @Outcome=N'PaidAttendance' AND ConsecutivePaidEventsAttended=1 THEN NULL ELSE RedFlagExpiresAt END,
+                ConsecutivePaidEventsAttended=CASE WHEN @Outcome=N'PaidAttendance' THEN CASE WHEN ConsecutivePaidEventsAttended<2 THEN ConsecutivePaidEventsAttended+1 ELSE 2 END ELSE 0 END,
+                ConsecutiveNegativeMarks=0, LastNegativeAtUtc=NULL
+            WHERE AccountId=@AccountId;
+        END
+    END
+
+    COMMIT TRANSACTION;
+END;
+
+GO
+
+CREATE OR ALTER PROCEDURE [Event].[RemoveHostedEvent]
+    @EventId UNIQUEIDENTIFIER, @PetParentId UNIQUEIDENTIFIER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
+    IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND PetParentId=@PetParentId)
+        THROW 51460, 'Event was not found for this host.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus<>N'Cancelled')
+        THROW 51466, 'Cancel the event before removing it.', 1;
+    UPDATE [Event].[Events] SET RemovedByHost=1, UpdatedAtUtc=SYSUTCDATETIME() WHERE EventId=@EventId;
+
+    COMMIT TRANSACTION;
+END;
+
+GO
+
+CREATE OR ALTER PROCEDURE [Event].[SetTicketPayment]
+    @BookingId UNIQUEIDENTIFIER, @TicketNumber INT, @PetParentId UNIQUEIDENTIFIER,
+    @PaymentStatus NVARCHAR(16)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
+    IF @PaymentStatus NOT IN (N'Pending',N'CashReceived') OR @PaymentStatus IS NULL
+        THROW 51468, 'paymentStatus must be Pending or CashReceived.', 1;
+    DECLARE @StartDate DATE,@EndDate DATE,@Status NVARCHAR(32),@Settled BIT;
+    SELECT @StartDate=e.StartDate,@EndDate=e.EndDate,@Status=b.Status,@Settled=b.ReliabilitySettled
+    FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+    JOIN [Event].[EventBookingTickets] t ON t.BookingId=b.BookingId AND t.TicketNumber=@TicketNumber
+    WHERE b.BookingId=@BookingId AND e.PetParentId=@PetParentId AND e.EventStatus=N'Active';
+    IF @EndDate IS NULL THROW 51460, 'Ticket was not found for this host.', 1;
+    IF SYSUTCDATETIME()<[Event].[EventStartUtc](@StartDate,'00:00') OR SYSUTCDATETIME()>=[Event].[EventStartUtc](DATEADD(day,1,@EndDate),'00:00') OR @Settled=1
+        THROW 51467, 'Attendance can only be recorded on the event days before midnight.', 1;
+    IF @Status NOT IN (N'Confirmed',N'Attended') THROW 51468, 'This booking cannot record attendance.', 1;
+    UPDATE [Event].[EventBookingTickets] SET PaymentStatus=@PaymentStatus WHERE BookingId=@BookingId AND TicketNumber=@TicketNumber;
+    UPDATE [Event].[EventBookings] SET UpdatedAtUtc=SYSUTCDATETIME(),
+        Status=CASE WHEN NOT EXISTS (SELECT 1 FROM [Event].[EventBookingTickets] WHERE BookingId=@BookingId AND PaymentStatus<>N'CashReceived') THEN N'Attended' ELSE N'Confirmed' END
+    WHERE BookingId=@BookingId;
+
+    COMMIT TRANSACTION;
+END;
+
+GO
+
+CREATE OR ALTER PROCEDURE [Event].[SettleEventAttendance]
+
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
+    DECLARE @BookingId UNIQUEIDENTIFIER, @Outcome NVARCHAR(16);
+    DECLARE bookings CURSOR LOCAL FAST_FORWARD FOR
+        SELECT b.BookingId FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+        WHERE e.EventStatus=N'Active' AND b.Status IN (N'Confirmed',N'Attended') AND b.ReliabilitySettled=0
+          AND SYSUTCDATETIME()>=[Event].[EventStartUtc](DATEADD(day,1,e.EndDate),'00:00')
+        ORDER BY e.EndDate,e.EndTime,b.BookingId;
+    OPEN bookings; FETCH NEXT FROM bookings INTO @BookingId;
+    WHILE @@FETCH_STATUS=0
+    BEGIN
+        UPDATE [Event].[EventBookingTickets] SET PaymentStatus=N'NoShow' WHERE BookingId=@BookingId AND PaymentStatus=N'Pending';
+        SET @Outcome=CASE WHEN EXISTS (SELECT 1 FROM [Event].[EventBookingTickets] WHERE BookingId=@BookingId AND PaymentStatus=N'NoShow') THEN N'Negative'
+            WHEN EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE BookingId=@BookingId AND TotalAmount>0) THEN N'PaidAttendance' ELSE N'Attendance' END;
+        UPDATE [Event].[EventBookings] SET Status=CASE WHEN @Outcome=N'Negative' THEN N'NoShow' ELSE N'Attended' END,
+            ReliabilitySettled=1,UpdatedAtUtc=SYSUTCDATETIME() WHERE BookingId=@BookingId;
+        EXEC [Event].[RecordReliabilityOutcome] @BookingId,@Outcome;
+        FETCH NEXT FROM bookings INTO @BookingId;
+    END
+    CLOSE bookings; DEALLOCATE bookings;
+
+    COMMIT TRANSACTION;
+END;
+
+GO
+
+CREATE OR ALTER PROCEDURE [Event].[SetWaitlist]
+    @EventId UNIQUEIDENTIFIER, @PetParentId UNIQUEIDENTIFIER, @Join BIT, @MaximumCapacity INT=NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
+    IF @Join=0 DELETE FROM [Event].[Waitlist] WHERE EventId=@EventId AND PetParentId=@PetParentId;
+    ELSE
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus=N'Active'
+            AND (PetParentId<>@PetParentId OR PetParentId IS NULL)
+            AND [Event].[EventStartUtc](StartDate,StartTime)>SYSUTCDATETIME())
+            THROW 51461, 'Event cannot be waitlisted.', 1;
+        SELECT @MaximumCapacity=COALESCE(MaximumCapacity,@MaximumCapacity) FROM [Event].[Events] WHERE EventId=@EventId;
+        IF @MaximumCapacity IS NULL OR @MaximumCapacity>(SELECT ISNULL(SUM(TicketCount),0) FROM [Event].[EventBookings] WHERE EventId=@EventId AND Status IN (N'Confirmed',N'Attended'))
+            THROW 51468, 'Only sold-out events accept waitlist registrations.', 1;
+        IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId AND BookerAccountId=@PetParentId AND Status IN (N'Confirmed',N'Attended'))
+            THROW 51469, 'You already hold a booking for this event.', 1;
+        IF NOT EXISTS (SELECT 1 FROM [Event].[Waitlist] WHERE EventId=@EventId AND PetParentId=@PetParentId)
+            INSERT [Event].[Waitlist](EventId,PetParentId) VALUES (@EventId,@PetParentId);
+    END
+
+    COMMIT TRANSACTION;
+END;
+GO
+
+-- Report success only after every schema upgrade and procedure has completed.
+IF XACT_STATE() <> 1 OR @@TRANCOUNT <> 1
+    THROW 51468, 'Deployment did not finish with a committable transaction. Roll back and rerun DeployAll.sql.', 1;
+COMMIT TRANSACTION;
+DROP TABLE #VerifiedEventBookingMappings;
+PRINT '--- Pawfront deployment complete ---';
+GO

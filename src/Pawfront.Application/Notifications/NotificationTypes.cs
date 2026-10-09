@@ -62,6 +62,8 @@ public static class NotificationTypes
     public const string EventBookingPaymentFailed = "EVENT_BOOKING_PAYMENT_FAILED";
     public const string EventBookingCancelled = "EVENT_BOOKING_CANCELLED";
     /// <summary>To the organiser: somebody bought tickets for their event.</summary>
+    public const string EventCancelled = "EVENT_CANCELLED";
+    public const string EventSeatsAvailable = "EVENT_SEATS_AVAILABLE";
     public const string EventTicketSold = "EVENT_TICKET_SOLD";
     /// <summary>To the organiser: an attendee cancelled, freeing their seat.</summary>
     public const string EventTicketCancelled = "EVENT_TICKET_CANCELLED";
