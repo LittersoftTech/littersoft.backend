@@ -114,16 +114,10 @@ public sealed class NotificationDispatcher(
                 $"No template registered for notification type '{notification.NotificationType}'.");
         }
 
-        if (!tokensByRecipient.TryGetValue((notification.Audience, notification.RecipientId), out var tokens)
-            || tokens.Count == 0)
-        {
-            // Not a failure: the notification is real and belongs in the in-app
-            // inbox, the recipient just has no active device right now.
-            return new NotificationDeliveryResult(
-                notification.NotificationId,
-                NotificationDeliveryStatuses.NoDevice,
-                rendered.Title, rendered.Body, rendered.Route, 0, null);
-        }
+        // InboxPushSender writes the Firestore inbox even when there is no device.
+        // Always pass through it so an active Firestore listener receives the event.
+        tokensByRecipient.TryGetValue((notification.Audience, notification.RecipientId), out var tokens);
+        tokens ??= [];
 
         var payload = NotificationPayloadBuilder.Build(notification, rendered, DateTimeOffset.UtcNow);
 
@@ -160,7 +154,7 @@ public sealed class NotificationDispatcher(
                 notification.NotificationId,
                 NotificationDeliveryStatuses.NoDevice,
                 rendered.Title, rendered.Body, rendered.Route, 0,
-                "All device tokens for this recipient were rejected as invalid.");
+                tokens.Count == 0 ? null : "All device tokens for this recipient were rejected as invalid.");
         }
 
         return new NotificationDeliveryResult(

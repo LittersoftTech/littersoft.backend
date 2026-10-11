@@ -194,8 +194,8 @@ public sealed record CapturedLocationRequest(
 /// <summary>
 /// Body for <c>POST .../bookings/{bookingId}/status</c> — the LEGACY generic status
 /// shim. <see cref="Location"/> is required when <see cref="Status"/> is one of the
-/// two no-show values and ignored otherwise; without it the shim would be a way to
-/// record a no-show with no position, which the dedicated route refuses.
+/// two no-show values or PAYMENT_NOT_RECEIVED; these actions require a position
+/// on both the dedicated route and this shim.
 /// </summary>
 public sealed record UpdateBookingStatusRequest(
     string Status,
@@ -502,7 +502,10 @@ public sealed record BookingDetailResponse(
     // GET .../bookings/{bookingId}/status-history. Unrelated to
     // pendingModification above, which is the open proposal (if any); a booking
     // modified last week and untouched since reads true here and null there.
-    bool IsModificationDone = false);
+    bool IsModificationDone = false,
+    // A booking incident ticket exists from either party, including closed tickets.
+    // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
+    bool IsDisputeRaised = false);
 
 /// <summary>
 /// The resolved "where does the service happen" block on a booking-detail read.
@@ -738,4 +741,7 @@ public sealed record BookingResponse(
     // than leaving real personal data frozen in a list.
     string? Breed = null,
     string? PetGender = null,
-    string? CustomerPhotoUrl = null);
+    string? CustomerPhotoUrl = null,
+    // A booking incident ticket exists from either party, including closed tickets.
+    // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
+    bool IsDisputeRaised = false);

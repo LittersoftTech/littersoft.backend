@@ -48,7 +48,7 @@ BEGIN
         THROW 51132, 'You are not the provider on this booking.', 1;
     END
 
-    IF @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING')
+    IF @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING', N'JOB_INCOMPLETE')
     BEGIN
         THROW 51133, 'Booking is not in a state the job can be completed from.', 1;
     END
@@ -96,7 +96,7 @@ BEGIN
     END
 
     -- [PayoutStatus] is not touched: it defaults to 'Pending' at insert and the
-    -- IN_PROGRESS from-state guarantees nothing has moved it since.
+    -- IN_PROGRESS / JOB_INCOMPLETE from-states guarantee nothing has moved it since.
     UPDATE [Booking].[Bookings]
     SET [Status] = N'COMPLETED',
         [UpdatedAtUtc] = @Now,

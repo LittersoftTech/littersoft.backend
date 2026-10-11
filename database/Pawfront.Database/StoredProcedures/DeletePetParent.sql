@@ -202,9 +202,9 @@ BEGIN
         LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = b.[PetId]
         WHERE b.[PetParentId] = @PetParentId
           AND b.[Status] NOT IN (
-                N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
+                N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
                 N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+                N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
         UNION ALL
         SELECT n.[NightStayBookingId],
                N'NightStay',
@@ -227,9 +227,9 @@ BEGIN
         LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = n.[PetId]
         WHERE n.[PetParentId] = @PetParentId
           AND n.[Status] NOT IN (
-                N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
+                N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
                 N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED');
+                N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED');
 
         IF EXISTS (SELECT 1 FROM @PendingJobs)
         BEGIN

@@ -20,6 +20,7 @@ public static class ProviderStatement
     public static string? Group(string status)
     {
         if (status == BookingStatuses.Paid) return "Received";
+        if (status == BookingStatuses.PaymentNotReceived) return "Unpaid";
         if (status == BookingStatuses.Expired) return "Ignored";
         if (BookingStatuses.Cancelled.Contains(status)) return "Unpaid";
         if (BookingStatuses.ConfirmedEquivalent.Contains(status)

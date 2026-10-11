@@ -79,10 +79,8 @@ internal sealed class SupportTicketService(
 
         if (created.Outcome == CreateSupportTicketOutcome.TicketAlreadyOpen)
         {
-            // This call created nothing. Attaching evidence to a ticket somebody already
-            // had open on this booking — possibly the counterparty's, about their own
-            // account of it — would be wrong, so the photos are dropped and the caller is
-            // handed the conflict.
+            // This call created nothing. Only the caller's own open ticket can
+            // conflict, so evidence stays off this retry and the caller receives it.
             return new CreateSupportTicketWithPhotosResult(created.Outcome, created.Ticket, []);
         }
 
@@ -228,19 +226,17 @@ internal sealed class SupportTicketService(
                 nameof(command));
         }
 
+        if (SupportTicketTypes.HasCounterparty(command.TicketType))
+        {
+            if (!ReportUserReasons.IsKnown(reason))
+                throw new ArgumentException("Select one of the six Report a User reasons.", nameof(command));
+
+            if (reason == ReportUserReasons.SomethingElse && string.IsNullOrEmpty(comment))
+                throw new ArgumentException("A description is required for Something else.", nameof(command));
+        }
+
         if (string.IsNullOrEmpty(comment))
         {
-            // The comment is the substance of a report AGAINST somebody, so those two kinds
-            // require it — a ticket accusing a person with no account of what they did gives
-            // support nothing to act on. An app issue or an event report is a different
-            // shape: its picker's Reason can carry the whole thing, and it opens the
-            // narrative in the comment's place. Neither ⇒ there is nothing to report at all.
-            if (SupportTicketTypes.RequiresComment(command.TicketType))
-            {
-                throw new ArgumentException(
-                    "A description of the incident is required.", nameof(command));
-            }
-
             comment = reason
                 ?? throw new ArgumentException(
                     "A description or a reason is required.", nameof(command));

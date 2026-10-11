@@ -61,6 +61,11 @@ public interface IParentOnboardingService
         UpdatePetParentProfileRequest request,
         CancellationToken cancellationToken);
 
+    Task<PetParentProfileDetailsResponse> UpdateMobileAsync(
+        Guid petParentId,
+        UpdatePetParentMobileRequest request,
+        CancellationToken cancellationToken);
+
     /// <summary>
     /// SQL half of the account delete: anonymises the parent row (and their
     /// pets), severs the Firebase login, and clears the operational data +

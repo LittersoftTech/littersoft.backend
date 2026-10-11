@@ -6,22 +6,19 @@
 -- screens offer "Report" on something the caller already reported, and the
 -- attempt comes back 409.
 --
--- Scoped by the CALLER as the REPORTER, deliberately — the flag is
--- "raised by me", not "raised by anybody". The counterparty's ticket on the same
--- booking is not the caller's to open, and its existence is not theirs to be told
--- about. (One consequence worth knowing: because the one-open-ticket rule runs in
--- either direction, a caller whose counterparty has already reported the booking
--- reads FALSE here and is still refused with 409 TicketAlreadyOpen.)
+-- Both result sets stay scoped to the caller as reporter. Result set 2 exposes
+-- only booking ids for incidents the caller raised.
+-- Those markers persist after closure: they mean a ticket HAS been raised.
 --
--- OPEN tickets only. A closed ticket is exactly the state in which a fresh report
+-- Result set 1: OPEN tickets only. A closed ticket is exactly the state in which a fresh report
 -- is allowed again, so counting one would leave the app permanently offering to
 -- open a ticket the user can no longer reach. It also keeps the answer
 -- unambiguous: at most one open ticket exists per subject, so there is exactly
 -- one id to return.
 --
--- Returns ONE result set — one row per open ticket the caller raised, whatever
--- its kind. The caller keys them by subject in memory. Scoped to the actor rather
--- than taking a list of subject ids on purpose: a booking list page then costs
+-- Returns TWO result sets: the caller's open tickets, then participant-scoped
+-- booking dispute markers. The caller keys them by subject in memory. Scoped
+-- to the actor rather than taking a list of subject ids on purpose: a booking list page then costs
 -- ONE read instead of one per card, the same reasoning behind
 -- [Review].[ListPetParentBookingReviews].
 --
@@ -53,4 +50,13 @@ BEGIN
     -- anyway rather than filtered here: the shape stays "my open tickets", and a
     -- future surface that wants to show one needs no procedure change.
     ORDER BY [CreatedAtUtc] ASC, [TicketId] ASC;
+
+    -- Ticket details are not projected here. The participant predicate prevents
+    -- a caller learning about tickets on another user's bookings.
+    SELECT DISTINCT [BookingType], [BookingId]
+    FROM [Support].[Tickets]
+    WHERE [TicketType] = N'BookingIncident'
+      AND [RaisedByType] = @RaisedByType
+      AND ((@RaisedByType = N'Provider' AND [ProviderId] = @ActorId)
+        OR (@RaisedByType = N'PetParent' AND [PetParentId] = @ActorId));
 END;

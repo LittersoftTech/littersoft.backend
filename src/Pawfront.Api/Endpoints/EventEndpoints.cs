@@ -361,11 +361,13 @@ internal static class EventEndpoints
 
         var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
             httpContext.User.FindFirstValue("email"), cancellationToken);
+        var cancelledByMe = await bookingService.HasCancelledBookingAsync(
+            eventId, httpContext.User.FindFirstValue("email"), cancellationToken);
         var myTickets = await MySupportTickets.ForCallerAsync(
             httpContext, onboardingService, ticketLookup, cancellationToken);
 
         return ApiResults.Ok(ToResponse(
-            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId)));
+            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId)) with { EventCancelledByMe = cancelledByMe });
     }
 
     private static async Task<IResult> Trending(
@@ -437,7 +439,7 @@ internal static class EventEndpoints
                 // for online events.
                 result.Physical?.MaximumCapacity,
                 result.TotalBookings),
-            isBookable && result.EventStatus == "Active",
+            isBookable && result.EventStatus == "Active" && !EventBookingWindow.IsClosed(result.StartDate, result.StartTime, DateTimeOffset.UtcNow),
             result.PaymentOptions,
             result.Attendees?
                 .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber, ProfileImageUrl: a.ProfileImageUrl))
@@ -450,7 +452,8 @@ internal static class EventEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef, EventStatus: result.EventStatus, IsCancelledByHost: result.EventStatus == "Cancelled",
-            AttendedCount: result.AttendedCount, EarnedAmount: result.EarnedAmount);
+            AttendedCount: result.AttendedCount, EarnedAmount: result.EarnedAmount,
+            BookingsCloseAtUtc: EventBookingWindow.CloseAtUtc(result.StartDate, result.StartTime));
     }
 
     /// <summary>

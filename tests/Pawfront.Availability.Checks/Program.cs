@@ -249,6 +249,7 @@ foreach (var endpoint in new[] { host == "Pawfront.Api" ? "BookingEndpoints" : "
         Assert(envelope.Error?.Code == (error is ProviderClosedOnDateException ? "ServiceClosed" : "BookingLeadTimeTooShort"), "Stable error code");
     }
 }
+checks += await NightStaySearchChecks.RunAsync();
 Console.WriteLine($"Passed {checks} availability, timezone, lifecycle and HTTP mapping checks.");
 void Assert(bool condition, string description) { if (!condition) throw new Exception(description); checks++; }
 

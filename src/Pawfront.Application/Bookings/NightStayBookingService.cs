@@ -7,6 +7,7 @@ using Pawfront.Application.Providers;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetSitter;
 using Pawfront.Application.Services.ProviderServiceLocations;
+using Pawfront.Application.Support;
 using Pawfront.Domain.Services;
 
 namespace Pawfront.Application.Bookings;
@@ -21,7 +22,8 @@ internal sealed class NightStayBookingService(
     IProviderServiceLocationRegistry providerLocationRegistry,
     IBookingTermsChangeService termsChangeService,
     IInvoiceQueuePublisher invoiceQueue,
-    IOptions<PawfrontFeeOptions> feeOptions) : INightStayBookingService, INightStayOccupancyReader
+    IOptions<PawfrontFeeOptions> feeOptions,
+    IMySupportTicketLookup? ticketLookup = null) : INightStayBookingService, INightStayOccupancyReader
 {
     // A stay can span at most this many nights. Matches the cap the night-stay
     // search enforces and bounds the per-night capacity walk in the sproc.
@@ -75,11 +77,18 @@ internal sealed class NightStayBookingService(
             throw new BookingOfferingNotConfiguredException(command.ProviderId, service.ServiceCategory);
         }
 
+        var dropOffTime = nightStay.HasFixedTimes ? nightStay.DropOffTime : command.DropOffTime;
+        var pickUpTime = nightStay.HasFixedTimes ? nightStay.PickUpTime : command.PickUpTime;
+        if (dropOffTime is null || pickUpTime is null)
+        {
+            throw new ArgumentException("Drop-off and pick-up times are required to book a night stay without fixed provider times.");
+        }
+
         // 3b. The stay must begin at least the minimum lead time from now, measured
         // from drop-off on the check-in day — the same service-start instant the
         // single-day rule uses, and the one the night-availability surface gates on.
         BookingLeadTime.EnsureFarEnoughAhead(
-            command.CheckInDate, nightStay.DropOffTime, DateTimeOffset.UtcNow);
+            command.CheckInDate, dropOffTime.Value, DateTimeOffset.UtcNow);
 
         await ProviderDateAvailability.EnsureOpenAsync(
             availabilityService, closureReader, command.ProviderId, command.ServiceId,
@@ -105,8 +114,8 @@ internal sealed class NightStayBookingService(
             service.SubCategory,
             command.CheckInDate,
             command.CheckOutDate,
-            nightStay.DropOffTime,
-            nightStay.PickUpTime,
+            dropOffTime.Value,
+            pickUpTime.Value,
             TrimOrNull(command.JobNotes, maxLength: 2000, nameof(command.JobNotes)),
             locationType,
             nightStay.PricePerHour,
@@ -205,7 +214,7 @@ internal sealed class NightStayBookingService(
         Guid bookingId,
         Guid petParentId,
         CancellationToken cancellationToken)
-        => sqlStore.CancelAsync(bookingId, petParentId, cancellationToken);
+        => WithDisputeAsync(sqlStore.CancelAsync(bookingId, petParentId, cancellationToken), cancellationToken);
 
     public Task<IReadOnlyList<NightStayBookingResult>> ListByProviderAsync(
         Guid providerId,
@@ -230,17 +239,19 @@ internal sealed class NightStayBookingService(
         // without a position, enforced here so the legacy /status shim cannot skip it.
         var location = BookingStatuses.NoShow.Contains(newStatus)
             ? CapturedLocation.Require(command.Location, "report a no-show")
+            : newStatus == BookingStatuses.PaymentNotReceived
+                ? CapturedLocation.Require(command.Location, "report payment not received")
             : command.Location;
         location?.Validate();
 
-        return sqlStore.UpdateStatusAsync(
+        return WithDisputeAsync(sqlStore.UpdateStatusAsync(
             command.NightStayBookingId,
             newStatus,
             command.Actor,
             command.ActorId,
             command.Note,
             location,
-            cancellationToken);
+            cancellationToken), cancellationToken);
     }
 
     public Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
@@ -263,22 +274,22 @@ internal sealed class NightStayBookingService(
     public Task<NightStayBookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken)
     {
         var fix = CapturedLocation.Require(command.Location, "start a job");
-        return sqlStore.StartJobAsync(
+        return WithDisputeAsync(sqlStore.StartJobAsync(
             command.BookingId, command.ProviderId, BookingService.GenerateOtpCode(), StartOtpTtlMinutes,
-            fix, cancellationToken);
+            fix, cancellationToken), cancellationToken);
     }
 
     public Task<NightStayBookingResult> VerifyStartOtpAsync(
         Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
     {
         var fix = CapturedLocation.Require(location, "start a job");
-        return sqlStore.VerifyStartOtpAsync(
-            bookingId, providerId, (otpCode ?? string.Empty).Trim(), fix, cancellationToken);
+        return WithDisputeAsync(sqlStore.VerifyStartOtpAsync(
+            bookingId, providerId, (otpCode ?? string.Empty).Trim(), fix, cancellationToken), cancellationToken);
     }
 
     public Task<NightStayBookingResult> CompleteAsync(
         Guid bookingId, Guid providerId, CancellationToken cancellationToken)
-        => sqlStore.CompleteAsync(bookingId, providerId, cancellationToken);
+        => WithDisputeAsync(sqlStore.CompleteAsync(bookingId, providerId, cancellationToken), cancellationToken);
 
     public async Task<NightStayBookingResult> MarkPaidAsync(
         MarkBookingPaidCommand command, CancellationToken cancellationToken)
@@ -287,7 +298,7 @@ internal sealed class NightStayBookingService(
         var location = CapturedLocation.Require(command.Location, "record a payment");
 
         // The amount is the stay's price-locked total (same figure the detail read
-        // shows). The sproc enforces party + from-state (COMPLETED).
+        // shows). The sproc enforces party + from-state (COMPLETED or PAYMENT_NOT_RECEIVED).
         var detail = await GetDetailAsync(command.BookingId, cancellationToken)
             ?? throw new NightStayBookingNotFoundException(command.BookingId);
         if (detail.TotalAmount is null)
@@ -295,14 +306,14 @@ internal sealed class NightStayBookingService(
             throw new BookingNotPriceableException(command.BookingId);
         }
 
-        var result = await sqlStore.MarkPaidAsync(
+        var result = await WithDisputeAsync(sqlStore.MarkPaidAsync(
             command.BookingId,
             command.ProviderId,
             detail.TotalAmount.Value,
             detail.PawfrontFee ?? 0m,
             method,
             location,
-            cancellationToken);
+            cancellationToken), cancellationToken);
 
         // Twin of the single-day path - see BookingService.MarkPaidAsync for why
         // this sits outside the transaction and why the publisher never throws.
@@ -353,10 +364,10 @@ internal sealed class NightStayBookingService(
             }
         }
 
-        return await sqlStore.RequestModificationAsync(
+        return await WithDisputeAsync(sqlStore.RequestModificationAsync(
             command.NightStayBookingId, command.Actor, command.ActorId,
             command.CheckInDate, command.CheckOutDate, command.Note,
-            acknowledgedTerms, cancellationToken);
+            acknowledgedTerms, cancellationToken), cancellationToken);
     }
 
     public async Task<NightStayBookingResult> RespondModificationAsync(
@@ -381,8 +392,8 @@ internal sealed class NightStayBookingService(
                 ?? throw new BookingOfferingNotConfiguredException(booking.ProviderId, booking.ServiceCategory);
         }
 
-        return await sqlStore.RespondModificationAsync(
-            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken);
+        return await WithDisputeAsync(sqlStore.RespondModificationAsync(
+            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken), cancellationToken);
     }
 
     public Task<NightStayBookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
@@ -399,4 +410,17 @@ internal sealed class NightStayBookingService(
     public Task<IReadOnlyList<BookingEvidenceResult>> ListEvidenceAsync(
         Guid bookingId, CancellationToken cancellationToken)
         => sqlStore.ListEvidenceAsync(bookingId, cancellationToken);
+
+    private async Task<NightStayBookingResult> WithDisputeAsync(
+        Task<NightStayBookingResult> bookingTask, CancellationToken cancellationToken)
+    {
+        var booking = await bookingTask;
+        if (ticketLookup is null) return booking;
+        var tickets = await ticketLookup.GetAsync(
+            SupportRaisedByTypes.Provider, booking.ProviderId, cancellationToken);
+        return booking with
+        {
+            IsDisputeRaised = tickets.IsDisputeRaisedForBooking(BookingTypes.NightStay, booking.NightStayBookingId)
+        };
+    }
 }

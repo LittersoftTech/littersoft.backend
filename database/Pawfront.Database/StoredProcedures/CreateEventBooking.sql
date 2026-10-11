@@ -51,9 +51,11 @@ BEGIN
 
     IF @BookerAccountId IS NULL OR @BookerType NOT IN (N'PetParent',N'Provider')
         THROW 51468, 'An authenticated account profile is required to book events.', 1;
-    IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus=N'Active'
-        AND [Event].[EventStartUtc](StartDate,StartTime)>SYSUTCDATETIME())
-        THROW 51461, 'Cancelled or started events cannot be booked.', 1;
+    IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus=N'Active')
+        THROW 51461, 'Cancelled events cannot be booked.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId
+        AND SYSUTCDATETIME() >= DATEADD(hour,-1,[Event].[EventStartUtc](StartDate,StartTime)))
+        THROW 51470, 'Ticket bookings for this event are closed.', 1;
     IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId AND BookerAccountId=@BookerAccountId AND Status IN (N'Confirmed',N'Attended'))
         THROW 51469, 'You already hold a booking for this event.', 1;
     DECLARE @ActiveCount INT=(SELECT COUNT(*) FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId

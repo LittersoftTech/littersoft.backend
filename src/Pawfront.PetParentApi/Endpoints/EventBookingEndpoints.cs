@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using System.Security.Claims;
 using Pawfront.Application.Events;
 using Pawfront.Contracts.Events;
@@ -96,6 +96,10 @@ internal static class EventBookingEndpoints
         {
             return ApiResults.BadRequest("OnlineEventSingleTicket", exception.Message);
         }
+        catch (EventBookingsClosedException exception)
+        {
+            return Results.Json(new { code = "BookingsClosed", message = exception.Message }, statusCode: 409);
+        }
         catch (EventBookingCapacityExceededException exception)
         {
             return ApiResults.Conflict("EventSoldOut", exception.Message);
@@ -174,7 +178,7 @@ internal static class EventBookingEndpoints
             result.PaymentStatus,
             result.PaymentReference,
             result.TotalAmount,
-            result.Status,
+            result.Status == "EventCancelled" ? "host_cancelled" : result.Status,
             tickets,
             result.CreatedAtUtc,
             result.UpdatedAtUtc,

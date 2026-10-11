@@ -71,7 +71,8 @@ internal static class NightStayBookingEndpoints
             .Select(r => ToResponse(
                 r,
                 myTickets.ForBooking(BookingTypes.NightStay, r.NightStayBookingId),
-                myBlocks.ForCounterparty(r.PetParentId)))
+                myBlocks.ForCounterparty(r.PetParentId),
+                myTickets.IsDisputeRaisedForBooking(BookingTypes.NightStay, r.NightStayBookingId)))
             .ToArray());
     }
 
@@ -120,7 +121,8 @@ internal static class NightStayBookingEndpoints
             pending,
             myRating,
             myTickets.ForBooking(BookingTypes.NightStay, bookingId),
-            myBlocks.ForCounterparty(detail.Row.PetParentId)));
+            myBlocks.ForCounterparty(detail.Row.PetParentId),
+            myTickets.IsDisputeRaisedForBooking(BookingTypes.NightStay, bookingId)));
     }
 
     /// <summary>
@@ -135,7 +137,8 @@ internal static class NightStayBookingEndpoints
         MySupportTicketRef? myTicket = null,
         // Whether the booking's counterparty is blocked, and whose block it
         // is. Default false/false on the write paths, where it cannot be true.
-        (bool IsBlocked, bool BlockedByMe) block = default)
+        (bool IsBlocked, bool BlockedByMe) block = default,
+        bool isDisputeRaised = false)
     {
         var row = detail.Row;
         return new NightStayBookingDetailResponse(
@@ -212,6 +215,7 @@ internal static class NightStayBookingEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
+            IsDisputeRaised: isDisputeRaised,
             IsBlocked: block.IsBlocked,
             BlockedByMe: block.BlockedByMe,
             // Whether this booking has ever been modified, so the screen can label
@@ -250,7 +254,7 @@ internal static class NightStayBookingEndpoints
 
     /// <summary>
     /// The provider reports that the parent (pet) never showed up for the stay.
-    /// Only allowed 30+ minutes after check-in + drop-off (409 NoShowTooEarly).
+    /// Only allowed 2+ hours after check-in + drop-off (409 NoShowTooEarly).
     /// </summary>
     /// <remarks>Carries a body: the provider's position is required (400 LocationRequired).</remarks>
     private static Task<IResult> MarkParentNoShow(
@@ -482,18 +486,14 @@ internal static class NightStayBookingEndpoints
     }
 
     /// <summary>
-    /// The provider records that they were NOT paid for the stay, with their
-    /// position. Log only — no status and no payout field changes; see the
-    /// single-day route for why the money verdict is deliberately left open.
+    /// The provider marks a completed stay PAYMENT_NOT_RECEIVED and records
+    /// their position in the same transaction. A later payment remains possible.
     /// </summary>
     private static Task<IResult> RecordCashNotReceived(
         Guid providerId, Guid bookingId, BookingLocationOnlyRequest? request,
-        IBookingLocationService locationService, CancellationToken cancellationToken)
-        => RecordLocationAsync(
-            new RecordBookingLocationCommand(
-                BookingTypes.NightStay, bookingId, BookingLocationTriggers.CashNotReceived,
-                BookingStatusActor.Provider, providerId, request?.Location.ToCapturedLocation()),
-            locationService, cancellationToken);
+        INightStayBookingService bookingService, CancellationToken cancellationToken)
+        => SetStatusAsync(providerId, bookingId, BookingStatuses.PaymentNotReceived,
+            bookingService, cancellationToken, request?.Location.ToCapturedLocation());
 
     /// <summary>The provider's own fix for a moment the PARENT drove.</summary>
     private static Task<IResult> RecordLocation(
@@ -646,7 +646,8 @@ internal static class NightStayBookingEndpoints
         MySupportTicketRef? myTicket = null,
         // Whether the booking's counterparty is blocked, and whose block it
         // is. Default false/false on the write paths, where it cannot be true.
-        (bool IsBlocked, bool BlockedByMe) block = default) =>
+        (bool IsBlocked, bool BlockedByMe) block = default,
+        bool isDisputeRaised = false) =>
         new(result.NightStayBookingId,
             result.ProviderId,
             result.PetParentId,
@@ -665,6 +666,7 @@ internal static class NightStayBookingEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
+            IsDisputeRaised: isDisputeRaised || result.IsDisputeRaised,
             IsBlocked: block.IsBlocked,
             BlockedByMe: block.BlockedByMe,
             // Only Booking.ListNightStayBookingsByProvider projects these, so

@@ -34,6 +34,8 @@ public sealed record EventBookingResponse(
     DateTimeOffset? CancelledAtUtc, int ConsecutiveNegativeMarks = 0, bool HasReported = false)
 {
     public DateTimeOffset? CancelledAt => CancelledAtUtc;
+    public bool EventCancelledByMe => Status is "CancelledByParent" or "Cancelled";
+    public bool IsCancelledByHost => Status is "host_cancelled" or "EventCancelled";
 }
 
 /// <summary>
@@ -64,7 +66,11 @@ public sealed record EventBookingSummaryResponse(
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? CancelledAtUtc)
+    DateTimeOffset? CancelledAtUtc,
+    EventBookingStatsResponse Bookings,
+    DateTimeOffset BookingsCloseAtUtc)
 {
     public DateTimeOffset? CancelledAt => CancelledAtUtc;
+    public bool EventCancelledByMe => Status is "CancelledByParent" or "Cancelled";
+    public bool IsCancelledByHost => Status is "host_cancelled" or "EventCancelled";
 }

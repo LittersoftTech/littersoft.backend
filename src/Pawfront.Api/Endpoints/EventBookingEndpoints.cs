@@ -75,10 +75,12 @@ internal static class EventBookingEndpoints
             summary.PaymentStatus,
             summary.PaymentReference,
             summary.TotalAmount,
-            summary.Status,
+            summary.Status == "EventCancelled" ? "host_cancelled" : summary.Status,
             summary.CreatedAtUtc,
             summary.UpdatedAtUtc,
-            summary.CancelledAtUtc);
+            summary.CancelledAtUtc,
+            new EventBookingStatsResponse(summary.MaxBookings, summary.TotalBookings),
+            EventBookingWindow.CloseAtUtc(summary.EventStartDate, summary.EventStartTime));
 
     private static async Task<IResult> Create(
         Guid eventId,
@@ -132,6 +134,10 @@ internal static class EventBookingEndpoints
         catch (EventBookingOnlineSingleTicketException exception)
         {
             return ApiResults.BadRequest("OnlineEventSingleTicket", exception.Message);
+        }
+        catch (EventBookingsClosedException exception)
+        {
+            return Results.Json(new { code = "BookingsClosed", message = exception.Message }, statusCode: 409);
         }
         catch (EventBookingCapacityExceededException exception)
         {
@@ -264,7 +270,7 @@ internal static class EventBookingEndpoints
             result.PaymentStatus,
             result.PaymentReference,
             result.TotalAmount,
-            result.Status,
+            result.Status == "EventCancelled" ? "host_cancelled" : result.Status,
             tickets,
             result.CreatedAtUtc,
             result.UpdatedAtUtc,

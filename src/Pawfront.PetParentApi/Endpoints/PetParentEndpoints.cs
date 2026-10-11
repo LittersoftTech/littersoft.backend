@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using System.Security.Claims;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Closures;
@@ -48,6 +48,7 @@ internal static class PetParentEndpoints
         var group = builder.MapGroup("/pet-parents/{petParentId:guid}").RequireOwnedPetParent();
         group.MapGet("/profile", GetProfile);
         group.MapPatch("/profile", UpdateProfile);
+        group.MapPatch("/mobile", UpdateMobile);
         // "Delete account" — anonymise + permanently disable. The ownership
         // filter on this group is what restricts it to the caller's own account.
         group.MapDelete("/", DeleteAccount);
@@ -164,10 +165,12 @@ internal static class PetParentEndpoints
             summary.PaymentStatus,
             summary.PaymentReference,
             summary.TotalAmount,
-            summary.Status,
+            summary.Status == "EventCancelled" ? "host_cancelled" : summary.Status,
             summary.CreatedAtUtc,
             summary.UpdatedAtUtc,
-            summary.CancelledAtUtc);
+            summary.CancelledAtUtc,
+            new EventBookingStatsResponse(summary.MaxBookings, summary.TotalBookings),
+            EventBookingWindow.CloseAtUtc(summary.EventStartDate, summary.EventStartTime));
 
     /// <summary>
     /// The parent's own service bookings ("my bookings"), most-recent first,
@@ -196,7 +199,8 @@ internal static class PetParentEndpoints
             .Select(card => ToServiceBookingCard(
                 card,
                 myTickets.ForBooking(BookingTypes.SingleDay, card.Booking.BookingId),
-                myBlocks.ForCounterparty(card.Booking.ProviderId)))
+                myBlocks.ForCounterparty(card.Booking.ProviderId),
+                myTickets.IsDisputeRaisedForBooking(BookingTypes.SingleDay, card.Booking.BookingId)))
             .ToArray());
     }
 
@@ -210,11 +214,12 @@ internal static class PetParentEndpoints
         MySupportTicketRef? myTicket = null,
         // Whether the booking's counterparty is blocked, and whose block it
         // is. Default false/false on the write paths, where it cannot be true.
-        (bool IsBlocked, bool BlockedByMe) block = default)
+        (bool IsBlocked, bool BlockedByMe) block = default,
+        bool isDisputeRaised = false)
     {
         var b = card.Booking;
         return new ParentServiceBookingCardResponse(
-            ToBookingResponse(b, myTicket, block),
+            ToBookingResponse(b, myTicket, block, isDisputeRaised),
             new BookingProviderDetailsSection(
                 b.ProviderId,
                 card.Provider?.DisplayName,
@@ -507,7 +512,8 @@ internal static class PetParentEndpoints
             pending,
             myReview,
             myTickets.ForBooking(BookingTypes.SingleDay, bookingId),
-            myBlocks.ForCounterparty(detail.Row.ProviderId)));
+            myBlocks.ForCounterparty(detail.Row.ProviderId),
+            myTickets.IsDisputeRaisedForBooking(BookingTypes.SingleDay, bookingId)));
     }
 
     /// <summary>
@@ -648,7 +654,7 @@ internal static class PetParentEndpoints
 
     /// <summary>
     /// The parent reports that the provider never showed up. Only allowed
-    /// 30+ minutes after the booking's scheduled start (409 NoShowTooEarly).
+    /// From the booking's scheduled end (409 NoShowTooEarly before then).
     /// </summary>
     /// <remarks>Carries a body: the parent's position is required (400 LocationRequired).</remarks>
     private static Task<IResult> ReportProviderNoShow(
@@ -857,7 +863,8 @@ internal static class PetParentEndpoints
         MySupportTicketRef? myTicket = null,
         // Whether the booking's counterparty is blocked, and whose block it
         // is. Default false/false on the write paths, where it cannot be true.
-        (bool IsBlocked, bool BlockedByMe) block = default) =>
+        (bool IsBlocked, bool BlockedByMe) block = default,
+        bool isDisputeRaised = false) =>
         new(result.BookingId,
             result.ProviderId,
             result.PetParentId,
@@ -886,6 +893,7 @@ internal static class PetParentEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
+            IsDisputeRaised: isDisputeRaised || result.IsDisputeRaised,
             IsBlocked: block.IsBlocked,
             BlockedByMe: block.BlockedByMe);
 
@@ -902,7 +910,8 @@ internal static class PetParentEndpoints
         MySupportTicketRef? myTicket = null,
         // Whether the booking's counterparty is blocked, and whose block it
         // is. Default false/false on the write paths, where it cannot be true.
-        (bool IsBlocked, bool BlockedByMe) block = default)
+        (bool IsBlocked, bool BlockedByMe) block = default,
+        bool isDisputeRaised = false)
     {
         var row = detail.Row;
         var isCustom = string.Equals(row.Source, "Custom", StringComparison.Ordinal);
@@ -985,6 +994,7 @@ internal static class PetParentEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
+            IsDisputeRaised: isDisputeRaised,
             IsBlocked: block.IsBlocked,
             BlockedByMe: block.BlockedByMe,
             // Whether this booking has ever been modified, so the screen can label
@@ -1055,6 +1065,37 @@ internal static class PetParentEndpoints
         catch (UnsupportedPetParentGenderException exception)
         {
             return ApiResults.BadRequest("UnsupportedGender", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> UpdateMobile(
+        Guid petParentId,
+        UpdatePetParentMobileRequest request,
+        IParentOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+            return ApiResults.BadRequest("InvalidRequest", "Request body is required.");
+
+        try
+        {
+            return ApiResults.Ok(await onboardingService.UpdateMobileAsync(petParentId, request, cancellationToken));
+        }
+        catch (PetParentNotFoundException exception)
+        {
+            return ApiResults.NotFound("PetParentNotFound", exception.Message);
+        }
+        catch (PetParentAccountDeletedException exception)
+        {
+            return ApiResults.Conflict("ParentAccountDeleted", exception.Message);
+        }
+        catch (PetParentMobileNumberAlreadyExistsException exception)
+        {
+            return ApiResults.Conflict("MobileNumberAlreadyExists", exception.Message);
         }
         catch (ArgumentException exception)
         {

@@ -349,7 +349,14 @@ internal sealed class SqlSupportTicketStore(
                     EventId: reader.IsDBNull(6) ? null : reader.GetGuid(6)));
             }
 
-            return new MySupportTicketSubjects(subjects);
+            var disputes = new List<BookingDisputeSubject>();
+            if (await reader.NextResultAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                    disputes.Add(new BookingDisputeSubject(reader.GetString(0), reader.GetGuid(1)));
+            }
+
+            return new MySupportTicketSubjects(subjects, disputes);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

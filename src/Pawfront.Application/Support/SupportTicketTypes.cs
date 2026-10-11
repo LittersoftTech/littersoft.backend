@@ -42,12 +42,6 @@ public static class SupportTicketTypes
     public static bool AllowsPhotos(string? value) =>
         IsKnown(value) && value != ChatIncident;
 
-    /// <summary>
-    /// Whether the reporter's free-text account is required. It is for the two
-    /// counterparty kinds, where it is the whole substance of the accusation; for an app
-    /// issue or an event report the picker's <c>Reason</c> may stand in for it.
-    /// </summary>
-    public static bool RequiresComment(string? value) => HasCounterparty(value);
 }
 
 /// <summary>

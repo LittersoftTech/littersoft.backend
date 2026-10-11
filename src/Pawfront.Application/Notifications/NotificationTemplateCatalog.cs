@@ -108,6 +108,12 @@ public static class NotificationTemplateCatalog
                 NotificationRoutes.BookingDetail,
                 Booking),
 
+            [NotificationTypes.BookingCashNotReceived] = new(
+                "Payment not received",
+                "{providerName} has reported that payment for {petName}'s {serviceName} has not been received. Please contact the provider to arrange payment.",
+                NotificationRoutes.BookingDetail,
+                Booking),
+
             // P-U4. {reviewWithin} is the LENGTH of the window, not a fixed 24
             // hours: a proposal dies at the EARLIER of its 24-hour review window
             // and the 2-hour pre-service cutoff, so on a short-notice booking the

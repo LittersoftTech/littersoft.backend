@@ -8,7 +8,7 @@
 -- [IsEarned] (money actually moved) or [Status] (the parent's history list shows
 -- cancelled and upcoming bookings too, each with its expected amount).
 --
--- [IsEarned] = the job reached COMPLETED or PAID. COMPLETED-not-yet-PAID counts as
+-- [IsEarned] = the job reached COMPLETED, PAYMENT_NOT_RECEIVED or PAID. COMPLETED-not-yet-PAID counts as
 -- earned/spent on purpose: with cash the provider has done the work and the parent
 -- has typically already handed the money over — only the provider's "mark paid" tap
 -- is outstanding, and the parent has no control over that. [IsPaid] separates the
@@ -63,7 +63,7 @@ RETURN
            [ServiceId]     = b.[ServiceId],
            [ServiceDate]   = b.[BookingDate],
            [Status]        = b.[Status],
-           [IsEarned]      = CAST(CASE WHEN b.[Status] IN (N'COMPLETED', N'PAID') THEN 1 ELSE 0 END AS BIT),
+           [IsEarned]      = CAST(CASE WHEN b.[Status] IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID') THEN 1 ELSE 0 END AS BIT),
            [IsPaid]        = CAST(CASE WHEN b.[Status] = N'PAID' THEN 1 ELSE 0 END AS BIT),
            [IsPrivate]     = CAST(CASE WHEN b.[Source] = N'Custom' THEN 1 ELSE 0 END AS BIT),
            [Amount]        = amt.[Amount],
@@ -116,7 +116,7 @@ RETURN
            [ServiceId]     = n.[ServiceId],
            [ServiceDate]   = n.[CheckOutDate],
            [Status]        = n.[Status],
-           [IsEarned]      = CAST(CASE WHEN n.[Status] IN (N'COMPLETED', N'PAID') THEN 1 ELSE 0 END AS BIT),
+           [IsEarned]      = CAST(CASE WHEN n.[Status] IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID') THEN 1 ELSE 0 END AS BIT),
            [IsPaid]        = CAST(CASE WHEN n.[Status] = N'PAID' THEN 1 ELSE 0 END AS BIT),
            [IsPrivate]     = CAST(0 AS BIT),
            [Amount]        = amt.[Amount],

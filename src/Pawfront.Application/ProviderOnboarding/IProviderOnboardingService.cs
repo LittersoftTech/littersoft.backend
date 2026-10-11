@@ -36,6 +36,11 @@ public interface IProviderOnboardingService
         UpdateProviderProfileRequest request,
         CancellationToken cancellationToken);
 
+    Task<ProviderProfileResponse> UpdateProviderMobileAsync(
+        Guid providerId,
+        UpdateProviderMobileRequest request,
+        CancellationToken cancellationToken);
+
     /// <summary>
     /// Anonymises the provider's SQL footprint: scrubs the personal fields on the
     /// profile row, severs the Firebase auth identity, forces the account

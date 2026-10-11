@@ -22,7 +22,7 @@ Booking detail includes per-ticket payment state/amount, `consecutiveNegativeMar
 ## Rules
 
 - The sixth upcoming booking is refused with `UpcomingBookingLimitReached`. A flagged account cannot add a booking when it already holds one (`RedFlagBookingLimitReached`) or create an event (`RedFlagCannotCreateEvent`). Existing reservations are not automatically cancelled when a flag is applied.
-- Duplicate live bookings return `EventAlreadyBooked`; cancelled/started events return `EventNotBookable`.
+- Duplicate live bookings return `EventAlreadyBooked`; cancelled events return `EventNotBookable`; purchases at or after the ticket cutoff return `BookingsClosed`.
 - The event edit procedures reject every edit after any booking has existed, including a subsequently cancelled booking (`EventLocked`). Parent PATCH accepts only `bannerImageUrl`, `description`, `maximumCapacity`, and `amenities`. A top-level capacity edit preserves the venue. PUT cannot change other event fields or the venue.
 - The two 24/48-hour policies use event start minus their advertised hours. The pre-existing 2/4-hour policies are also respected. Cancellation at the exact boundary is on time; later cancellation records one negative outcome. Null/`NoRefund` policies have no specified reliability cutoff, so they do not generate a late-cancellation mark.
 - Two consecutive negatives recorded within 30 days flag the account for 30 days from the second mark. A new negative does not extend an active flag. Successful attendance resets the negative streak. Free attendance does not count toward the two consecutive paid attendances required for early flag removal.
@@ -59,3 +59,15 @@ The checks cover concurrent limits, cancellation/rebooking, host authorization a
 
 The event-only deployment and live aggregate preflight results are documented in [EventLifecycleRollout.md](../database/Pawfront.Database/Deployment/EventLifecycleRollout.md). The user approved three legacy category mappings and requested that deployment remain prepared but unapplied. The 21 ambiguous booking identities still require verification before any rollout.
 
+
+## Cancellation cards and ticket booking cutoff
+
+`GET /pet-parents/{id}/event-bookings` and the provider's `GET /event-bookings` retain all booking history, including after the host removes a cancelled event. Host-cancelled rows expose `status: "host_cancelled"` and `isCancelledByHost: true`; attendee-cancelled rows retain `CancelledByParent` (or the legacy `Cancelled`) and expose `eventCancelledByMe: true`. Booking detail exposes the same status and flags. A host cancellation does not mark an attendee as having cancelled it.
+
+`GET /events/{eventId}` also returns `eventCancelledByMe`: true if the caller previously cancelled a booking, including after rebooking, or the caller is the parent host who cancelled the event. This is derived from the caller's own history and does not expose anyone else's cancellations.
+
+Each booking summary includes `bookings: { "totalBookings": 12, "maxBookings": 50 }`. The total is the sum of tickets across all `Confirmed`/`Attended` bookings for the event, matching the catalogue; cancelled tickets are excluded. Physical capacity comes from SQL with a Cosmos fallback for legacy events; online capacity is null.
+
+Event list/detail responses and booking summaries return `bookingsCloseAtUtc`. Bookings close exactly one elapsed hour before the first event start in Europe/Zurich (including daylight-saving offsets). At and after that instant, `isBookable` is false. Both booking POST hosts reject purchases with HTTP 409 and the exact body `{ "code": "BookingsClosed", "message": "Ticket bookings for this event are closed." }`. This error uses the explicitly requested body shape. The SQL transaction checks its own UTC clock and current event start after acquiring the lifecycle lock, so stale client data or concurrent edits cannot bypass the cutoff. Live and ended events also reject purchases.
+
+Deploy the updated procedures before the API hosts. Both standalone procedure files and the consolidated `DeployAll.sql` contain these changes; no production deployment is performed by this work.

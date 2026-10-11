@@ -171,6 +171,43 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
         }
     }
 
+    public Task<ProviderProfileResponse> UpdateProviderMobileAsync(
+        Guid providerId,
+        UpdateProviderMobileRequest request,
+        CancellationToken cancellationToken)
+    {
+        var countryCode = Required(request.MobileCountryCode, nameof(request.MobileCountryCode));
+        var mobileNumber = Required(request.MobileNumber, nameof(request.MobileNumber));
+        var newKey = $"{countryCode}:{mobileNumber}";
+
+        lock (syncRoot)
+        {
+            if (!profilesByProviderId.TryGetValue(providerId, out var profile))
+                throw new ProviderProfileNotFoundException(providerId);
+            if (profile.IsDeleted)
+                throw new ProviderAccountDeletedException(providerId);
+            if (providerIdsByMobileNumber.TryGetValue(newKey, out var ownerId) && ownerId != providerId)
+                throw new MobileNumberAlreadyExistsException(countryCode, mobileNumber);
+
+            if (profile.MobileCountryCode != countryCode || profile.MobileNumber != mobileNumber)
+            {
+                providerIdsByMobileNumber.Remove($"{profile.MobileCountryCode}:{profile.MobileNumber}");
+                providerIdsByMobileNumber[newKey] = providerId;
+                profile.MobileCountryCode = countryCode;
+                profile.MobileNumber = mobileNumber;
+                profile.MobileVerifiedAtUtc = null;
+                profile.OnboardingStatus = "MobileVerificationPending";
+                profile.UpdatedAtUtc = DateTimeOffset.UtcNow;
+                foreach (var otp in mobileOtpsById.Values.Where(otp => otp.ProviderId == providerId && otp.ValidationStatus != "Expired"))
+                {
+                    otp.ValidationStatus = "Expired";
+                    otp.UpdatedAtUtc = profile.UpdatedAtUtc;
+                }
+            }
+            return Task.FromResult(ToResponse(profile));
+        }
+    }
+
     public Task<ProviderAccountDeletionResult> DeleteProviderAccountAsync(
         Guid providerId,
         CancellationToken cancellationToken)
@@ -609,8 +646,8 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
         public required string FirstName { get; set; }
         public required string LastName { get; set; }
         public required string Gender { get; set; }
-        public required string MobileCountryCode { get; init; }
-        public required string MobileNumber { get; init; }
+        public required string MobileCountryCode { get; set; }
+        public required string MobileNumber { get; set; }
         public DateOnly DateOfBirth { get; set; }
         public DateTimeOffset? MobileVerifiedAtUtc { get; set; }
         public required string OnboardingStatus { get; set; }

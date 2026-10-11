@@ -169,7 +169,7 @@ internal sealed class ProviderAvailabilitySlotService(
     /// [<paramref name="fromNight"/>, <paramref name="toNight"/>] with the
     /// night's active-stay count and remaining capacity. A night is unavailable
     /// when a weekly day off or service time off covers it, capacity is exhausted,
-    /// or the stay would begin inside the booking lead-time window.
+    /// or the date is in the past. Pickup and drop-off times do not filter nights.
     /// </summary>
     private async Task<AvailableSlotsResult> GetNightAvailabilityAsync(
         Guid providerId,
@@ -194,13 +194,9 @@ internal sealed class ProviderAvailabilitySlotService(
         var occupancy = await nightStayOccupancyReader.GetNightlyOccupancyAsync(
             serviceId, fromNight, lastNight, cancellationToken);
 
-        // A stay begins at drop-off on its check-in night, so the same lead-time
-        // rule the hourly walk applies gates the earliest bookable night. The
-        // night is still RETURNED (its occupancy is real information for a
-        // calendar) — it just isn't available. A pre-2026-08 offering with no
-        // drop-off time recorded falls back to the start of the night.
-        var earliestStart = BookingLeadTime.EarliestBookableStart(DateTimeOffset.UtcNow);
-        var dropOff = offering.DropOffTime ?? TimeOnly.MinValue;
+        // Night-stay discovery is date-based. Today's night can be shown regardless
+        // of the provider's handover times; past nights remain unavailable.
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
         var weekly = await availabilityService.GetAsync(providerId, cancellationToken);
         var nights = new List<NightAvailability>();
@@ -209,7 +205,7 @@ internal sealed class ProviderAvailabilitySlotService(
             var closures = await closureReader.GetActiveClosuresForDateAsync(serviceId, night, cancellationToken);
             var isClosed = closures.Count > 0
                 || !weekly.Days.Any(d => d.DayOfWeek == (int)night.DayOfWeek && d.IsOpen);
-            var isTooSoon = BookingLeadTime.ServiceStartUtc(night, dropOff) < earliestStart;
+            var isPastDate = night < today;
 
             var activeStays = occupancy.TryGetValue(night, out var count) ? count : 0;
             var remaining = isClosed ? 0 : Math.Max(0, offering.Capacity - activeStays);
@@ -219,7 +215,7 @@ internal sealed class ProviderAvailabilitySlotService(
                 activeStays,
                 remaining,
                 isClosed,
-                IsAvailable: remaining > 0 && !isTooSoon));
+                IsAvailable: remaining > 0 && !isPastDate));
         }
 
         return new AvailableSlotsResult(

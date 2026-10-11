@@ -123,4 +123,4 @@ public sealed record EventBookingSummary(
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? CancelledAtUtc);
+    DateTimeOffset? CancelledAtUtc, int TotalBookings = 0, int? MaxBookings = null);

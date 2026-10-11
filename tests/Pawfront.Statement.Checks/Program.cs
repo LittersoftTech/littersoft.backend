@@ -11,6 +11,7 @@ foreach (var status in new[] { "PARENT_NO_SHOW", "PROVIDER_NO_SHOW", "PARENT_CAN
 foreach (var status in new[] { "CONFIRMED", "START_JOB", "IN_PROGRESS", "JOB_STARTED", "ENDING", "COMPLETED", "PROVIDER_ACCEPTED_MODIFICATION", "MODIFICATION_REQUEST_BY_PARENT" })
     Check(ProviderStatement.Group(status) == "Pending", status);
 Check(ProviderStatement.Group("PAID") == "Received", "Paid");
+Check(ProviderStatement.Group("PAYMENT_NOT_RECEIVED") == "Unpaid", "Completed job with unpaid service");
 Check(ProviderStatement.Group("EXPIRED") == "Ignored", "Expired only");
 Check(ProviderStatement.Group("CREATED") is null, "Unaccepted requests excluded");
 Check(ProviderStatement.Group("APPROVAL_NEEDED") is null, "Legacy unaccepted excluded");
@@ -33,6 +34,7 @@ Check(ProviderStatement.Fee(row) == 0 && ProviderStatement.Net(row) == 100, "Cas
 Check(ProviderStatement.Net(row with { PaymentMethod = "Card" }) == 90, "Digital fee retained");
 Check(ProviderStatement.Net(row with { IsPrivate = true, PaymentMethod = null }) == 100, "Private net=gross");
 Check(ProviderStatement.Net(row with { Status = "JOB_EXPIRED", PaymentMethod = null }) == 100, "No fee on failed jobs");
+Check(ProviderStatement.Net(row with { Status = "PAYMENT_NOT_RECEIVED", PaymentMethod = null }) == 100, "No fee charged before unpaid service is settled");
 Check(ProviderStatement.Net(row with { GrossAmount = null }) is null, "Unpriced stays unknown");
 var rows = Enumerable.Range(0, 85).Select(i => row with {
     JobId = $"PF-{i:000000}", Status = new[] { "PAID", "CONFIRMED", "JOB_EXPIRED", "EXPIRED" }[i % 4],

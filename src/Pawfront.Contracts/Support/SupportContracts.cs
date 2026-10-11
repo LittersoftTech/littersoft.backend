@@ -8,21 +8,19 @@ namespace Pawfront.Contracts.Support;
 /// </summary>
 /// <param name="BookingType"><c>SingleDay</c> or <c>NightStay</c>, case-insensitive.</param>
 /// <param name="Comment">
-/// What happened, in the reporter's own words. Required — it is the substance of the
-/// report and the first thing support reads.
+/// Required when Reason is "Something else"; optional for the other Report a User reasons.
 /// </param>
 /// <param name="Category">
 /// Optional. What KIND of problem this is, as the app's picker labelled it — a plain
 /// string, so the server never has to be released to add a category.
 /// </param>
 /// <param name="Reason">
-/// Optional short reason for this particular incident, recorded on the ticket beside the
-/// category. Never shown to the reported party.
+/// One of the six Report a User reasons. Required for reports against a user.
 /// </param>
 public sealed record ReportBookingIncidentRequest(
     string BookingType,
     Guid BookingId,
-    string Comment,
+    string? Comment = null,
     string? Category = null,
     string? Reason = null);
 
@@ -102,7 +100,7 @@ public sealed record ReportEventIncidentRequest(
 /// </remarks>
 public sealed record ReportChatIncidentRequest(
     Guid ConversationId,
-    string Comment,
+    string? Comment = null,
     string? Category = null,
     string? Reason = null);
 

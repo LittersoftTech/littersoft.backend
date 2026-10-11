@@ -21,6 +21,7 @@ internal static class ProviderOnboardingEndpoints
 
         builder.MapGet("/providers/{providerId:guid}/profile", GetProviderProfile);
         builder.MapPatch("/providers/{providerId:guid}/profile", UpdateProviderProfile);
+        builder.MapPatch("/providers/{providerId:guid}/mobile", UpdateProviderMobile);
         builder.MapGet("/providers/{providerId:guid}/onboarding-status", GetOnboardingStatus);
 
         return builder;
@@ -72,6 +73,47 @@ internal static class ProviderOnboardingEndpoints
         catch (UnsupportedGenderException exception)
         {
             return ApiResults.BadRequest("UnsupportedGender", exception.Message);
+        }
+        catch (ArgumentException exception)
+        {
+            return ApiResults.BadRequest("InvalidRequest", exception.Message);
+        }
+    }
+
+    private static async Task<IResult> UpdateProviderMobile(
+        Guid providerId,
+        UpdateProviderMobileRequest request,
+        HttpContext httpContext,
+        IProviderOnboardingService onboardingService,
+        CancellationToken cancellationToken)
+    {
+        if (request is null)
+            return ApiResults.BadRequest("InvalidRequest", "Request body is required.");
+
+        try
+        {
+            var firebaseUserId = FirebaseClaims.GetFirebaseUserId(httpContext.User);
+            var caller = await onboardingService.ResolveProviderByFirebaseUidAsync(firebaseUserId, cancellationToken);
+            if (caller.ProviderId != providerId)
+                return ApiResults.Forbidden("Forbidden", "You can only update your own mobile number.");
+
+            return ApiResults.Ok(await onboardingService.UpdateProviderMobileAsync(providerId, request, cancellationToken));
+        }
+        catch (ProviderAuthIdentityForFirebaseUserNotFoundException)
+        {
+            return ApiResults.Forbidden("Forbidden", "You can only update your own mobile number.");
+        }
+        catch (ProviderProfileNotFoundException exception)
+        {
+            return ApiResults.NotFound("ProviderProfileNotFound", exception.Message);
+        }
+        catch (ProviderAccountDeletedException exception)
+        {
+            return ApiResults.Conflict("ProviderAccountDeleted", exception.Message);
+        }
+        catch (MobileNumberAlreadyExistsException exception)
+        {
+            return ApiResults.Conflict("MobileNumberAlreadyExists", exception.Message);
         }
         catch (ArgumentException exception)
         {

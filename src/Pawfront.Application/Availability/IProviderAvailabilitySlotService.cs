@@ -14,7 +14,8 @@ public interface IProviderAvailabilitySlotService
     /// empty, and the result's <c>Nights</c> carries per-night remaining capacity
     /// for every night in [<paramref name="date"/>, <paramref name="endDate"/>]
     /// (<paramref name="endDate"/> defaults to <paramref name="date"/>; ignored
-    /// for hourly services).
+    /// for hourly services). Night availability ignores the provider's pickup
+    /// and drop-off times; today and future dates are eligible when open with capacity.
     /// </summary>
     Task<AvailableSlotsResult> GetAvailableSlotsAsync(
         Guid providerId,

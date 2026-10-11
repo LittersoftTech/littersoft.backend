@@ -129,6 +129,42 @@ internal sealed class SqlProviderOnboardingService(
         return ReadProviderProfile(reader);
     }
 
+    public async Task<ProviderProfileResponse> UpdateProviderMobileAsync(
+        Guid providerId,
+        UpdateProviderMobileRequest request,
+        CancellationToken cancellationToken)
+    {
+        var countryCode = Required(request.MobileCountryCode, nameof(request.MobileCountryCode));
+        var mobileNumber = Required(request.MobileNumber, nameof(request.MobileNumber));
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = CreateStoredProcedureCommand(connection, "Provider.UpdateProviderMobile");
+        command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@MobileCountryCode", countryCode);
+        command.Parameters.AddWithValue("@MobileNumber", mobileNumber);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                throw new InvalidOperationException("Provider mobile update result was not returned.");
+            return ReadProviderProfile(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51113)
+        {
+            throw new ProviderProfileNotFoundException(providerId);
+        }
+        catch (SqlException exception) when (exception.Number == 51115)
+        {
+            throw new ProviderAccountDeletedException(providerId);
+        }
+        catch (SqlException exception) when (exception.Number == 51116 ||
+            (exception.Number is 2601 or 2627 && exception.Message.Contains(MobileNumberIndexName, StringComparison.Ordinal)))
+        {
+            throw new MobileNumberAlreadyExistsException(countryCode, mobileNumber);
+        }
+    }
+
     public async Task<ProviderProfileResponse> UpdateProviderProfileAsync(
         Guid providerId,
         UpdateProviderProfileRequest request,

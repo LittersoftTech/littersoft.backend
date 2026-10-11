@@ -1,4 +1,4 @@
-﻿namespace Pawfront.Application.Notifications;
+namespace Pawfront.Application.Notifications;
 
 /// <summary>
 /// The stable machine keys carried as <c>data.type</c> in every push. The mobile
@@ -21,6 +21,7 @@ public static class NotificationTypes
     public const string BookingStartOtpIssued = "BOOKING_START_OTP_ISSUED";
     public const string BookingInProgress = "BOOKING_IN_PROGRESS";
     public const string BookingCompleted = "BOOKING_COMPLETED";
+    public const string BookingCashNotReceived = "BOOKING_CASH_NOT_RECEIVED";
     public const string BookingPaid = "BOOKING_PAID";
     public const string BookingModificationRequestedByProvider = "BOOKING_MODIFICATION_REQUESTED_BY_PROVIDER";
     public const string BookingModificationAcceptedByProvider = "BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER";

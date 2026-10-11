@@ -96,7 +96,7 @@ BEGIN
     END
 
     IF @CurrentStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
-                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED',
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE',
                           N'OTP_MAX_ATTEMPTS_EXCEEDED')
     BEGIN
         THROW 51383, 'This job did not happen and can no longer be edited.', 1;
@@ -137,7 +137,7 @@ BEGIN
         WHERE [ServiceId] = @ServiceId
           AND [BookingDate] = @BookingDate
           AND [BookingId] <> @BookingId
-          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+          AND [Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND [StartTime] < @EndTime
           AND COALESCE([ActualEndTime], [EndTime]) > @StartTime;
 

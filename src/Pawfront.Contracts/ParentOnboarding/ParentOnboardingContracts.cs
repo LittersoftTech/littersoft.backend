@@ -89,6 +89,8 @@ public sealed record UpdatePetParentProfileRequest(
     // CompletePetParentProfileRequest for why it carries a default).
     string? Description = null);
 
+public sealed record UpdatePetParentMobileRequest(string MobileCountryCode, string MobileNumber);
+
 /// <summary>
 /// Full profile read-back returned by <c>GET /pet-parents/{petParentId}/profile</c>
 /// and by the profile edit. Email + IsEmailVerified come from the linked

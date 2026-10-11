@@ -5,7 +5,7 @@ namespace Pawfront.Application.Bookings;
 /// Distinct from <see cref="CreateBookingCommand"/>, which is single-day. The
 /// stay spans <c>[CheckInDate, CheckOutDate)</c> — the checkout day is NOT a
 /// stayed night. Drop-off / pick-up times are resolved server-side from the
-/// provider's offering, not supplied by the caller.
+/// provider's offering when fixed; otherwise the caller supplies them.
 /// </summary>
 public sealed record CreateNightStayBookingCommand(
     Guid ProviderId,
@@ -22,7 +22,9 @@ public sealed record CreateNightStayBookingCommand(
     string? JobNotes = null,
     // Where the service is delivered: ParentLocation or ProviderLocation
     // (see <see cref="BookingLocationTypes"/>). Required on the parent host.
-    string? LocationType = null);
+    string? LocationType = null,
+    TimeOnly? DropOffTime = null,
+    TimeOnly? PickUpTime = null);
 
 public sealed record NightStayBookingResult(
     Guid NightStayBookingId,
@@ -53,7 +55,9 @@ public sealed record NightStayBookingResult(
     string? PetName = null,
     string? AnimalType = null,
     string? Breed = null,
-    string? PetGender = null);
+    string? PetGender = null,
+    // Shared dispute display marker, populated after booking mutations.
+    bool IsDisputeRaised = false);
 
 /// <summary>
 /// One row of the parent's night-stay "my bookings" list: the flat booking plus

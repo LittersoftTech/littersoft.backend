@@ -194,6 +194,42 @@ internal sealed class SqlParentOnboardingService(
         return ReadPetParentProfileDetails(reader);
     }
 
+    public async Task<PetParentProfileDetailsResponse> UpdateMobileAsync(
+        Guid petParentId,
+        UpdatePetParentMobileRequest request,
+        CancellationToken cancellationToken)
+    {
+        var countryCode = Required(request.MobileCountryCode, nameof(request.MobileCountryCode));
+        var mobileNumber = Required(request.MobileNumber, nameof(request.MobileNumber));
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = CreateStoredProcedureCommand(connection, "Parent.UpdatePetParentMobile");
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
+        command.Parameters.AddWithValue("@MobileCountryCode", countryCode);
+        command.Parameters.AddWithValue("@MobileNumber", mobileNumber);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                throw new InvalidOperationException("Pet parent mobile update result was not returned.");
+            return ReadPetParentProfileDetails(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51208)
+        {
+            throw new PetParentNotFoundException(petParentId);
+        }
+        catch (SqlException exception) when (exception.Number == 51224)
+        {
+            throw new PetParentAccountDeletedException(petParentId);
+        }
+        catch (SqlException exception) when (exception.Number == 51222 ||
+            (exception.Number is 2601 or 2627 && exception.Message.Contains(MobileNumberIndexName, StringComparison.Ordinal)))
+        {
+            throw new PetParentMobileNumberAlreadyExistsException(countryCode, mobileNumber);
+        }
+    }
+
     public async Task<PetParentProfileDetailsResponse> UpdateProfileAsync(
         Guid petParentId,
         UpdatePetParentProfileRequest request,

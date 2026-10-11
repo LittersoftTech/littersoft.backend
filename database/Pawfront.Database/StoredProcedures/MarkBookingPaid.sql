@@ -1,10 +1,10 @@
 -- Records that the parent has paid the provider for a single-day booking:
--- flips COMPLETED -> PAID, writes an audit row, and inserts the payment ledger
+-- flips COMPLETED or PAYMENT_NOT_RECEIVED -> PAID, writes an audit row, and inserts the payment ledger
 -- row in [Booking].[BookingPayments]. Provider-only, App bookings only (Custom
 -- walk-ins are off-platform and never reach PAID), a booking is paid at most
 -- once. @Amount / @PawfrontFee are computed by the app layer from the booking's
 -- price-locked snapshot; @PaymentMethod is 'Cash' or 'Digital'.
--- THROWs: 51160 not found, 51161 not the provider, 51162 not COMPLETED,
+-- THROWs: 51160 not found, 51161 not the provider, 51162 not COMPLETED or PAYMENT_NOT_RECEIVED,
 -- 51163 Custom walk-in (App only), 51164 already paid.
 --
 -- This is the provider swiping "Cash Received", so their geolocation is written
@@ -64,7 +64,7 @@ BEGIN
         THROW 51164, 'Booking is already marked paid.', 1;
     END
 
-    IF @CurrentStatus <> N'COMPLETED'
+    IF @CurrentStatus NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED')
     BEGIN
         THROW 51162, 'Booking must be completed before it can be marked paid.', 1;
     END

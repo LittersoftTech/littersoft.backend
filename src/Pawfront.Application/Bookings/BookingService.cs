@@ -7,6 +7,7 @@ using Pawfront.Application.Offerings;
 using Pawfront.Application.ParentPets;
 using Pawfront.Application.Providers;
 using Pawfront.Application.Services.ProviderServiceLocations;
+using Pawfront.Application.Support;
 using Pawfront.Domain.Services;
 
 namespace Pawfront.Application.Bookings;
@@ -21,7 +22,8 @@ internal sealed class BookingService(
     IProviderServiceLocationRegistry providerLocationRegistry,
     IBookingTermsChangeService termsChangeService,
     IInvoiceQueuePublisher invoiceQueue,
-    IOptions<PawfrontFeeOptions> feeOptions) : IBookingService, IDailyBookingReader, IDailyAgendaReader
+    IOptions<PawfrontFeeOptions> feeOptions,
+    IMySupportTicketLookup? ticketLookup = null) : IBookingService, IDailyBookingReader, IDailyAgendaReader
 {
     public async Task<BookingResult> CreateAsync(
         CreateBookingCommand command,
@@ -601,7 +603,7 @@ internal sealed class BookingService(
     }
 
     public Task<BookingResult> CancelAsync(Guid bookingId, Guid petParentId, CancellationToken cancellationToken)
-        => sqlStore.CancelAsync(bookingId, petParentId, cancellationToken);
+        => WithDisputeAsync(sqlStore.CancelAsync(bookingId, petParentId, cancellationToken), cancellationToken);
 
     public Task<IReadOnlyList<BookingResult>> ListByProviderAsync(
         Guid providerId,
@@ -628,17 +630,19 @@ internal sealed class BookingService(
         // the capture. Every other status this engine serves passes null.
         var location = BookingStatuses.NoShow.Contains(newStatus)
             ? CapturedLocation.Require(command.Location, "report a no-show")
+            : newStatus == BookingStatuses.PaymentNotReceived
+                ? CapturedLocation.Require(command.Location, "report payment not received")
             : command.Location;
         location?.Validate();
 
-        return sqlStore.UpdateStatusAsync(
+        return WithDisputeAsync(sqlStore.UpdateStatusAsync(
             command.BookingId,
             newStatus,
             command.Actor,
             command.ActorId,
             command.Note,
             location,
-            cancellationToken);
+            cancellationToken), cancellationToken);
     }
 
     public async Task<BookingResult> CompleteAsync(
@@ -688,10 +692,10 @@ internal sealed class BookingService(
 
         // No OTP gates completion — the sproc enforces party + from-state
         // (IN_PROGRESS) and flips the booking to COMPLETED with an audit row.
-        var result = await sqlStore.CompleteAsync(
+        var result = await WithDisputeAsync(sqlStore.CompleteAsync(
             command.BookingId,
             command.ProviderId,
-            cancellationToken);
+            cancellationToken), cancellationToken);
 
         // Extras are stored only once the transition succeeded — the status engine
         // is the authority on party/from-state rules.
@@ -724,7 +728,7 @@ internal sealed class BookingService(
 
         // The amount is the booking's price-locked total (same figure the detail
         // read shows) — a single source of truth for pricing. The sproc enforces
-        // party / from-state (COMPLETED) / App-only and rejects otherwise.
+        // party / from-state (COMPLETED or PAYMENT_NOT_RECEIVED) / App-only and rejects otherwise.
         var detail = await GetDetailAsync(command.BookingId, cancellationToken)
             ?? throw new BookingNotFoundException(command.BookingId);
         if (detail.TotalAmount is null)
@@ -732,14 +736,14 @@ internal sealed class BookingService(
             throw new BookingNotPriceableException(command.BookingId);
         }
 
-        var result = await sqlStore.MarkPaidAsync(
+        var result = await WithDisputeAsync(sqlStore.MarkPaidAsync(
             command.BookingId,
             command.ProviderId,
             detail.TotalAmount.Value,
             detail.PawfrontFee ?? 0m,
             method,
             location,
-            cancellationToken);
+            cancellationToken), cancellationToken);
 
         // The payment has committed, and with it the two 'Pending' invoice rows
         // the sproc raised inside the same transaction. Asking the renderer for
@@ -836,16 +840,16 @@ internal sealed class BookingService(
     public Task<BookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken)
     {
         var fix = CapturedLocation.Require(command.Location, "start a job");
-        return sqlStore.StartJobAsync(
-            command.BookingId, command.ProviderId, GenerateOtpCode(), StartOtpTtlMinutes, fix, cancellationToken);
+        return WithDisputeAsync(sqlStore.StartJobAsync(
+            command.BookingId, command.ProviderId, GenerateOtpCode(), StartOtpTtlMinutes, fix, cancellationToken), cancellationToken);
     }
 
     public Task<BookingResult> VerifyStartOtpAsync(
         Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
     {
         var fix = CapturedLocation.Require(location, "start a job");
-        return sqlStore.VerifyStartOtpAsync(
-            bookingId, providerId, (otpCode ?? string.Empty).Trim(), fix, cancellationToken);
+        return WithDisputeAsync(sqlStore.VerifyStartOtpAsync(
+            bookingId, providerId, (otpCode ?? string.Empty).Trim(), fix, cancellationToken), cancellationToken);
     }
 
     public async Task<BookingResult> RequestModificationAsync(
@@ -926,10 +930,10 @@ internal sealed class BookingService(
             }
         }
 
-        return await sqlStore.RequestModificationAsync(
+        return await WithDisputeAsync(sqlStore.RequestModificationAsync(
             command.BookingId, command.Actor, command.ActorId,
             command.BookingDate, command.StartTime, command.EndTime,
-            command.Note, acknowledgedTerms, cancellationToken);
+            command.Note, acknowledgedTerms, cancellationToken), cancellationToken);
     }
 
     public Task<BookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
@@ -960,8 +964,8 @@ internal sealed class BookingService(
                 : throw new BookingOfferingNotConfiguredException(booking.ProviderId, booking.ServiceCategory);
         }
 
-        return await sqlStore.RespondModificationAsync(
-            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken);
+        return await WithDisputeAsync(sqlStore.RespondModificationAsync(
+            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken), cancellationToken);
     }
 
     public Task<BookingEvidenceResult> AddEvidenceAsync(
@@ -1125,5 +1129,18 @@ internal sealed class BookingService(
         if (!windows.Any(w => startTime >= w.Start && endTime <= w.End && startTime < endTime))
             throw new InvalidBookingTimeException(
                 $"Provider is closed or the booking overlaps non-working hours on {bookingDate:yyyy-MM-dd}.");
+    }
+
+    private async Task<BookingResult> WithDisputeAsync(
+        Task<BookingResult> bookingTask, CancellationToken cancellationToken)
+    {
+        var booking = await bookingTask;
+        if (ticketLookup is null) return booking;
+        var tickets = await ticketLookup.GetAsync(
+            SupportRaisedByTypes.Provider, booking.ProviderId, cancellationToken);
+        return booking with
+        {
+            IsDisputeRaised = tickets.IsDisputeRaisedForBooking(BookingTypes.SingleDay, booking.BookingId)
+        };
     }
 }

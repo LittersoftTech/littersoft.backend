@@ -346,7 +346,8 @@ internal static class ProviderDetailsEndpoints
                 offering.MinimumBookingHours,
                 offering.LatePickupCharges,
                 offering.DropOffTime,
-                offering.PickUpTime);
+                offering.PickUpTime,
+                offering.HasFixedTimes);
 
     // ---------------------------------------------------------------------
     // PetGroomer mapping (mirror of Pawfront.Api.Endpoints.PetGroomerEndpoints).

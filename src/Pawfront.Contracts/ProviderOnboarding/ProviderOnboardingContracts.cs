@@ -41,6 +41,8 @@ public sealed record UpdateProviderProfileRequest(
     string Gender,
     DateOnly DateOfBirth);
 
+public sealed record UpdateProviderMobileRequest(string MobileCountryCode, string MobileNumber);
+
 public sealed record ProviderProfileResponse(
     Guid ProviderId,
     Guid ProviderAuthIdentityId,

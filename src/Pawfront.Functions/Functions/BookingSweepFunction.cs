@@ -92,6 +92,10 @@ public sealed class BookingSweepFunction(
                 noShows.ProviderNoShowBookings, noShows.ParentNoShowBookings,
                 noShows.ProviderNoShowNightStayBookings, noShows.ParentNoShowNightStayBookings);
         }
+
+        if (noShows.IncompleteBookings > 0)
+            _logger.LogInformation("BR-38: marked {IncompleteBookings} started but unfinished booking(s) JOB_INCOMPLETE.",
+                noShows.IncompleteBookings);
     }
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)

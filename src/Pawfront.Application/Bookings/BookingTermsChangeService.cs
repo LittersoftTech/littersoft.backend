@@ -102,26 +102,28 @@ internal sealed class BookingTermsChangeService(
         var livePolicyHours = await TryResolvePolicyHoursAsync(row.ProviderId, cancellationToken);
         AddCancellationPolicyChange(changes, row.CancellationPolicyHours, livePolicyHours);
 
-        // Drop-off / pick-up are frozen NOT NULL on the stay, so both sides always
-        // have a value to compare whenever the offering still resolves.
-        if (nightStay is not null && nightStay.DropOffTime != row.DropOffTime)
+        // Flexible offerings let the parent choose these times. Only fixed
+        // provider times can change the terms of an existing stay.
+        if (nightStay is { HasFixedTimes: true, DropOffTime: TimeOnly liveDropOffTime }
+            && liveDropOffTime != row.DropOffTime)
         {
             changes.Add(new BookingTermsChangeItem(
                 BookingTermsChangeFields.DropOffTime,
                 BookingTermsChangeTypes.ValueChanged,
                 FormatTime(row.DropOffTime),
-                FormatTime(nightStay.DropOffTime),
-                $"The drop-off time changed from {FormatTime(row.DropOffTime)} to {FormatTime(nightStay.DropOffTime)}."));
+                FormatTime(liveDropOffTime),
+                $"The drop-off time changed from {FormatTime(row.DropOffTime)} to {FormatTime(liveDropOffTime)}."));
         }
 
-        if (nightStay is not null && nightStay.PickUpTime != row.PickUpTime)
+        if (nightStay is { HasFixedTimes: true, PickUpTime: TimeOnly livePickUpTime }
+            && livePickUpTime != row.PickUpTime)
         {
             changes.Add(new BookingTermsChangeItem(
                 BookingTermsChangeFields.PickUpTime,
                 BookingTermsChangeTypes.ValueChanged,
                 FormatTime(row.PickUpTime),
-                FormatTime(nightStay.PickUpTime),
-                $"The pick-up time changed from {FormatTime(row.PickUpTime)} to {FormatTime(nightStay.PickUpTime)}."));
+                FormatTime(livePickUpTime),
+                $"The pick-up time changed from {FormatTime(row.PickUpTime)} to {FormatTime(livePickUpTime)}."));
         }
 
         // Minimum nights: the NightStay branch's MinimumBookingHours is the stay's
@@ -150,8 +152,10 @@ internal sealed class BookingTermsChangeService(
         var terms = new BookingAcknowledgedTerms(
             UnitPrice: nightStay?.PricePerHour ?? row.PricePerNight,
             CancellationPolicyHours: livePolicyHours,
-            DropOffTime: nightStay?.DropOffTime ?? row.DropOffTime,
-            PickUpTime: nightStay?.PickUpTime ?? row.PickUpTime,
+            DropOffTime: nightStay is { HasFixedTimes: true, DropOffTime: TimeOnly fixedDropOffTime }
+                ? fixedDropOffTime : row.DropOffTime,
+            PickUpTime: nightStay is { HasFixedTimes: true, PickUpTime: TimeOnly fixedPickUpTime }
+                ? fixedPickUpTime : row.PickUpTime,
             AddressLine: liveLocation?.AddressLine ?? row.SnapshotAddressLine,
             City: liveLocation?.City ?? row.SnapshotCity,
             ZipCode: liveLocation?.ZipCode ?? row.SnapshotZipCode,

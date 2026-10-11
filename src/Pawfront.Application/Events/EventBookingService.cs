@@ -73,6 +73,9 @@ internal sealed class EventBookingService(
             }
         }
 
+        if (@event.EventStatus == "Active" && EventBookingWindow.IsClosed(@event.StartDate, @event.StartTime, DateTimeOffset.UtcNow))
+            throw new EventBookingsClosedException();
+
         int? maximumCapacity;
         if (string.Equals(@event.EventType, nameof(EventType.Online), StringComparison.Ordinal))
         {
@@ -111,6 +114,13 @@ internal sealed class EventBookingService(
                 totalAmount,
                 attendeeNames, command.BookerOrganiserId, command.BookerType),
             cancellationToken);
+    }
+
+    public async Task<bool> HasCancelledBookingAsync(Guid eventId, string? bookerEmail, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(bookerEmail)) return false;
+        var history = await sqlStore.ListByBookerEmailAsync(bookerEmail.Trim(), cancellationToken);
+        return history.Any(b => b.EventId == eventId && b.Status is "CancelledByParent" or "Cancelled");
     }
 
     public Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)
@@ -164,7 +174,7 @@ internal sealed class EventBookingService(
             {
                 var physical = await cosmosStore.GetPhysicalAsync(
                     summary.EventId, summary.EventCategory, cancellationToken);
-                return summary with { EventLocation = physical?.Location };
+                return summary with { EventLocation = physical?.Location, MaxBookings = summary.MaxBookings ?? physical?.MaximumCapacity };
             }
             catch (Exception ex)
             {

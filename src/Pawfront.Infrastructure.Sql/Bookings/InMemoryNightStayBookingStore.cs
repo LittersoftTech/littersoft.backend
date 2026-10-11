@@ -275,7 +275,8 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             throw new BookingStatusNotAllowedException(newStatus, actor);
         }
 
-        if (BookingStatuses.Terminal.Contains(row.Status))
+        if (BookingStatuses.Terminal.Contains(row.Status)
+            && !(row.Status == BookingStatuses.Completed && newStatus == BookingStatuses.PaymentNotReceived))
         {
             throw new BookingStatusTerminalException(bookingId, row.Status);
         }
@@ -284,6 +285,9 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         {
             throw new BookingStatusUnchangedException(bookingId, newStatus);
         }
+
+        if (newStatus == BookingStatuses.PaymentNotReceived && row.Status != BookingStatuses.Completed)
+            throw new BookingNotStartableException(bookingId);
 
         var now = DateTimeOffset.UtcNow;
         if (BookingStatuses.NoShow.Contains(newStatus))
@@ -294,9 +298,9 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             }
 
             var startsAtUtc = new DateTimeOffset(row.CheckInDate.ToDateTime(row.DropOffTime), TimeSpan.Zero);
-            if (now < startsAtUtc.AddMinutes(30))
+            if (now < startsAtUtc.AddHours(2))
             {
-                throw new BookingNoShowTooEarlyException(bookingId);
+                throw new BookingNoShowTooEarlyException(bookingId, isNightStay: true);
             }
         }
 

@@ -172,7 +172,8 @@ public sealed record EventResponse(
     string? TicketRef = null,
     double? Distance = null,
     string DistanceUnit = "km", string EventStatus = "Active", bool IsCancelledByHost = false,
-    int AttendedCount = 0, decimal EarnedAmount = 0, bool IsOnWaitlist = false);
+    int AttendedCount = 0, decimal EarnedAmount = 0, bool IsOnWaitlist = false,
+    bool EventCancelledByMe = false, DateTimeOffset? BookingsCloseAtUtc = null);
 
 /// <summary>
 /// Booking summary for an event. <see cref="MaxBookings"/> is the maximum

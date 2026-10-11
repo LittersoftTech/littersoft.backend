@@ -354,7 +354,7 @@ internal sealed class SqlNightStayBookingStore(
         }
         catch (SqlException exception) when (exception.Number == 51248)
         {
-            throw new BookingNoShowTooEarlyException(bookingId);
+            throw new BookingNoShowTooEarlyException(bookingId, isNightStay: true);
         }
         catch (SqlException exception) when (exception.Number == 51249)
         {

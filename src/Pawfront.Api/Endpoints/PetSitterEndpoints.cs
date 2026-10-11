@@ -251,7 +251,8 @@ internal static class PetSitterEndpoints
                 request.MinimumBookingHours,
                 request.LatePickupCharges,
                 request.DropOffTime,
-                request.PickUpTime);
+                request.PickUpTime,
+                request.HasFixedTimes);
     }
 
     private static PetSitterServiceResponse ToResponse(PetSitterServiceResult result)
@@ -319,6 +320,7 @@ internal static class PetSitterEndpoints
                 offering.MinimumBookingHours,
                 offering.LatePickupCharges,
                 offering.DropOffTime,
-                offering.PickUpTime);
+                offering.PickUpTime,
+                offering.HasFixedTimes);
     }
 }

@@ -116,13 +116,13 @@ CREATE TABLE [Booking].[NightStayBookings]
     CONSTRAINT [CK_NightStayBookings_Status]
         CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED',
                             N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED',
-                            N'COMPLETED', N'PAID', N'APPROVAL_NEEDED',
+                            N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'APPROVAL_NEEDED',
                             N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER',
                             N'PROVIDER_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
                             N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                             N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                             N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                            N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
+                            N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
     CONSTRAINT [CK_NightStayBookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))

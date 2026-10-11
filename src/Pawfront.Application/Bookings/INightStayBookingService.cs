@@ -76,7 +76,7 @@ public interface INightStayBookingService
         Guid bookingId, Guid providerId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Records that the parent has paid the provider for a stay (COMPLETED → PAID)
+    /// Records that the parent has paid the provider for a stay (COMPLETED or PAYMENT_NOT_RECEIVED → PAID)
     /// and writes the payment ledger row. The amount is the stay's price-locked
     /// total. Throws <see cref="NightStayBookingNotFoundException"/>,
     /// <see cref="BookingStatusForbiddenException"/>,

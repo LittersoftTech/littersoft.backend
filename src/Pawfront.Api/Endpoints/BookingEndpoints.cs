@@ -37,6 +37,7 @@ internal static class BookingEndpoints
         // Job lifecycle: start-job (issues start-OTP) → verify start-OTP (→ IN_PROGRESS)
         // → complete (→ COMPLETED, no OTP).
         providerScoped.MapPost("/{bookingId:guid}/start-job", StartJob);
+        providerScoped.MapPost("/{bookingId:guid}/wait-for-customer", StartJob);
         providerScoped.MapPost("/{bookingId:guid}/start-job/verify", VerifyStartOtp);
         providerScoped.MapPost("/{bookingId:guid}/complete", CompleteBooking);
         // Payment: the parent has paid the provider → PAID + a payment ledger row.
@@ -52,11 +53,8 @@ internal static class BookingEndpoints
         providerScoped.MapPost("/{bookingId:guid}/modifications/decline", DeclineModification);
         providerScoped.MapPost("/{bookingId:guid}/evidence", UploadEvidence).DisableAntiforgery();
         providerScoped.MapGet("/{bookingId:guid}/evidence", ListEvidence);
-        // Geolocation capture. "Cash not received" is log-only — it exists solely to
-        // record that the provider raised the payment prompt and was not paid, with
-        // their position; nothing about the booking changes. /location is how this
-        // host records the PROVIDER's own fix for a moment the PARENT drove, since
-        // each app only ever reports where IT is.
+        // Unpaid completed jobs: change status and record the provider's position.
+        // /location records this app's own fix for a moment the other party drove.
         providerScoped.MapPost("/{bookingId:guid}/cash-not-received", RecordCashNotReceived);
         providerScoped.MapPost("/{bookingId:guid}/location", RecordLocation);
 
@@ -352,7 +350,8 @@ internal static class BookingEndpoints
             pending,
             myRating,
             myTickets.ForBooking(BookingTypes.SingleDay, bookingId),
-            myBlocks.ForCounterparty(detail.Row.PetParentId)));
+            myBlocks.ForCounterparty(detail.Row.PetParentId),
+            myTickets.IsDisputeRaisedForBooking(BookingTypes.SingleDay, bookingId)));
     }
 
     private static BookingModificationResponse? ToModificationResponse(BookingModificationResult? mod) =>
@@ -501,7 +500,8 @@ internal static class BookingEndpoints
                     request.Status,
                     BookingStatusActor.Provider,
                     providerId,
-                    request.Note),
+                    request.Note,
+                    request.Location.ToCapturedLocation()),
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
@@ -550,19 +550,23 @@ internal static class BookingEndpoints
             .Select(r => ToResponse(
                 r,
                 myTickets.ForBooking(BookingTypes.SingleDay, r.BookingId),
-                myBlocks.ForCounterparty(r.PetParentId)))
+                myBlocks.ForCounterparty(r.PetParentId),
+                myTickets.IsDisputeRaisedForBooking(BookingTypes.SingleDay, r.BookingId)))
             .ToArray());
     }
 
     private static async Task<IResult> ListByPetParent(
         Guid petParentId,
         IBookingService bookingService,
+        IMySupportTicketLookup ticketLookup,
         CancellationToken cancellationToken)
     {
         // The list rows carry frozen-at-creation extras for the parent host's
         // cards; this provider-facing lookup keeps its original flat shape.
         var results = await bookingService.ListByPetParentAsync(petParentId, cancellationToken);
-        return ApiResults.Ok(results.Select(r => ToResponse(r.Booking)).ToArray());
+        var tickets = await ticketLookup.GetAsync(SupportRaisedByTypes.PetParent, petParentId, cancellationToken);
+        return ApiResults.Ok(results.Select(r => ToResponse(r.Booking,
+            isDisputeRaised: tickets.IsDisputeRaisedForBooking(BookingTypes.SingleDay, r.Booking.BookingId))).ToArray());
     }
 
     // --- Per-transition handlers (provider actor) ---------------------------
@@ -697,7 +701,7 @@ internal static class BookingEndpoints
 
     /// <summary>
     /// The provider reports that the parent (pet) never showed up. Only allowed
-    /// 30+ minutes after the booking's scheduled start (409 NoShowTooEarly).
+    /// From the booking's scheduled end (409 NoShowTooEarly before then).
     /// </summary>
     /// <remarks>
     /// Carries a body — unlike accept / decline / cancel — because a no-show is one
@@ -730,7 +734,7 @@ internal static class BookingEndpoints
     }
 
     /// <summary>
-    /// Provider taps "Start Job" (customer arrived). Moves the booking to START_JOB
+    /// Provider taps "Start Job" or "Wait for Customer". Moves the booking to START_JOB
     /// and issues the parent-facing start-OTP. Only on the booking's own service
     /// date (409 BookingNotOnServiceDate otherwise) and only while the provider is
     /// inside their own weekly working hours (409 OutsideWorkingHours otherwise).
@@ -885,21 +889,14 @@ internal static class BookingEndpoints
     }
 
     /// <summary>
-    /// The provider records that they were NOT paid, with their position. Log only:
-    /// it changes no status and no payout field — the booking stays COMPLETED with
-    /// its payout Pending. Whether money is owed on an unpaid job is a question the
-    /// refund / chase flow will answer, and freezing a verdict here would prejudge
-    /// it; what this captures is that the provider raised the prompt and where they
-    /// were when they did.
+    /// The provider marks a completed job PAYMENT_NOT_RECEIVED and records their
+    /// position in the same transaction. A later payment can still be recorded.
     /// </summary>
     private static Task<IResult> RecordCashNotReceived(
         Guid providerId, Guid bookingId, BookingLocationOnlyRequest? request,
-        IBookingLocationService locationService, CancellationToken cancellationToken)
-        => RecordLocationAsync(
-            new RecordBookingLocationCommand(
-                BookingTypes.SingleDay, bookingId, BookingLocationTriggers.CashNotReceived,
-                BookingStatusActor.Provider, providerId, request?.Location.ToCapturedLocation()),
-            locationService, cancellationToken);
+        IBookingService bookingService, CancellationToken cancellationToken)
+        => SetStatusAsync(providerId, bookingId, BookingStatuses.PaymentNotReceived,
+            bookingService, cancellationToken, request?.Location.ToCapturedLocation());
 
     /// <summary>
     /// The provider records their own position for a moment the PARENT drove — the
@@ -1081,7 +1078,8 @@ internal static class BookingEndpoints
         MySupportTicketRef? myTicket = null,
         // Whether the booking's counterparty is blocked, and whose block it
         // is. Default false/false on the write paths, where it cannot be true.
-        (bool IsBlocked, bool BlockedByMe) block = default)
+        (bool IsBlocked, bool BlockedByMe) block = default,
+        bool isDisputeRaised = false)
     {
         var row = detail.Row;
         var isCustom = string.Equals(row.Source, "Custom", StringComparison.Ordinal);
@@ -1165,6 +1163,7 @@ internal static class BookingEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
+            IsDisputeRaised: isDisputeRaised,
             IsBlocked: block.IsBlocked,
             BlockedByMe: block.BlockedByMe,
             // Whether this booking has ever been modified, so the screen can label
@@ -1196,7 +1195,8 @@ internal static class BookingEndpoints
         MySupportTicketRef? myTicket = null,
         // Whether the booking's counterparty is blocked, and whose block it
         // is. Default false/false on the write paths, where it cannot be true.
-        (bool IsBlocked, bool BlockedByMe) block = default) =>
+        (bool IsBlocked, bool BlockedByMe) block = default,
+        bool isDisputeRaised = false) =>
         new(result.BookingId,
             result.ProviderId,
             result.PetParentId,
@@ -1225,6 +1225,7 @@ internal static class BookingEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
+            IsDisputeRaised: isDisputeRaised || result.IsDisputeRaised,
             IsBlocked: block.IsBlocked,
             BlockedByMe: block.BlockedByMe,
             // Only Booking.ListBookingsByProvider projects these, so they are

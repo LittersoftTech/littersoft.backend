@@ -22,7 +22,10 @@ public sealed record CreateParentNightStayBookingRequest(
     // the parent's address) or "ProviderLocation" (the pet boards at the
     // sitter's place). Required. The detail read resolves the matching
     // address live.
-    string? LocationType = null);
+    string? LocationType = null,
+    // Required when the provider's night-stay offering has no fixed handover times.
+    TimeOnly? DropOffTime = null,
+    TimeOnly? PickUpTime = null);
 
 public sealed record NightStayBookingResponse(
     Guid NightStayBookingId,
@@ -68,7 +71,10 @@ public sealed record NightStayBookingResponse(
     string? PetName = null,
     string? AnimalType = null,
     string? Breed = null,
-    string? PetGender = null);
+    string? PetGender = null,
+    // A booking incident ticket exists from either party, including closed tickets.
+    // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
+    bool IsDisputeRaised = false);
 
 /// <summary>Provider schedule-only proposal. Acceptance preserves the booked terms.</summary>
 public sealed record RequestProviderNightStayBookingModificationRequest(
@@ -156,7 +162,10 @@ public sealed record NightStayBookingDetailResponse(
     // GET .../bookings/{bookingId}/status-history. Unrelated to
     // pendingModification above, which is the open proposal (if any); a booking
     // modified last week and untouched since reads true here and null there.
-    bool IsModificationDone = false);
+    bool IsModificationDone = false,
+    // A booking incident ticket exists from either party, including closed tickets.
+    // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
+    bool IsDisputeRaised = false);
 
 /// <summary>The stay/job facts: identity, the check-in/check-out range + nights,
 /// drop-off/pick-up times, status, and where the provider delivers the service.</summary>

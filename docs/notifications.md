@@ -289,6 +289,7 @@ Notifications V3 spec, so the two documents can be checked against each other.
 | `BOOKING_IN_PROGRESS` | Provider entered the code; the job is under way | P-U8 |
 | `BOOKING_COMPLETED` | Job done — collect the pet and pay | P-U11 / P-U12 |
 | `BOOKING_PAID` | Provider confirmed receiving the cash | P-U13 |
+| `BOOKING_CASH_NOT_RECEIVED` | Provider reported cash was not received; same booking envelope as `BOOKING_PAID` | Cash sheet |
 | `BOOKING_PRESCRIPTION_RECORDED` | Vet added a prescription | *(not in V3)* |
 
 ### 3.2 To the provider — the parent acted

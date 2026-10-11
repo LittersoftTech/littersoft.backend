@@ -121,7 +121,7 @@ public interface INightStayBookingSqlStore
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Flips a COMPLETED stay to PAID and inserts the payment ledger row. Maps
+    /// Flips a COMPLETED or PAYMENT_NOT_RECEIVED stay to PAID and inserts the payment ledger row. Maps
     /// 51280 not found, 51281 forbidden, 51282 not payable, 51283 already paid.
     /// </summary>
     Task<NightStayBookingResult> MarkPaidAsync(

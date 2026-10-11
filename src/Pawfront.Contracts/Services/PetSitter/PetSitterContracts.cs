@@ -57,8 +57,9 @@ public sealed record BoardingOfferingRequest(
     IReadOnlyCollection<string> AddOns,
     int MinimumBookingHours,
     decimal LatePickupCharges,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime);
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
+    bool? HasFixedTimes = null);
 
 public sealed record PetSitterServiceResponse(
     Guid ProviderId,
@@ -107,7 +108,8 @@ public sealed record BoardingOfferingResponse(
     IReadOnlyCollection<string> AddOns,
     int MinimumBookingHours,
     decimal LatePickupCharges,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime);
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
+    bool HasFixedTimes);
 
 public sealed record UploadImageResponse(string Url);

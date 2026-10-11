@@ -60,7 +60,7 @@ internal static class EventEndpoints
         parentScoped.MapPost("/{eventId:guid}/cancel", async (Guid petParentId, Guid eventId, IEventLifecycleStore lifecycle, IEventService events, CancellationToken ct) =>
         {
             await lifecycle.CancelAsync(eventId, petParentId, ct);
-            return ApiResults.Ok(ToResponse((await events.GetAsync(eventId, ct))!));
+            return ApiResults.Ok(ToResponse((await events.GetAsync(eventId, ct))!) with { EventCancelledByMe = true });
         });
         parentScoped.MapDelete("/{eventId:guid}", async (Guid petParentId, Guid eventId, IEventLifecycleStore lifecycle, CancellationToken ct) =>
         {
@@ -270,7 +270,7 @@ internal static class EventEndpoints
     {
         var results = await eventService.ListByPetParentAsync(petParentId, cancellationToken);
         // Organiser's own events — IsBookable defaults true (not a booking surface).
-        return ApiResults.Ok(results.Select(e => ToResponse(e)).ToArray());
+        return ApiResults.Ok(results.Select(e => ToResponse(e) with { EventCancelledByMe = e.EventStatus == "Cancelled" }).ToArray());
     }
 
     private static async Task<IResult> List(
@@ -371,13 +371,15 @@ internal static class EventEndpoints
 
         var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
             httpContext.User.FindFirstValue("email"), cancellationToken);
+        var cancelledByMe = await bookingService.HasCancelledBookingAsync(
+            eventId, httpContext.User.FindFirstValue("email"), cancellationToken);
         var callerId = await currentParent.GetPetParentIdAsync(cancellationToken);
         var waitlist = callerId is Guid id ? await lifecycle.GetWaitlistAsync(id, cancellationToken) : new HashSet<Guid>();
         var myTickets = await MySupportTickets.ForCallerAsync(
             currentParent, ticketLookup, cancellationToken);
 
         return ApiResults.Ok(ToResponse(
-            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId), callerId is not null && result.PetParentId == callerId) with { IsOnWaitlist = waitlist.Contains(result.EventId) });
+            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId), callerId is not null && result.PetParentId == callerId) with { IsOnWaitlist = waitlist.Contains(result.EventId), EventCancelledByMe = cancelledByMe || (callerId is not null && result.EventStatus == "Cancelled" && result.PetParentId == callerId) });
     }
 
     private static async Task<IResult> Trending(
@@ -502,7 +504,7 @@ internal static class EventEndpoints
                 // for online events.
                 result.Physical?.MaximumCapacity,
                 result.TotalBookings),
-            isBookable && result.EventStatus == "Active",
+            isBookable && result.EventStatus == "Active" && !EventBookingWindow.IsClosed(result.StartDate, result.StartTime, DateTimeOffset.UtcNow),
             result.PaymentOptions,
             result.Attendees?
                 .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber, includeHostAttendance ? a.BookingId : null, includeHostAttendance ? a.PaymentStatus : null, includeHostAttendance ? a.Amount : null, a.ProfileImageUrl))
@@ -515,7 +517,8 @@ internal static class EventEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef, EventStatus: result.EventStatus, IsCancelledByHost: result.EventStatus == "Cancelled",
-            AttendedCount: result.AttendedCount, EarnedAmount: result.EarnedAmount);
+            AttendedCount: result.AttendedCount, EarnedAmount: result.EarnedAmount,
+            BookingsCloseAtUtc: EventBookingWindow.CloseAtUtc(result.StartDate, result.StartTime));
     }
 
     /// <summary>

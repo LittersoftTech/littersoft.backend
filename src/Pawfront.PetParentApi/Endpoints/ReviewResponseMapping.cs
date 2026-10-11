@@ -67,7 +67,7 @@ internal static class ReviewResponseMapping
 
     /// <summary>
     /// The review block for a booking-detail read. <paramref name="status"/> and
-    /// <paramref name="source"/> decide <c>canReview</c>: COMPLETED or PAID, and an App
+    /// <paramref name="source"/> decide <c>canReview</c>: COMPLETED, PAYMENT_NOT_RECEIVED or PAID, and an App
     /// booking — a Custom walk-in has no pet-parent record, so neither side can review
     /// it. This mirrors the gate in <c>Review.UpsertBookingReview</c>; SQL remains the
     /// authority, this only tells the app whether to offer the prompt.
@@ -93,5 +93,5 @@ internal static class ReviewResponseMapping
 
     private static bool IsReviewable(string status, string source)
         => string.Equals(source, "App", StringComparison.OrdinalIgnoreCase)
-            && status is "COMPLETED" or "PAID";
+            && status is "COMPLETED" or "PAYMENT_NOT_RECEIVED" or "PAID";
 }

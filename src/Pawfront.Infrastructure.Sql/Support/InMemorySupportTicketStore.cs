@@ -93,7 +93,7 @@ internal sealed class InMemorySupportTicketStore
         Guid actorId,
         CancellationToken cancellationToken)
     {
-        if (!tickets.TryGetValue(ticketId, out var ticket) || !IsParty(ticket, actorType, actorId))
+        if (!tickets.TryGetValue(ticketId, out var ticket) || !ticket.WasRaisedBy(actorType) || !IsParty(ticket, actorType, actorId))
         {
             return Task.FromResult<SupportTicketRecord?>(null);
         }
@@ -106,7 +106,7 @@ internal sealed class InMemorySupportTicketStore
         CancellationToken cancellationToken)
     {
         var matching = tickets.Values
-            .Where(ticket => IsParty(ticket, query.ActorType, query.ActorId))
+            .Where(ticket => ticket.WasRaisedBy(query.ActorType) && IsParty(ticket, query.ActorType, query.ActorId))
             .Where(ticket => query.Statuses is not { Count: > 0 }
                 || query.Statuses.Contains(ticket.Status, StringComparer.Ordinal))
             .ToList();
@@ -225,6 +225,9 @@ internal sealed class InMemorySupportTicketStore
         Guid actorId,
         CancellationToken cancellationToken)
     {
+        if (!SupportRaisedByTypes.IsKnown(actorType) || actorId == Guid.Empty)
+            return Task.FromResult(MySupportTicketSubjects.Empty);
+
         var mine = tickets.Values
             .Where(ticket => ticket.IsOpen
                 && ticket.WasRaisedBy(actorType)
@@ -239,7 +242,14 @@ internal sealed class InMemorySupportTicketStore
                 ticket.ConversationId,
                 ticket.EventId));
 
-        return Task.FromResult(new MySupportTicketSubjects(mine));
+        var disputes = tickets.Values
+            .Where(ticket => ticket.TicketType == SupportTicketTypes.BookingIncident
+                && ticket.WasRaisedBy(actorType)
+                && IsParty(ticket, actorType, actorId)
+                && ticket.BookingType is not null && ticket.BookingId is not null)
+            .Select(ticket => new BookingDisputeSubject(ticket.BookingType!, ticket.BookingId!.Value));
+
+        return Task.FromResult(new MySupportTicketSubjects(mine, disputes));
     }
 
     /// <summary>
@@ -255,10 +265,12 @@ internal sealed class InMemorySupportTicketStore
         {
             SupportTicketTypes.BookingIncident => open.FirstOrDefault(ticket =>
                 ticket.BookingId == command.BookingId
+                && ticket.WasRaisedBy(command.RaisedByType)
                 && string.Equals(ticket.BookingType, command.BookingType, StringComparison.Ordinal)),
 
             SupportTicketTypes.ChatIncident => open.FirstOrDefault(ticket =>
-                ticket.ConversationId == command.ConversationId),
+                ticket.ConversationId == command.ConversationId
+                && ticket.WasRaisedBy(command.RaisedByType)),
 
             // Per REPORTER as well as per event: another attendee's report of the same
             // event is a separate account and gets its own ticket.

@@ -180,7 +180,9 @@ public sealed record BookingResult(
     // placeholder here instead of leaving real personal data in a list.
     string? Breed = null,
     string? PetGender = null,
-    string? CustomerPhotoUrl = null);
+    string? CustomerPhotoUrl = null,
+    // Shared dispute display marker, populated after booking mutations.
+    bool IsDisputeRaised = false);
 
 /// <summary>
 /// One row of the parent's "my bookings" list: the flat booking plus the
@@ -433,7 +435,7 @@ public sealed record BookingPaymentResult(
     string PaymentMethod,
     DateTimeOffset PaidAtUtc);
 
-/// <summary>The booking can't be marked paid from its current status — payment is only allowed from COMPLETED.</summary>
+/// <summary>Payment is only allowed from COMPLETED or PAYMENT_NOT_RECEIVED.</summary>
 public sealed class BookingNotPayableException(Guid bookingId)
     : Exception($"Booking '{bookingId}' must be completed before it can be marked paid.");
 
@@ -458,11 +460,9 @@ public sealed class BookingNotPriceableException(Guid bookingId)
 /// booking and that the transition is permitted for that actor.
 /// </summary>
 /// <param name="Location">
-/// The acting party's position, required for — and only stored on — the two
-/// NO-SHOW transitions. Every other status this engine serves (accept, decline,
-/// cancel, the legacy COMPLETED shim) leaves it null. The no-show routes on both
-/// hosts, and the legacy <c>/status</c> shim when it is used to set one, all refuse
-/// the request without it, so the shim cannot become a way to skip the capture.
+/// The acting party's position, required for the two NO-SHOW transitions and
+/// PAYMENT_NOT_RECEIVED. Both the dedicated endpoints and the generic status
+/// shim require it for these actions.
 /// </param>
 public sealed record UpdateBookingStatusCommand(
     Guid BookingId,
@@ -575,10 +575,12 @@ public sealed class BookingStatusUnchangedException(Guid bookingId, string statu
 
 /// <summary>
 /// A no-show was reported before the counterparty is actually late — the
-/// 30-minute grace window after the booking's scheduled start hasn't elapsed.
+/// applicable no-show threshold has not elapsed.
 /// </summary>
-public sealed class BookingNoShowTooEarlyException(Guid bookingId)
-    : Exception($"A no-show on booking '{bookingId}' can only be reported 30 minutes after its scheduled start.");
+public sealed class BookingNoShowTooEarlyException(Guid bookingId, bool isNightStay = false)
+    : Exception(isNightStay
+        ? $"A no-show on night stay '{bookingId}' can only be reported 2 hours after scheduled check-in."
+        : $"A no-show on booking '{bookingId}' can only be reported from its scheduled end.");
 
 /// <summary>
 /// The booking was never accepted in time, so it is expired — no further status

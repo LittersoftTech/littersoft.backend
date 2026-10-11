@@ -36,7 +36,8 @@
 -- 2+ hours after the scheduled start); this sproc is purely the backstop for
 -- when neither party bothers.
 -- Returns one row: (ProviderNoShowBookings, ParentNoShowBookings,
---                   ProviderNoShowNightStayBookings, ParentNoShowNightStayBookings).
+--                   ProviderNoShowNightStayBookings, ParentNoShowNightStayBookings,
+--                   IncompleteBookings).
 CREATE OR ALTER PROCEDURE [Booking].[SettleUnstartedJobsAsNoShow]
 AS
 BEGIN
@@ -53,6 +54,8 @@ BEGIN
         N'Automatically marked: the provider never started the stay on the check-in day.';
     DECLARE @ParentNoShowStayNote NVARCHAR(500) =
         N'Automatically marked: the start code was issued on the check-in day but never verified.';
+    DECLARE @JobIncompleteNote NVARCHAR(500) =
+        N'Automatically marked: the job was started but not completed before the provider''s working day ended.';
 
     DECLARE @NoShowBookings TABLE (
         [BookingId] UNIQUEIDENTIFIER NOT NULL,
@@ -62,6 +65,7 @@ BEGIN
         [NightStayBookingId] UNIQUEIDENTIFIER NOT NULL,
         [FromStatus] NVARCHAR(48) NOT NULL,
         [ToStatus] NVARCHAR(48) NOT NULL);
+    DECLARE @IncompleteBookings TABLE ([BookingId] UNIQUEIDENTIFIER NOT NULL, [FromStatus] NVARCHAR(48) NOT NULL);
 
     BEGIN TRANSACTION;
 
@@ -111,6 +115,29 @@ BEGIN
     SELECT [BookingId], [FromStatus], [ToStatus], N'System', NULL,
            CASE WHEN [ToStatus] = N'PARENT_NO_SHOW' THEN @ParentNoShowJobNote ELSE @ProviderNoShowJobNote END
     FROM @NoShowBookings;
+
+    -- The start code was verified, so neither party is a no-show. A job still
+    -- underway after the same end-of-day cutoff is explicitly incomplete.
+    UPDATE b
+    SET [Status] = N'JOB_INCOMPLETE',
+        [UpdatedAtUtc] = @Now
+    OUTPUT inserted.[BookingId], deleted.[Status] INTO @IncompleteBookings
+    FROM [Booking].[Bookings] b
+    OUTER APPLY [Provider].[WorkingHoursAtUtc](b.[ProviderId],
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), b.[StartTime]),
+            CAST(b.[BookingDate] AS DATETIME2(7)))) wa
+    CROSS APPLY (
+        SELECT [BookingEndsAtUtc] = DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[EndTime]), CAST(b.[BookingDate] AS DATETIME2(7))),
+               [ProviderClosesAtUtc] = CASE WHEN wa.[IsOpen] = 1 THEN wa.[ClosesAtUtc] ELSE DATEADD(DAY, 1, CAST(b.[BookingDate] AS DATETIME2(7))) END
+    ) AS [Cutoffs]
+    WHERE b.[Status] IN (N'IN_PROGRESS', N'ENDING', N'JOB_STARTED')
+      AND @Now >= (CASE WHEN [Cutoffs].[BookingEndsAtUtc] >= [Cutoffs].[ProviderClosesAtUtc]
+                        THEN [Cutoffs].[BookingEndsAtUtc] ELSE [Cutoffs].[ProviderClosesAtUtc] END);
+
+    INSERT INTO [Booking].[BookingStatusHistory]
+        ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+    SELECT [BookingId], [FromStatus], N'JOB_INCOMPLETE', N'System', NULL, @JobIncompleteNote
+    FROM @IncompleteBookings;
 
     -- Night stay: unchanged — check-in day ended (midnight UTC), no working-
     -- hours join, mirroring the retired sweep exactly.
@@ -186,5 +213,6 @@ BEGIN
         (SELECT COUNT(*) FROM @NoShowNightStays WHERE [ToStatus] = N'PROVIDER_NO_SHOW')
             AS [ProviderNoShowNightStayBookings],
         (SELECT COUNT(*) FROM @NoShowNightStays WHERE [ToStatus] = N'PARENT_NO_SHOW')
-            AS [ParentNoShowNightStayBookings];
+            AS [ParentNoShowNightStayBookings],
+        (SELECT COUNT(*) FROM @IncompleteBookings) AS [IncompleteBookings];
 END;

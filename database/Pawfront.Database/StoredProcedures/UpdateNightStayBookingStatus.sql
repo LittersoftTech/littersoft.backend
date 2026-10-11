@@ -5,7 +5,7 @@
 -- @ActorId come from the authenticated route, never the client body. Enforces:
 --   * the actor is a party to the booking            (THROW 51241)
 --   * the status is one the actor may set            (THROW 51242)
---   * the booking is not already terminal            (THROW 51243)
+--   * finished jobs only allow COMPLETED -> PAYMENT_NOT_RECEIVED (THROW 51243)
 --   * the status actually changes                    (THROW 51244)
 --   * the transition is allowed from the current state (THROW 51246)
 --   * a no-show is only reportable 2+ HOURS after check-in + drop-off (THROW 51248)
@@ -28,8 +28,8 @@
 --               PROVIDER_NO_SHOW (from confirmed-equivalent or START_JOB, 2 h after check-in)
 -- A cancel is blocked once the job is underway (IN_PROGRESS; the retired ENDING
 -- kept for legacy rows) → THROW 51269.
--- Terminal states: COMPLETED, PROVIDER_DECLINED, PROVIDER_CANCELLED, PARENT_CANCELLED,
--- PARENT_NO_SHOW, PROVIDER_NO_SHOW.
+-- COMPLETED may move to PAYMENT_NOT_RECEIVED. Both allow payment through the
+-- dedicated MarkNightStayBookingPaid procedure; other terminal states reject this engine.
 -- A geolocation fix may be supplied and is written only for the NO-SHOW
 -- transitions — see [Booking].[UpdateBookingStatus].
 CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
@@ -52,7 +52,7 @@ BEGIN
         THROW 51245, 'Actor must be Provider or Parent.', 1;
     END
 
-    IF @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED',
+    IF @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PAYMENT_NOT_RECEIVED',
                           N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                           N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
     BEGIN
@@ -118,15 +118,16 @@ BEGIN
     -- A no-show always names the OTHER party: the provider reports the parent's
     -- no-show, the parent reports the provider's.
     IF (@Actor = N'Provider'
-            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PROVIDER_CANCELLED', N'PARENT_NO_SHOW'))
+            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PROVIDER_CANCELLED', N'PARENT_NO_SHOW'))
        OR (@Actor = N'Parent'
             AND @NewStatus NOT IN (N'PARENT_CANCELLED', N'PROVIDER_NO_SHOW'))
     BEGIN
         THROW 51242, 'This status is not permitted for this actor.', 1;
     END
 
-    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
-                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+    IF @CurrentStatus IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+       AND NOT (@CurrentStatus = N'COMPLETED' AND @NewStatus = N'PAYMENT_NOT_RECEIVED')
     BEGIN
         THROW 51243, 'Booking is in a terminal state and cannot change.', 1;
     END
@@ -138,6 +139,7 @@ BEGIN
 
     IF (@NewStatus = N'CONFIRMED'           AND @CurrentStatus <> N'CREATED')
        OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
+       OR (@NewStatus = N'PAYMENT_NOT_RECEIVED' AND @CurrentStatus <> N'COMPLETED')
        OR (@NewStatus = N'COMPLETED'        AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
        OR (@NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
            AND @CurrentStatus NOT IN (N'CONFIRMED',
@@ -160,7 +162,7 @@ BEGIN
     -- A no-show can only be reported once the counterparty is actually late:
     -- 2 HOURS past the stay's scheduled check-in (check-in date + drop-off
     -- time; all times are UTC). A boarding hand-over is a slower affair than a
-    -- single-day appointment, whose gate stays at 30 minutes — so a 09:00
+    -- single-day appointment, whose gate is its scheduled end — so a 09:00
     -- check-in is reportable from 11:00.
     --
     -- Neither party has to wait it out: if the stay is still unstarted when the
@@ -231,6 +233,16 @@ BEGIN
              @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
     END
 
+    IF @NewStatus = N'PAYMENT_NOT_RECEIVED' AND @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[NightStayBookingLocationEvents]
+            ([NightStayBookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@NightStayBookingId, N'CashNotReceived', N'Provider', @ActorId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
+
     -- Mirror of Booking.UpdateBookingStatus: notify the OTHER party, in this
     -- transaction, never the actor who tapped it.
     DECLARE @NotificationType NVARCHAR(64) =
@@ -240,6 +252,7 @@ BEGIN
             WHEN N'PROVIDER_CANCELLED' THEN N'BOOKING_CANCELLED_BY_PROVIDER'
             WHEN N'PARENT_CANCELLED'   THEN N'BOOKING_CANCELLED_BY_PARENT'
             WHEN N'COMPLETED'          THEN N'BOOKING_COMPLETED'
+            WHEN N'PAYMENT_NOT_RECEIVED' THEN N'BOOKING_CASH_NOT_RECEIVED'
             WHEN N'PARENT_NO_SHOW'     THEN N'BOOKING_NO_SHOW_REPORTED'
             WHEN N'PROVIDER_NO_SHOW'   THEN N'BOOKING_NO_SHOW_REPORTED'
         END;

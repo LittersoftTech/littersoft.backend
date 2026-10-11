@@ -134,10 +134,10 @@ BEGIN
         FROM [Booking].[Bookings] b
         WHERE b.[ProviderId] = @ProviderId
           AND b.[PetParentId] = @PetParentId
-          AND b.[Status] NOT IN (N'COMPLETED', N'PAID', N'IN_PROGRESS', N'ENDING',
+          AND b.[Status] NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'IN_PROGRESS', N'ENDING',
                                  N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                  N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED',
-                                 N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+                                 N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           -- Already dead under BR-17 / BR-53; the engine would reject the cancel.
           AND NOT (
                 b.[Status] = N'CREATED'
@@ -159,10 +159,10 @@ BEGIN
         FROM [Booking].[NightStayBookings] n
         WHERE n.[ProviderId] = @ProviderId
           AND n.[PetParentId] = @PetParentId
-          AND n.[Status] NOT IN (N'COMPLETED', N'PAID', N'IN_PROGRESS', N'ENDING',
+          AND n.[Status] NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'IN_PROGRESS', N'ENDING',
                                  N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                                  N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED',
-                                 N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+                                 N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
           AND NOT (
                 n.[Status] = N'CREATED'
                 AND (

@@ -119,8 +119,11 @@ public sealed class BoardingOffering
     public decimal LatePickupCharges { get; set; }
 
     [JsonPropertyName("dropOffTime")]
-    public TimeOnly DropOffTime { get; set; }
+    public TimeOnly? DropOffTime { get; set; }
 
     [JsonPropertyName("pickUpTime")]
-    public TimeOnly PickUpTime { get; set; }
+    public TimeOnly? PickUpTime { get; set; }
+
+    [JsonPropertyName("hasFixedTimes")]
+    public bool? HasFixedTimes { get; set; }
 }

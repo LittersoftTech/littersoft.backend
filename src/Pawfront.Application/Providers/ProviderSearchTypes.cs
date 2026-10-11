@@ -75,6 +75,7 @@ public sealed record ProviderSearchRefinements(
 /// Checkout date — NOT a stayed night. Every date from StartDate up to the
 /// day before PickupDate must have free NightStay capacity.
 /// </param>
+/// <remarks>Availability is date-based and ignores the provider's pickup and drop-off times.</remarks>
 public sealed record NightStayProviderSearchCriteria(
     IReadOnlyCollection<string>? Animals,
     string? City,

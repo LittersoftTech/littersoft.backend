@@ -62,6 +62,18 @@ async Task<Guid> Book(Guid ev, Guid parent, int tickets=1)
 Task Cancel(Guid booking, Guid parent) => Query("EXEC [Event].[CancelEventBooking] @B,@Email",("@B",booking),("@Email",parent+"@test.invalid"));
 Task Cash(Guid booking, Guid host, int ticket, string status) => Query("EXEC [Event].[SetTicketPayment] @B,@N,@H,@S",("@B",booking),("@N",ticket),("@H",host),("@S",status));
 async Task<Dictionary<string,object>> Reliability(Guid parent) => (await Query("EXEC [Event].[GetReliability] @Id",("@Id",parent)))[0];
+// The exact boundary and timezone offsets do not depend on the test machine clock.
+var winterDate = new DateOnly(2026,1,15); var summerDate = new DateOnly(2026,7,15); var sixPm = new TimeOnly(18,0);
+var winterClose = EventBookingWindow.CloseAtUtc(winterDate,sixPm);
+Check(winterClose == new DateTimeOffset(2026,1,15,16,0,0,TimeSpan.Zero),"winter 18:00 Zurich closes at 16:00 UTC");
+Check(EventBookingWindow.CloseAtUtc(summerDate,sixPm) == new DateTimeOffset(2026,7,15,15,0,0,TimeSpan.Zero),"summer 18:00 Zurich closes at 15:00 UTC");
+Check(!EventBookingWindow.IsClosed(winterDate,sixPm,winterClose.AddTicks(-1)) && EventBookingWindow.IsClosed(winterDate,sixPm,winterClose),"booking closes at the exact one-hour boundary");
+foreach (var date in new[]{new DateOnly(2026,3,29),new DateOnly(2026,10,25)})
+{
+    var time = new TimeOnly(2,30);
+    var sqlClose = (DateTime)(await Query("SELECT DATEADD(hour,-1,[Event].[EventStartUtc](@D,@T)) AS CloseAt",("@D",date.ToDateTime(TimeOnly.MinValue)),("@T",time.ToTimeSpan())))[0]["CloseAt"];
+    Check(EventBookingWindow.CloseAtUtc(date,time).UtcDateTime==sqlClose,$"client cutoff matches SQL across DST transition {date}");
+}
 var host=await Parent(); var buyer=await Parent(); var watcher=await Parent();
 var ev=await Event(host,2); var booking=await Book(ev,buyer,2);
 Check((decimal)(await Query("SELECT TotalAmount FROM [Event].[EventBookings] WHERE BookingId=@B",("@B",booking)))[0]["TotalAmount"]==20,"server snapshots price, ignores stale caller amount/capacity");
@@ -79,6 +91,14 @@ Check(detail!.Status=="CancelledByParent" && detail.CancelledAtUtc is not null,"
 var eventStore=(IEventSqlStore)Activator.CreateInstance(sqlAssembly.GetType("Pawfront.Infrastructure.Sql.Events.SqlEventStore")!,connectionString,null)!;
 var current=(await eventStore.GetAsync(ev,default))!;
 Check(current.Attendees!.Single(a=>a.TicketNumber==1).BookingId==rebook,"attendees carry booking identity and payment state");
+var bookingService = (IEventBookingService)Activator.CreateInstance(Assembly.Load("Pawfront.Application").GetType("Pawfront.Application.Events.EventBookingService")!,new object?[]{null,store,null,null,null,null})!;
+Check(await bookingService.HasCancelledBookingAsync(ev,buyer+"@test.invalid",default),"event detail remembers caller cancellation after rebooking");
+Check(!await bookingService.HasCancelledBookingAsync(ev,watcher+"@test.invalid",default) && !await bookingService.HasCancelledBookingAsync(ev,null,default),"cancellation warning is private to the caller");
+var activeCards = await store.ListByBookerEmailAsync(buyer+"@test.invalid",default);
+Check(activeCards.Where(b=>b.EventId==ev).All(b=>b.TotalBookings==2 && b.MaxBookings==2),"cards include event-wide ticket counts, excluding cancelled tickets");
+var sharedEvent = await Event(host,10); var sharedBuyer = await Parent(); var sharedOther = await Parent();
+await Book(sharedEvent,sharedBuyer,2); await Book(sharedEvent,sharedOther,3);
+Check((await store.ListByBookerEmailAsync(sharedBuyer+"@test.invalid",default)).Single(b=>b.EventId==sharedEvent).TotalBookings==5,"card counts all parents' tickets instead of bookings or the caller's tickets");
 var input=new UpdateParentEventSqlInput(ev,host,current.EventCategory,true,current.Title,"Edited",null,Array.Empty<string>(),current.EventType,current.StartDate,current.EndDate,current.StartTime,current.EndTime,true,10,current.CancellationPolicy,null,4);
 await Error(51465,()=>eventStore.UpdateByParentAsync(input,default),"booked events reject edits at SQL boundary");
 await Error(51460,()=>Query("EXEC [Event].[CancelHostedEvent] @E,@P",("@E",ev),("@P",buyer)),"host cancellation ownership enforced");
@@ -90,6 +110,34 @@ await Error(51461,()=>Book(ev,watcher),"cancelled events cannot be booked");
 await Query("EXEC [Event].[RemoveHostedEvent] @E,@P",("@E",ev),("@P",host));
 Check(!(await eventStore.ListByPetParentAsync(host,default)).Any(x=>x.EventId==ev),"remove hides only host list");
 Check((await eventStore.GetAsync(ev,default))!.EventsCancelledCount==1,"cancelled event remains readable and counts for host");
+var cancelledCards = (await store.ListByBookerEmailAsync(buyer+"@test.invalid",default)).Where(b=>b.EventId==ev).ToArray();
+Check(cancelledCards.Length==2 && cancelledCards.Any(b=>b.Status=="EventCancelled") && cancelledCards.All(b=>b.TotalBookings==0),"host removal preserves attendee history and releases counts");
+var parentEndpoints = Assembly.Load("Pawfront.PetParentApi");
+var mapCard = parentEndpoints.GetType("Pawfront.PetParentApi.Endpoints.PetParentEndpoints")!.GetMethod("ToSummaryResponse",BindingFlags.Static|BindingFlags.NonPublic)!;
+var hostCard = (Pawfront.Contracts.Events.EventBookingSummaryResponse)mapCard.Invoke(null,new object[]{cancelledCards.Single(b=>b.Status=="EventCancelled")})!;
+var ownCard = (Pawfront.Contracts.Events.EventBookingSummaryResponse)mapCard.Invoke(null,new object[]{cancelledCards.Single(b=>b.Status=="CancelledByParent")})!;
+Check(hostCard.Status=="host_cancelled" && hostCard.IsCancelledByHost && !hostCard.EventCancelledByMe,"host-cancelled API card distinguishes who cancelled");
+Check(ownCard.EventCancelledByMe && !ownCard.IsCancelledByHost,"parent-cancelled API card marks caller's cancellation");
+var json = System.Text.Json.JsonSerializer.Serialize(hostCard,new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+using(var document = System.Text.Json.JsonDocument.Parse(json))
+    Check(document.RootElement.GetProperty("bookings").GetProperty("totalBookings").GetInt32()==0 && document.RootElement.GetProperty("bookings").GetProperty("maxBookings").GetInt32()==2 && document.RootElement.TryGetProperty("bookingsCloseAtUtc",out _),"booking card serializes counts and UTC cutoff in client shape");
+// Direct SQL rejects purchases inside the final hour and while live, for either account role.
+var cutoffBuyer=await Parent(); var closingEvent=await Event(host,10,1);
+await Query("""
+    DECLARE @Start DATETIME2=CONVERT(DATETIME2,DATEADD(second,3598,SYSUTCDATETIME()) AT TIME ZONE 'UTC' AT TIME ZONE 'W. Europe Standard Time');
+    UPDATE [Event].[Events] SET StartDate=CAST(@Start AS DATE),EndDate=CAST(@Start AS DATE),StartTime=CAST(@Start AS TIME) WHERE EventId=@E;
+    """,("@E",closingEvent));
+await Error(51470,()=>Book(closingEvent,cutoffBuyer),"SQL rejects at or after the one-hour cutoff");
+var liveEvent=await Event(host,10,0);
+await Error(51470,()=>Book(liveEvent,cutoffBuyer),"SQL rejects purchases while event is live");
+var openEvent=await Event(host,10,2); await Book(openEvent,cutoffBuyer);
+Check(true,"SQL permits purchases before the one-hour cutoff");
+try
+{
+    await store.CreateAsync(new CreateEventBookingSqlInput(closingEvent,"Test",cutoffBuyer+"@test.invalid",null,"Cash",10,10,new[]{"Attendee"},cutoffBuyer),default);
+    throw new Exception("Expected BookingsClosed from SQL store");
+}
+catch(EventBookingsClosedException ex) { Check(ex.Message=="Ticket bookings for this event are closed.","SQL store translates cutoff into the exact BookingsClosed message"); }
 var empty=await Event(host);
 await Error(51466,()=>Query("EXEC [Event].[RemoveHostedEvent] @E,@P",("@E",empty),("@P",host)),"active event cannot be removed");
 await Query("EXEC [Event].[CancelHostedEvent] @E,@P",("@E",empty),("@P",host));

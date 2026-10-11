@@ -209,7 +209,7 @@ public interface IBookingSqlStore
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Flips a COMPLETED booking to PAID and inserts the payment ledger row
+    /// Flips a COMPLETED or PAYMENT_NOT_RECEIVED booking to PAID and inserts the payment ledger row
     /// (<c>Booking.BookingPayments</c>). Maps 51160 not found, 51161 forbidden,
     /// 51162 not payable, 51163 Custom walk-in, 51164 already paid.
     /// </summary>

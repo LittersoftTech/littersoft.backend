@@ -59,6 +59,10 @@ internal sealed class SqlEventBookingStore(
             // 51091 is only thrown when a capacity is set (physical events).
             throw new EventBookingCapacityExceededException(input.EventId, input.MaximumCapacity ?? 0);
         }
+        catch (SqlException exception) when (exception.Number == 51470)
+        {
+            throw new EventBookingsClosedException();
+        }
         catch (SqlException exception) when (exception.Number == 51094)
         {
             throw new ArgumentException(exception.Message);
@@ -108,7 +112,9 @@ internal sealed class SqlEventBookingStore(
                 UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(17), TimeSpan.Zero),
                 CancelledAtUtc: reader.IsDBNull(18)
                     ? null
-                    : new DateTimeOffset(reader.GetDateTime(18), TimeSpan.Zero)));
+                    : new DateTimeOffset(reader.GetDateTime(18), TimeSpan.Zero),
+                TotalBookings: reader.GetInt32(20),
+                MaxBookings: reader.IsDBNull(21) ? null : reader.GetInt32(21)));
         }
         return rows;
     }

@@ -68,6 +68,7 @@ foreach (var audience in new[] { NotificationAudience.PetParent, NotificationAud
 }
 checks += await NotificationApiChecks.RunAsync();
 checks += await FirestoreReadChecks.RunAsync();
+checks += await CashNotificationChecks.RunAsync();
 Console.WriteLine($"Passed {checks} notification checks.");
 
 sealed class RecordingFirestoreClient : FirestoreClient

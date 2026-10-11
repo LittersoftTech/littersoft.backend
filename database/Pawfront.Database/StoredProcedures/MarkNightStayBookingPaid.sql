@@ -1,9 +1,9 @@
 -- Records that the parent has paid the provider for a multi-night stay: flips
--- COMPLETED -> PAID, writes an audit row, and inserts the payment ledger row in
+-- COMPLETED or PAYMENT_NOT_RECEIVED -> PAID, writes an audit row, and inserts the payment ledger row in
 -- [Booking].[BookingPayments] (BookingType = 'NightStay'). Mirror of
 -- [Booking].[MarkBookingPaid]. Night-stay bookings are always App bookings, so
 -- there is no Custom check. Provider-only, paid at most once.
--- THROWs: 51280 not found, 51281 not the provider, 51282 not COMPLETED,
+-- THROWs: 51280 not found, 51281 not the provider, 51282 not COMPLETED or PAYMENT_NOT_RECEIVED,
 -- 51283 already paid.
 -- Also records the provider's "Cash Received" geolocation — see
 -- [Booking].[MarkBookingPaid]. The parent's own fix arrives separately, via
@@ -51,7 +51,7 @@ BEGIN
         THROW 51283, 'Booking is already marked paid.', 1;
     END
 
-    IF @CurrentStatus <> N'COMPLETED'
+    IF @CurrentStatus NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED')
     BEGIN
         THROW 51282, 'Booking must be completed before it can be marked paid.', 1;
     END

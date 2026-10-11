@@ -30,9 +30,9 @@
 -- is public: anyone signed in can see one, so anyone signed in can report one —
 -- there is no attendance check.
 --
--- ONE open ticket per SUBJECT, not per person:
---   booking      -> per (BookingType, BookingId), either direction
---   conversation -> per ConversationId, either direction
+-- ONE open ticket per SUBJECT per RAISER:
+--   booking      -> per (BookingType, BookingId, RaisedByType)
+--   conversation -> per (ConversationId, RaisedByType)
 --   event        -> per (EventId, REPORTER). An event has many attendees and each
 --                   of them reporting it is a separate account; what is refused
 --                   is the same person reporting it twice.
@@ -110,6 +110,13 @@ BEGIN
     BEGIN
         SET @Reason = NULL;
     END
+
+    IF @TicketType IN (N'BookingIncident', N'ChatIncident')
+       AND (@Reason IS NULL OR @Reason NOT IN
+            (N'Offensive or threatening messages', N'Unwanted advertising',
+             N'Fraud or fake profile', N'Asking to book outside Pawfront',
+             N'Concern for an animal''s welfare', N'Something else'))
+        THROW 51343, 'Select one of the six Report a User reasons.', 1;
 
     BEGIN TRANSACTION;
 
@@ -214,6 +221,7 @@ BEGIN
         FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BookingId] = @BookingId
           AND [BookingType] = @BookingType
+          AND [RaisedByType] = @RaisedByType
           AND [Status] <> N'CLOSED';
     END
     ELSE IF @TicketType = N'ChatIncident'
@@ -221,6 +229,7 @@ BEGIN
         SELECT @ExistingTicketId = [TicketId]
         FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [ConversationId] = @ConversationId
+          AND [RaisedByType] = @RaisedByType
           AND [Status] <> N'CLOSED';
     END
     ELSE IF @TicketType = N'EventIncident'

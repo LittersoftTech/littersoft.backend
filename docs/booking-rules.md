@@ -31,7 +31,7 @@ A parent browsing at 11:00 sees 13:00 as the first bookable slot. Measured again
 and the same test hides today's already-elapsed slots.
 *Enforced:* Application — the shared slot service (so both hosts' slot endpoints,
 the `/providers` window checker and all five `/providers/search/*` cards inherit
-it) plus every App-booking create path.
+it for hourly services) plus every App-booking create path.
 *Violation:* 409 `BookingLeadTimeTooShort`.
 *Exempt:* Custom walk-ins (BR-09).
 *See also:* BR-53 applies the same cutoff to an already-created booking nobody
@@ -58,7 +58,11 @@ not a stayed night.** At least one night, at most 30.
 
 **BR-06 — Night-stay availability is per night, not per time window.**
 Capacity, closures and occupancy are evaluated for each stayed night; the weekly
-time grid is deliberately not consulted.
+time grid is deliberately not consulted. Night-stay searches, nightly availability
+and calendars ignore configured pickup/drop-off times and use the date only:
+today and future nights are eligible when open with capacity; past nights are
+unavailable. Booking creation and modification still enforce BR-01 against the
+scheduled drop-off time.
 *Enforced:* Application + SQL.
 
 ---
@@ -248,9 +252,13 @@ the slot.
 *Violation:* 409 `BookingNotStartable`.
 
 **BR-37 — A no-show may only be reported once the counterparty is actually late.**
-Single-day: **30+ minutes** after `serviceStart`. Night stay: **2+ hours** — a
+Single-day: from the booking's scheduled end. Night stay: **2+ hours** after check-in — a
 boarding hand-over is a slower affair, so a 09:00 check-in is reportable from 11:00.
 *Enforced:* SQL. *Violation:* 409 `NoShowTooEarly`.
+
+For a night-stay offering with `hasFixedTimes: false`, the provider sends null
+`dropOffTime` and `pickUpTime`. The parent supplies both times when booking;
+they are snapshotted onto the stay and govern its lead time and no-show window.
 
 **BR-38 — An accepted job that is still unstarted at the end of the provider's
 working day settles itself as a no-show, and blame is read from evidence rather
@@ -258,6 +266,12 @@ than guessed.**
 From `START_JOB` → `PARENT_NO_SHOW` (the code was issued, the parent never handed
 it back); from confirmed-equivalent → `PROVIDER_NO_SHOW` (Start was never tapped).
 Both terminal, both free the slot.
+For a single-day booking already `IN_PROGRESS` when that cutoff passes, the job
+becomes `JOB_INCOMPLETE`. The provider can still use the complete endpoint to
+resolve it, and payout remains pending until then. A provider choosing “Wait for Customer”
+must call `POST /providers/{providerId}/bookings/{bookingId}/wait-for-customer`
+(the same transition as `/start-job`), which persists `START_JOB` and makes the
+automatic outcome `PARENT_NO_SHOW` rather than `PROVIDER_NO_SHOW`.
 *Enforced:* **Job** — sproc `Booking.SettleUnstartedJobsAsNoShow`, called by
 `BookingSweepFunction` (`Pawfront.Functions`) every 5 minutes, after BR-30's
 sproc in the same tick. Reporting manually (BR-35) stays optional.
@@ -290,7 +304,7 @@ The retired in-database sweep needed only the booking row.
 
 *Consequence:* a job now settles later than it used to — up to the provider's
 closing time rather than the booking's end time. A manual report (BR-35, legal
-from 30 minutes after the start) therefore remains the fast path, and the Job is
+from the scheduled end) therefore remains the fast path, and the Job is
 the backstop for when neither party bothers.
 
 ---

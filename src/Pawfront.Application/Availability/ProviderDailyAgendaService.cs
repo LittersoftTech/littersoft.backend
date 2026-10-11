@@ -127,13 +127,9 @@ internal sealed class ProviderDailyAgendaService(
         bool isClosedForDay,
         Guid? callerPetParentId)
     {
-        // A stay begins at drop-off on its check-in day, so the whole-day block is
-        // bookable only if that instant clears the lead time. Expressed as a
-        // day-wide "bookable from" so the shared Label stays uniform: DayStart
-        // when the stay is far enough ahead, null when it isn't.
-        var staysFarEnoughAhead = !BookingLeadTime.IsTooSoon(
-            date, offering.DropOffTime ?? TimeOnly.MinValue, DateTimeOffset.UtcNow);
-        TimeOnly? bookableFrom = staysFarEnoughAhead ? DayStart : null;
+        // Match date-based night availability: handover times do not hide today's
+        // night on the parent's calendar. Past dates remain unavailable.
+        TimeOnly? bookableFrom = date >= DateOnly.FromDateTime(DateTime.UtcNow) ? DayStart : null;
 
         var entries = isClosedForDay
             ? [Blocked((DayStart, DayEnd), AgendaEntryType.Closed, AgendaStatuses.Closed)]

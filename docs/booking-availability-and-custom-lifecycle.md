@@ -20,6 +20,18 @@ Failures return HTTP 400 using the existing response envelope:
 Declining a modification does not require its proposed dates to remain bookable.
 Capacity remains enforced by the existing transactional SQL procedures.
 
+## Night Stay searches and calendars
+
+`GET /providers/search/night-stay` matches the requested dates and ignores the
+provider's configured pickup and drop-off times. The nightly availability and
+agenda reads use the same date-only cutoff: today and future dates can appear
+as available; past dates remain unavailable. Search still checks open weekdays
+and service time off through the pickup date, and capacity for each stayed
+night in `[startDate, pickupDate)`.
+
+Creating or modifying a booking continues to validate its scheduled handover
+time and the existing two-hour lead time.
+
 ## Private bookings
 
 Use the existing provider route:
