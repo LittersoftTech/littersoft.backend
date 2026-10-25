@@ -209,7 +209,8 @@ internal sealed class SupportTicketService(
         // Both classifiers are optional and free-form: blank collapses to null so a read
         // never has to tell an empty picker value apart from an unset one. Their VALUES
         // are deliberately unvalidated — the vocabulary belongs to the app's picker, and
-        // pinning it here would make adding a category a backend release.
+        // pinning it here would make adding a category a backend release. Chat Report User
+        // reasons are the exception: that screen uses the six canonical choices.
         var category = string.IsNullOrWhiteSpace(command.Category) ? null : command.Category.Trim();
         if (category is { Length: > SupportTicketLimits.MaxCategoryLength })
         {
@@ -226,7 +227,7 @@ internal sealed class SupportTicketService(
                 nameof(command));
         }
 
-        if (SupportTicketTypes.HasCounterparty(command.TicketType))
+        if (command.TicketType == SupportTicketTypes.ChatIncident)
         {
             if (!ReportUserReasons.IsKnown(reason))
                 throw new ArgumentException("Select one of the six Report a User reasons.", nameof(command));
@@ -234,6 +235,9 @@ internal sealed class SupportTicketService(
             if (reason == ReportUserReasons.SomethingElse && string.IsNullOrEmpty(comment))
                 throw new ArgumentException("A description is required for Something else.", nameof(command));
         }
+
+        if (command.TicketType == SupportTicketTypes.BookingIncident && string.IsNullOrEmpty(comment))
+            throw new ArgumentException("A description is required for a booking ticket.", nameof(command));
 
         if (string.IsNullOrEmpty(comment))
         {

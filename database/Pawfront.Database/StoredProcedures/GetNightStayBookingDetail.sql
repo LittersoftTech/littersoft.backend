@@ -98,7 +98,21 @@ BEGIN
                          FROM [Booking].[NightStayBookingStatusHistory] AS mh
                          WHERE mh.[NightStayBookingId] = b.[NightStayBookingId]
                            AND mh.[ToStatus] IN (N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION'))
-                     THEN 1 ELSE 0 END AS BIT) AS [IsModificationDone]
+                     THEN 1 ELSE 0 END AS BIT) AS [IsModificationDone],
+           b.[CashNotReceivedAtUtc], b.[CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = b.[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN b.[Status] = N'CREATED' THEN
+               [Booking].[NightStayRequestExpiresAtUtc](b.[CreatedAtUtc], b.[CheckInDate])
+           WHEN b.[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], b.[CheckInDate])
+                FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = b.[NightStayBookingId])
+           END AS [RequestExpiresAtUtc],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh
+               WHERE mh.[NightStayBookingId] = b.[NightStayBookingId] AND mh.[ToStatus] = N'PROVIDER_ACCEPTED_MODIFICATION')
+               THEN 1 ELSE 0 END AS BIT) AS [IsParentModificationDone],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh
+               WHERE mh.[NightStayBookingId] = b.[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION')
+               THEN 1 ELSE 0 END AS BIT) AS [IsProviderModificationDone]
     FROM [Booking].[NightStayBookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]

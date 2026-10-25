@@ -23,8 +23,33 @@ public sealed class FirestoreNotificationWriter(FirebaseAppRegistry registry) : 
             throw new InvalidOperationException("Notification payload has no type.");
 
         var db = await registry.GetFirestoreAsync(message.Audience, cancellationToken);
-        await CreateAsync(db, message, id, type, cancellationToken);
+        if (!message.Data.TryGetValue("recipientId", out var recipient) || !Guid.TryParse(recipient, out var accountId))
+            throw new InvalidOperationException("Notification recipient has no account ID.");
+        await CreateForActiveAccountAsync(db, message, id, type, accountId, cancellationToken);
     }
+
+    internal static async Task CreateForActiveAccountAsync(FirestoreDb db, PushMessage message, string id,
+        string type, Guid accountId, CancellationToken ct)
+    {
+        var user = db.Collection("users").Document(message.FirebaseUserId);
+        var marker = user.Collection("deletedAccounts").Document(accountId.ToString());
+        try
+        {
+            await db.RunTransactionAsync(async transaction =>
+            {
+                if ((await transaction.GetSnapshotAsync(marker, ct)).Exists) return;
+                transaction.Create(user.Collection("notifications").Document(id), Fields(message, type));
+            }, cancellationToken: ct);
+        }
+        catch (RpcException exception) when (exception.StatusCode == StatusCode.AlreadyExists) { }
+    }
+
+    private static Dictionary<string, object> Fields(PushMessage message, string type) => new()
+    {
+        ["title"] = message.Title, ["body"] = message.Body, ["type"] = type,
+        ["data"] = new Dictionary<string, string>(message.Data),
+        ["createdAt"] = FieldValue.ServerTimestamp, ["isRead"] = false
+    };
 
     internal static async Task CreateAsync(FirestoreDb db, PushMessage message, string id,
         string type, CancellationToken cancellationToken)

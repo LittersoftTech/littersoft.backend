@@ -54,7 +54,8 @@
 --
 -- THROWs: 51340 booking not found, 51341 caller is not a party to the subject,
 -- 51342 conversation not found, 51343 invalid request (defensive), 51348 Custom
--- walk-in (no pet parent to report or be reported), 51355 event not found.
+-- walk-in (no pet parent to report or be reported), 51355 event not found,
+-- 51357 job has not ended, 51358 booking ticket window expired.
 CREATE OR ALTER PROCEDURE [Support].[CreateTicket]
     @TicketType NVARCHAR(24),
     @RaisedByType NVARCHAR(16),
@@ -111,7 +112,7 @@ BEGIN
         SET @Reason = NULL;
     END
 
-    IF @TicketType IN (N'BookingIncident', N'ChatIncident')
+    IF @TicketType = N'ChatIncident'
        AND (@Reason IS NULL OR @Reason NOT IN
             (N'Offensive or threatening messages', N'Unwanted advertising',
              N'Fraud or fake profile', N'Asking to book outside Pawfront',
@@ -122,17 +123,19 @@ BEGIN
 
     IF @TicketType = N'BookingIncident'
     BEGIN
-        -- No UPDLOCK on the booking: nothing about its status affects whether it
-        -- can be reported, so this read cannot go stale in a way that matters.
-        -- Any booking either party is on is reportable, at any point in its life —
-        -- an incident is a statement about what happened, not a transition.
+        -- Serialize with payment confirmation, which locks this same booking
+        -- before inserting its payment ledger row.
+        DECLARE @BookedEndUtc DATETIME2(7), @ActualEndUtc DATETIME2(7), @PaidAtUtc DATETIME2(7);
+        DECLARE @BookingStatus NVARCHAR(48);
         IF @BookingType = N'SingleDay'
         BEGIN
             SELECT @ProviderId = [ProviderId],
                    @PetParentId = [PetParentId],
                    @PetId = [PetId],
-                   @Found = 1
-            FROM [Booking].[Bookings]
+                   @Found = 1, @BookingStatus = [Status],
+                   @BookedEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),[EndTime]),CAST([BookingDate] AS DATETIME2(7))),
+                   @ActualEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),[ActualEndTime]),CAST([BookingDate] AS DATETIME2(7)))
+            FROM [Booking].[Bookings] WITH (UPDLOCK,HOLDLOCK)
             WHERE [BookingId] = @BookingId;
         END
         ELSE
@@ -140,8 +143,10 @@ BEGIN
             SELECT @ProviderId = [ProviderId],
                    @PetParentId = [PetParentId],
                    @PetId = [PetId],
-                   @Found = 1
-            FROM [Booking].[NightStayBookings]
+                   @Found = 1, @BookingStatus = [Status],
+                   @BookedEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),COALESCE([PickUpTime], CAST('00:00' AS TIME))),CAST([CheckOutDate] AS DATETIME2(7))),
+                   @ActualEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),COALESCE([PickUpTime], CAST('00:00' AS TIME))),CAST([ActualCheckOutDate] AS DATETIME2(7)))
+            FROM [Booking].[NightStayBookings] WITH (UPDLOCK,HOLDLOCK)
             WHERE [NightStayBookingId] = @BookingId;
         END
 
@@ -204,6 +209,32 @@ BEGIN
         OR (@RaisedByType = N'PetParent' AND @PetParentId <> @ActorId)
     BEGIN
         THROW 51341, 'You are not a party to this.', 1;
+    END
+
+    IF @TicketType = N'BookingIncident'
+    BEGIN
+        SELECT @PaidAtUtc = [PaidAtUtc]
+        FROM [Booking].[BookingPayments]
+        WHERE [BookingType] = @BookingType AND [BookingId] = @BookingId;
+
+        SET @Now = SYSUTCDATETIME();
+
+        DECLARE @CompletedAtUtc DATETIME2(7);
+        IF @BookingType = N'SingleDay'
+            SELECT @CompletedAtUtc = MIN([ChangedAtUtc]) FROM [Booking].[BookingStatusHistory]
+            WHERE [BookingId] = @BookingId AND [ToStatus] = N'COMPLETED';
+        ELSE
+            SELECT @CompletedAtUtc = MIN([ChangedAtUtc]) FROM [Booking].[NightStayBookingStatusHistory]
+            WHERE [NightStayBookingId] = @BookingId AND [ToStatus] = N'COMPLETED';
+
+        -- Completion/payment evidence permits reporting an early-finished job
+        -- before its booked end. Unpaid jobs retain the booked-end fallback.
+        IF (@PaidAtUtc IS NULL AND @CompletedAtUtc IS NULL AND @ActualEndUtc IS NULL
+            AND @BookingStatus IN (N'IN_PROGRESS',N'JOB_STARTED',N'ENDING'))
+           OR @Now < COALESCE(@CompletedAtUtc,@ActualEndUtc,@PaidAtUtc,@BookedEndUtc)
+            THROW 51357, 'A booking ticket can only be raised after the job ends.', 1;
+        IF @Now > DATEADD(HOUR,24,COALESCE(@PaidAtUtc,@BookedEndUtc))
+            THROW 51358, 'The booking ticket window has expired.', 1;
     END
 
     -- Scoped to the SUBJECT, not to the pair: this is what lets a parent report
@@ -277,6 +308,17 @@ BEGIN
              @Category, @Reason, N'OPENED', @Now, @Now);
 
         SELECT @TicketId = [TicketId] FROM @Inserted;
+    END
+
+    IF @TicketType = N'BookingIncident' AND @RaisedByType = N'Provider'
+       AND (@Category = N'Cash Not Received' OR @Reason = N'Cash Not Received')
+    BEGIN
+        IF @BookingType = N'SingleDay'
+            UPDATE [Booking].[Bookings] SET [CashNotReceivedAtUtc] = SYSUTCDATETIME(), [UpdatedAtUtc] = SYSUTCDATETIME()
+            WHERE [BookingId] = @BookingId AND [Status] <> N'PAID';
+        ELSE
+            UPDATE [Booking].[NightStayBookings] SET [CashNotReceivedAtUtc] = SYSUTCDATETIME(), [UpdatedAtUtc] = SYSUTCDATETIME()
+            WHERE [NightStayBookingId] = @BookingId AND [Status] <> N'PAID';
     END
 
     SELECT @Outcome AS [Outcome],

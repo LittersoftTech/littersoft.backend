@@ -39,6 +39,18 @@ public static class BookingAcceptanceDeadline
         return pendingExpiry <= leadTimeExpiry ? pendingExpiry : leadTimeExpiry;
     }
 
+    public static DateTimeOffset ComputeModification(DateTimeOffset requestedAtUtc,
+        DateTimeOffset originalStartUtc, DateTimeOffset proposedStartUtc)
+        => Compute(requestedAtUtc, originalStartUtc <= proposedStartUtc ? originalStartUtc : proposedStartUtc);
+
+    /// <summary>Night stays expire after 24 hours or at the end of the original check-in day.</summary>
+    public static DateTimeOffset ComputeNightStay(DateTimeOffset createdAtUtc, DateOnly checkInDate)
+    {
+        var pendingExpiry = createdAtUtc + PendingWindow;
+        var dateExpiry = new DateTimeOffset(checkInDate.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        return pendingExpiry <= dateExpiry ? pendingExpiry : dateExpiry;
+    }
+
     /// <inheritdoc cref="Compute(DateTimeOffset, DateTimeOffset)"/>
     /// <remarks>
     /// Overload taking the service date + start time directly — the same

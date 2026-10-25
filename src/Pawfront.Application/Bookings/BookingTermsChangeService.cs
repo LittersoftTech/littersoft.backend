@@ -403,8 +403,8 @@ internal sealed class BookingTermsChangeService(
     private static string FormatPolicy(int? hours)
         => hours is null ? "no restriction" : $"{hours} hours";
 
-    private static string FormatTime(TimeOnly value)
-        => value.ToString("HH:mm", CultureInfo.InvariantCulture);
+    private static string FormatTime(TimeOnly? value)
+        => value?.ToString("HH:mm", CultureInfo.InvariantCulture) ?? "not set";
 
     private static string FormatHours(decimal hours)
         => hours == 1m

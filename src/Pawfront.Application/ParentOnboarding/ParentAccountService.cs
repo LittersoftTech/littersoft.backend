@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Pawfront.Application.Storage;
 using Pawfront.Contracts.ParentOnboarding;
+using Pawfront.Application.Notifications;
 
 namespace Pawfront.Application.ParentOnboarding;
 
@@ -26,13 +27,15 @@ namespace Pawfront.Application.ParentOnboarding;
 internal sealed class ParentAccountService(
     IParentOnboardingService onboardingService,
     IPawfrontBlobStorage blobStorage,
-    ILogger<ParentAccountService> logger) : IParentAccountService
+    ILogger<ParentAccountService> logger,
+    IAccountNotificationCleanup notificationCleanup) : IParentAccountService
 {
     public async Task<DeletePetParentAccountResponse> DeleteAsync(
         Guid petParentId,
         CancellationToken cancellationToken)
     {
         var result = await onboardingService.DeletePetParentAccountAsync(petParentId, cancellationToken);
+        await notificationCleanup.TryCleanupAsync(NotificationAudience.PetParent, petParentId, cancellationToken);
 
         foreach (var blobUrl in result.BlobUrls)
         {

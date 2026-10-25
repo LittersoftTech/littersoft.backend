@@ -4,7 +4,8 @@
 -- signal rather than silently incrementing nothing.
 CREATE OR ALTER PROCEDURE [Event].[IncrementEventCounter]
     @EventId UNIQUEIDENTIFIER,
-    @CounterType NVARCHAR(16)
+    @CounterType NVARCHAR(16),
+    @ViewerAccountId UNIQUEIDENTIFIER=NULL, @ViewerType NVARCHAR(16)=NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -19,10 +20,24 @@ BEGIN
 
     IF @CounterType = N'View'
     BEGIN
-        UPDATE [Event].[Events]
-        SET [ViewCount] = [ViewCount] + 1
-        WHERE [EventId] = @EventId;
-        SET @RowsAffected = @@ROWCOUNT;
+        IF @ViewerAccountId IS NULL OR @ViewerType IS NULL OR @ViewerType NOT IN (N'PetParent',N'Provider')
+            THROW 51097, 'An authenticated account profile is required to record a view.', 1;
+        BEGIN TRANSACTION;
+        -- Lock the event first so concurrent first views insert and increment once.
+        DECLARE @HostParentId UNIQUEIDENTIFIER,@HostProviderId UNIQUEIDENTIFIER;
+        SELECT @HostParentId=PetParentId,@HostProviderId=ProviderId
+        FROM [Event].[Events] WITH (UPDLOCK,HOLDLOCK) WHERE EventId=@EventId;
+        SET @RowsAffected=@@ROWCOUNT;
+        IF @RowsAffected=1
+           AND NOT ((@ViewerType=N'PetParent' AND ISNULL(@HostParentId,'00000000-0000-0000-0000-000000000000')=@ViewerAccountId)
+                 OR (@ViewerType=N'Provider' AND ISNULL(@HostProviderId,'00000000-0000-0000-0000-000000000000')=@ViewerAccountId))
+           AND NOT EXISTS (SELECT 1 FROM [Event].[EventViews]
+                           WHERE EventId=@EventId AND ViewerType=@ViewerType AND ViewerAccountId=@ViewerAccountId)
+        BEGIN
+            INSERT [Event].[EventViews](EventId,ViewerType,ViewerAccountId) VALUES (@EventId,@ViewerType,@ViewerAccountId);
+            UPDATE [Event].[Events] SET ViewCount=ViewCount+1 WHERE EventId=@EventId;
+        END
+        COMMIT TRANSACTION;
     END
     ELSE IF @CounterType = N'Share'
     BEGIN

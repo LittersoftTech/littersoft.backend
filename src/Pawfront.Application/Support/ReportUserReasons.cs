@@ -1,6 +1,6 @@
 namespace Pawfront.Application.Support;
 
-/// <summary>Accepted reason values for booking and chat reports about a user.</summary>
+/// <summary>Accepted reason values for chat reports about a user.</summary>
 public static class ReportUserReasons
 {
     public const string OffensiveMessages = "Offensive or threatening messages";

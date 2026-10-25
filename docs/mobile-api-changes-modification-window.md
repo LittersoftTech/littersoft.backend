@@ -196,3 +196,12 @@ and work in **UTC**.
    minutes of the cutoff the booking flips to `CONFIRMED` on its own.
 5. **Provider side unaffected:** as the provider, open a modification on a booking
    starting in under 2 hours → still succeeds.
+
+
+### Earlier proposed starts (2026-10-18)
+
+For single-day bookings, modification expiry is the earliest of request creation + 24 hours, original start - 2 hours, and proposed start - 2 hours. Both requester directions use this rule for notification `reviewByUtc`, response rejection, and the expiry sweep. Expiry preserves the original schedule.
+
+The pending-modification API returns `createdAtUtc` and the proposed schedule, with no `expiresAt` field currently. Clients deriving a countdown must include both schedules; notification payloads carry `reviewByUtc`.
+
+New service booking pushes include scheduled `startTime` in the body. The sent timestamp remains metadata. Schedules retain the existing Swiss wall-clock convention: 18:00 IST corresponds to 15:30 in Swiss winter and 16:30 in summer.

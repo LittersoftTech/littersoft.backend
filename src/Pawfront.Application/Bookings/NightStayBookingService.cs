@@ -79,16 +79,9 @@ internal sealed class NightStayBookingService(
 
         var dropOffTime = nightStay.HasFixedTimes ? nightStay.DropOffTime : command.DropOffTime;
         var pickUpTime = nightStay.HasFixedTimes ? nightStay.PickUpTime : command.PickUpTime;
-        if (dropOffTime is null || pickUpTime is null)
-        {
-            throw new ArgumentException("Drop-off and pick-up times are required to book a night stay without fixed provider times.");
-        }
 
-        // 3b. The stay must begin at least the minimum lead time from now, measured
-        // from drop-off on the check-in day — the same service-start instant the
-        // single-day rule uses, and the one the night-availability surface gates on.
-        BookingLeadTime.EnsureFarEnoughAhead(
-            command.CheckInDate, dropOffTime.Value, DateTimeOffset.UtcNow);
+        // Night stays use calendar dates, matching search and availability.
+        EnsureCheckInDate(command.CheckInDate);
 
         await ProviderDateAvailability.EnsureOpenAsync(
             availabilityService, closureReader, command.ProviderId, command.ServiceId,
@@ -114,14 +107,20 @@ internal sealed class NightStayBookingService(
             service.SubCategory,
             command.CheckInDate,
             command.CheckOutDate,
-            dropOffTime.Value,
-            pickUpTime.Value,
+            dropOffTime,
+            pickUpTime,
             TrimOrNull(command.JobNotes, maxLength: 2000, nameof(command.JobNotes)),
             locationType,
             nightStay.PricePerHour,
             providerAddress,
             offering.MaxPetsAtOneTime,
             cancellationToken);
+    }
+
+    private static void EnsureCheckInDate(DateOnly date)
+    {
+        if (date < DateOnly.FromDateTime(DateTime.UtcNow))
+            throw new InvalidNightStayDatesException("Check-in date cannot be before today.");
     }
 
     private static string? TrimOrNull(string? value, int maxLength, string field)
@@ -276,7 +275,7 @@ internal sealed class NightStayBookingService(
         var fix = CapturedLocation.Require(command.Location, "start a job");
         return WithDisputeAsync(sqlStore.StartJobAsync(
             command.BookingId, command.ProviderId, BookingService.GenerateOtpCode(), StartOtpTtlMinutes,
-            fix, cancellationToken), cancellationToken);
+            fix, cancellationToken, command.WaitForCustomer), cancellationToken);
     }
 
     public Task<NightStayBookingResult> VerifyStartOtpAsync(
@@ -342,7 +341,7 @@ internal sealed class NightStayBookingService(
         var booking = await sqlStore.GetAsync(command.NightStayBookingId, cancellationToken)
             ?? throw new NightStayBookingNotFoundException(command.NightStayBookingId);
 
-        BookingLeadTime.EnsureFarEnoughAhead(command.CheckInDate, booking.DropOffTime, DateTimeOffset.UtcNow);
+        EnsureCheckInDate(command.CheckInDate);
         await ProviderDateAvailability.EnsureOpenAsync(
             availabilityService, closureReader, booking.ProviderId, booking.ServiceId,
             command.CheckInDate, command.CheckOutDate, cancellationToken);
@@ -374,6 +373,8 @@ internal sealed class NightStayBookingService(
         RespondBookingModificationCommand command,
         CancellationToken cancellationToken)
     {
+        if (command.CancelBooking && (command.Accept || command.Actor != BookingStatusActor.Parent))
+            throw new ArgumentException("Only a parent declining a provider modification can cancel the booking.");
         var capacity = 0;
         if (command.Accept)
         {
@@ -381,8 +382,7 @@ internal sealed class NightStayBookingService(
                 ?? throw new NightStayBookingNotFoundException(command.BookingId);
             var pending = await sqlStore.GetPendingModificationAsync(command.BookingId, cancellationToken)
                 ?? throw new NoPendingModificationException(command.BookingId);
-            BookingLeadTime.EnsureFarEnoughAhead(
-                pending.ProposedCheckInDate, booking.DropOffTime, DateTimeOffset.UtcNow);
+            EnsureCheckInDate(pending.ProposedCheckInDate);
             await ProviderDateAvailability.EnsureOpenAsync(
                 availabilityService, closureReader, booking.ProviderId, booking.ServiceId,
                 pending.ProposedCheckInDate, pending.ProposedCheckOutDate, cancellationToken);
@@ -393,7 +393,7 @@ internal sealed class NightStayBookingService(
         }
 
         return await WithDisputeAsync(sqlStore.RespondModificationAsync(
-            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken), cancellationToken);
+            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken, command.CancelBooking), cancellationToken);
     }
 
     public Task<NightStayBookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)

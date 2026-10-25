@@ -54,10 +54,9 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
         string? parentName,
         CancellationToken cancellationToken)
     {
-        // A stay's service begins at drop-off on the check-in day — the same
-        // instant BR-53 and the lead-time rule measure against.
-        var serviceStartUtc = BookingLeadTime.ServiceStartUtc(booking.CheckInDate, booking.DropOffTime);
-        var checkOutUtc = BookingLeadTime.ServiceStartUtc(booking.CheckOutDate, booking.PickUpTime);
+        // Handover times are display information; acceptance expires by date.
+        var serviceStartUtc = BookingLeadTime.ServiceStartUtc(booking.CheckInDate, booking.DropOffTime ?? TimeOnly.MinValue);
+        var checkOutUtc = BookingLeadTime.ServiceStartUtc(booking.CheckOutDate, booking.PickUpTime ?? TimeOnly.MinValue);
 
         var data = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -75,7 +74,7 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
         AddAcceptByDeadline(
             data,
             booking.CreatedAtUtc,
-            BookingAcceptanceDeadline.Compute(booking.CreatedAtUtc, serviceStartUtc));
+            BookingAcceptanceDeadline.ComputeNightStay(booking.CreatedAtUtc, booking.CheckInDate));
 
         return publisher.PublishAsync(
             new NotificationRequest(

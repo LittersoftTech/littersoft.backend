@@ -46,6 +46,9 @@ erDiagram
     PROVIDERS                ||--o| PROVIDER_CANCELLATION_POLICIES : "configures"
     PROVIDERS                ||--o{ EVENTS                       : "creates"
     EVENTS                   ||--o{ EVENT_AMENITIES              : "lists"
+    EVENTS                   ||--o{ EVENT_VIEWS                  : "unique viewers"
+    EVENTS                   ||--o{ EVENT_WAITLIST               : "seat reminders"
+    PET_PARENTS              ||--o{ EVENT_WAITLIST               : "registers"
     EVENTS                   ||--o{ EVENT_BOOKINGS               : "sells tickets for"
     EVENT_BOOKINGS           ||--o{ EVENT_BOOKING_TICKETS        : "issues (1..N attendees)"
     EVENTS                   ||--o{ EVENT_BOOKING_TICKETS        : "denormalised"
@@ -55,6 +58,19 @@ erDiagram
     PET_PARENTS              ||--o{ PETS                         : "has"
     PETS                     ||--o{ PET_PHOTOS                   : "has (ON DELETE CASCADE)"
     PETS                     ||--o{ PET_NEXT_CONSULTATIONS       : "has (ON DELETE CASCADE)"
+
+    EVENT_VIEWS {
+        UNIQUEIDENTIFIER EventId PK,FK
+        NVARCHAR ViewerType PK
+        UNIQUEIDENTIFIER ViewerAccountId PK
+        DATETIME2 ViewedAtUtc
+    }
+    EVENT_WAITLIST {
+        UNIQUEIDENTIFIER EventId PK,FK
+        UNIQUEIDENTIFIER PetParentId PK,FK
+        DATETIME2 JoinedAtUtc
+        DATETIME2 NotifiedAtUtc "nullable until notified"
+    }
 
     PROVIDER_AUTH_IDENTITIES {
         UNIQUEIDENTIFIER ProviderAuthIdentityId PK
@@ -666,8 +682,11 @@ the event under `UPDLOCK + HOLDLOCK`.
 - `PaymentReference` — external gateway reference, populated on callback.
 - `TotalAmount` — snapshot of `price × TicketCount` at booking time; 0 for
   free events.
-- `Status` — `Confirmed` or `Cancelled`. `Cancelled` requires
-  `CancelledAtUtc` (CHECK). Cancellation/refund flow is not built yet.
+- `Status` — `Confirmed`, `Attended`, `NoShow`, `Cancelled`,
+  `CancelledByParent`, `EventCancelled`, or `AccountDeleted`. Only
+  `Confirmed` and `Attended` reserve seats. Account deletion releases upcoming
+  bookings without recording a reliability mark.
+
 
 ### `Event.EventBookingTickets`
 One row per attendee / printed ticket. The GET endpoint returns one entry
@@ -678,6 +697,20 @@ per row here — if 4 tickets were bought, 4 rows come back.
 - `EventId` — denormalised so per-event listings don't need a join back.
 - `TicketNumber` — 1..N within the booking; UNIQUE with `BookingId`.
 - `AttendeeName` — free text, not validated against any user table.
+
+### `Event.Waitlist`
+Primary key `(EventId, PetParentId)`; both columns reference their event/parent.
+`NotifiedAtUtc` is nullable until a seat reminder is atomically enqueued. Each
+registration receives one reminder, and stays registered until booking, leaving,
+host cancellation, account deletion, or event start. The lifecycle sweep deletes
+started-event rows; reads exclude started events immediately.
+
+### `Event.EventViews`
+Primary key `(EventId, ViewerType, ViewerAccountId)` stores the first view of an
+authenticated parent or provider account. `EventId` references `Event.Events`.
+The account is polymorphic, so its identity has no parent-only foreign key.
+`ViewedAtUtc` records the first view. The insert and counter increment share a
+transaction; host views do neither. Existing aggregate counts are preserved.
 
 ## Booking schema
 

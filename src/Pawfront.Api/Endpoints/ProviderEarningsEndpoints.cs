@@ -297,5 +297,6 @@ internal static class ProviderEarningsEndpoints
             row.PaymentMethod,
             row.Breed,
             row.PetGender,
-            row.CustomerPhotoUrl);
+            row.CustomerPhotoUrl,
+            row.CashNotReceivedAtUtc);
 }

@@ -33,7 +33,11 @@ public sealed record ChatCounterpartyResponse(
     Guid ParticipantId,
     string? Name,
     string? PhotoUrl,
-    string? BusinessName = null);
+    string? BusinessName = null) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => ParticipantType == "PetParent" ? ParticipantId : null;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <param name="LastSequence">
 /// The newest message's sequence. Compare with <paramref name="LastReadSequence"/>

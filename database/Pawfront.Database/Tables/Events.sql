@@ -4,7 +4,7 @@ CREATE TABLE [Event].[Events]
     [CancelledWithBookings] BIT NOT NULL CONSTRAINT DF_Events_CancelledBooked DEFAULT 0,
     [RemovedByHost] BIT NOT NULL CONSTRAINT DF_Events_Removed DEFAULT 0,
     [EventStatus] NVARCHAR(16) NOT NULL CONSTRAINT DF_Events_Status DEFAULT N'Active',
-    [EventStatus] NVARCHAR(16) NOT NULL CONSTRAINT DF_Events_Status DEFAULT N'Active',
+    [CancelledAtUtc] DATETIME2(7) NULL,
     [EventId] UNIQUEIDENTIFIER NOT NULL
         CONSTRAINT [DF_Events_EventId] DEFAULT NEWSEQUENTIALID(),
     -- Either ProviderId or PetParentId is set on each row; the CHECK below

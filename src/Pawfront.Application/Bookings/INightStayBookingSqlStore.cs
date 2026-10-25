@@ -21,8 +21,8 @@ public interface INightStayBookingSqlStore
         string subCategory,
         DateOnly checkInDate,
         DateOnly checkOutDate,
-        TimeOnly dropOffTime,
-        TimeOnly pickUpTime,
+        TimeOnly? dropOffTime,
+        TimeOnly? pickUpTime,
         string? jobNotes,
         string? locationType,
         // Snapshot of the offering's per-night rate at booking time (price-lock).
@@ -106,7 +106,7 @@ public interface INightStayBookingSqlStore
         string newCode,
         int ttlMinutes,
         CapturedLocation? location,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, bool waitForCustomer = false);
 
     Task<NightStayBookingResult> VerifyStartOtpAsync(
         Guid bookingId,
@@ -159,7 +159,8 @@ public interface INightStayBookingSqlStore
         bool accept,
         int capacity,
         string? note,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool cancelBooking = false);
 
     Task<BookingEvidenceResult> AddEvidenceAsync(
         Guid bookingId,

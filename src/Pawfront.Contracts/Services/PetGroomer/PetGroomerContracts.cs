@@ -25,9 +25,9 @@ public sealed record RegisterFreelanceGroomerRequest(
     decimal Longitude);
 
 public sealed record SaveGroomerShopOfferingRequest(
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     GroomingOfferingRequest Session,
     IReadOnlyCollection<string> AnimalsHandled,
     int MaxPetsAtOneTime,
@@ -35,9 +35,9 @@ public sealed record SaveGroomerShopOfferingRequest(
     string ServiceLocation);
 
 public sealed record SaveFreelanceGroomerOfferingRequest(
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     GroomingOfferingRequest Session,
     IReadOnlyCollection<string> AnimalsHandled,
     int MaxPetsAtOneTime,

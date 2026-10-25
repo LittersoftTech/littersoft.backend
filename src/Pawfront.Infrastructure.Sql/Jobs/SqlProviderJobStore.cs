@@ -125,7 +125,10 @@ internal sealed class SqlProviderJobStore(
                 ? null
                 : new DateTimeOffset(reader.GetDateTime(11), TimeSpan.Zero),
             PaymentMethod: reader.IsDBNull(12) ? null : reader.GetString(12),
-            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(36), TimeSpan.Zero));
+            CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(36), TimeSpan.Zero),
+            CashNotReceivedAtUtc: reader.IsDBNull(37) ? null : new DateTimeOffset(reader.GetDateTime(37), TimeSpan.Zero),
+            ProviderModificationUsed: reader.GetBoolean(38),
+            RequestExpiresAtUtc: reader.IsDBNull(39) ? null : new DateTimeOffset(reader.GetDateTime(39), TimeSpan.Zero));
     }
 
     private static void AddCsv(

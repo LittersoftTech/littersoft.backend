@@ -46,7 +46,8 @@ internal static class PetParentEndpoints
         // group runs. Mismatch → 403; missing profile → 403
         // ParentProfileNotCompleted.
         var group = builder.MapGroup("/pet-parents/{petParentId:guid}").RequireOwnedPetParent();
-        group.MapGet("/profile", GetProfile);
+        group.MapGet("/profile", GetProfile)
+            .Produces<Pawfront.Contracts.Common.ApiResponse<PetParentProfileDetailsResponse>>();
         group.MapPatch("/profile", UpdateProfile);
         group.MapPatch("/mobile", UpdateMobile);
         // "Delete account" — anonymise + permanently disable. The ownership
@@ -753,15 +754,15 @@ internal static class PetParentEndpoints
 
     private static Task<IResult> DeclineServiceBookingModification(
         Guid petParentId, Guid bookingId, RespondBookingModificationRequest? request, IBookingService s, CancellationToken ct)
-        => RespondParentBookingModificationAsync(petParentId, bookingId, accept: false, request?.Note, s, ct);
+        => RespondParentBookingModificationAsync(petParentId, bookingId, accept: false, request?.Note, s, ct, request?.CancelBooking ?? false);
 
     private static async Task<IResult> RespondParentBookingModificationAsync(
-        Guid petParentId, Guid bookingId, bool accept, string? note, IBookingService bookingService, CancellationToken cancellationToken)
+        Guid petParentId, Guid bookingId, bool accept, string? note, IBookingService bookingService, CancellationToken cancellationToken, bool cancelBooking = false)
     {
         try
         {
             var result = await bookingService.RespondModificationAsync(
-                new RespondBookingModificationCommand(bookingId, BookingStatusActor.Parent, petParentId, accept, note),
+                new RespondBookingModificationCommand(bookingId, BookingStatusActor.Parent, petParentId, accept, note, cancelBooking),
                 cancellationToken);
             return ApiResults.Ok(ToBookingResponse(result));
         }
@@ -792,7 +793,7 @@ internal static class PetParentEndpoints
         or InvalidStartOtpException or StartOtpExpiredException or BookingNotModifiableException
         or BookingModificationConflictException or NoPendingModificationException
         or BookingModificationCapacityException or BookingTermsChangedException
-        or BookingModificationWindowClosedException or BookingModificationExpiredException
+        or BookingModificationLimitReachedException or BookingModificationWindowClosedException or BookingModificationExpiredException
         or BookingServiceInvalidException
         or BookingOfferingNotConfiguredException or BookingGroomingItemCodeRequiredException
         or BookingGroomingItemNotOfferedException or BookingGroomingItemInactiveException
@@ -818,6 +819,7 @@ internal static class PetParentEndpoints
         NoPendingModificationException e => ApiResults.Conflict("NoPendingModification", e.Message),
         BookingModificationCapacityException e => ApiResults.Conflict("CapacityExceeded", e.Message),
         BookingTermsChangedException e => ApiResults.Conflict("BookingTermsChanged", e.Message),
+        BookingModificationLimitReachedException e => ApiResults.Conflict("ModificationLimitReached", e.Message),
         BookingModificationWindowClosedException e => ApiResults.Conflict("ModificationWindowClosed", e.Message),
         BookingModificationExpiredException e => ApiResults.Conflict("ModificationRequestExpired", e.Message),
         BookingServiceInvalidException e => ApiResults.BadRequest("InvalidServiceId", e.Message),
@@ -893,6 +895,12 @@ internal static class PetParentEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
+            CashNotReceivedAtUtc: result.CashNotReceivedAtUtc,
+            CancellationReason: result.CancellationReason,
+            PaymentDetails: new BookingPaymentTimestampDetails(result.PaidAtUtc),
+            RequestExpiresAtUtc: result.RequestExpiresAtUtc ?? (result.Status == BookingStatuses.Created
+                ? BookingAcceptanceDeadline.Compute(result.CreatedAtUtc, result.BookingDate, result.StartTime) : null),
+            ProviderModificationUsed: result.ProviderModificationUsed,
             IsDisputeRaised: isDisputeRaised || result.IsDisputeRaised,
             IsBlocked: block.IsBlocked,
             BlockedByMe: block.BlockedByMe);
@@ -980,7 +988,8 @@ internal static class PetParentEndpoints
                 row.PayoutStatus,
                 row.PayoutId,
                 row.PayoutMethod,
-                row.PaidAtUtc),
+                row.PaidAtUtc,
+                row.CashNotReceivedAtUtc),
             new CancellationPolicyDetailsSection(detail.MinimumHoursBeforeCancellation),
             ToLocationSection(detail.Location),
             startOtp,
@@ -994,13 +1003,19 @@ internal static class PetParentEndpoints
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
             TicketRef: myTicket?.TicketRef,
+            CancellationReason: row.CancellationReason,
+            RequestExpiresAtUtc: row.RequestExpiresAtUtc ?? (row.Status == BookingStatuses.Created
+                ? BookingAcceptanceDeadline.Compute(row.CreatedAtUtc, row.BookingDate, row.StartTime) : null),
+            ProviderModificationUsed: row.ProviderModificationUsed,
             IsDisputeRaised: isDisputeRaised,
             IsBlocked: block.IsBlocked,
             BlockedByMe: block.BlockedByMe,
             // Whether this booking has ever been modified, so the screen can label
             // it without walking the status history. An accepted change only --
             // a declined proposal left the terms untouched.
-            IsModificationDone: row.IsModificationDone);
+            IsModificationDone: row.IsModificationDone,
+            IsParentModificationDone: row.IsParentModificationDone,
+            IsProviderModificationDone: row.IsProviderModificationDone);
     }
 
     /// <summary>Builds the detail read's prescription block — null until a vet records one.</summary>
@@ -1030,11 +1045,13 @@ internal static class PetParentEndpoints
     private static async Task<IResult> GetProfile(
         Guid petParentId,
         IParentOnboardingService onboardingService,
+        Pawfront.Application.Reliability.IReliabilityReader reliabilityReader,
         CancellationToken cancellationToken)
     {
         try
         {
             var response = await onboardingService.GetProfileAsync(petParentId, cancellationToken);
+            response = response with { Reliability = await reliabilityReader.GetParentAsync(petParentId, cancellationToken) };
             return ApiResults.Ok(response);
         }
         catch (PetParentNotFoundException exception)
@@ -1185,7 +1202,8 @@ internal static class PetParentEndpoints
                 job.Price?.PriceUnit ?? PendingJobPriceUnits.PerHour,
                 job.Price?.TotalAmount,
                 job.Price?.PawfrontFee,
-                job.Price?.FeePercentage ?? 0m));
+                job.Price?.FeePercentage ?? 0m),
+            job.CashNotReceivedAtUtc);
 
     private static async Task<IResult> SendMobileOtp(
         Guid petParentId,
@@ -1352,6 +1370,10 @@ internal static class PetParentEndpoints
                 $"/api/v1/pets/{petId}/photos/{response.PetPhotoId}",
                 response);
         }
+        catch (PetPhotoLimitReachedException exception)
+        {
+            return ApiResults.Conflict("PetPhotoLimitReached", exception.Message);
+        }
         catch (PetNotFoundException exception)
         {
             return ApiResults.NotFound("PetNotFound", exception.Message);
@@ -1411,6 +1433,10 @@ internal static class PetParentEndpoints
         catch (PetNotFoundException exception)
         {
             return ApiResults.NotFound("PetNotFound", exception.Message);
+        }
+        catch (MicrochipIdInvalidException exception)
+        {
+            return ApiResults.BadRequest("MicrochipIdInvalid", exception.Message);
         }
         catch (MicrochipIdAlreadyExistsException exception)
         {
@@ -1567,6 +1593,10 @@ internal static class PetParentEndpoints
         catch (PetParentNotFoundException exception)
         {
             return ApiResults.NotFound("PetParentNotFound", exception.Message);
+        }
+        catch (MicrochipIdInvalidException exception)
+        {
+            return ApiResults.BadRequest("MicrochipIdInvalid", exception.Message);
         }
         catch (MicrochipIdAlreadyExistsException exception)
         {

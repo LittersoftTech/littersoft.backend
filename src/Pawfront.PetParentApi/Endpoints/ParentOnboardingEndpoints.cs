@@ -85,6 +85,10 @@ internal static class ParentOnboardingEndpoints
             var response = await onboardingService.SaveFirebaseAuthAsync(command, cancellationToken);
             return ApiResults.Ok(response);
         }
+        catch (Pawfront.Application.Onboarding.EmailAlreadyExistsException exception)
+        {
+            return ApiResults.Conflict("EmailAlreadyExists", exception.Message);
+        }
         catch (UnsupportedParentAuthProviderException exception)
         {
             return ApiResults.BadRequest("UnsupportedAuthProvider", exception.Message);

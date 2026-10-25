@@ -15,6 +15,27 @@ void Check(bool condition, string name)
     checks++;
 }
 
+// The SQL request stages the deadline; rendering must preserve that instant and
+// quote its exact review window, including when an earlier proposal governs.
+foreach (var (deadline, duration) in new[]
+{
+    ("2026-10-18T15:30:00Z", "2 hours"),
+    ("2026-10-18T16:00:00Z", "2 hours 30 minutes"),
+    ("2026-10-19T13:30:00Z", "24 hours")
+})
+{
+    var data = new Dictionary<string, string>
+    {
+        [NotificationDataKeys.RequestedAtUtc] = "2026-10-18T13:30:00Z",
+        [NotificationDataKeys.ReviewByUtc] = deadline
+    };
+    var rendered = NotificationRenderer.Render(NotificationTypes.BookingModificationRequestedByParent,
+        NotificationAudience.Provider, data)!;
+    Check(rendered.Body.Contains($"Review it within {duration}"), "Modification push quotes the supplied deadline");
+    Check(rendered.Data[NotificationDataKeys.ReviewByUtc] == deadline,
+        "Modification app payload preserves the review deadline");
+}
+
 foreach (var audience in new[] { NotificationAudience.PetParent, NotificationAudience.Provider })
 {
     var message = new PushMessage(audience, ["device-a", "device-b"], "A title", "A body",
@@ -68,7 +89,49 @@ foreach (var audience in new[] { NotificationAudience.PetParent, NotificationAud
 }
 checks += await NotificationApiChecks.RunAsync();
 checks += await FirestoreReadChecks.RunAsync();
+try { checks += await AccountCleanupChecks.RunAsync(); }
+catch (Exception exception) { Console.Error.WriteLine(exception); Environment.Exit(1); }
 checks += await CashNotificationChecks.RunAsync();
+checks += EventNotificationCopyChecks.Run();
+
+foreach (var type in new[] { NotificationTypes.EventBookingCashReceived, NotificationTypes.EventBookingPaymentPending })
+{
+    var bookingId=Guid.NewGuid(); var eventId=Guid.NewGuid();
+    var data=new Dictionary<string,string> { ["type"]=type,["category"]="EVENT",["bookingId"]=bookingId.ToString(),
+        ["entityId"]=bookingId.ToString(),["eventId"]=eventId.ToString(),["amount"]="100",["eventTitle"]="Play day",["hostName"]="Alex" };
+    var rendered=NotificationRenderer.Render(type,NotificationAudience.PetParent,data)!;
+    Check(rendered is not null && rendered.Category=="EVENT","Event cash type is registered");
+    var notification=new ClaimedNotification(Guid.NewGuid(),NotificationAudience.PetParent,Guid.NewGuid(),type,
+        "EventBooking",bookingId,System.Text.Json.JsonSerializer.Serialize(data),null,1,DateTimeOffset.UtcNow);
+    var payload=NotificationPayloadBuilder.Build(notification,rendered!,DateTimeOffset.UtcNow);
+    Check(data.All(pair=>payload[pair.Key]==pair.Value),"Cash payload retains exact app envelope and amount");
+    var cashClient=new RecordingFirestoreClient();
+    var cashDb=FirestoreDb.Create("parent",cashClient);
+    var cashMessage=new PushMessage(NotificationAudience.PetParent,["device"],rendered!.Title,rendered.Body,payload,null,"attendee-uid");
+    await FirestoreNotificationWriter.CreateAsync(cashDb,cashMessage,payload["notificationId"],type,default);
+    var cashWrite=cashClient.Request!.Writes.Single().Update;
+    Check(cashWrite.Name.Contains("/users/attendee-uid/notifications/") &&
+        cashWrite.Fields["data"].MapValue.Fields["bookingId"].StringValue==bookingId.ToString() &&
+        cashWrite.Fields["data"].MapValue.Fields["amount"].StringValue=="100","Attendee Firestore inbox receives cash payload");
+}
+
+// Schedules are stored as Swiss wall-clock readings; creation is a separate instant.
+foreach (var (date, expectedTime) in new[] { ("2026-07-18", "16:30"), ("2026-12-18", "15:30") })
+{
+    var scheduled = new Dictionary<string, string>
+    {
+        [NotificationDataKeys.ServiceStartUtc] = date + "T" + expectedTime + ":00Z", // stored Swiss schedule for 18:00 IST
+        [NotificationDataKeys.CreatedAtUtc] = date + "T10:30:00Z", // 16:00 IST
+        [NotificationDataKeys.AcceptByUtc] = date + "T11:30:00Z"
+    };
+    foreach (var type in new[] { NotificationTypes.BookingRequested, NotificationTypes.NightStayBookingRequested })
+    {
+        var rendered = NotificationRenderer.Render(type, NotificationAudience.Provider, scheduled)!;
+        Check(rendered.Body.Contains("at " + expectedTime), "Booking push quotes scheduled Swiss time: " + date);
+        Check(rendered.Data[NotificationDataKeys.StartTime] == expectedTime, "Push body and app scheduled time agree");
+    }
+}
+
 Console.WriteLine($"Passed {checks} notification checks.");
 
 sealed class RecordingFirestoreClient : FirestoreClient

@@ -53,10 +53,10 @@ internal static class EventEndpoints
             .MapGroup("/pet-parents/{petParentId:guid}/events")
             .RequireOwnedPetParent();
         parentScoped.MapPost("/banner-image", UploadBanner).DisableAntiforgery();
-        parentScoped.MapPost("/", Create);
+        parentScoped.MapPost("/", Create).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
         parentScoped.MapGet("/", ListByPetParent);
-        parentScoped.MapPut("/{eventId:guid}", Update);
-        parentScoped.MapPatch("/{eventId:guid}", Patch);
+        parentScoped.MapPut("/{eventId:guid}", Update).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
+        parentScoped.MapPatch("/{eventId:guid}", Patch).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
         parentScoped.MapPost("/{eventId:guid}/cancel", async (Guid petParentId, Guid eventId, IEventLifecycleStore lifecycle, IEventService events, CancellationToken ct) =>
         {
             await lifecycle.CancelAsync(eventId, petParentId, ct);
@@ -218,9 +218,8 @@ internal static class EventEndpoints
         CancellationToken cancellationToken)
     {
         if (request.EventCategory.IsSet || request.IsChildFriendly.IsSet || request.Title.IsSet || request.EventType.IsSet
-            || request.StartDate.IsSet || request.EndDate.IsSet || request.StartTime.IsSet || request.EndTime.IsSet
             || request.IsPaid.IsSet || request.Price.IsSet || request.CancellationPolicy.IsSet || request.EventLink.IsSet || request.Physical.IsSet)
-            return ApiResults.BadRequest("EventFieldNotEditable", "Only bannerImageUrl, description, maximumCapacity and amenities can be edited.");
+            return ApiResults.BadRequest("EventFieldNotEditable", "Only schedule, bannerImageUrl, description, maximumCapacity and amenities can be edited.");
         var current = await eventService.GetAsync(eventId, cancellationToken);
         if (current is null)
         {

@@ -25,9 +25,9 @@ public sealed record RegisterFreelanceTrainerRequest(
     decimal Longitude);
 
 public sealed record SaveTrainingSchoolOfferingRequest(
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     TrainingSessionRequest Session,
     IReadOnlyCollection<string> PetsTrained,
     IReadOnlyCollection<string> AgeGroups,
@@ -42,9 +42,9 @@ public sealed record SaveTrainingSchoolOfferingRequest(
     string? PrivateTrainingDescription = null);
 
 public sealed record SaveFreelanceTrainerOfferingRequest(
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     TrainingSessionRequest Session,
     IReadOnlyCollection<string> PetsTrained,
     IReadOnlyCollection<string> AgeGroups,

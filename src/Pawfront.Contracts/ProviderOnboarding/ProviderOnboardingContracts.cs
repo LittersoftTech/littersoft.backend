@@ -59,7 +59,8 @@ public sealed record ProviderProfileResponse(
     DateTimeOffset UpdatedAtUtc,
     // Wide banner shown on the provider's card in the parent-facing searches.
     // Set via POST /providers/{providerId}/banner-image; null until uploaded.
-    string? BannerImageUrl);
+    string? BannerImageUrl,
+    Pawfront.Contracts.Reliability.ReliabilityResponse? Reliability = null);
 
 public sealed record SendProviderMobileOtpResponse(
     Guid ProviderMobileOtpId,

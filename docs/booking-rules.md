@@ -25,13 +25,15 @@ for a night stay.
 
 ## A. Timing and scheduling
 
-**BR-01 — A booking must start at least 2 hours from now.**
+**BR-01 — A single-day booking must start at least 2 hours from now.**
 A parent browsing at 11:00 sees 13:00 as the first bookable slot. Measured against
 `serviceStart`. Slots inside the window are not shown at all (not shown as full),
 and the same test hides today's already-elapsed slots.
 *Enforced:* Application — the shared slot service (so both hosts' slot endpoints,
 the `/providers` window checker and all five `/providers/search/*` cards inherit
-it for hourly services) plus every App-booking create path.
+it for hourly services) plus single-day App-booking create paths. Night stays
+use calendar dates: check-in today is allowed regardless of drop-off time,
+and a check-in before today is rejected.
 *Violation:* 409 `BookingLeadTimeTooShort`.
 *Exempt:* Custom walk-ins (BR-09).
 *See also:* BR-53 applies the same cutoff to an already-created booking nobody
@@ -122,13 +124,15 @@ sproc `Booking.ExpireStaleCreatedBookings`, called by `BookingSweepFunction`
 already refuses to act on it. Stored status and effective status diverge here by
 design.
 
-**BR-53 — A booking still in `CREATED` when the service is less than 2 hours
+**BR-53 — A single-day booking still in `CREATED` when the service is less than 2 hours
 away expires, however recently it was made.**
 The provider has run out of time to accept it. Measured against `serviceStart`,
 so it is the **same cutoff as BR-01**: an unaccepted booking dies exactly when a
 fresh booking for that slot could no longer be created. A booking whose start has
 already passed is caught by the same test. Independent of BR-17 — a booking made
 90 minutes before the service expires on the next tick, hours short of 24.
+Night stays instead expire once their check-in date is before today; drop-off
+time does not shorten the acceptance window. BR-17's 24-hour timeout still applies.
 *Enforced:* SQL rejects the transition (THROW 51153, night stay 51273); **Job**
 writes the `EXPIRED` status — the same sproc and tick as BR-17, which is why the
 guard matters: without it the rule would only hold to the job's 5-minute
@@ -197,11 +201,15 @@ confirmed-equivalent resting state.
 **BR-28 — Only date and time may be changed.** The service, the service item and
 the pet are not editable through a modification.
 
-**BR-29 — The modification window closes 2 hours before `serviceStart`, for
+**BR-29 — The single-day modification window closes 2 hours before `serviceStart`, for
 EITHER party's proposal** (widened 2026-08-02 to the provider side — previously
 parent-only, see the retired BR-31 below).
 Same cutoff instant as BR-01, so the two rules bracket a booking's life
 symmetrically: creatable up to `serviceStart − 2h`, changeable up to the same point.
+For night stays, the window closes at the end of the original check-in date.
+The 24-hour review window remains an independent upper bound for either party's
+modification request; drop-off and proposed times do not shorten it.
+Proposed night-stay check-in dates must be today or later, including at acceptance.
 *Enforced:* SQL. *Violation:* 409 `ModificationWindowClosed`.
 
 **BR-30 — An unanswered proposal — from either party — expires at that same

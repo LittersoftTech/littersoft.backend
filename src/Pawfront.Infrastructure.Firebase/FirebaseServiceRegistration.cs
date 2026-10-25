@@ -14,6 +14,7 @@ public static class FirebaseServiceRegistration
         services.Configure<NotificationOptions>(configuration.GetSection(NotificationOptions.SectionName));
         services.TryAddSingleton<FirebaseAppRegistry>();
         services.TryAddSingleton<INotificationInboxReader, FirestoreNotificationReader>();
+        services.TryAddSingleton<INotificationInboxDeleter, FirestoreNotificationDeleter>();
         services.TryAddSingleton<INotificationReadStateStore, FirestoreNotificationReadStateStore>();
         return services;
     }
@@ -36,8 +37,10 @@ public static class FirebaseServiceRegistration
         services.TryAddSingleton<FirebaseAppRegistry>();
         services.TryAddSingleton<FirebasePushSender>();
         services.TryAddSingleton<INotificationInboxWriter, FirestoreNotificationWriter>();
+        services.TryAddSingleton<INotificationInboxDeleter, FirestoreNotificationDeleter>();
         services.TryAddSingleton<IPushSender>(provider => new InboxPushSender(
-            provider.GetRequiredService<FirebasePushSender>(),
+            new ProviderOwnedPushSender(provider.GetRequiredService<FirebasePushSender>(),
+                provider.GetRequiredService<IProviderPushTokenReader>()),
             provider.GetRequiredService<INotificationInboxWriter>(),
             provider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<InboxPushSender>>()));
 

@@ -58,7 +58,8 @@ BEGIN
                b.[ServiceItemCode] AS [ServiceItemCode],
                CAST(NULL AS DATE) AS [CheckOutDate],
                b.[PricePerHour] AS [SnapshotUnitPrice],
-               b.[CreatedAtUtc] AS [CreatedAtUtc]
+               b.[CreatedAtUtc] AS [CreatedAtUtc],
+               b.[CashNotReceivedAtUtc] AS [CashNotReceivedAtUtc]
         FROM [Booking].[Bookings] AS b
         LEFT JOIN [Provider].[Providers] AS pr ON pr.[ProviderId] = b.[ProviderId]
         LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = b.[PetId]
@@ -83,7 +84,8 @@ BEGIN
                NULL,
                n.[CheckOutDate],
                n.[PricePerNight],
-               n.[CreatedAtUtc]
+               n.[CreatedAtUtc],
+               n.[CashNotReceivedAtUtc]
         FROM [Booking].[NightStayBookings] AS n
         LEFT JOIN [Provider].[Providers] AS pr ON pr.[ProviderId] = n.[ProviderId]
         LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = n.[PetId]
@@ -106,7 +108,8 @@ BEGIN
            [ServiceItemCode],
            [CheckOutDate],
            [SnapshotUnitPrice],
-           COUNT(*) OVER () AS [TotalCount]
+           COUNT(*) OVER () AS [TotalCount],
+           [CashNotReceivedAtUtc]
     FROM [Jobs]
     -- By the date the service happens, not the date it was booked — the list is a
     -- calendar of what these two have done together. StartTime orders a day with

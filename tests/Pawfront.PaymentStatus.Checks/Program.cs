@@ -53,7 +53,7 @@ foreach (var night in new[] { false, true })
         ? nightStore.UpdateStatusAsync(bookingId, target, actor, actorId, "Payment not received", location, default)
         : dayStore.UpdateStatusAsync(bookingId, target, actor, actorId, "Payment not received", location, default);
 
-    foreach (var from in BookingStatuses.All.Where(s => s != BookingStatuses.Completed))
+    foreach (var from in BookingStatuses.All.Where(s => s != BookingStatuses.Completed && s != BookingStatuses.PaymentNotReceived))
     {
         statusProperty.SetValue(savedRow, from);
         if (BookingStatuses.Terminal.Contains(from))
@@ -71,6 +71,11 @@ foreach (var night in new[] { false, true })
     Check(history.Last() is { FromStatus: BookingStatuses.Completed, ToStatus: BookingStatuses.PaymentNotReceived,
         ChangedByActor: "Provider", Note: "Payment not received" }, "Status history records provider transition");
     Check(history.Last().ChangedByActorId == providerId, "History records actor identity");
+    var cashReport = savedRow.GetType().GetProperty("CashNotReceivedAtUtc")!;
+    var firstReport = (DateTimeOffset?)cashReport.GetValue(savedRow);
+    Check(firstReport is not null, "Cash report time is persisted");
+    await Change(BookingStatusActor.Provider, providerId);
+    Check((DateTimeOffset?)cashReport.GetValue(savedRow) >= firstReport, "Repeated cash report keeps the latest time");
     await Reject<BookingStatusTerminalException>(() => Change(BookingStatusActor.Provider, providerId, BookingStatuses.ProviderCancelled), "Unpaid job cannot be cancelled");
 
     // Exercise the actual application and endpoint paths with a recording SQL
@@ -120,7 +125,22 @@ foreach (var night in new[] { false, true })
         Check((bool)canReview.Invoke(null, [BookingStatuses.PaymentNotReceived, "App"])!, "Completed unpaid job remains reviewable");
     }
 }
-checks += await BookingDisputeChecks.RunAsync();
+// Every booking host must expose the same durable-limit conflict contract.
+foreach (var (host, endpoint) in new[] {
+    ("Pawfront.Api", "BookingEndpoints"), ("Pawfront.Api", "NightStayBookingEndpoints"),
+    ("Pawfront.PetParentApi", "PetParentEndpoints"), ("Pawfront.PetParentApi", "NightStayBookingEndpoints") })
+{
+    var type = Assembly.Load(host).GetType(host + ".Endpoints." + endpoint)!;
+    var error = new BookingModificationLimitReachedException(Guid.NewGuid());
+    Check((bool)type.GetMethod("IsBookingError", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, [error])!, "Modification limit is a handled booking error");
+    var mapped = (IResult)type.GetMethod("MapBookingError", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, [error])!;
+    Check(((IStatusCodeHttpResult)mapped).StatusCode == 409, "Modification limit returns conflict");
+    var json = JsonSerializer.Serialize(((IValueHttpResult)mapped).Value);
+    Check(json.Contains("ModificationLimitReached"), "Modification limit returns stable mobile error code");
+}
+Check(BookingStatuses.Terminal.Contains(BookingStatuses.JobIncomplete), "Incomplete jobs are terminal");
+if (!args.Contains("--payment-only")) checks += await BookingDisputeChecks.RunAsync();
+if (args.Contains("--sql")) checks += await SqlBookingReadChecks.RunAsync();
 Console.WriteLine($"Passed {checks} payment-status lifecycle, history, filter and endpoint checks.");
 
 static T Fake<T>(Func<MethodInfo, object?[], object> callback) where T : class

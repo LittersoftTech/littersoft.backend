@@ -5,7 +5,7 @@ namespace Pawfront.Application.Bookings;
 /// Distinct from <see cref="CreateBookingCommand"/>, which is single-day. The
 /// stay spans <c>[CheckInDate, CheckOutDate)</c> — the checkout day is NOT a
 /// stayed night. Drop-off / pick-up times are resolved server-side from the
-/// provider's offering when fixed; otherwise the caller supplies them.
+/// provider's offering when fixed; otherwise caller-supplied times are optional.
 /// </summary>
 public sealed record CreateNightStayBookingCommand(
     Guid ProviderId,
@@ -35,8 +35,8 @@ public sealed record NightStayBookingResult(
     string SubCategory,
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime,
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
@@ -57,7 +57,12 @@ public sealed record NightStayBookingResult(
     string? Breed = null,
     string? PetGender = null,
     // Shared dispute display marker, populated after booking mutations.
-    bool IsDisputeRaised = false);
+    bool IsDisputeRaised = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    DateTimeOffset? PaidAtUtc = null);
 
 /// <summary>
 /// One row of the parent's night-stay "my bookings" list: the flat booking plus
@@ -90,8 +95,8 @@ public sealed record NightStayBookingDetailRow(
     string SubCategory,
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime,
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
@@ -160,7 +165,13 @@ public sealed record NightStayBookingDetailRow(
     // trail, not from Booking.BookingModifications: that table is a staging area
     // holding only the OPEN proposal, and its row is deleted on accept and on
     // decline alike, so after the fact it can say nothing about what happened.
-    bool IsModificationDone = false);
+    bool IsModificationDone = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    bool IsParentModificationDone = false,
+    bool IsProviderModificationDone = false);
 
 /// <summary>
 /// Fully resolved night-stay booking-detail view: the raw <see cref="Row"/> plus the

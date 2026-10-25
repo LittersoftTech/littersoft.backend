@@ -24,9 +24,9 @@ public sealed record RegisterFreelanceGroomerCommand(
 
 public sealed record SaveGroomerShopOfferingCommand(
     Guid ProviderId,
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     GroomingOfferingInput Session,
     IReadOnlyCollection<string> AnimalsHandled,
     int MaxPetsAtOneTime,
@@ -35,9 +35,9 @@ public sealed record SaveGroomerShopOfferingCommand(
 
 public sealed record SaveFreelanceGroomerOfferingCommand(
     Guid ProviderId,
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     GroomingOfferingInput Session,
     IReadOnlyCollection<string> AnimalsHandled,
     int MaxPetsAtOneTime,

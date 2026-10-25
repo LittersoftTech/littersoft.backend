@@ -6,7 +6,7 @@
 -- 51272 the proposal expired before it was answered.
 --
 -- An unanswered proposal — from EITHER party (widened 2026-08-02; previously
--- parent-only) — expires 2 hours before drop-off on the check-in day, so a
+-- parent-only) — expires at the end of the check-in day, so a
 -- response landing at or after that cutoff is rejected (THROW 51272).
 -- Mirror of 51152. REJECT ONLY: the revert to CONFIRMED and the discard of the
 -- staging row are left to the scheduled external job, the single writer for
@@ -21,7 +21,8 @@ CREATE OR ALTER PROCEDURE [Booking].[RespondNightStayBookingModification]
     @ActorId UNIQUEIDENTIFIER,
     @Accept BIT,
     @Capacity INT,
-    @Note NVARCHAR(500) = NULL
+    @Note NVARCHAR(500) = NULL,
+    @CancelBooking BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -34,6 +35,9 @@ BEGIN
     DECLARE @ServiceId UNIQUEIDENTIFIER;
     DECLARE @CheckInDate DATE;
     DECLARE @DropOffTime TIME(0);
+
+    IF @Actor NOT IN (N'Provider', N'Parent') OR (@CancelBooking = 1 AND (@Accept = 1 OR @Actor <> N'Parent'))
+        THROW 51263, 'Only a parent declining a provider modification can cancel the booking.', 1;
 
     BEGIN TRANSACTION;
 
@@ -54,32 +58,19 @@ BEGIN
         THROW 51266, 'You are not a party to this booking.', 1;
     END
 
-    -- An unanswered proposal — from either party — dies 2 hours before drop-off
-    -- on the check-in day (all times UTC): reject the attempted response,
+    -- An unanswered proposal expires after 24 hours or the original check-in day.
+    -- (all dates UTC): reject the attempted response,
     -- whichever side is answering. Checked before the counterparty test so the
     -- rejection is the same whichever party calls. REJECT ONLY: the revert to
     -- CONFIRMED and the discard of the staging row are left to the scheduled
     -- external job, the single writer for time-driven status changes.
     IF @CurrentStatus IN (N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER')
     BEGIN
-        DECLARE @StartsAtUtc DATETIME2(7) =
-            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
-                    CAST(@CheckInDate AS DATETIME2(7)));
-
-        -- Mirror of the single-day sproc: the 24-hour review window is the other
-        -- deadline (2026-08-04), and whichever arrives first ends the proposal.
         IF EXISTS (
-            SELECT 1 FROM [Booking].[NightStayBookingModifications]
-            WHERE [NightStayBookingId] = @NightStayBookingId
-              AND @Now >= DATEADD(HOUR, 24, [CreatedAtUtc]))
-        BEGIN
-            THROW 51272, 'The modification request timed out after 24 hours and can no longer be answered.', 1;
-        END
-
-        IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
-        BEGIN
-            THROW 51272, 'The modification request expired 2 hours before the service start time and can no longer be answered.', 1;
-        END
+            SELECT 1 FROM [Booking].[NightStayBookingModifications] m
+            WHERE m.[NightStayBookingId] = @NightStayBookingId
+              AND @Now >= [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], @CheckInDate))
+            THROW 51272, 'The modification request has expired and can no longer be answered.', 1;
     END
 
     DECLARE @ExpectedStatus NVARCHAR(48) =
@@ -116,6 +107,8 @@ BEGIN
 
     IF @Accept = 1
     BEGIN
+        IF @PIn < CAST(@Now AS DATE) OR @POut <= @PIn
+            THROW 51421, 'Check-in cannot be before today and check-out must follow check-in.', 1;
         -- Per-night capacity re-check on the proposed range, excluding this stay.
         -- Other stays cover nights only up to
         -- COALESCE([ActualCheckOutDate], [CheckOutDate]), so nights released by
@@ -149,8 +142,8 @@ BEGIN
                               ELSE N'PARENT_ACCEPTED_MODIFICATION' END;
 
         -- Staging -> main: the proposed range, plus the acknowledged terms when the
-        -- requester confirmed a drift. Drop-off / pick-up are NOT NULL on the stay,
-        -- so a staged NULL falls back to the frozen value rather than failing.
+        -- requester confirmed a drift. An absent staged handover time preserves
+        -- the frozen value, which can itself be NULL for a date-only stay.
         UPDATE [Booking].[NightStayBookings]
         SET [CheckInDate] = @PIn,
             [CheckOutDate] = @POut,
@@ -169,11 +162,15 @@ BEGIN
     END
     ELSE
     BEGIN
-        SET @NewStatus = CASE WHEN @Actor = N'Provider' THEN N'PROVIDER_DECLINED_MODIFICATION'
+        SET @NewStatus = CASE WHEN @CancelBooking = 1 THEN N'PARENT_CANCELLED'
+                              WHEN @Actor = N'Provider' THEN N'PROVIDER_DECLINED_MODIFICATION'
                               ELSE N'PARENT_DECLINED_MODIFICATION' END;
 
         UPDATE [Booking].[NightStayBookings]
-        SET [Status] = @NewStatus, [UpdatedAtUtc] = @Now
+        SET [Status] = @NewStatus, [UpdatedAtUtc] = @Now,
+            [CancelledAtUtc] = CASE WHEN @CancelBooking = 1 THEN @Now ELSE [CancelledAtUtc] END,
+            [CancellationReason] = CASE WHEN @CancelBooking = 1 THEN N'CancelledAfterModificationDeclined' ELSE [CancellationReason] END,
+            [PayoutStatus] = CASE WHEN @CancelBooking = 1 THEN N'NO_PAYOUT' ELSE [PayoutStatus] END
         WHERE [NightStayBookingId] = @NightStayBookingId;
     END
 
@@ -190,6 +187,7 @@ BEGIN
         CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
     DECLARE @RespType NVARCHAR(64) =
         CASE
+            WHEN @CancelBooking = 1 THEN N'BOOKING_CANCELLED_BY_PARENT'
             WHEN @Actor = N'Provider' AND @Accept = 1 THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER'
             WHEN @Actor = N'Provider'                 THEN N'BOOKING_MODIFICATION_DECLINED_BY_PROVIDER'
             WHEN @Accept = 1                          THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PARENT'
@@ -209,10 +207,10 @@ BEGIN
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
     DECLARE @RespStartUtc DATETIME2(0) =
-        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EffDropOffTime),
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), COALESCE(@EffDropOffTime, CAST('00:00' AS TIME))),
                 CAST(@PIn AS DATETIME2(0)));
     DECLARE @RespCheckOutUtc DATETIME2(0) =
-        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EffPickUpTime),
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), COALESCE(@EffPickUpTime, CAST('00:00' AS TIME))),
                 CAST(@POut AS DATETIME2(0)));
     DECLARE @RespDedupe NVARCHAR(64) = CAST(@ModId AS NVARCHAR(36));
 
@@ -239,7 +237,17 @@ BEGIN
            [CreatedAtUtc],
            [UpdatedAtUtc],
            [CancelledAtUtc],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[NightStayBookings].[Status] = N'CREATED' THEN
+               [Booking].[NightStayRequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+           WHEN [Booking].[NightStayBookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+                FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'NightStay' AND pay.[BookingId]=[Booking].[NightStayBookings].[NightStayBookingId]) AS [PaidAtUtc]
     FROM [Booking].[NightStayBookings]
     WHERE [NightStayBookingId] = @NightStayBookingId;
 

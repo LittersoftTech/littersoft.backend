@@ -29,9 +29,9 @@ public sealed record RegisterFreelancePetSitterRequest(
     decimal Longitude);
 
 public sealed record SavePetHotelOfferingRequest(
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     BoardingOfferingRequest? DayCare,
     BoardingOfferingRequest? NightStay,
     IReadOnlyCollection<string> AnimalsHandled,
@@ -41,9 +41,9 @@ public sealed record SavePetHotelOfferingRequest(
     bool AllowParentFood);
 
 public sealed record SaveFreelancePetSitterOfferingRequest(
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     BoardingOfferingRequest? DayCare,
     BoardingOfferingRequest? NightStay,
     IReadOnlyCollection<string> AnimalsHandled,

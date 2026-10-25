@@ -21,9 +21,30 @@ BEGIN
 
     BEGIN TRANSACTION;
 
+    -- Serialize provider token registration with account deletion, including sign-in.
+    DECLARE @TokenLockResult INT;
+    EXEC @TokenLockResult = sys.sp_getapplock @Resource = N'Provider.DeviceTokenOwnership',
+        @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 15000;
+    IF @TokenLockResult < 0 THROW 51006, 'Device-token ownership is busy. Please retry.', 1;
+
+
     SELECT @ProviderAuthIdentityId = [ProviderAuthIdentityId]
     FROM [Provider].[ProviderAuthIdentities] WITH (UPDLOCK, HOLDLOCK)
     WHERE [FirebaseUserId] = @FirebaseUserId;
+
+    -- Contact uniqueness is scoped to this app's Firebase account type.
+    -- Range locks on the email index also serialize concurrent registrations.
+    IF EXISTS (
+        SELECT 1
+        FROM [Provider].[ProviderAuthIdentities] AS a WITH (UPDLOCK, HOLDLOCK)
+        WHERE a.[Email] = @Email AND a.[FirebaseUserId] <> @FirebaseUserId
+          AND NOT EXISTS (
+              SELECT 1 FROM [Provider].[Providers] AS p
+              WHERE p.[ProviderAuthIdentityId] = a.[ProviderAuthIdentityId]
+                AND p.[IsDeleted] = 1
+          )
+    )
+        THROW 51980, 'Email is already registered to another provider account.', 1;
 
     IF @ProviderAuthIdentityId IS NULL
     BEGIN
@@ -79,41 +100,10 @@ BEGIN
 
     IF @FcmToken IS NOT NULL AND LEN(LTRIM(RTRIM(@FcmToken))) > 0
     BEGIN
-        IF EXISTS (
-            SELECT 1
-            FROM [Provider].[ProviderDeviceTokens] WITH (UPDLOCK, HOLDLOCK)
-            WHERE [FcmToken] = @FcmToken
-        )
-        BEGIN
-            UPDATE [Provider].[ProviderDeviceTokens]
-            SET [ProviderAuthIdentityId] = @ProviderAuthIdentityId,
-                [ProviderId] = @ProviderId,
-                [DeviceId] = @DeviceId,
-                [DevicePlatform] = @DevicePlatform,
-                [IsActive] = 1,
-                [LastSeenAtUtc] = SYSUTCDATETIME(),
-                [UpdatedAtUtc] = SYSUTCDATETIME()
-            WHERE [FcmToken] = @FcmToken;
-        END
-        ELSE
-        BEGIN
-            INSERT INTO [Provider].[ProviderDeviceTokens]
-            (
-                [ProviderAuthIdentityId],
-                [ProviderId],
-                [FcmToken],
-                [DeviceId],
-                [DevicePlatform]
-            )
-            VALUES
-            (
-                @ProviderAuthIdentityId,
-                @ProviderId,
-                @FcmToken,
-                @DeviceId,
-                @DevicePlatform
-            );
-        END
+        -- Sign-in and explicit refresh must use exactly the same ownership rules.
+        EXEC [Provider].[SaveProviderDeviceToken]
+            @FirebaseUserId = @FirebaseUserId, @FcmToken = @FcmToken,
+            @DeviceId = @DeviceId, @DevicePlatform = @DevicePlatform, @ReturnResult = 0;
     END
 
     SELECT [ProviderAuthIdentityId],

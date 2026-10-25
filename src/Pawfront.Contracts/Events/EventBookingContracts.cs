@@ -31,8 +31,11 @@ public sealed record EventBookingResponse(
     IReadOnlyList<EventBookingTicketResponse> Tickets,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? CancelledAtUtc, int ConsecutiveNegativeMarks = 0, bool HasReported = false)
+    DateTimeOffset? CancelledAtUtc, int ConsecutiveNegativeMarks = 0, bool HasReported = false) : Pawfront.Contracts.Badges.IEventBookerBadgeTarget
 {
+    Guid? Pawfront.Contracts.Badges.IEventBookerBadgeTarget.BadgeEventBookingId => BookingId;
+    public bool HasIdBadge { get; set; }
+
     public DateTimeOffset? CancelledAt => CancelledAtUtc;
     public bool EventCancelledByMe => Status is "CancelledByParent" or "Cancelled";
     public bool IsCancelledByHost => Status is "host_cancelled" or "EventCancelled";
@@ -68,8 +71,11 @@ public sealed record EventBookingSummaryResponse(
     DateTimeOffset UpdatedAtUtc,
     DateTimeOffset? CancelledAtUtc,
     EventBookingStatsResponse Bookings,
-    DateTimeOffset BookingsCloseAtUtc)
+    DateTimeOffset BookingsCloseAtUtc) : Pawfront.Contracts.Badges.IEventBookerBadgeTarget
 {
+    Guid? Pawfront.Contracts.Badges.IEventBookerBadgeTarget.BadgeEventBookingId => BookingId;
+    public bool HasIdBadge { get; set; }
+
     public DateTimeOffset? CancelledAt => CancelledAtUtc;
     public bool EventCancelledByMe => Status is "CancelledByParent" or "Cancelled";
     public bool IsCancelledByHost => Status is "host_cancelled" or "EventCancelled";

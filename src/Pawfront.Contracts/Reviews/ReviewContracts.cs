@@ -45,7 +45,11 @@ public sealed record BookingReviewResponse(
     string? Comment,
     IReadOnlyList<BookingReviewPhotoResponse> Photos,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 public sealed record BookingReviewPhotoResponse(
     Guid BookingReviewPhotoId,
@@ -104,7 +108,11 @@ public sealed record ProviderReviewItemResponse(
     string? Comment,
     IReadOnlyList<string> PhotoUrls,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>
 /// A page of a provider's reviews plus the summary over ALL of them — the summary is

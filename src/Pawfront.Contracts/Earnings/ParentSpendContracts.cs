@@ -67,7 +67,8 @@ public sealed record ParentBookingHistoryItemResponse(
     bool IsPaid,
     decimal? Amount,
     DateTimeOffset? PaidAtUtc,
-    string? PaymentMethod);
+    string? PaymentMethod,
+    DateTimeOffset? CashNotReceivedAtUtc = null);
 
 /// <summary>
 /// A page of the parent's booking history, with the filters that produced it

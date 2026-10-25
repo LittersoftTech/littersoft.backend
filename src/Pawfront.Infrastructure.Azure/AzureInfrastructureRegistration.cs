@@ -51,6 +51,7 @@ public static class AzureInfrastructureRegistration
         }
 
         services.TryAddSingleton<IPawfrontBlobStorage, AzureBlobStorageService>();
+        services.TryAddSingleton<IDocumentationStorage, AzureBlobStorageService>();
 
         // Invoice-generation queue. Registered BEFORE AddPawfrontApplication()'s
         // TryAdd of the no-op publisher wins, which is the same first-wins pattern

@@ -79,7 +79,11 @@ public sealed record ProviderJobResponse(
     string PayoutStatus,
     DateTimeOffset? PaidAtUtc,
     string? PaymentMethod,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    Pawfront.Contracts.Bookings.BookingPaymentTimestampDetails? PaymentDetails = null);
 
 /// <summary>
 /// Where the job happens, frozen at booking time. Null when the booking recorded
@@ -100,7 +104,11 @@ public sealed record ProviderJobLocationResponse(
 public sealed record ProviderJobCustomerResponse(
     Guid? PetParentId,
     string? Name,
-    string? PhotoUrl);
+    string? PhotoUrl) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>
 /// The pet, likewise joined live ("Deleted Pet" for a deleted one). Breed and
@@ -112,4 +120,8 @@ public sealed record ProviderJobPetResponse(
     string? Name,
     string? AnimalType,
     string? Breed,
-    string? Gender);
+    string? Gender) : Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+}

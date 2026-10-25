@@ -384,6 +384,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
             PricePerHour: row.PricePerHour,
             JobNotes: row.JobNotes,
             PetId: row.PetId,
+            CashNotReceivedAtUtc: row.CashNotReceivedAtUtc,
             PayoutStatus: PayoutStatuses.ForBookingStatus(row.Status),
             PayoutId: null,
             ParentFirstName: null,
@@ -509,17 +510,17 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         }
 
         if (BookingStatuses.Terminal.Contains(row.Status)
-            && !(row.Status == BookingStatuses.Completed && newStatus == BookingStatuses.PaymentNotReceived))
+            && !((row.Status is BookingStatuses.Completed or BookingStatuses.PaymentNotReceived) && newStatus == BookingStatuses.PaymentNotReceived))
         {
             throw new BookingStatusTerminalException(bookingId, row.Status);
         }
 
-        if (row.Status == newStatus)
+        if (row.Status == newStatus && newStatus != BookingStatuses.PaymentNotReceived)
         {
             throw new BookingStatusUnchangedException(bookingId, newStatus);
         }
 
-        if (newStatus == BookingStatuses.PaymentNotReceived && row.Status != BookingStatuses.Completed)
+        if (newStatus == BookingStatuses.PaymentNotReceived && row.Status is not (BookingStatuses.Completed or BookingStatuses.PaymentNotReceived))
             throw new BookingNotStartableException(bookingId);
 
         var now = DateTimeOffset.UtcNow;
@@ -539,6 +540,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
 
         var from = row.Status;
         row.Status = newStatus;
+        if (newStatus == BookingStatuses.PaymentNotReceived) row.CashNotReceivedAtUtc = now;
         row.UpdatedAtUtc = now;
         if (newStatus is BookingStatuses.ProviderCancelled or BookingStatuses.ParentCancelled)
         {
@@ -659,7 +661,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
     public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<BookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
+    public Task<BookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken, bool waitForCustomer = false)
         => throw NotInMemory();
 
     public Task<BookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
@@ -677,7 +679,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         => throw NotInMemory();
 
     public Task<BookingResult> RespondModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
-        bool accept, int capacity, string? note, CancellationToken cancellationToken)
+        bool accept, int capacity, string? note, CancellationToken cancellationToken, bool cancelBooking = false)
         => throw NotInMemory();
 
     public Task<BookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
@@ -765,7 +767,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
             row.CustomerLocation,
             row.PricePerHour,
             row.JobNotes,
-            row.PetId);
+            row.PetId, CashNotReceivedAtUtc: row.CashNotReceivedAtUtc);
 
     private sealed class BookingRow
     {
@@ -785,6 +787,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         public DateTimeOffset CreatedAtUtc { get; init; }
         public DateTimeOffset UpdatedAtUtc { get; set; }
         public DateTimeOffset? CancelledAtUtc { get; set; }
+        public DateTimeOffset? CashNotReceivedAtUtc { get; set; }
         public required string Source { get; init; }
         public string? CustomerName { get; init; }
         public string? CustomerMobileCountryCode { get; init; }

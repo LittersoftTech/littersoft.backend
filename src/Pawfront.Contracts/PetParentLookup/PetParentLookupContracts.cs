@@ -30,7 +30,12 @@ public sealed record PetParentDetailsResponse(
     string MobileCountryCode,
     string MobileNumber,
     IReadOnlyList<PetParentPetCardResponse> Pets,
-    int RatingCount = 0);
+    int RatingCount = 0,
+    Pawfront.Contracts.Reliability.ReliabilityResponse? Reliability = null) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>The parent's profile address (where they live / default service location).</summary>
 public sealed record PetParentAddressResponse(
@@ -52,7 +57,11 @@ public sealed record PetParentPetCardResponse(
     string Breed,
     string Gender,
     PetAgeResponse Age,
-    string? ProfileImageUrl);
+    string? ProfileImageUrl) : Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+}
 
 /// <summary>Age split into full years + remaining months (pets are often under a year).</summary>
 public sealed record PetAgeResponse(int Years, int Months);
@@ -70,7 +79,6 @@ public sealed record PetDetailsResponse(
     Guid PetParentId,
     string? ProfileImageUrl,
     string Name,
-    string? MicrochipId,
     string PetType,
     string Gender,
     decimal Weight,
@@ -85,4 +93,8 @@ public sealed record PetDetailsResponse(
     string? VaccinationDose,
     string? Prescription,
     string? Temperament,
-    IReadOnlyList<string> Photos);
+    IReadOnlyList<string> Photos) : Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+}

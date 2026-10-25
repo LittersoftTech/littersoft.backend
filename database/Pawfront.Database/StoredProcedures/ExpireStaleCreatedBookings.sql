@@ -6,9 +6,8 @@
 --     serviceStart < @Now + @LeadTimeHours. That is the SAME cutoff BR-01 uses
 --     to decide a booking is too soon to be created, so an unaccepted booking
 --     dies exactly when a fresh one for that slot could no longer be made.
---     serviceStart is BookingDate + StartTime (single-day) and
---     CheckInDate + DropOffTime (night stay), matching the modification-window
---     and lead-time arithmetic elsewhere. Comparison is strict (<), so a
+--     serviceStart is BookingDate + StartTime for single-day bookings.
+--     Night stays instead expire when CheckInDate is before the current UTC date. Comparison is strict (<), so a
 --     booking whose service is exactly @LeadTimeHours away survives this tick —
 --     mirroring BookingLeadTime.IsTooSoon.
 -- A booking already past its start time is caught by the same test.
@@ -66,7 +65,7 @@ BEGIN
     WHERE [Status] = N'CREATED'
       AND ([CreatedAtUtc] <= @PendingCutoff
            OR DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), [StartTime]),
-                      CAST([BookingDate] AS DATETIME2(7))) < @LeadTimeCutoff);
+                      CAST([BookingDate] AS DATETIME2(7))) <= @LeadTimeCutoff);
 
     INSERT INTO [Booking].[BookingStatusHistory]
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
@@ -83,13 +82,12 @@ BEGIN
     INTO @ExpiredNightStays ([NightStayBookingId], [Reason])
     WHERE [Status] = N'CREATED'
       AND ([CreatedAtUtc] <= @PendingCutoff
-           OR DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), [DropOffTime]),
-                      CAST([CheckInDate] AS DATETIME2(7))) < @LeadTimeCutoff);
+           OR [CheckInDate] < CAST(@Now AS DATE));
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     SELECT [NightStayBookingId], N'CREATED', N'EXPIRED', N'System', NULL,
-           CASE WHEN [Reason] = N'Pending' THEN @PendingNote ELSE @LeadTimeNote END
+           CASE WHEN [Reason] = N'Pending' THEN @PendingNote ELSE N'Automatically expired: the check-in date has passed.' END
     FROM @ExpiredNightStays;
 
     -- ONE expiry event, TWO notifications (V3 cards P-S1 + V-S2) — the parent is

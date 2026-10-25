@@ -72,7 +72,8 @@ BEGIN
         -- only invite "am I being charged extra?".
         e.[Amount],
         e.[PaidAtUtc],
-        e.[PaymentMethod]
+        e.[PaymentMethod],
+        COALESCE(b.[CashNotReceivedAtUtc], n.[CashNotReceivedAtUtc]) AS [CashNotReceivedAtUtc]
     FROM [Booking].[BookingAmounts](NULL, @PetParentId, @FeePercentage) e
     LEFT JOIN [Booking].[Bookings] b
         ON e.[BookingType] = N'SingleDay' AND b.[BookingId] = e.[BookingId]

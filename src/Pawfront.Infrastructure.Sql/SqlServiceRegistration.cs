@@ -69,9 +69,21 @@ public static class SqlServiceRegistration
 
         var sqlConnectionString = configuration.GetConnectionString("SqlServer");
         var useKeyVault = configuration.GetValue("AzureKeyVault:Enabled", true);
+        services.AddSingleton<IAccountNotificationCleanupStore>(provider =>
+            new SqlAccountNotificationCleanupStore(sqlConnectionString, provider.GetService<IPawfrontSecretProvider>()));
+
+        services.AddSingleton<IProviderPushTokenReader>(provider =>
+            new SqlProviderPushTokenReader(sqlConnectionString, provider.GetService<IPawfrontSecretProvider>()));
+
+        services.AddScoped<IParentEmailStatusReader>(provider =>
+            new SqlParentEmailStatusReader(sqlConnectionString, provider.GetService<IPawfrontSecretProvider>()));
 
         if (string.IsNullOrWhiteSpace(sqlConnectionString) && !useKeyVault)
         {
+            services.AddSingleton<Pawfront.Application.ProviderTrust.IProviderTrustService, ProviderTrust.NullProviderTrustService>();
+            services.AddSingleton<IParentIdentityReviewService, NullParentIdentityReviewService>();
+            services.AddSingleton<Pawfront.Application.Badges.IBadgeReader, Badges.NullBadgeReader>();
+            services.AddSingleton<Pawfront.Application.Reliability.IReliabilityReader, Reliability.NullReliabilityReader>();
             services.AddSingleton<IProviderOnboardingService, InMemoryProviderOnboardingService>();
             services.AddSingleton<IProviderServiceLocationRegistry, InMemoryProviderServiceLocationRegistry>();
             services.AddSingleton<IProviderPolicyService, InMemoryProviderPolicyService>();
@@ -174,6 +186,8 @@ public static class SqlServiceRegistration
         }
         else
         {
+            services.AddScoped<Pawfront.Application.Reliability.IReliabilityReader>(provider =>
+                new Reliability.SqlReliabilityReader(sqlConnectionString, provider.GetService<IPawfrontSecretProvider>()));
             services.AddScoped<IProviderOnboardingService>(provider =>
                 new SqlProviderOnboardingService(
                     sqlConnectionString,
@@ -248,6 +262,15 @@ public static class SqlServiceRegistration
                 new SqlProviderServiceCatalog(
                     sqlConnectionString,
                     provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<Pawfront.Application.Badges.IBadgeReader>(provider =>
+                new Pawfront.Infrastructure.Sql.Badges.SqlBadgeReader(sqlConnectionString, provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<Pawfront.Application.ProviderTrust.IProviderTrustService>(provider =>
+                new ProviderTrust.SqlProviderTrustService(sqlConnectionString, provider.GetService<IPawfrontSecretProvider>()));
+
+            services.AddScoped<IParentIdentityReviewService>(provider =>
+                new SqlParentIdentityReviewService(sqlConnectionString, provider.GetService<IPawfrontSecretProvider>()));
 
             services.AddScoped<IParentOnboardingService>(provider =>
                 new SqlParentOnboardingService(

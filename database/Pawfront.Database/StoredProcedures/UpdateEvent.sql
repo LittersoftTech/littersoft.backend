@@ -47,11 +47,18 @@ BEGIN
     END
 
 
-    IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId)
-        THROW 51465, 'Events are locked after the first booking, including cancelled bookings.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId AND Status IN (N'Confirmed',N'Attended'))
+        THROW 51465, 'Events are locked while attendees are booked.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND [Event].[EventStartUtc](StartDate,StartTime)<=SYSUTCDATETIME())
+        THROW 51465, 'Events that have started cannot be edited.', 1;
     IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus<>N'Active')
         THROW 51465, 'Cancelled events cannot be edited.', 1;
     DECLARE @PreviousCapacity INT=(SELECT MaximumCapacity FROM [Event].[Events] WHERE EventId=@EventId);
+
+    IF EXISTS (SELECT @StartDate,@EndDate,@StartTime,@EndTime
+        EXCEPT SELECT StartDate,EndDate,StartTime,EndTime FROM [Event].[Events] WHERE EventId=@EventId)
+        EXEC [Event].[AssertHostEventNoOverlap] @StartDate, @EndDate, @StartTime, @EndTime,
+            @ProviderId=@ProviderId, @ExcludedEventId=@EventId;
 
     UPDATE [Event].[Events]
     SET [MaximumCapacity] = @MaximumCapacity,

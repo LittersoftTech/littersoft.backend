@@ -182,7 +182,12 @@ public sealed record BookingResult(
     string? PetGender = null,
     string? CustomerPhotoUrl = null,
     // Shared dispute display marker, populated after booking mutations.
-    bool IsDisputeRaised = false);
+    bool IsDisputeRaised = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    DateTimeOffset? PaidAtUtc = null);
 
 /// <summary>
 /// One row of the parent's "my bookings" list: the flat booking plus the
@@ -329,7 +334,13 @@ public sealed record BookingDetailRow(
     // trail, not from Booking.BookingModifications: that table is a staging area
     // holding only the OPEN proposal, and its row is deleted on accept and on
     // decline alike, so after the fact it can say nothing about what happened.
-    bool IsModificationDone = false);
+    bool IsModificationDone = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    bool IsParentModificationDone = false,
+    bool IsProviderModificationDone = false);
 
 /// <summary>
 /// Fully resolved booking-detail view: the raw <see cref="Row"/> plus the friendly
@@ -650,7 +661,8 @@ public sealed record BookingEvidenceResult(
 public sealed record StartBookingCommand(
     Guid BookingId,
     Guid ProviderId,
-    CapturedLocation? Location);
+    CapturedLocation? Location,
+    bool WaitForCustomer = false);
 
 /// <summary>
 /// Either party proposes a new date/time for a single-day booking (editing is
@@ -683,7 +695,8 @@ public sealed record RespondBookingModificationCommand(
     BookingStatusActor Actor,
     Guid ActorId,
     bool Accept,
-    string? Note);
+    string? Note,
+    bool CancelBooking = false);
 
 /// <summary>
 /// The staged (pending) date/time-change proposal for a single-day booking, as
@@ -898,3 +911,6 @@ public sealed class CustomBookingNotEditableException(Guid bookingId, string cur
 /// </summary>
 public sealed class CustomBookingScheduleLockedException(Guid bookingId, string currentStatus)
     : Exception($"Booking '{bookingId}' is '{currentStatus}'; the service and schedule can only be changed before the job starts.");
+
+public sealed class BookingModificationLimitReachedException(Guid bookingId)
+    : Exception($"This party has already had a modification accepted for booking {bookingId}.");

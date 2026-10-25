@@ -41,7 +41,8 @@ internal static class InvoiceEndpoints
             CancellationToken cancellationToken)
             => DownloadAsync(
                 providerId, BookingTypes.SingleDay, bookingId,
-                httpContext, onboardingService, invoiceService, cancellationToken));
+                httpContext, onboardingService, invoiceService, cancellationToken))
+            .AddEndpointFilter(new ProviderBookingAccessFilter(nightStay: false));
 
         // The two booking kinds live in separate tables and share no id space, so
         // they need separate routes rather than a discriminator on one.
@@ -54,7 +55,8 @@ internal static class InvoiceEndpoints
             CancellationToken cancellationToken)
             => DownloadAsync(
                 providerId, BookingTypes.NightStay, bookingId,
-                httpContext, onboardingService, invoiceService, cancellationToken));
+                httpContext, onboardingService, invoiceService, cancellationToken))
+            .AddEndpointFilter(new ProviderBookingAccessFilter(nightStay: true));
 
         return builder;
     }

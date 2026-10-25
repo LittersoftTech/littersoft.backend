@@ -43,6 +43,14 @@ builder.Services.AddPawfrontAzureInfrastructure(builder.Configuration, builder.E
 // one Firebase app per audience, because the provider and pet-parent mobile apps
 // live in separate Firebase projects and a token from one is invalid in the other.
 builder.Services.AddPawfrontFirebaseMessaging(builder.Configuration);
+builder.Services.AddSingleton<IAccountNotificationCleanupStore>(provider =>
+    new Pawfront.Infrastructure.Sql.Notifications.SqlAccountNotificationCleanupStore(
+        builder.Configuration.GetConnectionString("SqlServer"), provider.GetService<IPawfrontSecretProvider>()));
+builder.Services.AddSingleton<IAccountNotificationCleanup, AccountNotificationCleanup>();
+builder.Services.AddSingleton<IProviderPushTokenReader>(provider =>
+    new Pawfront.Infrastructure.Sql.DeviceTokens.SqlProviderPushTokenReader(
+        builder.Configuration.GetConnectionString("SqlServer"),
+        provider.GetService<IPawfrontSecretProvider>()));
 
 // The dispatcher's side of the outbox — a local store (see Notifications/) that
 // talks to SQL directly, exactly as the three booking sweeps do, so this host

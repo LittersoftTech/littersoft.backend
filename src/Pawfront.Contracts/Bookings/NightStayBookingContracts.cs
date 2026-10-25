@@ -36,8 +36,8 @@ public sealed record NightStayBookingResponse(
     string SubCategory,
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime,
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
@@ -74,7 +74,18 @@ public sealed record NightStayBookingResponse(
     string? PetGender = null,
     // A booking incident ticket exists from either party, including closed tickets.
     // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
-    bool IsDisputeRaised = false);
+    bool IsDisputeRaised = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    BookingPaymentTimestampDetails? PaymentDetails = null) : Pawfront.Contracts.Badges.IParentBadgeTarget, Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>Provider schedule-only proposal. Acceptance preserves the booked terms.</summary>
 public sealed record RequestProviderNightStayBookingModificationRequest(
@@ -165,7 +176,12 @@ public sealed record NightStayBookingDetailResponse(
     bool IsModificationDone = false,
     // A booking incident ticket exists from either party, including closed tickets.
     // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
-    bool IsDisputeRaised = false);
+    bool IsDisputeRaised = false,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    bool IsParentModificationDone = false,
+    bool IsProviderModificationDone = false);
 
 /// <summary>The stay/job facts: identity, the check-in/check-out range + nights,
 /// drop-off/pick-up times, status, and where the provider delivers the service.</summary>
@@ -179,8 +195,8 @@ public sealed record NightStayBookingDetailsSection(
     string SubCategory,
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime,
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
     // Stayed nights = CheckOutDate - CheckInDate (the checkout day isn't a night).
     int Nights,
     string Status,
@@ -211,4 +227,5 @@ public sealed record NightStayPaymentDetailsSection(
     string PayoutStatus,
     string? PayoutId,
     string? PayoutMethod = null,
-    DateTimeOffset? PaidAtUtc = null);
+    DateTimeOffset? PaidAtUtc = null,
+    DateTimeOffset? CashNotReceivedAtUtc = null);

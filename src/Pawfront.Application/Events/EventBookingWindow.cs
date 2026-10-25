@@ -4,7 +4,7 @@ public static class EventBookingWindow
 {
     private static readonly TimeZoneInfo EventTimeZone = TimeZoneInfo.FindSystemTimeZoneById("Europe/Zurich");
 
-    public static DateTimeOffset CloseAtUtc(DateOnly startDate, TimeOnly startTime)
+    public static DateTimeOffset StartAtUtc(DateOnly startDate, TimeOnly startTime)
     {
         var localStart = startDate.ToDateTime(startTime, DateTimeKind.Unspecified);
         // Match SQL AT TIME ZONE: move gap times forward by the DST change,
@@ -15,8 +15,11 @@ public static class EventBookingWindow
         var offset = EventTimeZone.IsAmbiguousTime(localStart)
             ? EventTimeZone.GetAmbiguousTimeOffsets(localStart).Max()
             : EventTimeZone.GetUtcOffset(localStart);
-        return new DateTimeOffset(localStart, offset).ToUniversalTime().AddHours(-1);
+        return new DateTimeOffset(localStart, offset).ToUniversalTime();
     }
+
+    public static DateTimeOffset CloseAtUtc(DateOnly startDate, TimeOnly startTime)
+        => StartAtUtc(startDate, startTime).AddHours(-1);
 
     public static bool IsClosed(DateOnly startDate, TimeOnly startTime, DateTimeOffset now)
         => now >= CloseAtUtc(startDate, startTime);

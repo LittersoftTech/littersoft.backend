@@ -185,7 +185,7 @@ public interface IBookingSqlStore
         int ttlMinutes,
         // Where the provider was when they confirmed arrival.
         CapturedLocation? location,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, bool waitForCustomer = false);
 
     /// <summary>
     /// Validates the start-OTP and moves the booking START_JOB → IN_PROGRESS
@@ -255,7 +255,8 @@ public interface IBookingSqlStore
         bool accept,
         int capacity,
         string? note,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool cancelBooking = false);
 
     Task<BookingEvidenceResult> AddEvidenceAsync(
         Guid bookingId,

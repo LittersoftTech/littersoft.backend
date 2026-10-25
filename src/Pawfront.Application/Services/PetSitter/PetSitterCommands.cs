@@ -24,9 +24,9 @@ public sealed record RegisterFreelancePetSitterCommand(
 
 public sealed record SavePetHotelOfferingCommand(
     Guid ProviderId,
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     BoardingOfferingInput? DayCare,
     BoardingOfferingInput? NightStay,
     IReadOnlyCollection<string> AnimalsHandled,
@@ -37,9 +37,9 @@ public sealed record SavePetHotelOfferingCommand(
 
 public sealed record SaveFreelancePetSitterOfferingCommand(
     Guid ProviderId,
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     BoardingOfferingInput? DayCare,
     BoardingOfferingInput? NightStay,
     IReadOnlyCollection<string> AnimalsHandled,

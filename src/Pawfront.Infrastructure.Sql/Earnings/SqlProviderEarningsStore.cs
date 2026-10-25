@@ -182,7 +182,8 @@ internal sealed class SqlProviderEarningsStore(
             // the ordinals above moved.
             Breed: reader.IsDBNull(24) ? null : reader.GetString(24),
             PetGender: reader.IsDBNull(25) ? null : reader.GetString(25),
-            CustomerPhotoUrl: reader.IsDBNull(26) ? null : reader.GetString(26));
+            CustomerPhotoUrl: reader.IsDBNull(26) ? null : reader.GetString(26),
+            CashNotReceivedAtUtc: reader.IsDBNull(27) ? null : new DateTimeOffset(reader.GetDateTime(27), TimeSpan.Zero));
     }
 
     public async Task<(ProviderBookingFigures Totals, IReadOnlyList<ProviderServiceBookingBreakdown> Services)>

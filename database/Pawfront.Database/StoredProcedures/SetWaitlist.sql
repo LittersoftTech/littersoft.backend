@@ -12,6 +12,8 @@ BEGIN
     IF @Join=0 DELETE FROM [Event].[Waitlist] WHERE EventId=@EventId AND PetParentId=@PetParentId;
     ELSE
     BEGIN
+        IF NOT EXISTS (SELECT 1 FROM [Parent].[PetParents] WHERE PetParentId=@PetParentId AND IsDeleted=0)
+            THROW 51468, 'Pet parent account has been deleted.', 1;
         IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus=N'Active'
             AND (PetParentId<>@PetParentId OR PetParentId IS NULL)
             AND [Event].[EventStartUtc](StartDate,StartTime)>SYSUTCDATETIME())

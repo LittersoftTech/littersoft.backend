@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Pawfront.Api.Auth;
 using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
 using Pawfront.Application.Storage;
@@ -17,10 +18,11 @@ internal static class EventEndpoints
         var providerScoped = builder.MapGroup("/providers/{providerId:guid}/events");
 
         providerScoped.MapPost("/banner-image", UploadBanner).DisableAntiforgery();
-        providerScoped.MapPost("/", Create);
+        providerScoped.MapPost("/", Create).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
         providerScoped.MapGet("/", ListByProvider);
-        providerScoped.MapPut("/{eventId:guid}", Update);
-        providerScoped.MapPatch("/{eventId:guid}", Patch);
+        providerScoped.MapPut("/{eventId:guid}", Update).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
+        providerScoped.MapPatch("/{eventId:guid}", Patch).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
+        providerScoped.MapPost("/{eventId:guid}/cancel", Cancel);
 
         // Catalog-wide listing with optional filters. Anchored before the
         // {eventId:guid} route so a literal /events GET resolves to List.
@@ -44,6 +46,31 @@ internal static class EventEndpoints
         eventScoped.MapPost("/payout-methods", SavePayoutMethods);
 
         return builder;
+    }
+
+    private static async Task<IResult> Cancel(
+        Guid providerId,
+        Guid eventId,
+        HttpContext httpContext,
+        IProviderOnboardingService onboardingService,
+        IEventLifecycleStore lifecycle,
+        IEventService events,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var caller = await onboardingService.ResolveProviderByFirebaseUidAsync(
+                FirebaseClaims.GetFirebaseUserId(httpContext.User), cancellationToken);
+            if (caller.ProviderId != providerId)
+                return ApiResults.Forbidden("ProviderOwnershipRequired", "You can only cancel your own events.");
+        }
+        catch (ProviderAuthIdentityForFirebaseUserNotFoundException)
+        {
+            return ApiResults.Forbidden("ProviderOwnershipRequired", "You can only cancel your own events.");
+        }
+
+        await lifecycle.CancelByProviderAsync(eventId, providerId, cancellationToken);
+        return ApiResults.Ok(ToResponse((await events.GetAsync(eventId, cancellationToken))!) with { EventCancelledByMe = true });
     }
 
     private static async Task<IResult> SavePayoutMethods(

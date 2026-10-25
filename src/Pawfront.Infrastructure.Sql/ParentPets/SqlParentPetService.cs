@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.ParentOnboarding;
@@ -24,7 +24,7 @@ internal sealed class SqlParentPetService(
         var breed = Required(request.Breed, nameof(request.Breed));
         var gender = NormalizeGender(request.Gender);
         var weight = ValidateWeight(request.Weight);
-        var microchipId = TrimOrNull(request.MicrochipId);
+        var microchipId = MicrochipId.Validate(request.MicrochipId);
         var description = TrimOrNull(request.Description);
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
@@ -75,7 +75,7 @@ internal sealed class SqlParentPetService(
         var breed = Required(request.Breed, nameof(request.Breed));
         var gender = NormalizeGender(request.Gender);
         var weight = ValidateWeight(request.Weight);
-        var microchipId = TrimOrNull(request.MicrochipId);
+        var microchipId = MicrochipId.Validate(request.MicrochipId);
         var description = TrimOrNull(request.Description);
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
@@ -525,6 +525,10 @@ internal sealed class SqlParentPetService(
                 reader.GetString(2),
                 new DateTimeOffset(reader.GetDateTime(3), TimeSpan.Zero),
                 new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero));
+        }
+        catch (SqlException exception) when (exception.Number == 51420)
+        {
+            throw new PetPhotoLimitReachedException();
         }
         catch (SqlException exception) when (exception.Number == 51204)
         {

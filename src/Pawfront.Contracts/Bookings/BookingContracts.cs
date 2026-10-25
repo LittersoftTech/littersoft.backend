@@ -123,7 +123,8 @@ public sealed record BulkCancelBookingItemRequest(Guid BookingId, string? Bookin
 /// The batch's outcome. Always returned with <b>200</b> when the batch itself was
 /// well-formed, even if every booking in it was refused — the per-booking verdict
 /// is in <paramref name="Results"/>, not in the HTTP status. A 400 means the batch
-/// was unusable (no bookings, or more than 50).
+/// was unusable (no bookings, or more than 50). Authorization failures return
+/// 403 before any booking is changed.
 /// </summary>
 /// <param name="RequestedCount">
 /// Distinct bookings processed, after duplicate ids in the request are collapsed.
@@ -395,9 +396,10 @@ public sealed record BookingTermsChangeResponse(
 /// <summary>
 /// Body for accepting/declining a modification
 /// (<c>POST .../modifications/accept</c> | <c>/decline</c>). Accept-vs-decline is
-/// the route, not the body; only an optional note travels here.
+/// the route, not the body. A parent decline can also cancel the booking atomically
+/// by setting CancelBooking; the default leaves the original booking in place.
 /// </summary>
-public sealed record RespondBookingModificationRequest(string? Note);
+public sealed record RespondBookingModificationRequest(string? Note = null, bool CancelBooking = false);
 
 /// <summary>
 /// The staged (pending) date/time-change proposal on a single-day booking, so the
@@ -505,7 +507,12 @@ public sealed record BookingDetailResponse(
     bool IsModificationDone = false,
     // A booking incident ticket exists from either party, including closed tickets.
     // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
-    bool IsDisputeRaised = false);
+    bool IsDisputeRaised = false,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    bool IsParentModificationDone = false,
+    bool IsProviderModificationDone = false);
 
 /// <summary>
 /// The resolved "where does the service happen" block on a booking-detail read.
@@ -577,7 +584,11 @@ public sealed record ParentDetailsSection(
     string? City = null,
     string? ZipCode = null,
     decimal? Latitude = null,
-    decimal? Longitude = null);
+    decimal? Longitude = null) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>The provider (service-side) facts, joined from the provider's profile —
 /// the counterpart of <see cref="ParentDetailsSection"/> so the parent app can show
@@ -621,7 +632,11 @@ public sealed record PetDetailsSection(
     // walk-ins and until the parent fills them via PATCH /pets/{petId}/medical-info.
     string? SterilizationStatus = null,
     string? MedicalHistory = null,
-    string? Temperament = null);
+    string? Temperament = null) : Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+}
 
 /// <summary>The money facts. <c>PricePerHour</c> is the offering's unit rate (the
 /// stored per-hour price for Custom walk-ins); <c>TotalAmount</c> is rate × time;
@@ -652,7 +667,8 @@ public sealed record PaymentDetailsSection(
     string PayoutStatus,
     string? PayoutId,
     string? PayoutMethod = null,
-    DateTimeOffset? PaidAtUtc = null);
+    DateTimeOffset? PaidAtUtc = null,
+    DateTimeOffset? CashNotReceivedAtUtc = null);
 
 /// <summary>One row of a booking's status-change audit trail.</summary>
 public sealed record BookingStatusHistoryEntryResponse(
@@ -744,4 +760,17 @@ public sealed record BookingResponse(
     string? CustomerPhotoUrl = null,
     // A booking incident ticket exists from either party, including closed tickets.
     // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
-    bool IsDisputeRaised = false);
+    bool IsDisputeRaised = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    BookingPaymentTimestampDetails? PaymentDetails = null) : Pawfront.Contracts.Badges.IParentBadgeTarget, Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
+
+public sealed record BookingPaymentTimestampDetails(DateTimeOffset? PaidAtUtc);

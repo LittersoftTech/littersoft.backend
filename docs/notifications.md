@@ -1,4 +1,4 @@
-﻿# Push notifications — mobile integration contract
+# Push notifications — mobile integration contract
 
 Status: **engine built; every booking trigger in the Notifications V3 spec is
 wired.** `MESSAGE_RECEIVED` was wired on 2026-08-09 with the chat module (see
@@ -396,38 +396,19 @@ feature yet.
 `PROMOTIONAL_MESSAGE` takes its `title`/`body` from the caller rather than a
 template, since campaign wording is the point of a campaign.
 
-### 3.5 Event tickets
+### 3.5 Events V3
 
-Not covered by the V3 services spec. **The two organiser-side types are wired**;
-the four buyer-side ones are not, for the two distinct reasons below.
+All 21 live Events V3 notifications are implemented. See
+[event-notifications-v3.md](event-notifications-v3.md) for the code/type mapping,
+recipients, exact timing, routes, payload fields, configuration and rollout.
 
-| `type` | Audience | When | Status |
-|---|---|---|---|
-| `EVENT_TICKET_SOLD` | Organiser | Somebody bought tickets | **wired** |
-| `EVENT_TICKET_CANCELLED` | Organiser | An attendee cancelled, seats freed | **wired** |
-| `EVENT_BOOKING_CONFIRMED` | Buyer | Tickets booked | not sent — own action |
-| `EVENT_BOOKING_CANCELLED` | Buyer | Tickets cancelled | not sent — own action |
-| `EVENT_BOOKING_PAYMENT_SUCCEEDED` | Buyer | Gateway confirmed payment | blocked — see below |
-| `EVENT_BOOKING_PAYMENT_FAILED` | Buyer | Payment failed | blocked — see below |
+The host gets first booking, sold out and event unlocked notices instead of a
+notification for every booking/cancellation. Attendees get host cancellation,
+cash status, reminders, attendance outcomes, flag changes and support resolution.
+Free and paid events have separate live/completion copy where required.
+User actions do not send self-notifications. The retired legacy event types stay
+in the catalog for compatibility; new event notifications use the V3 types.
 
-**Why the organiser side works and the buyer side doesn't.** `Event.Events`
-carries exactly one of `ProviderId` / `PetParentId`, so the organiser is a real id
-and that choice also *is* the audience — no ambiguity. `Event.EventBookings`, by
-contrast, identifies its booker only by free-text `BookerEmail` with **no FK to
-any user table**, so there is no id to push to. The payment webhook has no JWT
-either. Addressing the buyer needs a persisted booker id on the booking row
-first; until then those two types stay defined but unsent.
-
-**Why the two "own action" ones are not sent.** Booking and cancelling tickets are
-things the buyer just did on screen — the same relevance rule that drops "Booking
-Request Sent" in the V3 spec. The types remain in the catalog in case a receipt is
-wanted later; nothing enqueues them today.
-
-The `data` object for the wired pair carries `category: "EVENT"`, a populated
-`eventId`, the organiser in `parentId` **or** `providerId` (whichever they are),
-plus `eventBookingId`, `eventTitle`, `parentName` (the buyer's name, free text) and
-`ticketCount`. `bookingId`, `petId`, `isNightStay` and `payoutId` are empty
-strings — this is not a service booking.
 
 ---
 

@@ -1,3 +1,4 @@
+using Pawfront.Application.ProviderTrust;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetTrainer;
 using Pawfront.Application.Services.ProviderServiceLocations;
@@ -127,6 +128,7 @@ internal static class PetTrainerEndpoints
         SaveTrainingSchoolOfferingRequest request,
         IPetTrainerServiceRegistry registry,
         IProviderServiceCatalog serviceCatalog,
+        IProviderTrustService trustService,
         CancellationToken cancellationToken)
     {
         try
@@ -148,6 +150,8 @@ internal static class PetTrainerEndpoints
                     request.PrivateTrainingDescription),
                 cancellationToken);
 
+            await trustService.SyncOfferingDocumentAsync(providerId, request.LicenseImageUrl, cancellationToken);
+
             await SyncTrainerServiceAsync(providerId, result.SubCategory,
                 result.TrainingSchool?.Offering, serviceCatalog, cancellationToken);
 
@@ -168,6 +172,7 @@ internal static class PetTrainerEndpoints
         SaveFreelanceTrainerOfferingRequest request,
         IPetTrainerServiceRegistry registry,
         IProviderServiceCatalog serviceCatalog,
+        IProviderTrustService trustService,
         CancellationToken cancellationToken)
     {
         try
@@ -188,6 +193,8 @@ internal static class PetTrainerEndpoints
                     request.PreviousExperience,
                     request.PrivateTrainingDescription),
                 cancellationToken);
+
+            await trustService.SyncOfferingDocumentAsync(providerId, request.LicenseImageUrl, cancellationToken);
 
             await SyncTrainerServiceAsync(providerId, result.SubCategory,
                 result.Freelance?.Offering, serviceCatalog, cancellationToken);

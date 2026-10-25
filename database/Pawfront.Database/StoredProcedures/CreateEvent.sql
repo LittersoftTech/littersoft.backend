@@ -41,6 +41,8 @@ BEGIN
 
     DECLARE @InsertedEventId TABLE (EventId UNIQUEIDENTIFIER);
 
+    EXEC [Event].[AssertHostEventNoOverlap] @StartDate, @EndDate, @StartTime, @EndTime, @ProviderId=@ProviderId;
+
     INSERT INTO [Event].[Events]
     (
         [MaximumCapacity],

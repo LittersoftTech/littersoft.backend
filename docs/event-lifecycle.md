@@ -5,6 +5,7 @@ All routes below have the `/api/v1` prefix and require authentication. Host IDs 
 | Method and route | Behaviour |
 | --- | --- |
 | `POST /pet-parents/{petParentId}/events/{eventId}/cancel` | Cancels a future event, changes confirmed bookings to `EventCancelled`, and queues attendee notifications atomically. Repeating the call is safe. |
+| `POST /providers/{providerId}/events/{eventId}/cancel` | Provider API: validates the authenticated provider and event ownership, then applies the same atomic cancellation, booking updates, and notifications as the parent route. Returns `eventStatus: "Cancelled"` and `isCancelledByHost: true`. Repeating the call is safe. |
 | `DELETE /pet-parents/{petParentId}/events/{eventId}` | Hides a cancelled event from its host's list; retains event and booking history. |
 | `DELETE /event-bookings/{bookingId}` | Releases all tickets; retains `CancelledByParent`, `cancelledAtUtc` and its `cancelledAt` alias. A new booking for the same event is allowed. |
 | `GET /me/reliability` | Returns `isRedFlagged`, `redFlagExpiresAt`, `consecutivePaidEventsAttended`, `activeBookingCount`, and `consecutiveNegativeMarks`. |
@@ -21,15 +22,15 @@ Booking detail includes per-ticket payment state/amount, `consecutiveNegativeMar
 
 ## Rules
 
-- The sixth upcoming booking is refused with `UpcomingBookingLimitReached`. A flagged account cannot add a booking when it already holds one (`RedFlagBookingLimitReached`) or create an event (`RedFlagCannotCreateEvent`). Existing reservations are not automatically cancelled when a flag is applied.
+- The sixth upcoming booking is refused with `UpcomingBookingLimitReached`. A flagged account cannot add a paid booking when it already holds an upcoming paid booking (`RedFlagBookingLimitReached`) or create an event (`RedFlagCannotCreateEvent`). Existing reservations are not automatically cancelled when a flag is applied.
 - Duplicate live bookings return `EventAlreadyBooked`; cancelled events return `EventNotBookable`; purchases at or after the ticket cutoff return `BookingsClosed`.
-- The event edit procedures reject every edit after any booking has existed, including a subsequently cancelled booking (`EventLocked`). Parent PATCH accepts only `bannerImageUrl`, `description`, `maximumCapacity`, and `amenities`. A top-level capacity edit preserves the venue. PUT cannot change other event fields or the venue.
+- The event edit procedures reject edits while active bookings exist (`EventLocked`). Cancelling the last active booking unlocks edits before the start time and notifies the host; started events stay locked. Parent PATCH accepts `startDate`, `endDate`, `startTime`, `endTime`, `bannerImageUrl`, `description`, `maximumCapacity`, and `amenities`. Schedule changes are checked against the same host's other non-cancelled events and return `HostEventOverlap` on conflict. A top-level capacity edit preserves the venue. PUT cannot change other event fields or the venue.
 - The two 24/48-hour policies use event start minus their advertised hours. The pre-existing 2/4-hour policies are also respected. Cancellation at the exact boundary is on time; later cancellation records one negative outcome. Null/`NoRefund` policies have no specified reliability cutoff, so they do not generate a late-cancellation mark.
-- Two consecutive negatives recorded within 30 days flag the account for 30 days from the second mark. A new negative does not extend an active flag. Successful attendance resets the negative streak. Free attendance does not count toward the two consecutive paid attendances required for early flag removal.
+- Two consecutive negatives recorded within 30 days flag the account for 30 days from the second mark. A new negative while flagged restarts the 30 days from that mark and resets consecutive paid attendance to zero. The reliability read reflects the new expiry immediately. Successful attendance resets the negative streak. Free attendance does not count toward the two consecutive paid attendances required for early flag removal.
 - Every clock boundary uses **Europe/Zurich**, including daylight-saving time. SQL uses the corresponding `W. Europe Standard Time` zone. Cash recording is available from midnight on the first event day until midnight after the final event day; after that it returns `AttendanceWindowClosed`.
-- The existing five-minute booking sweep settles attendance after that cutoff. Pending tickets become `NoShow`; a booking with any unpaid ticket becomes `NoShow` and receives at most one negative mark. All tickets received means `Attended`. Paid-attendance recovery is finalized only at settlement, so undoing a cash receipt cannot leave an earned reliability reward behind.
+- The Events V3 timer settles attendance every 15 seconds after that cutoff (the five-minute booking sweep remains an idempotent fallback). Pending tickets become `NoShow`; a booking with any unpaid ticket becomes `NoShow` and receives at most one negative mark. All tickets received means `Attended`. Paid-attendance recovery is finalized only at settlement, so undoing a cash receipt cannot leave an earned reliability reward behind.
 - `attendedCount` counts tickets marked `CashReceived`. `earnedAmount` sums their original per-ticket prices, including partially collected bookings. Both exclude cancelled bookings. Receiving cash never frees capacity.
-- Waitlisted parents receive `EVENT_SEATS_AVAILABLE` when seats are released, and are removed from the waitlist when they book. A host cancellation queues `EVENT_CANCELLED` once per active booking. A permitted capacity increase also notifies the waitlist; the first-booking edit lock still takes precedence.
+- Each waitlist registration receives `EVENT_SEATS_AVAILABLE` once when seats are released, and is removed when the parent books or the event starts. A host cancellation queues `EVENT_CANCELLED` once per active booking. A permitted capacity increase also notifies the waitlist; the first-booking edit lock still takes precedence.
 
 ## Storage and rollout
 
@@ -71,3 +72,38 @@ Each booking summary includes `bookings: { "totalBookings": 12, "maxBookings": 5
 Event list/detail responses and booking summaries return `bookingsCloseAtUtc`. Bookings close exactly one elapsed hour before the first event start in Europe/Zurich (including daylight-saving offsets). At and after that instant, `isBookable` is false. Both booking POST hosts reject purchases with HTTP 409 and the exact body `{ "code": "BookingsClosed", "message": "Ticket bookings for this event are closed." }`. This error uses the explicitly requested body shape. The SQL transaction checks its own UTC clock and current event start after acquiring the lifecycle lock, so stale client data or concurrent edits cannot bypass the cutoff. Live and ended events also reject purchases.
 
 Deploy the updated procedures before the API hosts. Both standalone procedure files and the consolidated `DeployAll.sql` contain these changes; no production deployment is performed by this work.
+
+### Paid booking limits, cash changes, reminders, views and account deletion
+
+- A community red flag permits one upcoming **paid** booking. Free bookings do not
+  consume that slot and are not refused by the flag. The general five-booking
+  limit still applies. `GET /me/reliability` includes `activePaidBookingCount`;
+  account reliability's community block also includes it and calculates flagged
+  available slots from that count.
+- Cash recording is per ticket. The first whole-booking transition to all cash
+  received queues `EVENT_BOOKING_CASH_RECEIVED`; reversing that confirmation
+  queues `EVENT_BOOKING_PAYMENT_PENDING`. Repeating a value does not notify.
+  `amount` is the full booking amount as an invariant string without `CHF`.
+  A partial receipt updates dashboard totals without sending a full-payment
+  receipt. Bookings remain `Confirmed` until midnight settlement, then become
+  `Attended` or `NoShow`. Free events do not record attendance or cash.
+- Waitlist registrations are notified once. Repeated seat releases do not notify
+  already claimed rows; booking removes the winner's registration. The event
+  attendance sweep also removes waitlists for started events; seat notices stop
+  at the one-hour booking cutoff. Event
+  detail continues to return the authenticated caller's `isOnWaitlist`, including
+  after a reminder has been sent; started/cancelled events return false.
+- Event views are unique per event and account, with host views excluded. Existing
+  aggregate counts are retained because historical viewer identities are unknown.
+- Successful account deletion cancels upcoming hosted events through the normal
+  host cancellation path, notifying attendees. Its own upcoming bookings become
+  `AccountDeleted`, releasing seats, notifying each host and waking unnotified
+  waiters without a negative reliability mark. Its waitlist rows are deleted.
+  Existing account-deletion refusal rules for unfinished services/open support
+  tickets remain in force. Events that have already started remain historical.
+- Deploy the consolidated SQL script before the API hosts and Functions. Apply
+  migrations to production through the normal release process; local validation
+  does not verify the currently deployed API's authenticated response.
+
+See [Events notifications V3](event-notifications-v3.md) for all 21 approved
+notifications, quiet hours, delay configuration, routes and rollout.

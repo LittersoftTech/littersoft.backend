@@ -30,7 +30,8 @@ CREATE OR ALTER PROCEDURE [Booking].[RespondBookingModification]
     @ActorId UNIQUEIDENTIFIER,
     @Accept BIT,
     @Capacity INT,
-    @Note NVARCHAR(500) = NULL
+    @Note NVARCHAR(500) = NULL,
+    @CancelBooking BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -43,6 +44,9 @@ BEGIN
     DECLARE @ServiceId UNIQUEIDENTIFIER;
     DECLARE @BookingDate DATE;
     DECLARE @StartTime TIME(0);
+
+    IF @Actor NOT IN (N'Provider', N'Parent') OR (@CancelBooking = 1 AND (@Accept = 1 OR @Actor <> N'Parent'))
+        THROW 51147, 'Only a parent declining a provider modification can cancel the booking.', 1;
 
     BEGIN TRANSACTION;
 
@@ -74,6 +78,14 @@ BEGIN
         DECLARE @StartsAtUtc DATETIME2(7) =
             DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
                     CAST(@BookingDate AS DATETIME2(7)));
+
+        DECLARE @ProposedStartUtc DATETIME2(7);
+        SELECT @ProposedStartUtc =
+            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), [ProposedStartTime]),
+                    CAST([ProposedBookingDate] AS DATETIME2(7)))
+        FROM [Booking].[BookingModifications]
+        WHERE [BookingId] = @BookingId;
+        IF @ProposedStartUtc < @StartsAtUtc SET @StartsAtUtc = @ProposedStartUtc;
 
         -- The 24-hour review window is the OTHER deadline (2026-08-04). Whichever
         -- arrives first ends the proposal, so both are rejected here — without
@@ -174,11 +186,15 @@ BEGIN
     END
     ELSE
     BEGIN
-        SET @NewStatus = CASE WHEN @Actor = N'Provider' THEN N'PROVIDER_DECLINED_MODIFICATION'
+        SET @NewStatus = CASE WHEN @CancelBooking = 1 THEN N'PARENT_CANCELLED'
+                              WHEN @Actor = N'Provider' THEN N'PROVIDER_DECLINED_MODIFICATION'
                               ELSE N'PARENT_DECLINED_MODIFICATION' END;
 
         UPDATE [Booking].[Bookings]
-        SET [Status] = @NewStatus, [UpdatedAtUtc] = @Now
+        SET [Status] = @NewStatus, [UpdatedAtUtc] = @Now,
+            [CancelledAtUtc] = CASE WHEN @CancelBooking = 1 THEN @Now ELSE [CancelledAtUtc] END,
+            [CancellationReason] = CASE WHEN @CancelBooking = 1 THEN N'CancelledAfterModificationDeclined' ELSE [CancellationReason] END,
+            [PayoutStatus] = CASE WHEN @CancelBooking = 1 THEN N'NO_PAYOUT' ELSE [PayoutStatus] END
         WHERE [BookingId] = @BookingId;
     END
 
@@ -197,6 +213,7 @@ BEGIN
         CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
     DECLARE @RespType NVARCHAR(64) =
         CASE
+            WHEN @CancelBooking = 1 THEN N'BOOKING_CANCELLED_BY_PARENT'
             WHEN @Actor = N'Provider' AND @Accept = 1 THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER'
             WHEN @Actor = N'Provider'                 THEN N'BOOKING_MODIFICATION_DECLINED_BY_PROVIDER'
             WHEN @Accept = 1                          THEN N'BOOKING_MODIFICATION_ACCEPTED_BY_PARENT'
@@ -246,7 +263,17 @@ BEGIN
            [CustomerLocation],
            [PricePerHour],
            [JobNotes],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] mh WHERE mh.[BookingId] = [Booking].[Bookings].[BookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[Bookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[Bookings].[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], NULL, NULL)
+           WHEN [Booking].[Bookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], m.[ProposedBookingDate], m.[ProposedStartTime])
+                FROM [Booking].[BookingModifications] m WHERE m.[BookingId] = [Booking].[Bookings].[BookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'SingleDay' AND pay.[BookingId]=[Booking].[Bookings].[BookingId]) AS [PaidAtUtc]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

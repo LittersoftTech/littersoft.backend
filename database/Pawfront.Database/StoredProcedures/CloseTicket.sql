@@ -51,6 +51,17 @@ BEGIN
             [ClosedAtUtc] = @Now,
             [UpdatedAtUtc] = @Now
         WHERE [TicketId] = @TicketId;
+
+        DECLARE @EventId UNIQUEIDENTIFIER,@AccountId UNIQUEIDENTIFIER,@Audience NVARCHAR(16),@Key NVARCHAR(200),@Data NVARCHAR(MAX);
+        SELECT @EventId=EventId,@Audience=RaisedByType,
+            @AccountId=CASE WHEN RaisedByType=N'PetParent' THEN PetParentId ELSE ProviderId END
+        FROM [Support].[Tickets] WHERE TicketId=@TicketId AND TicketType=N'EventIncident';
+        IF @EventId IS NOT NULL
+        BEGIN
+            SET @Key=CONCAT(N'EVENT_ISSUE_RESOLVED:',@TicketId);
+            SET @Data=(SELECT CONVERT(NVARCHAR(36),@TicketId) AS ticketId FOR JSON PATH,WITHOUT_ARRAY_WRAPPER);
+            EXEC [Event].[NotifyEventAccount] @EventId,@AccountId,@Audience,N'EVENT_ISSUE_RESOLVED',@Key,@ExtraData=@Data;
+        END
     END
 
     SELECT [TicketId],

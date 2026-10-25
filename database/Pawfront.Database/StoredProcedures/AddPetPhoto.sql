@@ -10,12 +10,15 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1
-        FROM [Parent].[Pets]
+        FROM [Parent].[Pets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [PetId] = @PetId
     )
     BEGIN
         THROW 51204, 'Pet was not found.', 1;
     END
+
+    IF (SELECT COUNT(*) FROM [Parent].[PetPhotos] WHERE [PetId] = @PetId) >= 12
+        THROW 51420, 'A pet can have at most 12 photos.', 1;
 
     DECLARE @InsertedPetPhotoId TABLE ([PetPhotoId] UNIQUEIDENTIFIER);
 

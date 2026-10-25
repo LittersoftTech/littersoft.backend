@@ -62,6 +62,17 @@ Check(after.BasicInfo.Status == "Complete" && after.ProfilePhoto.Status == "Comp
     "Settings changes reflected on next read");
 Check(after.PetMedicalInfo.Status == "Complete" && after.PetMedicalInfo.Pets.Single().MissingSections!.Count == 0,
     "Saved medical and photo clear missing sections");
+reader.Snapshot = reader.Snapshot with { IsMobileVerified = false };
+var changedMobile = await statusService.GetAsync(pet.PetParentId, default);
+Check(changedMobile.IsFullyOnboarded && !changedMobile.Verification.IsMobileVerified,
+    "Changing a mobile number preserves onboarding while exposing unverified mobile");
+reader.Snapshot = reader.Snapshot with { IdentityType = null };
+Check((await statusService.GetAsync(pet.PetParentId, default)).IsFullyOnboarded,
+    "Identity is optional: no ID or deleted ID preserves onboarding");
+reader.Snapshot = reader.Snapshot with { IsEmailVerified = false };
+Check(!(await statusService.GetAsync(pet.PetParentId, default)).IsFullyOnboarded,
+    "Email verification still gates parent onboarding");
+reader.Snapshot = reader.Snapshot with { IsEmailVerified = true };
 reader.Snapshot = reader.Snapshot with { Pets = [new(pet.PetId, pet.PetName, true, false, IsDetailsComplete: false)] };
 var removed = await statusService.GetAsync(pet.PetParentId, default);
 Check(removed.PetMedicalInfo.Pets.Single().MissingSections!.SequenceEqual(["Details", "ProfilePhoto"]),

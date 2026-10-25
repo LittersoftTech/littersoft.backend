@@ -66,7 +66,8 @@ public sealed record PendingParentJob(
     DateOnly? CheckOutDate,
     decimal? SnapshotUnitPrice,
     string? ProviderProfilePhotoUrl = null,
-    PendingJobPrice? Price = null);
+    PendingJobPrice? Price = null,
+    DateTimeOffset? CashNotReceivedAtUtc = null);
 
 /// <summary>
 /// What a pending job costs, in the same shape and by the same arithmetic as the

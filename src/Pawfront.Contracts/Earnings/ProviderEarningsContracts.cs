@@ -184,7 +184,8 @@ public sealed record ProviderEarningsBookingResponse(
     // its customer is the free text in customerName / petName above.
     string? Breed = null,
     string? PetGender = null,
-    string? CustomerPhotoUrl = null);
+    string? CustomerPhotoUrl = null,
+    DateTimeOffset? CashNotReceivedAtUtc = null);
 
 /// <summary>
 /// A page of the earnings breakdown, with the filters that produced it echoed back

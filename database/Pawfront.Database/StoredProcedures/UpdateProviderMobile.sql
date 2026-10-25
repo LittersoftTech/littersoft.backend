@@ -18,7 +18,7 @@ BEGIN
 
     IF EXISTS (SELECT 1 FROM [Provider].[Providers]
                WHERE [MobileCountryCode] = @MobileCountryCode AND [MobileNumber] = @MobileNumber
-                 AND [ProviderId] <> @ProviderId)
+                 AND [ProviderId] <> @ProviderId AND [IsDeleted] = 0)
         THROW 51116, 'Mobile number is already registered.', 1;
 
     IF EXISTS (SELECT 1 FROM [Provider].[Providers]

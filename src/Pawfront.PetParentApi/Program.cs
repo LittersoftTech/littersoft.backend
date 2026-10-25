@@ -17,6 +17,7 @@ builder.Services.AddOpenApi();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpContextAccessor();
+builder.Services.AddEmailStatusRateLimiting();
 
 // Registered BEFORE AddPawfrontApplication on purpose: Application TryAdds a
 // no-op in its place, so a host that wants real block filtering on discovery
@@ -57,9 +58,14 @@ if (app.Configuration.GetValue("Api:UseHttpsRedirection", false))
 app.MapOpenApi();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 app.UseMiddleware<PetParentTelemetryEnrichmentMiddleware>();
 
-var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.PetParentUserPolicy);
+var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.PetParentUserPolicy).AddEndpointFilter<Pawfront.Application.Badges.BadgeResponseFilter>().AddEndpointFilter<Pawfront.Application.ProviderTrust.ProviderTrustBadgeFilter>();
+
+// Also expose the unversioned route requested by the email sign-in flow.
+app.MapAuthEndpoints();
+api.MapAuthEndpoints();
 
 api.MapHealthEndpoints();
 api.MapMetadataEndpoints();
@@ -88,6 +94,7 @@ api.MapProviderSearchEndpoints();
 // Invoice PDF download (the provider's service invoice for a paid booking).
 api.MapInvoiceEndpoints();
 api.MapBlobImageEndpoints();
+Pawfront.Application.Storage.DocumentationEndpoints.MapDocumentationEndpoints(api, providerHost: false);
 api.MapAvailabilitySlotsEndpoints();
 api.MapProviderAgendaEndpoints();
 

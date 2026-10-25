@@ -133,7 +133,8 @@ internal sealed class SqlParentSpendStore(
             PaidAtUtc: reader.IsDBNull(23)
                 ? null
                 : new DateTimeOffset(reader.GetDateTime(23), TimeSpan.Zero),
-            PaymentMethod: reader.IsDBNull(24) ? null : reader.GetString(24));
+            PaymentMethod: reader.IsDBNull(24) ? null : reader.GetString(24),
+            CashNotReceivedAtUtc: reader.IsDBNull(25) ? null : new DateTimeOffset(reader.GetDateTime(25), TimeSpan.Zero));
     }
 
     private static void AddFilterParameters(

@@ -223,7 +223,7 @@ public sealed record EventSqlSnapshot(
     EventCounters Counters,
     // Organiser display fields, joined from Provider.Providers /
     // Parent.PetParents in every event-returning sproc's result set 1.
-    // OrganizerImageUrl is null for provider-organised events.
+    // SQL supplies pet-parent photos; EventService enriches provider photos live.
     string? OrganizerName = null,
     string? OrganizerImageUrl = null,
     // Total tickets booked (non-cancelled) — appended after the organiser

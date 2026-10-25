@@ -200,10 +200,10 @@ internal sealed class CosmosPetSitterServiceRegistry(
         return document is null ? null : ToResult(document);
     }
 
-    private static (PetSitterLicense License, PetSitterOffering Offering) BuildLicenseAndOffering(
-        string licenseNumber,
-        string licenseType,
-        string licenseImageUrl,
+    private static (PetSitterLicense? License, PetSitterOffering Offering) BuildLicenseAndOffering(
+        string? licenseNumber,
+        string? licenseType,
+        string? licenseImageUrl,
         BoardingOfferingInput? dayCare,
         BoardingOfferingInput? nightStay,
         IReadOnlyCollection<string> animalsHandled,
@@ -226,10 +226,11 @@ internal sealed class CosmosPetSitterServiceRegistry(
             throw new ArgumentException("MaxPetsAtOneTime must be between 1 and 4.", nameof(maxPetsAtOneTime));
         }
 
-        var license = new PetSitterLicense
+        var license = string.IsNullOrWhiteSpace(licenseImageUrl)
+            ? null : new PetSitterLicense
         {
-            LicenseNumber = Required(licenseNumber, nameof(licenseNumber)),
-            LicenseType = Required(licenseType, nameof(licenseType)),
+            LicenseNumber = Trim(licenseNumber) ?? string.Empty,
+            LicenseType = Trim(licenseType) ?? string.Empty,
             ImageUrl = Required(licenseImageUrl, nameof(licenseImageUrl))
         };
 

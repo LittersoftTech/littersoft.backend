@@ -69,6 +69,7 @@ public static class NotificationPayloadBuilder
         payload[NotificationDataKeys.Route] = rendered.Route;
         payload[NotificationDataKeys.NotificationId] = notification.NotificationId.ToString();
         payload[NotificationDataKeys.SentAtUtc] = sentAtUtc.ToString("O");
+        payload["recipientId"] = notification.RecipientId.ToString();
 
         if (!string.IsNullOrWhiteSpace(notification.EntityType))
         {

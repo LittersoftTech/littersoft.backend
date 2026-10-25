@@ -13,7 +13,10 @@ BEGIN
          WHERE b.BookerAccountId=@AccountId AND b.Status IN (N'Confirmed',N'Attended') AND e.EventStatus=N'Active'
            AND [Event].[EventStartUtc](DATEADD(day,1,e.EndDate),'00:00')>@Now) AS ActiveBookingCount,
         CASE WHEN r.LastNegativeAtUtc>=DATEADD(day,-30,@Now) AND (r.RedFlagExpiresAt IS NULL OR r.RedFlagExpiresAt>@Now)
-            THEN ISNULL(r.ConsecutiveNegativeMarks,0) ELSE 0 END AS ConsecutiveNegativeMarks
+            THEN ISNULL(r.ConsecutiveNegativeMarks,0) ELSE 0 END AS ConsecutiveNegativeMarks,
+        (SELECT COUNT(*) FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+         WHERE b.BookerAccountId=@AccountId AND b.Status IN (N'Confirmed',N'Attended') AND e.EventStatus=N'Active'
+           AND e.IsPaid=1 AND [Event].[EventStartUtc](e.StartDate,e.StartTime)>@Now) AS ActivePaidBookingCount
     FROM (SELECT @AccountId AS Id) a LEFT JOIN [Event].[Reliability] r ON r.AccountId=a.Id;
 
 END;

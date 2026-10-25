@@ -91,6 +91,8 @@ CREATE TABLE [Booking].[Bookings]
     -- which are exactly the outcomes where nobody performed and nobody owes. It
     -- exists because 'Pending' read as "the money is on its way" on a job that
     -- was never going to produce any, and both apps had to special-case it.
+    [CashNotReceivedAtUtc] DATETIME2(7) NULL,
+    [CancellationReason] NVARCHAR(64) NULL,
     [PayoutStatus] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_Bookings_PayoutStatus] DEFAULT N'Pending',
     [PayoutId] NVARCHAR(64) NULL,

@@ -98,7 +98,8 @@ public interface IEventSqlStore
     Task<EventCounters> IncrementCounterAsync(
         Guid eventId,
         string counterType,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        Pawfront.Application.Blocks.BlockParty? viewer = null);
 
     /// <summary>
     /// Replaces the event's payout-method set with the given Cash/Digital

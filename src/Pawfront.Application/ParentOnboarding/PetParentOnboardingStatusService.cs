@@ -63,8 +63,8 @@ internal sealed class PetParentOnboardingStatusService(
 
         // Stage 5 — Identity. Snapshot.IdentityType is null until the
         // parent uploads via POST /pet-parents/{id}/identity. The
-        // IdentityType is surfaced so the mobile UI can render "Verified
-        // with Passport" etc.
+        // IdentityType describes the uploaded document; review status is returned
+        // by the owner-only identity endpoint. Uploading is not acceptance.
         var identity = new PetParentIdentityStage(
             string.IsNullOrWhiteSpace(snapshot.IdentityType)
                 ? OnboardingStageStatuses.Remaining
@@ -80,15 +80,13 @@ internal sealed class PetParentOnboardingStatusService(
             snapshot.IsMobileVerified);
 
         // Fully-onboarded gate: BasicInfo + Pets + PetMedicalInfo +
-        // Identity + email verified + mobile verified. ProfilePhoto is
-        // informational and intentionally NOT part of the gate.
+        // email verified. Identity is optional; Mobile verification and ProfilePhoto are
+        // informational; the parent app does not require a mobile OTP.
         var isFullyOnboarded =
             basicInfo.Status == OnboardingStageStatuses.Complete
             && pets.Status == OnboardingStageStatuses.Complete
             && petMedicalInfo.Status == OnboardingStageStatuses.Complete
-            && identity.Status == OnboardingStageStatuses.Complete
-            && verification.IsEmailVerified
-            && verification.IsMobileVerified;
+            && verification.IsEmailVerified;
 
         return new PetParentOnboardingStatus(
             petParentId,

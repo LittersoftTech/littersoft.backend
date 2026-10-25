@@ -10,6 +10,7 @@
     <Content Include="Tables\*.sql" />
     <Content Include="Functions\*.sql" />
     <Content Include="StoredProcedures\*.sql" />
+    <Content Include="Triggers\*.sql" />
   </ItemGroup>
 
   <ItemGroup>

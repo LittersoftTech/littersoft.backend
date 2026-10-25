@@ -26,6 +26,8 @@ internal sealed class SqlEventLifecycleStore(string? configuredConnectionString,
 
     public Task CancelAsync(Guid eventId, Guid parentId, CancellationToken ct) =>
         ExecuteAsync("Event.CancelHostedEvent", ct, ("@EventId", eventId), ("@PetParentId", parentId));
+    public Task CancelByProviderAsync(Guid eventId, Guid providerId, CancellationToken ct) =>
+        ExecuteAsync("Event.CancelHostedEvent", ct, ("@EventId", eventId), ("@ProviderId", providerId));
     public Task RemoveAsync(Guid eventId, Guid parentId, CancellationToken ct) =>
         ExecuteAsync("Event.RemoveHostedEvent", ct, ("@EventId", eventId), ("@PetParentId", parentId));
     public Task SetTicketPaymentAsync(Guid bookingId, int ticketNumber, Guid parentId, string paymentStatus, CancellationToken ct) =>
@@ -38,7 +40,7 @@ internal sealed class SqlEventLifecycleStore(string? configuredConnectionString,
     public async Task<IReadOnlySet<Guid>> GetWaitlistAsync(Guid parentId, CancellationToken ct)
     {
         await using var connection = await OpenAsync(ct);
-        await using var command = new SqlCommand("SELECT EventId FROM [Event].[Waitlist] WHERE PetParentId=@Id", connection);
+        await using var command = new SqlCommand("SELECT w.EventId FROM [Event].[Waitlist] w JOIN [Event].[Events] e ON e.EventId=w.EventId WHERE w.PetParentId=@Id AND e.EventStatus=N'Active' AND [Event].[EventStartUtc](e.StartDate,e.StartTime)>SYSUTCDATETIME()", connection);
         command.Parameters.AddWithValue("@Id", parentId);
         await using var reader = await command.ExecuteReaderAsync(ct);
         var result = new HashSet<Guid>();
@@ -54,6 +56,6 @@ internal sealed class SqlEventLifecycleStore(string? configuredConnectionString,
         await using var reader = await command.ExecuteReaderAsync(ct);
         await reader.ReadAsync(ct);
         return new(reader.GetBoolean(0), reader.IsDBNull(1) ? null : new DateTimeOffset(reader.GetDateTime(1), TimeSpan.Zero),
-            reader.GetInt32(2), reader.GetInt32(3), reader.GetInt32(4));
+            reader.GetInt32(2), reader.GetInt32(3), reader.GetInt32(4), reader.GetInt32(5));
     }
 }

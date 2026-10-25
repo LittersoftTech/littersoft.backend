@@ -4,9 +4,9 @@
 -- is discarded and the booking REVERTS to CONFIRMED (NOT terminal: it goes back
 -- into a startable state so neither party is left blocked by a stale proposal).
 --
--- TWO DEADLINES, whichever arrives FIRST (2026-08-04):
+-- Earliest of the review window and BOTH original/proposed service cutoffs:
 --   * the 24-hour review window     — [BookingModifications].[CreatedAtUtc] + 24h
---   * the 2-hour pre-service cutoff — serviceStart - 2h
+--   * original service start - 2h and proposed service start - 2h
 --     (BookingDate + StartTime for a single-day booking, CheckInDate +
 --     DropOffTime for a stay; all UTC)
 --
@@ -74,24 +74,22 @@ BEGIN
 
     INSERT INTO @ExpiredSingleDay ([BookingId], [Arm])
     SELECT b.[BookingId],
-           CASE
-               WHEN @Now >= DATEADD(HOUR, -2,
-                        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[StartTime]),
-                                CAST(b.[BookingDate] AS DATETIME2(7))))
-               THEN N'Cutoff'
-               ELSE N'TimedOut'
-           END
+           CASE WHEN @Now >= DATEADD(HOUR, -2, starts.[EarlierStartUtc])
+                THEN N'Cutoff' ELSE N'TimedOut' END
     FROM [Booking].[Bookings] b
     INNER JOIN [Booking].[BookingModifications] m ON m.[BookingId] = b.[BookingId]
+    CROSS APPLY (
+        SELECT MIN(v.[StartUtc]) AS [EarlierStartUtc]
+        FROM (VALUES
+            (DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[StartTime]),
+                     CAST(b.[BookingDate] AS DATETIME2(7)))),
+            (DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), m.[ProposedStartTime]),
+                     CAST(m.[ProposedBookingDate] AS DATETIME2(7))))
+        ) v([StartUtc])
+    ) starts
     WHERE b.[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER')
-      AND (
-            -- 2-hour pre-service cutoff
-            @Now >= DATEADD(HOUR, -2,
-                DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[StartTime]),
-                        CAST(b.[BookingDate] AS DATETIME2(7))))
-            -- 24-hour review window
-            OR @Now >= DATEADD(HOUR, 24, m.[CreatedAtUtc])
-          );
+      AND (@Now >= DATEADD(HOUR, -2, starts.[EarlierStartUtc])
+           OR @Now >= DATEADD(HOUR, 24, m.[CreatedAtUtc]));
 
     UPDATE b
     SET [Status] = N'CONFIRMED',
@@ -118,9 +116,7 @@ BEGIN
     INSERT INTO @ExpiredNightStay ([NightStayBookingId], [Arm])
     SELECT n.[NightStayBookingId],
            CASE
-               WHEN @Now >= DATEADD(HOUR, -2,
-                        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), n.[DropOffTime]),
-                                CAST(n.[CheckInDate] AS DATETIME2(7))))
+               WHEN n.[CheckInDate] < CAST(@Now AS DATE)
                THEN N'Cutoff'
                ELSE N'TimedOut'
            END
@@ -128,12 +124,7 @@ BEGIN
     INNER JOIN [Booking].[NightStayBookingModifications] m
         ON m.[NightStayBookingId] = n.[NightStayBookingId]
     WHERE n.[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER')
-      AND (
-            @Now >= DATEADD(HOUR, -2,
-                DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), n.[DropOffTime]),
-                        CAST(n.[CheckInDate] AS DATETIME2(7))))
-            OR @Now >= DATEADD(HOUR, 24, m.[CreatedAtUtc])
-          );
+      AND @Now >= [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], n.[CheckInDate]);
 
     UPDATE n
     SET [Status] = N'CONFIRMED',

@@ -1,5 +1,11 @@
 namespace Pawfront.Application.Support;
 
+public sealed class SupportBookingTicketWindowException(bool notOpen) : Exception(
+    notOpen ? "A booking ticket can only be raised after the job ends." : "The booking ticket window has expired.")
+{
+    public string Code => notOpen ? "TicketWindowNotOpen" : "TicketWindowExpired";
+}
+
 /// <summary>
 /// The booking named by a "Report Incident" does not exist. Maps to
 /// <b>404 BookingNotFound</b> / <b>404 NightStayBookingNotFound</b> depending on the

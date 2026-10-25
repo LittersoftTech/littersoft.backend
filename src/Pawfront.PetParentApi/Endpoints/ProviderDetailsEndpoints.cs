@@ -38,7 +38,8 @@ internal static class ProviderDetailsEndpoints
         // the list handler resolves first. (Minimal-API routing already
         // prefers the more specific match, but keeping the order explicit.)
         builder.MapGet("/providers", List);
-        builder.MapGet("/providers/{providerId:guid}", Get);
+        builder.MapGet("/providers/{providerId:guid}", Get)
+            .Produces<Pawfront.Contracts.Common.ApiResponse<ProviderPublicProfileResponse>>();
         return builder;
     }
 
@@ -170,12 +171,13 @@ internal static class ProviderDetailsEndpoints
     private static async Task<IResult> Get(
         Guid providerId,
         IProviderPublicProfileService publicProfileService,
+        Pawfront.Application.Reliability.IReliabilityReader reliabilityReader,
         CancellationToken cancellationToken)
     {
         try
         {
             var profile = await publicProfileService.GetAsync(providerId, cancellationToken);
-            return ApiResults.Ok(ToResponse(profile));
+            return ApiResults.Ok(ToResponse(profile) with { Reliability = await reliabilityReader.GetProviderAsync(providerId, cancellationToken) });
         }
         catch (ProviderPublicProfileNotFoundException exception)
         {

@@ -77,8 +77,8 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         string subCategory,
         DateOnly checkInDate,
         DateOnly checkOutDate,
-        TimeOnly dropOffTime,
-        TimeOnly pickUpTime,
+        TimeOnly? dropOffTime,
+        TimeOnly? pickUpTime,
         string? jobNotes,
         string? locationType,
         decimal? pricePerNight,
@@ -178,6 +178,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             row.ServiceCategory, row.SubCategory, row.CheckInDate, row.CheckOutDate,
             row.DropOffTime, row.PickUpTime, row.Status, row.CreatedAtUtc, row.UpdatedAtUtc,
             row.CancelledAtUtc, row.PetId,
+            CashNotReceivedAtUtc: row.CashNotReceivedAtUtc,
             PayoutStatus: PayoutStatuses.ForBookingStatus(row.Status), PayoutId: null,
             ParentFirstName: null, ParentLastName: null, ParentGender: null,
             ParentMobileCountryCode: null, ParentMobileNumber: null, ParentPhotoUrl: null,
@@ -259,10 +260,10 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             throw BookingExpiredException.NeverAccepted(bookingId);
         }
 
-        // BR-53: still CREATED with under 2 hours to check-in + drop-off —
+        // A CREATED stay expires after its check-in date —
         // mirror of the sproc's THROW 51273, and reject-only for the same reason.
         if (row.Status == BookingStatuses.Created
-            && BookingLeadTime.IsTooSoon(row.CheckInDate, row.DropOffTime, DateTimeOffset.UtcNow))
+            && row.CheckInDate < DateOnly.FromDateTime(DateTime.UtcNow))
         {
             throw BookingExpiredException.ServiceTooClose(bookingId);
         }
@@ -276,17 +277,17 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         }
 
         if (BookingStatuses.Terminal.Contains(row.Status)
-            && !(row.Status == BookingStatuses.Completed && newStatus == BookingStatuses.PaymentNotReceived))
+            && !((row.Status is BookingStatuses.Completed or BookingStatuses.PaymentNotReceived) && newStatus == BookingStatuses.PaymentNotReceived))
         {
             throw new BookingStatusTerminalException(bookingId, row.Status);
         }
 
-        if (row.Status == newStatus)
+        if (row.Status == newStatus && newStatus != BookingStatuses.PaymentNotReceived)
         {
             throw new BookingStatusUnchangedException(bookingId, newStatus);
         }
 
-        if (newStatus == BookingStatuses.PaymentNotReceived && row.Status != BookingStatuses.Completed)
+        if (newStatus == BookingStatuses.PaymentNotReceived && row.Status is not (BookingStatuses.Completed or BookingStatuses.PaymentNotReceived))
             throw new BookingNotStartableException(bookingId);
 
         var now = DateTimeOffset.UtcNow;
@@ -297,7 +298,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
                 throw new BookingNotStartableException(bookingId);
             }
 
-            var startsAtUtc = new DateTimeOffset(row.CheckInDate.ToDateTime(row.DropOffTime), TimeSpan.Zero);
+            var startsAtUtc = new DateTimeOffset(row.CheckInDate.ToDateTime(row.DropOffTime ?? TimeOnly.MinValue), TimeSpan.Zero);
             if (now < startsAtUtc.AddHours(2))
             {
                 throw new BookingNoShowTooEarlyException(bookingId, isNightStay: true);
@@ -306,6 +307,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
 
         var from = row.Status;
         row.Status = newStatus;
+        if (newStatus == BookingStatuses.PaymentNotReceived) row.CashNotReceivedAtUtc = now;
         row.UpdatedAtUtc = now;
         if (newStatus is BookingStatuses.ProviderCancelled or BookingStatuses.ParentCancelled)
         {
@@ -394,7 +396,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
     public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<NightStayBookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
+    public Task<NightStayBookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken, bool waitForCustomer = false)
         => throw NotInMemory();
 
     public Task<NightStayBookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
@@ -412,7 +414,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         => throw NotInMemory();
 
     public Task<NightStayBookingResult> RespondModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
-        bool accept, int capacity, string? note, CancellationToken cancellationToken)
+        bool accept, int capacity, string? note, CancellationToken cancellationToken, bool cancelBooking = false)
         => throw NotInMemory();
 
     public Task<NightStayBookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
@@ -439,7 +441,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
             row.CreatedAtUtc,
             row.UpdatedAtUtc,
             row.CancelledAtUtc,
-            row.PetId);
+            row.PetId, CashNotReceivedAtUtc: row.CashNotReceivedAtUtc);
 
     private sealed class Row
     {
@@ -452,8 +454,8 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         public required string SubCategory { get; init; }
         public DateOnly CheckInDate { get; init; }
         public DateOnly CheckOutDate { get; init; }
-        public TimeOnly DropOffTime { get; init; }
-        public TimeOnly PickUpTime { get; init; }
+        public TimeOnly? DropOffTime { get; init; }
+        public TimeOnly? PickUpTime { get; init; }
         public string? JobNotes { get; init; }
         public string? LocationType { get; init; }
         public decimal? PricePerNight { get; init; }
@@ -466,5 +468,6 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         public DateTimeOffset CreatedAtUtc { get; init; }
         public DateTimeOffset UpdatedAtUtc { get; set; }
         public DateTimeOffset? CancelledAtUtc { get; set; }
+        public DateTimeOffset? CashNotReceivedAtUtc { get; set; }
     }
 }

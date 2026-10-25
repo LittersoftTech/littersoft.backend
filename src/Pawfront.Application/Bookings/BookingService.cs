@@ -841,7 +841,7 @@ internal sealed class BookingService(
     {
         var fix = CapturedLocation.Require(command.Location, "start a job");
         return WithDisputeAsync(sqlStore.StartJobAsync(
-            command.BookingId, command.ProviderId, GenerateOtpCode(), StartOtpTtlMinutes, fix, cancellationToken), cancellationToken);
+            command.BookingId, command.ProviderId, GenerateOtpCode(), StartOtpTtlMinutes, fix, cancellationToken, command.WaitForCustomer), cancellationToken);
     }
 
     public Task<BookingResult> VerifyStartOtpAsync(
@@ -945,6 +945,8 @@ internal sealed class BookingService(
     {
         // Capacity is only needed when accepting (the proposed window is applied);
         // resolve it from the booked service so the sproc can re-check race-safely.
+        if (command.CancelBooking && (command.Accept || command.Actor != BookingStatusActor.Parent))
+            throw new ArgumentException("Only a parent declining a provider modification can cancel the booking.");
         var capacity = 0;
         if (command.Accept)
         {
@@ -965,7 +967,7 @@ internal sealed class BookingService(
         }
 
         return await WithDisputeAsync(sqlStore.RespondModificationAsync(
-            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken), cancellationToken);
+            command.BookingId, command.Actor, command.ActorId, command.Accept, capacity, command.Note, cancellationToken, command.CancelBooking), cancellationToken);
     }
 
     public Task<BookingEvidenceResult> AddEvidenceAsync(

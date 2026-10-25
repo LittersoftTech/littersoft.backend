@@ -72,6 +72,10 @@ internal sealed class SqlSupportTicketStore(
 
             return new CreateSupportTicketResult(outcome, ticket with { Photos = photos });
         }
+        catch (SqlException exception) when (exception.Number is 51357 or 51358)
+        {
+            throw new SupportBookingTicketWindowException(exception.Number == 51357);
+        }
         catch (SqlException exception) when (exception.Number == 51340)
         {
             throw new SupportBookingNotFoundException(command.BookingId ?? Guid.Empty);

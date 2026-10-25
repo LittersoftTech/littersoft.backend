@@ -10,6 +10,8 @@ namespace Pawfront.Application.Notifications;
 /// </summary>
 public static class NotificationTypes
 {
+    public const string IdentityAdded = "IDENTITY_ADDED";
+    public const string IdentityNotApproved = "IDENTITY_NOT_APPROVED";
     // --- Booking lifecycle, to the PET PARENT --------------------------------
 
     public const string BookingAccepted = "BOOKING_ACCEPTED";
@@ -62,12 +64,33 @@ public static class NotificationTypes
     public const string EventBookingPaymentSucceeded = "EVENT_BOOKING_PAYMENT_SUCCEEDED";
     public const string EventBookingPaymentFailed = "EVENT_BOOKING_PAYMENT_FAILED";
     public const string EventBookingCancelled = "EVENT_BOOKING_CANCELLED";
-    /// <summary>To the organiser: somebody bought tickets for their event.</summary>
+    /// <summary>To the booking account: the host recorded cash for a ticket.</summary>
+    public const string EventBookingCashReceived = "EVENT_BOOKING_CASH_RECEIVED";
+    public const string EventBookingPaymentPending = "EVENT_BOOKING_PAYMENT_PENDING";
     public const string EventCancelled = "EVENT_CANCELLED";
     public const string EventSeatsAvailable = "EVENT_SEATS_AVAILABLE";
     public const string EventTicketSold = "EVENT_TICKET_SOLD";
     /// <summary>To the organiser: an attendee cancelled, freeing their seat.</summary>
     public const string EventTicketCancelled = "EVENT_TICKET_CANCELLED";
+
+    // Events V3: host and attendee are roles on an event, not app audiences.
+    public const string EventFirstBooking = "EVENT_FIRST_BOOKING";
+    public const string EventEditableAgain = "EVENT_EDITABLE_AGAIN";
+    public const string EventSoldOut = "EVENT_SOLD_OUT";
+    public const string EventReminderDayBefore = "EVENT_REMINDER_DAY_BEFORE";
+    public const string EventReminderStartingSoon = "EVENT_REMINDER_STARTING_SOON";
+    public const string EventAttended = "EVENT_ATTENDED";
+    public const string EventMissed = "EVENT_MISSED";
+    public const string EventProfileFlagged = "EVENT_PROFILE_FLAGGED";
+    public const string EventProfileFlagRemoved = "EVENT_PROFILE_FLAG_REMOVED";
+    public const string EventIssueResolved = "EVENT_ISSUE_RESOLVED";
+    public const string EventHostReminderDayBefore = "EVENT_HOST_REMINDER_DAY_BEFORE";
+    public const string EventHostReminderStartingSoon = "EVENT_HOST_REMINDER_STARTING_SOON";
+    public const string EventLive = "EVENT_LIVE";
+    public const string EventLiveFree = "EVENT_LIVE_FREE";
+    public const string EventRecordRemaining = "EVENT_RECORD_REMAINING";
+    public const string EventHosted = "EVENT_HOSTED";
+    public const string EventHostedFree = "EVENT_HOSTED_FREE";
 
     // --- Reminders before the service, to BOTH parties ------------------------
 
@@ -275,6 +298,12 @@ public static class NotificationDataKeys
     public const string ParentName = "parentName";
     public const string PetName = "petName";
     public const string EventTitle = "eventTitle";
+    public const string HostName = "hostName";
+    public const string AttendeeCount = "attendeeCount";
+    public const string Attendees = "attendees";
+    public const string AttendeeVerb = "attendeeVerb";
+    public const string TotalAmount = "totalAmount";
+    public const string Seats = "seats";
 
     // --- Times: raw instants in, display strings out --------------------------
     // Producers emit the *Utc keys below; NotificationRenderer converts them to

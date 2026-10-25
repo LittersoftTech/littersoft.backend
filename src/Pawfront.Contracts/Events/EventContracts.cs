@@ -173,7 +173,11 @@ public sealed record EventResponse(
     double? Distance = null,
     string DistanceUnit = "km", string EventStatus = "Active", bool IsCancelledByHost = false,
     int AttendedCount = 0, decimal EarnedAmount = 0, bool IsOnWaitlist = false,
-    bool EventCancelledByMe = false, DateTimeOffset? BookingsCloseAtUtc = null);
+    bool EventCancelledByMe = false, DateTimeOffset? BookingsCloseAtUtc = null) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>
 /// Booking summary for an event. <see cref="MaxBookings"/> is the maximum
@@ -192,7 +196,11 @@ public sealed record EventBookingStatsResponse(
 /// </summary>
 public sealed record EventAttendeeSummaryResponse(
     string AttendeeName,
-    int TicketNumber, Guid? BookingId = null, string? PaymentStatus = null, decimal? Amount = null, string? ProfileImageUrl = null);
+    int TicketNumber, Guid? BookingId = null, string? PaymentStatus = null, decimal? Amount = null, string? ProfileImageUrl = null) : Pawfront.Contracts.Badges.IEventBookerBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IEventBookerBadgeTarget.BadgeEventBookingId => BookingId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>
 /// Identifies the organiser of an event for display in event reads. An event
@@ -209,7 +217,11 @@ public sealed record EventOrganizerResponse(
     string? ImageUrl,
     // Total events this organiser has created. Populated on the event-detail
     // read (GET /events/{eventId}); null on list reads.
-    int? TotalEventsOrganized = null, int EventsCancelledCount = 0);
+    int? TotalEventsOrganized = null, int EventsCancelledCount = 0) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => Type == "PetParent" ? Id : null;
+    public bool HasIdBadge { get; set; }
+}
 
 public sealed record PhysicalEventResponse(
     int MaximumCapacity,

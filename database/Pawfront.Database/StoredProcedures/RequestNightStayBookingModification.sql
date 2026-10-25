@@ -4,11 +4,8 @@
 -- forbidden, 51262 not in a modifiable state, 51263 a proposal is already open,
 -- 51271 the modification window has closed.
 --
--- NEITHER PARTY may open a proposal once the stay's drop-off is less than 2 hours
--- away (THROW 51271; the stay's "service start" is CheckInDate + DropOffTime, the
--- same instant its no-show grace runs from). Mirror of 51151. (Widened
--- 2026-08-02 — the provider side was previously ungated and never auto-expired;
--- both parties are now symmetric.)
+-- Either party may open a proposal through the current check-in date.
+-- Drop-off time does not shorten this date-based window (THROW 51271).
 --
 -- The @Acknowledged* params carry the provider's CURRENT terms as shown to and
 -- confirmed by the requester when they had drifted since the stay was created;
@@ -46,6 +43,9 @@ BEGIN
     -- notification's timezone conversion.
     DECLARE @PickUpTime TIME(0);
 
+    IF @ProposedCheckInDate < CAST(SYSUTCDATETIME() AS DATE) OR @ProposedCheckOutDate <= @ProposedCheckInDate
+        THROW 51421, 'Check-in cannot be before today and check-out must follow check-in.', 1;
+
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status], @ProviderId = [ProviderId], @PetParentId = [PetParentId],
@@ -65,6 +65,17 @@ BEGIN
         THROW 51261, 'You are not a party to this booking.', 1;
     END
 
+    -- Each requester gets one accepted change. Declined/expired proposals do not count.
+    -- The booking row lock serializes requests and responses before reading history.
+    IF EXISTS (
+        SELECT 1 FROM [Booking].[NightStayBookingStatusHistory]
+        WHERE [NightStayBookingId] = @NightStayBookingId
+          AND ((@Actor = N'Parent' AND [ToStatus] = N'PROVIDER_ACCEPTED_MODIFICATION')
+            OR (@Actor = N'Provider' AND [ToStatus] = N'PARENT_ACCEPTED_MODIFICATION')))
+    BEGIN
+        THROW 51991, 'This party has already had a modification accepted for this booking.', 1;
+    END
+
     IF @CurrentStatus NOT IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION',
                               N'PARENT_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
                               N'PARENT_DECLINED_MODIFICATION')
@@ -72,17 +83,10 @@ BEGIN
         THROW 51262, 'A modification can only be requested on a confirmed booking.', 1;
     END
 
-    -- The modification window closes 2 hours before drop-off on the check-in day
-    -- (all times UTC), for either party's proposal.
-    DECLARE @StartsAtUtc DATETIME2(7) =
-        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
-                CAST(@CheckInDate AS DATETIME2(7)));
-
-    IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
-    BEGIN
-        THROW 51271, 'A booking can no longer be modified within 2 hours of the service start time.', 1;
-    END
-
+    -- Night stays retain their original check-in-day window, independent of drop-off time.
+    DECLARE @RequestDeadline DATETIME2(7) = [Booking].[NightStayRequestExpiresAtUtc](@Now, @CheckInDate);
+    IF @Now >= @RequestDeadline
+        THROW 51271, 'A booking can no longer be modified after the check-in date.', 1;
     IF EXISTS (SELECT 1 FROM [Booking].[NightStayBookingModifications] WHERE [NightStayBookingId] = @NightStayBookingId)
     BEGIN
         THROW 51263, 'A modification request is already awaiting a response.', 1;
@@ -98,14 +102,14 @@ BEGIN
          [HasAcknowledgedTerms], [AcknowledgedPricePerNight], [AcknowledgedCancellationPolicyHours],
          [AcknowledgedDropOffTime], [AcknowledgedPickUpTime],
          [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
-         [AcknowledgedLatitude], [AcknowledgedLongitude])
+         [AcknowledgedLatitude], [AcknowledgedLongitude], [CreatedAtUtc])
     OUTPUT inserted.[NightStayBookingModificationId] INTO @InsertedModification
     VALUES
         (@NightStayBookingId, @Actor, @ActorId, @ProposedCheckInDate, @ProposedCheckOutDate, @Note,
          ISNULL(@HasAcknowledgedTerms, 0), @AcknowledgedPricePerNight, @AcknowledgedCancellationPolicyHours,
          @AcknowledgedDropOffTime, @AcknowledgedPickUpTime,
          @AcknowledgedAddressLine, @AcknowledgedCity, @AcknowledgedZipCode,
-         @AcknowledgedLatitude, @AcknowledgedLongitude);
+         @AcknowledgedLatitude, @AcknowledgedLongitude, @Now);
 
     DECLARE @NewStatus NVARCHAR(48) =
         CASE WHEN @Actor = N'Provider' THEN N'MODIFICATION_REQUEST_BY_PROVIDER'
@@ -135,21 +139,21 @@ BEGIN
     -- date range, so the copy's "new time" slot carries the new check-out DATE
     -- rather than a clock time — the renderer applies that for night-stay rows.
     DECLARE @ProposedStartUtc DATETIME2(0) =
-        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), COALESCE(@DropOffTime, CAST('00:00' AS TIME))),
                 CAST(@ProposedCheckInDate AS DATETIME2(0)));
     DECLARE @ProposedCheckOutUtc DATETIME2(0) =
-        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @PickUpTime),
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), COALESCE(@PickUpTime, CAST('00:00' AS TIME))),
                 CAST(@ProposedCheckOutDate AS DATETIME2(0)));
 
     -- How long the counterparty actually has, as the pair of readings the renderer
     -- turns into a length. Mirror of Booking.RequestBookingModification — see the
     -- note there for why a flat "24 hours" is wrong; the only difference is that a
-    -- stay's service starts at drop-off on the check-in day.
+    -- stay's review window ends at the end of the original check-in date.
     DECLARE @RequestedAtUtc DATETIME2(0) = @Now;
     DECLARE @ReviewByUtc DATETIME2(0) =
-        CASE WHEN DATEADD(HOUR, 24, @Now) < DATEADD(HOUR, -2, @StartsAtUtc)
+        CASE WHEN DATEADD(HOUR, 24, @Now) < @RequestDeadline
              THEN DATEADD(HOUR, 24, @Now)
-             ELSE DATEADD(HOUR, -2, @StartsAtUtc) END;
+             ELSE @RequestDeadline END;
 
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @NightStayBookingId,
@@ -176,7 +180,17 @@ BEGIN
            [CreatedAtUtc],
            [UpdatedAtUtc],
            [CancelledAtUtc],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[NightStayBookings].[Status] = N'CREATED' THEN
+               [Booking].[NightStayRequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+           WHEN [Booking].[NightStayBookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+                FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'NightStay' AND pay.[BookingId]=[Booking].[NightStayBookings].[NightStayBookingId]) AS [PaidAtUtc]
     FROM [Booking].[NightStayBookings]
     WHERE [NightStayBookingId] = @NightStayBookingId;
 

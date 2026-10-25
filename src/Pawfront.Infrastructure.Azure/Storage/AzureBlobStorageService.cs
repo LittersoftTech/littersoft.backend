@@ -10,7 +10,7 @@ namespace Pawfront.Infrastructure.Azure.Storage;
 
 internal sealed class AzureBlobStorageService(
     IPawfrontSecretProvider secretProvider,
-    IOptions<BlobStorageOptions> blobOptions) : IPawfrontBlobStorage
+    IOptions<BlobStorageOptions> blobOptions) : IPawfrontBlobStorage, IDocumentationStorage
 {
     private readonly BlobStorageOptions options = blobOptions.Value;
     private readonly SemaphoreSlim semaphore = new(1, 1);
@@ -23,6 +23,29 @@ internal sealed class AzureBlobStorageService(
         new(StringComparer.OrdinalIgnoreCase);
 
     private BlobServiceClient? serviceClient;
+
+    public async Task<BlobDownload?> DownloadDocumentAsync(string fileName, CancellationToken cancellationToken)
+    {
+        // Keep documentation separate from the general URL-based read/delete APIs.
+        if (fileName.Contains('/') || fileName.Contains('\\') ||
+            !new[] { "terms-and-usage", "provider-faq", "parent-faq", "cookies-policy", "privacy-policy", "community-faq" }
+                .Any(category => DocumentationCatalog.ResolveFileName(category, true) == fileName ||
+                                 DocumentationCatalog.ResolveFileName(category, false) == fileName))
+        {
+            throw new ArgumentException("Unknown documentation file.", nameof(fileName));
+        }
+
+        var container = await GetContainerAsync("documentation", cancellationToken);
+        try
+        {
+            var response = await container.GetBlobClient(fileName).DownloadStreamingAsync(cancellationToken: cancellationToken);
+            return new BlobDownload(response.Value.Content, DocumentationCatalog.ContentType(fileName), response.Value.Details.ContentLength);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            return null;
+        }
+    }
 
     public async Task<string> UploadAsync(
         BlobUploadKind kind,
@@ -175,6 +198,7 @@ internal sealed class AzureBlobStorageService(
             BlobUploadKind.ChatAttachment => options.Folders.ChatAttachments,
             BlobUploadKind.IncidentPhoto => options.Folders.IncidentPhotos,
             BlobUploadKind.Invoice => options.Folders.Invoices,
+            BlobUploadKind.ProviderDocument => "provider-documents",
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unsupported blob upload kind.")
         };
 

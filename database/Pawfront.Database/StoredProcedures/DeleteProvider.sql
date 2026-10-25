@@ -92,6 +92,13 @@ BEGIN
 
     BEGIN TRANSACTION;
 
+    -- Serialize provider token registration with account deletion, including sign-in.
+    DECLARE @TokenLockResult INT;
+    EXEC @TokenLockResult = sys.sp_getapplock @Resource = N'Provider.DeviceTokenOwnership',
+        @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 15000;
+    IF @TokenLockResult < 0 THROW 51006, 'Device-token ownership is busy. Please retry.', 1;
+
+
     -- UPDLOCK + HOLDLOCK: serialise against a concurrent booking create or
     -- active-status toggle on this provider.
     SELECT @ProviderAuthIdentityId = [ProviderAuthIdentityId],
@@ -145,6 +152,11 @@ BEGIN
     -- Everything below only runs when the account is live AND unblocked.
     IF @IsDeleted = 0 AND @BlockedByOpenTickets = 0
     BEGIN
+        IF NOT EXISTS (SELECT 1 FROM [Notification].[AccountNotificationCleanup] WHERE [Audience]=N'Provider' AND [AccountId]=@ProviderId)
+            INSERT [Notification].[AccountNotificationCleanup]([Audience],[AccountId],[FirebaseUserId],[DeletedAtUtc])
+            SELECT N'Provider',@ProviderId,[FirebaseUserId],@Now FROM Provider.ProviderAuthIdentities
+            WHERE [ProviderAuthIdentityId]=@ProviderAuthIdentityId;
+
         INSERT INTO @ServiceCategories ([ServiceCategory])
         SELECT [ServiceCategory]
         FROM [Provider].[ProviderServiceRegistrations]
@@ -227,7 +239,25 @@ BEGIN
         DELETE FROM [Provider].[ProviderClosures] WHERE [ProviderId] = @ProviderId;
         DELETE FROM [Provider].[ProviderCancellationPolicies] WHERE [ProviderId] = @ProviderId;
         DELETE FROM [Provider].[ProviderPayoutMethods] WHERE [ProviderId] = @ProviderId;
+        DELETE FROM [Provider].[ProviderTrust] WHERE [ProviderId] = @ProviderId;
         DELETE FROM [Provider].[ProviderServiceRegistrations] WHERE [ProviderId] = @ProviderId;
+    END
+
+    IF @BlockedByOpenTickets = 0
+        DELETE FROM [Provider].[ProviderDeviceTokens]
+        WHERE [ProviderId] = @ProviderId OR [ProviderAuthIdentityId] = @ProviderAuthIdentityId;
+
+    -- Only completed deletes purge private data; a refused delete changes nothing.
+    -- Repeat calls also remove any stale operational rows.
+    IF @BlockedByOpenTickets = 0
+    BEGIN
+        DELETE [Notification].[NotificationOutbox] WHERE [Audience]=N'Provider' AND [RecipientId]=@ProviderId;
+        DELETE [Chat].[ChatConnections] WHERE [ParticipantType]=N'Provider' AND [ParticipantId]=@ProviderId;
+        UPDATE [Chat].[ConversationParticipants] SET [DeletedAtUtc]=COALESCE([DeletedAtUtc],@Now),
+            [UnreadCount]=0,[IsMuted]=1,[UpdatedAtUtc]=@Now
+        WHERE [ParticipantType]=N'Provider' AND [ParticipantId]=@ProviderId;
+        DELETE [Event].[EventViews] WHERE [ViewerType]=N'Provider' AND [ViewerAccountId]=@ProviderId;
+        DELETE [Provider].[ProviderServiceViews] WHERE [ProviderId]=@ProviderId;
     END
 
     -- Result set 1: summary. The retained counts are reported so the caller can

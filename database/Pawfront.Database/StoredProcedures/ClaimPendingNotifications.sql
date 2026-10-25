@@ -27,6 +27,36 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
 
+    -- Re-check Events V3 relevance before the first delivery. A delayed notice
+    -- must not describe a booking that was cancelled, a seat already filled, or
+    -- an event that has since ended. Retired rows never enter either inbox.
+    UPDATE n SET Status=N'Failed',UpdatedAtUtc=@Now,LastError=N'Superseded event notification.'
+    FROM [Notification].[NotificationOutbox] n
+    LEFT JOIN [Event].[Events] e ON e.EventId=TRY_CONVERT(UNIQUEIDENTIFIER,JSON_VALUE(CASE WHEN ISJSON(n.DataJson)=1 THEN n.DataJson ELSE N'{}' END,'$.eventId'))
+    LEFT JOIN [Event].[EventBookings] b ON b.BookingId=TRY_CONVERT(UNIQUEIDENTIFIER,JSON_VALUE(CASE WHEN ISJSON(n.DataJson)=1 THEN n.DataJson ELSE N'{}' END,'$.eventBookingId'))
+    OUTER APPLY (SELECT ISNULL(SUM(TicketCount),0) AS Reserved FROM [Event].[EventBookings]
+        WHERE EventId=e.EventId AND Status IN (N'Confirmed',N'Attended')) seats
+    WHERE n.Status=N'Pending' AND n.AttemptCount=0 AND n.NotificationType LIKE N'EVENT[_]%'
+      AND (
+        n.NotificationType IN (N'EVENT_TICKET_SOLD',N'EVENT_TICKET_CANCELLED',N'EVENT_BOOKING_CONFIRMED',N'EVENT_BOOKING_CANCELLED',N'EVENT_BOOKING_PAYMENT_SUCCEEDED',N'EVENT_BOOKING_PAYMENT_FAILED')
+        OR (e.EventStatus<>N'Active' AND n.NotificationType NOT IN (N'EVENT_CANCELLED',N'EVENT_ISSUE_RESOLVED',N'EVENT_PROFILE_FLAGGED',N'EVENT_PROFILE_FLAG_REMOVED'))
+        OR (n.NotificationType IN (N'EVENT_FIRST_BOOKING',N'EVENT_REMINDER_DAY_BEFORE',N'EVENT_REMINDER_STARTING_SOON') AND b.Status NOT IN (N'Confirmed',N'Attended'))
+        OR (n.NotificationType=N'EVENT_EDITABLE_AGAIN' AND seats.Reserved>0)
+        OR (n.NotificationType=N'EVENT_SOLD_OUT' AND seats.Reserved<e.MaximumCapacity)
+        OR (n.NotificationType IN (N'EVENT_REMINDER_DAY_BEFORE',N'EVENT_HOST_REMINDER_DAY_BEFORE') AND @Now>=DATEADD(hour,-1,[Event].[EventStartUtc](e.StartDate,e.StartTime)))
+        OR (n.NotificationType IN (N'EVENT_REMINDER_STARTING_SOON',N'EVENT_HOST_REMINDER_STARTING_SOON',N'EVENT_SEATS_AVAILABLE') AND @Now>=CASE WHEN n.NotificationType=N'EVENT_SEATS_AVAILABLE' THEN DATEADD(hour,-1,[Event].[EventStartUtc](e.StartDate,e.StartTime)) ELSE [Event].[EventStartUtc](e.StartDate,e.StartTime) END)
+        OR (n.NotificationType=N'EVENT_SEATS_AVAILABLE' AND e.MaximumCapacity IS NOT NULL AND seats.Reserved>=e.MaximumCapacity)
+        OR (n.NotificationType=N'EVENT_SEATS_AVAILABLE' AND EXISTS (SELECT 1 FROM [Event].[EventBookings] held
+            WHERE held.EventId=e.EventId AND held.BookerAccountId=n.RecipientId AND held.Status IN (N'Confirmed',N'Attended')))
+        OR (n.NotificationType IN (N'EVENT_HOST_REMINDER_DAY_BEFORE',N'EVENT_HOST_REMINDER_STARTING_SOON') AND seats.Reserved=0)
+        OR (n.NotificationType IN (N'EVENT_LIVE',N'EVENT_LIVE_FREE') AND @Now>=[Event].[EventStartUtc](e.EndDate,e.EndTime))
+        OR (n.NotificationType=N'EVENT_RECORD_REMAINING' AND @Now>=[Event].[EventStartUtc](DATEADD(day,1,e.EndDate),'00:00'))
+        OR (n.NotificationType=N'EVENT_RECORD_REMAINING' AND NOT EXISTS (
+            SELECT 1 FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] pending ON pending.BookingId=t.BookingId
+            WHERE pending.EventId=e.EventId AND pending.Status IN (N'Confirmed',N'Attended') AND t.PaymentStatus=N'Pending'))
+        OR (n.NotificationType=N'EVENT_PROFILE_FLAGGED' AND NOT EXISTS (SELECT 1 FROM [Event].[Reliability] r WHERE r.AccountId=n.RecipientId AND r.RedFlagExpiresAt>@Now))
+      );
+
     -- Retire rows that exhausted their attempts while claimed — a dispatcher
     -- that crashed on the final attempt would otherwise sit in 'Sending'
     -- forever, since the claim predicate below excludes it.

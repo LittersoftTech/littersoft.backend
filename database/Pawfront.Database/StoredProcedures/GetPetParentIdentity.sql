@@ -12,7 +12,9 @@ BEGIN
            [IdentityType],
            [IdentityPhotoUrl],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [Status],
+           [RejectionReason]
     FROM [Parent].[ParentIdentities]
     WHERE [PetParentId] = @PetParentId;
 END;

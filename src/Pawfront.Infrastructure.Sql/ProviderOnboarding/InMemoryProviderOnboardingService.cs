@@ -26,6 +26,12 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
 
         lock (syncRoot)
         {
+            if (authIdentities.Values.Any(identity =>
+                identity.FirebaseUserId != firebaseUserId &&
+                string.Equals(identity.Email, email, StringComparison.OrdinalIgnoreCase) &&
+                !(identity.ProviderId is { } providerId && profilesByProviderId[providerId].IsDeleted)))
+                throw new Pawfront.Application.Onboarding.EmailAlreadyExistsException();
+
             if (authIdentityIdsByFirebaseUserId.TryGetValue(firebaseUserId, out var existingId))
             {
                 var existing = authIdentities[existingId];
@@ -244,6 +250,8 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
             profile.LastName = "Provider";
             profile.Gender = "PreferNotToSay";
             profile.DateOfBirth = new DateOnly(1900, 1, 1);
+            profile.MobileCountryCode = "+00";
+            profile.MobileNumber = $"DEL{providerId:N}"[..32];
             profile.MobileVerifiedAtUtc = null;
             profile.BannerImageUrl = null;
             profile.IsActive = false;
@@ -356,6 +364,9 @@ internal sealed class InMemoryProviderOnboardingService(IProviderMobileOtpSender
             {
                 throw new ProviderProfileNotFoundException(providerId);
             }
+
+            if (profile.IsDeleted)
+                throw new ProviderAccountDeletedException(providerId);
 
             profile.IsActive = isActive;
             profile.UpdatedAtUtc = now;

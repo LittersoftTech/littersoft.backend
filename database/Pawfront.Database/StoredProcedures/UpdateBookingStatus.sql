@@ -93,6 +93,8 @@ BEGIN
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
 
+    SET @Now = SYSUTCDATETIME(); -- Capture report time after acquiring the booking lock.
+
     IF @CurrentStatus IS NULL
     BEGIN
         THROW 51120, 'Booking was not found.', 1;
@@ -130,7 +132,7 @@ BEGIN
     -- the service starts.
     IF @CurrentStatus = N'CREATED'
        AND DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
-                   CAST(@BookingDate AS DATETIME2(7))) < DATEADD(HOUR, 2, @Now)
+                   CAST(@BookingDate AS DATETIME2(7))) <= DATEADD(HOUR, 2, @Now)
     BEGIN
         THROW 51153, 'Booking has expired: it was never accepted and the service now starts in under 2 hours.', 1;
     END
@@ -149,12 +151,12 @@ BEGIN
     -- Finished jobs allow only the provider's report of non-payment here.
     IF @CurrentStatus IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                           N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
-       AND NOT (@CurrentStatus = N'COMPLETED' AND @NewStatus = N'PAYMENT_NOT_RECEIVED')
+       AND NOT (@CurrentStatus IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED') AND @NewStatus = N'PAYMENT_NOT_RECEIVED')
     BEGIN
         THROW 51123, 'Booking is in a terminal state and cannot change.', 1;
     END
 
-    IF @CurrentStatus = @NewStatus
+    IF @CurrentStatus = @NewStatus AND @NewStatus <> N'PAYMENT_NOT_RECEIVED'
     BEGIN
         THROW 51124, 'Booking is already in the requested status.', 1;
     END
@@ -162,7 +164,7 @@ BEGIN
     -- From-state rules for the engine transitions.
     IF (@NewStatus = N'CONFIRMED'        AND @CurrentStatus <> N'CREATED')
        OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
-       OR (@NewStatus = N'PAYMENT_NOT_RECEIVED' AND @CurrentStatus <> N'COMPLETED')
+       OR (@NewStatus = N'PAYMENT_NOT_RECEIVED' AND @CurrentStatus NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED'))
        OR (@NewStatus = N'COMPLETED' AND @Source <> N'Custom' AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
        OR (@NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
            AND @CurrentStatus NOT IN (N'CONFIRMED',
@@ -212,6 +214,7 @@ BEGIN
 
     UPDATE [Booking].[Bookings]
     SET [Status] = @NewStatus,
+        [CashNotReceivedAtUtc] = CASE WHEN @NewStatus = N'PAYMENT_NOT_RECEIVED' THEN @Now ELSE [CashNotReceivedAtUtc] END,
         [UpdatedAtUtc] = @Now,
         -- Only ever written on the COMPLETED transition; every other status
         -- preserves the actual finish, including non-payment and later payment.
@@ -327,7 +330,17 @@ BEGIN
            [CustomerLocation],
            [PricePerHour],
            [JobNotes],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] mh WHERE mh.[BookingId] = [Booking].[Bookings].[BookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[Bookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[Bookings].[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], NULL, NULL)
+           WHEN [Booking].[Bookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], m.[ProposedBookingDate], m.[ProposedStartTime])
+                FROM [Booking].[BookingModifications] m WHERE m.[BookingId] = [Booking].[Bookings].[BookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'SingleDay' AND pay.[BookingId]=[Booking].[Bookings].[BookingId]) AS [PaidAtUtc]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

@@ -19,7 +19,8 @@ internal static class ProviderOnboardingEndpoints
         mobileVerification.MapPost("/otp", SendOtp);
         mobileVerification.MapPost("/otp/{providerMobileOtpId:guid}/verify", VerifyOtp);
 
-        builder.MapGet("/providers/{providerId:guid}/profile", GetProviderProfile);
+        builder.MapGet("/providers/{providerId:guid}/profile", GetProviderProfile)
+            .Produces<Pawfront.Contracts.Common.ApiResponse<ProviderProfileResponse>>();
         builder.MapPatch("/providers/{providerId:guid}/profile", UpdateProviderProfile);
         builder.MapPatch("/providers/{providerId:guid}/mobile", UpdateProviderMobile);
         builder.MapGet("/providers/{providerId:guid}/onboarding-status", GetOnboardingStatus);
@@ -30,11 +31,13 @@ internal static class ProviderOnboardingEndpoints
     private static async Task<IResult> GetProviderProfile(
         Guid providerId,
         IProviderOnboardingService onboardingService,
+        Pawfront.Application.Reliability.IReliabilityReader reliabilityReader,
         CancellationToken cancellationToken)
     {
         try
         {
             var response = await onboardingService.GetProviderProfileAsync(providerId, cancellationToken);
+            response = response with { Reliability = await reliabilityReader.GetProviderAsync(providerId, cancellationToken) };
             return ApiResults.Ok(response);
         }
         catch (ProviderProfileNotFoundException exception)
@@ -155,6 +158,10 @@ internal static class ProviderOnboardingEndpoints
             var command = FirebaseClaims.BuildCommand(httpContext.User, request);
             var response = await onboardingService.SaveFirebaseAuthAsync(command, cancellationToken);
             return ApiResults.Ok(response);
+        }
+        catch (Pawfront.Application.Onboarding.EmailAlreadyExistsException exception)
+        {
+            return ApiResults.Conflict("EmailAlreadyExists", exception.Message);
         }
         catch (UnsupportedAuthProviderException exception)
         {

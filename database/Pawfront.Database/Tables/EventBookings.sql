@@ -49,7 +49,7 @@ CREATE TABLE [Event].[EventBookings]
     CONSTRAINT [CK_EventBookings_PaymentStatus]
         CHECK ([PaymentStatus] IN (N'Pending', N'Paid', N'Failed')),
     CONSTRAINT [CK_EventBookings_Status]
-        CHECK ([Status] IN (N'Confirmed', N'Cancelled', N'CancelledByParent', N'EventCancelled', N'Attended', N'NoShow')),
+        CHECK ([Status] IN (N'Confirmed', N'Cancelled', N'CancelledByParent', N'EventCancelled', N'AccountDeleted', N'Attended', N'NoShow')),
     CONSTRAINT [CK_EventBookings_CancelledRequiresTimestamp] CHECK (
         ([Status] = N'Cancelled' AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] <> N'Cancelled')

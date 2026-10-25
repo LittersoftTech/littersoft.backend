@@ -75,7 +75,11 @@ public sealed record ProviderPublicProfileResponse(
     PetGroomerServiceResponse? PetGroomer,
     PetTrainerServiceResponse? PetTrainer,
     PetAdoptionSaleServiceResponse? PetAdoptionSale,
-    VetServiceResponse? Vet);
+    VetServiceResponse? Vet,
+    Pawfront.Contracts.Reliability.ReliabilityResponse? Reliability = null)
+{
+    public string? Badge { get; set; }
+}
 
 
 public sealed record ProviderWorkingHoursDayResponse(
@@ -186,4 +190,7 @@ public sealed record ProviderSearchResultResponse(
     // ring up would simply have vanished.
     bool? MatchesPetTemperament = null,
     double? Distance = null,
-    string DistanceUnit = "km");
+    string DistanceUnit = "km")
+{
+    public string? Badge { get; set; }
+}

@@ -196,5 +196,9 @@ internal static class ProviderJobEndpoints
             row.PayoutStatus,
             row.PaidAtUtc,
             row.PaymentMethod,
-            row.CreatedAtUtc);
+            row.CreatedAtUtc,
+            row.CashNotReceivedAtUtc,
+            row.ProviderModificationUsed,
+            row.RequestExpiresAtUtc,
+            new Pawfront.Contracts.Bookings.BookingPaymentTimestampDetails(row.PaidAtUtc));
 }

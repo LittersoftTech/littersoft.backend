@@ -1,3 +1,4 @@
+using Pawfront.Application.ProviderTrust;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetGroomer;
 using Pawfront.Application.Services.ProviderServiceLocations;
@@ -127,6 +128,7 @@ internal static class PetGroomerEndpoints
         SaveGroomerShopOfferingRequest request,
         IPetGroomerServiceRegistry registry,
         IProviderServiceCatalog serviceCatalog,
+        IProviderTrustService trustService,
         CancellationToken cancellationToken)
     {
         try
@@ -143,6 +145,8 @@ internal static class PetGroomerEndpoints
                     request.DogTemperaments,
                     request.ServiceLocation),
                 cancellationToken);
+
+            await trustService.SyncOfferingDocumentAsync(providerId, request.LicenseImageUrl, cancellationToken);
 
             await SyncGroomerServiceAsync(providerId, result.SubCategory,
                 result.GroomerShop?.Offering, serviceCatalog, cancellationToken);
@@ -164,6 +168,7 @@ internal static class PetGroomerEndpoints
         SaveFreelanceGroomerOfferingRequest request,
         IPetGroomerServiceRegistry registry,
         IProviderServiceCatalog serviceCatalog,
+        IProviderTrustService trustService,
         CancellationToken cancellationToken)
     {
         try
@@ -180,6 +185,8 @@ internal static class PetGroomerEndpoints
                     request.DogTemperaments,
                     request.ServiceLocation),
                 cancellationToken);
+
+            await trustService.SyncOfferingDocumentAsync(providerId, request.LicenseImageUrl, cancellationToken);
 
             await SyncGroomerServiceAsync(providerId, result.SubCategory,
                 result.Freelance?.Offering, serviceCatalog, cancellationToken);

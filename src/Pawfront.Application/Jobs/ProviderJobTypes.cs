@@ -147,7 +147,10 @@ public sealed record ProviderJobRow(
     string PayoutStatus,
     DateTimeOffset? PaidAtUtc,
     string? PaymentMethod,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null);
 
 /// <summary>One page of the provider's jobs, plus the total behind it.</summary>
 public sealed record ProviderJobPage(

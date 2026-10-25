@@ -47,6 +47,9 @@ public static class NotificationTemplateCatalog
             // To the PET PARENT — the provider acted (V3 cards P-U*)
             // ================================================================
 
+            [NotificationTypes.IdentityAdded] = new("ID added", "Your ID has been accepted. Your ID Added badge is now visible.", NotificationRoutes.Identity, "Identity"),
+            [NotificationTypes.IdentityNotApproved] = new("ID not approved", "Your ID was not approved. Open your ID to see the reason and upload a replacement.", NotificationRoutes.Identity, "Identity"),
+
             // P-U1
             [NotificationTypes.BookingAccepted] = new(
                 "Booking confirmed",
@@ -209,7 +212,7 @@ public static class NotificationTemplateCatalog
             // the window is measured from creation.
             [NotificationTypes.BookingRequested] = new(
                 "New Service Booking",
-                "{parentName} has requested {serviceName} for {petName} on {serviceDateWithYear}. Respond within {respondWithin}.",
+                "{parentName} has requested {serviceName} for {petName} on {serviceDateWithYear} at {startTime}. Respond within {respondWithin}.",
                 NotificationRoutes.BookingRequests,
                 Booking),
 
@@ -219,7 +222,7 @@ public static class NotificationTemplateCatalog
             // in {serviceName} ("Night Stay (3 nights)").
             [NotificationTypes.NightStayBookingRequested] = new(
                 "New Service Booking",
-                "{parentName} has requested {serviceName} for {petName} on {serviceDateWithYear}. Respond within {respondWithin}.",
+                "{parentName} has requested {serviceName} for {petName} on {serviceDateWithYear} at {startTime}. Respond within {respondWithin}.",
                 NotificationRoutes.BookingRequests,
                 Booking),
 
@@ -323,7 +326,7 @@ public static class NotificationTemplateCatalog
                 Booking),
 
             // ================================================================
-            // Event tickets — not covered by the V3 services spec
+            // Event tickets — approved Events V3 copy (card codes below).
             // ================================================================
 
             [NotificationTypes.EventBookingConfirmed] = new(
@@ -350,10 +353,58 @@ public static class NotificationTemplateCatalog
                 NotificationRoutes.EventBookingDetail,
                 Event),
 
+            [NotificationTypes.EventBookingCashReceived] = new(
+                "Thank You for Your Payment",
+                "{hostName} has confirmed receiving CHF {amount} for {eventTitle}.",
+                NotificationRoutes.EventDetail, Event),
+            [NotificationTypes.EventBookingPaymentPending] = new(
+                "Event Payment Pending",
+                "{hostName} marked your CHF {amount} payment for {eventTitle} as pending. Please check with the host.",
+                NotificationRoutes.EventDetail, Event),
             [NotificationTypes.EventCancelled] = new(
-                "Event cancelled", "The host cancelled {eventTitle}.", NotificationRoutes.EventBookingDetail, Event),
+                "Event Cancelled by Host", "{hostName} cancelled {eventTitle} scheduled for {serviceDate}.", NotificationRoutes.EventDetail, Event),
             [NotificationTypes.EventSeatsAvailable] = new(
-                "Places available", "A place has opened up at {eventTitle}. Book while places are available.", NotificationRoutes.EventDetail, Event),
+                "A Spot Just Opened Up", "A spot opened up for {eventTitle}. Book now before it’s gone!", NotificationRoutes.EventDetail, Event),
+
+            // A-S1 / A-S2 / A-S5 / A-S6 / A-S7 / A-S8 / A-S9
+            [NotificationTypes.EventReminderDayBefore] = new(
+                "Be There For The Event Tomorrow", "Don’t forget to be there on time for {eventTitle} tomorrow.", NotificationRoutes.EventMyTickets, Event),
+            [NotificationTypes.EventReminderStartingSoon] = new(
+                "Event Starts Soon", "{eventTitle} starts in 1 hour. Please be there on time.", NotificationRoutes.EventMyTickets, Event),
+            [NotificationTypes.EventAttended] = new(
+                "Thanks for Attending!", "We hope you and your pet enjoyed {eventTitle}. See you at the next one!", NotificationRoutes.EventDetail, Event),
+            [NotificationTypes.EventMissed] = new(
+                "You Missed the Event", "Your attendance at {eventTitle} wasn’t recorded, so you’re marked as a no-show. This counts towards a red flag.", NotificationRoutes.EventDetail, Event),
+            [NotificationTypes.EventProfileFlagged] = new(
+                "Your Events Profile Is Flagged", "Your last two event bookings were cancelled late or missed, so your Events profile has a red flag for 30 days. Tap to see how to remove it.", NotificationRoutes.EventAccountFlagged, Event),
+            [NotificationTypes.EventProfileFlagRemoved] = new(
+                "Red Flag Removed", "Congratulations! The red flag is removed from your Events profile. You can again book up to 5 events at a time and host your own events.", NotificationRoutes.Events, Event),
+            [NotificationTypes.EventIssueResolved] = new(
+                "Issue Resolved", "Your ticket for {eventTitle} has been resolved. Tap to see the outcome.", NotificationRoutes.TicketDetail, Event),
+
+            // H-U1 / H-U4 / H-S1 / H-S2 / H-S3 / H-S4 / H-S4-Free / H-S5 / H-S6 / H-S6-Free
+            [NotificationTypes.EventFirstBooking] = new(
+                "First Booking For Your Event!", "Congratulations! {parentName} booked the first ticket for {eventTitle}. Your event details can no longer be changed.", NotificationRoutes.EventMyEvent, Event),
+            [NotificationTypes.EventEditableAgain] = new(
+                "Your Event Is Editable Again", "All bookings for {eventTitle} were cancelled. You can edit your event details again.", NotificationRoutes.EventMyEvent, Event),
+            [NotificationTypes.EventSoldOut] = new(
+                "Your Event Is Sold Out!", "Congratulations! All {seats} seats for {eventTitle} are booked.", NotificationRoutes.EventAttendees, Event),
+            [NotificationTypes.EventHostReminderDayBefore] = new(
+                "Get Ready For Your Event Tomorrow", "{attendees} {attendeeVerb} booked for {eventTitle}. Good luck!", NotificationRoutes.EventPawPrints, Event),
+            [NotificationTypes.EventHostReminderStartingSoon] = new(
+                "Your Event Starts Soon!", "{attendees} {attendeeVerb} coming. Bookings are now closed.", NotificationRoutes.EventAttendees, Event),
+            [NotificationTypes.EventLive] = new(
+                "Your Event Is Live", "Record attendance and cash received in the Attendees tab as guests arrive.", NotificationRoutes.EventAttendees, Event),
+            [NotificationTypes.EventLiveFree] = new(
+                "Your Event Is Live", "{eventTitle} has started. Check who’s coming in the Attendees tab.", NotificationRoutes.EventAttendees, Event),
+            [NotificationTypes.EventRecordRemaining] = new(
+                "Record Remaining Attendance and Cash", "Please record the remaining {attendees} by midnight. Unrecorded attendees are marked as no-show.", NotificationRoutes.EventAttendees, Event),
+            [NotificationTypes.EventHosted] = new(
+                "Thank You for Hosting!", "{attendees} joined your event. You received CHF {totalAmount}. Congratulations!", NotificationRoutes.EventPawPrints, Event),
+            [NotificationTypes.EventHostedFree] = new(
+                "Thank You for Hosting!", "{attendees} joined your event. Congratulations!", NotificationRoutes.EventPawPrints, Event),
+
+            // Legacy types remain renderable for already queued rows; V3 never enqueues them.
             [NotificationTypes.EventTicketSold] = new(
                 "Tickets sold",
                 "{parentName} booked {ticketCount} ticket(s) for {eventTitle}.",

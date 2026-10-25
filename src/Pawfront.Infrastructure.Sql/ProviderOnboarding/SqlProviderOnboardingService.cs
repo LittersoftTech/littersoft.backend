@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using System.Globalization;
 using System.Security.Cryptography;
 using Microsoft.Data.SqlClient;
@@ -46,14 +46,17 @@ internal sealed class SqlProviderOnboardingService(
         command.Parameters.AddWithValue("@DeviceId", DbValue(TrimOrNull(commandInput.DeviceId)));
         command.Parameters.AddWithValue("@DevicePlatform", DbValue(NormalizeDevicePlatformOrNull(commandInput.DevicePlatform)));
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-
-        if (!await reader.ReadAsync(cancellationToken))
+        try
         {
-            throw new InvalidOperationException("Provider auth identity was not returned after save.");
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                throw new InvalidOperationException("Provider auth identity was not returned after save.");
+            return ReadAuthIdentity(reader);
         }
-
-        return ReadAuthIdentity(reader);
+        catch (SqlException exception) when (exception.Number == 51980)
+        {
+            throw new Pawfront.Application.Onboarding.EmailAlreadyExistsException();
+        }
     }
 
     public async Task<ProviderProfileResponse> CompleteProviderProfileAsync(
