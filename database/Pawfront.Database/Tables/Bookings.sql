@@ -28,6 +28,10 @@ CREATE TABLE [Booking].[Bookings]
     [BookingDate] DATE NOT NULL,
     [StartTime] TIME(0) NOT NULL,
     [EndTime] TIME(0) NOT NULL,
+    -- Accepted working day, in UTC (including local-date/DST conversion).
+    -- NULL only for requests, Custom walk-ins and legacy rows awaiting capture.
+    [WorkingHoursOpensAtUtc] DATETIME2(7) NULL,
+    [WorkingHoursClosesAtUtc] DATETIME2(7) NULL,
     -- When the job actually finished, if it finished EARLY. Stamped by
     -- [Booking].[CompleteBooking] and left NULL whenever the booked window ran
     -- its course (completed at/after [EndTime], or on a later date), so NULL

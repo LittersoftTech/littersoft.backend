@@ -4,7 +4,10 @@ using System.Reflection;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Events;
 
-const string connectionString = @"Server=(localdb)\MSSQLLocalDB;Database=PawfrontEventLifecycleChecks;Integrated Security=true;Encrypt=false;TrustServerCertificate=true";
+var database = args.SingleOrDefault(a => a.StartsWith("--database=", StringComparison.Ordinal))?[11..]
+    ?? "PawfrontEventLifecycleChecks";
+var connectionString = new SqlConnectionStringBuilder(@"Server=(localdb)\MSSQLLocalDB;Integrated Security=true;Encrypt=false;TrustServerCertificate=true")
+    { InitialCatalog = database }.ConnectionString;
 int checks = 0;
 void Check(bool ok, string name) { if (!ok) throw new Exception(name); checks++; Console.WriteLine($"PASS {name}"); }
 async Task<List<Dictionary<string, object>>> Query(string sql, params (string, object?)[] args)
@@ -151,6 +154,34 @@ Check(!(await lifecycle.GetReliabilityAsync(providerBuyer,default)).IsRedFlagged
 var json = System.Text.Json.JsonSerializer.Serialize(hostCard,new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
 using(var document = System.Text.Json.JsonDocument.Parse(json))
     Check(document.RootElement.GetProperty("bookings").GetProperty("totalBookings").GetInt32()==0 && document.RootElement.GetProperty("bookings").GetProperty("maxBookings").GetInt32()==2 && document.RootElement.TryGetProperty("bookingsCloseAtUtc",out _),"booking card serializes counts and UTC cutoff in client shape");
+// The same email in both apps must not merge Hosting and Attending.
+var sharedEmail=Guid.NewGuid()+"@test.invalid";
+var sharedParent=await Parent(); var sharedProvider=Guid.NewGuid();
+await Query("""
+    DECLARE @Auth UNIQUEIDENTIFIER=NEWID();
+    INSERT Provider.ProviderAuthIdentities(ProviderAuthIdentityId,FirebaseUserId,AuthProvider,Email)
+    VALUES(@Auth,CONVERT(nvarchar(36),@Id),N'EmailPassword',@Email);
+    INSERT Provider.Providers(ProviderId,ProviderAuthIdentityId,FirstName,LastName,Gender,MobileCountryCode,MobileNumber,DateOfBirth)
+    VALUES(@Id,@Auth,N'Test',N'Provider',N'Other',N'+41',LEFT(CONVERT(nvarchar(36),@Id),16),'1990-01-01');
+    UPDATE Parent.ParentAuthIdentities SET Email=@Email WHERE PetParentId=@Parent;
+    """,("@Id",sharedProvider),("@Parent",sharedParent),("@Email",sharedEmail));
+foreach(var providerHosts in new[]{false,true})
+{
+    var sharedHosted=await Event(sharedParent);
+    if(providerHosts) await Query("UPDATE [Event].[Events] SET ProviderId=@P,PetParentId=NULL WHERE EventId=@E",("@P",sharedProvider),("@E",sharedHosted));
+    var attendeeId=providerHosts?sharedParent:sharedProvider;
+    var attendeeType=providerHosts?Pawfront.Application.Blocks.BlockPartyType.PetParent:Pawfront.Application.Blocks.BlockPartyType.Provider;
+    var attendee=new Pawfront.Application.Blocks.BlockParty(attendeeType,attendeeId);
+    var organizer=new Pawfront.Application.Blocks.BlockParty(providerHosts?Pawfront.Application.Blocks.BlockPartyType.Provider:Pawfront.Application.Blocks.BlockPartyType.PetParent,providerHosts?sharedProvider:sharedParent);
+    var scopedBooking=await store.CreateAsync(new(sharedHosted,"Shared",sharedEmail,null,"Cash",5,10,["Attendee"],attendeeId,attendeeType.ToString()),default);
+    Check(await store.GetAsync(scopedBooking.BookingId,default,organizer) is null,"Same-email host cannot read the attendee's booking");
+    await Error(51218,()=>Query("EXEC [Event].[CancelEventBooking] @B,@Email,@Account,@Type",("@B",scopedBooking.BookingId),("@Email",sharedEmail),("@Account",organizer.Id),("@Type",organizer.Type.ToString())),"Same-email host cannot cancel the attendee's booking");
+    Check((await store.ListByBookerEmailAsync(sharedEmail,default,attendee)).Any(x=>x.EventId==sharedHosted),"Attendee sees tickets under its own app account");
+    Check(!(await store.ListByBookerEmailAsync(sharedEmail,default,organizer)).Any(x=>x.EventId==sharedHosted),"Same-email host does not acquire attendee tickets");
+    Check(!(await store.ListBookedEventIdsByBookerEmailAsync(sharedEmail,default,organizer)).Contains(sharedHosted),"Same-email booking indicator does not hide hosting");
+    Check((providerHosts?await eventStore.ListByProviderAsync(sharedProvider,default):await eventStore.ListByPetParentAsync(sharedParent,default)).Any(x=>x.EventId==sharedHosted),"Host's event remains in Hosting");
+}
+
 // Direct SQL rejects purchases inside the final hour and while live, for either account role.
 var cutoffBuyer=await Parent(); var closingEvent=await Event(host,10,1);
 await Query("""
@@ -172,6 +203,34 @@ var empty=await Event(host);
 await Error(51466,()=>Query("EXEC [Event].[RemoveHostedEvent] @E,@P",("@E",empty),("@P",host)),"active event cannot be removed");
 await Query("EXEC [Event].[CancelHostedEvent] @E,@P",("@E",empty),("@P",host));
 Check((await eventStore.GetAsync(empty,default))!.EventsCancelledCount==1,"unbooked cancellation does not count");
+// A paid NoRefund cancellation is always late, including repeat bookings of one event.
+var noRefundBuyer=await Parent(); var noRefundEvent=await Event(host,5,12);
+await Query("UPDATE [Event].[Events] SET CancellationPolicy=N'NoRefund' WHERE EventId=@E",("@E",noRefundEvent));
+for(var i=1;i<=2;i++)
+{
+    await Cancel(await Book(noRefundEvent,noRefundBuyer),noRefundBuyer);
+    var state=await Reliability(noRefundBuyer);
+    Check((bool)state["IsRedFlagged"]==(i==2),$"NoRefund cancellation {i} is visible immediately in reliability");
+}
+await Query("UPDATE [Event].[Reliability] SET RedFlagExpiresAt=DATEADD(day,14,SYSUTCDATETIME()) WHERE AccountId=@P",("@P",noRefundBuyer));
+var extendedBefore=DateTime.UtcNow.AddDays(30);
+await Cancel(await Book(noRefundEvent,noRefundBuyer),noRefundBuyer);
+var extended=(DateTime)(await Reliability(noRefundBuyer))["RedFlagExpiresAt"];
+Check(extended>=extendedBefore && extended<=DateTime.UtcNow.AddDays(30),"Late NoRefund cancellation restarts an active flag for 30 days");
+var profileReliability=(Pawfront.Application.Reliability.IReliabilityReader)Activator.CreateInstance(sqlAssembly.GetType("Pawfront.Infrastructure.Sql.Reliability.SqlReliabilityReader")!,connectionString,null)!;
+var profileCommunity=(await profileReliability.GetParentAsync(noRefundBuyer,default)).Community;
+Check(profileCommunity.IsRedFlagged && profileCommunity.RedFlagExpiresAtUtc==new DateTimeOffset(extended,TimeSpan.Zero),"Profile reliability.community immediately returns the restarted flag date");
+var freeWindowBooking=await Book(await Event(host,5,72),noRefundBuyer);
+await Cancel(freeWindowBooking,noRefundBuyer);
+Check((DateTime)(await Reliability(noRefundBuyer))["RedFlagExpiresAt"]==extended,"Free-window cancellation preserves the active flag deadline");
+await Query("UPDATE [Event].[Reliability] SET RedFlagExpiresAt=DATEADD(second,-1,SYSUTCDATETIME()) WHERE AccountId=@P",("@P",noRefundBuyer));
+Check(!(bool)(await Reliability(noRefundBuyer))["IsRedFlagged"],"Flag lifts immediately once its deadline passes");
+profileCommunity=(await profileReliability.GetParentAsync(noRefundBuyer,default)).Community;
+Check(!profileCommunity.IsRedFlagged && profileCommunity.RedFlagExpiresAtUtc is null,"Profile clears the flag and expiry date at the deadline");
+var startedBooking=await Book(await Event(host,5,12),noRefundBuyer);
+await Query("UPDATE e SET StartDate=CAST(SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'W. Europe Standard Time' AS DATE),StartTime='00:00' FROM [Event].[Events] e JOIN [Event].[EventBookings] b ON b.EventId=e.EventId WHERE b.BookingId=@B",("@B",startedBooking));
+await Error(51468,()=>Cancel(startedBooking,noRefundBuyer),"Cancellation rejects once the Zurich event start passes");
+
 // Two late cancellations, then account restrictions and expiry.
 for(int i=0;i<2;i++) { var late=await Event(host,5,12); var b=await Book(late,buyer); await Cancel(b,buyer); }
 Check((bool)(await Reliability(buyer))["IsRedFlagged"],"two late cancellations flag account");
@@ -320,6 +379,15 @@ await eventStore.IncrementCounterAsync(viewEvent,"View",default,new Pawfront.App
 Check((int)(await Query("SELECT COUNT(*) N FROM [Event].[EventViews] WHERE EventId=@E",("@E",viewEvent)))[0]["N"]==2,"SQL adapter forwards caller identity");
 
 // Receipt and undo notifications reflect real transitions and preserve paid state on reopen.
+await Task.WhenAll(Enumerable.Range(0,8).Select(_=>eventStore.IncrementCounterAsync(viewEvent,"View",default,new Pawfront.Application.Blocks.BlockParty(Pawfront.Application.Blocks.BlockPartyType.Provider,providerHost))));
+Check((await eventStore.GetAsync(viewEvent,default))!.Counters.ViewCount==3,"Repeated provider opens count one account view");
+var providerViewEvent=await Event(host);
+await Query("UPDATE [Event].[Events] SET ProviderId=@P,PetParentId=NULL WHERE EventId=@E",("@P",providerHost),("@E",providerViewEvent));
+await eventStore.IncrementCounterAsync(providerViewEvent,"View",default,new Pawfront.Application.Blocks.BlockParty(Pawfront.Application.Blocks.BlockPartyType.Provider,providerHost));
+Check((await store.GetMetricsAsync(providerHost,providerViewEvent,default)).Views==0,"Provider host's own view is excluded from metrics");
+await eventStore.IncrementCounterAsync(providerViewEvent,"View",default,new Pawfront.Application.Blocks.BlockParty(Pawfront.Application.Blocks.BlockPartyType.Provider,sharedProvider));
+Check((await store.GetMetricsAsync(providerHost,providerViewEvent,default)).Views==1 && (await eventStore.GetAsync(providerViewEvent,default))!.Counters.ViewCount==1,"Provider views appear in event PawPrints and host metrics");
+
 var receiptParent=await Parent(); var receiptEvent=await Event(host); var receiptBooking=await Book(receiptEvent,receiptParent,2);
 await Query("UPDATE [Event].[Events] SET StartDate=CAST(SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'W. Europe Standard Time' AS DATE),EndDate=CAST(SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'W. Europe Standard Time' AS DATE) WHERE EventId=@E",("@E",receiptEvent));
 await Cash(receiptBooking,host,1,"CashReceived"); await Cash(receiptBooking,host,1,"CashReceived");

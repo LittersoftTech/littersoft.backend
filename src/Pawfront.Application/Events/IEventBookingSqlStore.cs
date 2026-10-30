@@ -1,3 +1,5 @@
+using Pawfront.Application.Blocks;
+
 namespace Pawfront.Application.Events;
 
 public interface IEventBookingSqlStore
@@ -14,7 +16,7 @@ public interface IEventBookingSqlStore
         CreateEventBookingSqlInput input,
         CancellationToken cancellationToken);
 
-    Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
+    Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken, BlockParty? booker = null);
 
     /// <summary>
     /// External gateway callback. Sets PaymentStatus + PaymentReference.
@@ -51,12 +53,14 @@ public interface IEventBookingSqlStore
     /// <summary>
     /// Lists all event bookings made under <paramref name="bookerEmail"/>,
     /// joined with their event so the mobile summary card can render
-    /// without a follow-up fetch. Ordered most-recent first. Cancelled
+    /// without a follow-up fetch. A supplied booker restricts the result to that account
+    /// and role; email alone is only the compatibility path for internal callers.
+    /// Ordered most-recent first. Cancelled
     /// bookings are included so the parent sees their full history.
     /// </summary>
     Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
         string bookerEmail,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, BlockParty? booker = null);
 
     /// <summary>
     /// Returns the distinct set of event ids the caller currently holds
@@ -66,7 +70,7 @@ public interface IEventBookingSqlStore
     /// </summary>
     Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
         string bookerEmail,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, BlockParty? booker = null);
 
     /// <summary>
     /// Soft-cancels the booking iff it was made under <paramref name="bookerEmail"/>.
@@ -78,5 +82,5 @@ public interface IEventBookingSqlStore
     Task<EventBookingResult> CancelByBookerAsync(
         Guid bookingId,
         string bookerEmail,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, BlockParty? booker = null);
 }

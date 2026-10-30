@@ -64,13 +64,15 @@ internal static class NightStaySearchChecks
         {
             offering = offering with { DropOffTime = dropOff };
             var available = (await Nights(today)).Nights!.Single();
-            Check(available.IsAvailable && available.RemainingCapacity == 2,
-                "Today's night ignores missing, elapsed and late drop-off times");
-            Check((await Search(today, today.AddDays(1))).Single().ProviderId == provider,
-                "Parent search includes today's provider regardless of handover time");
-            Check((await agenda.GetDailyAgendaAsync(provider, service, today, null, default)).Entries.Single().IsBookable,
-                "Parent night calendar agrees with date-based search");
+            var expected=!BookingLeadTime.IsTooSoon(today,dropOff??TimeOnly.MinValue,DateTimeOffset.UtcNow);
+            Check(available.IsAvailable==expected && available.RemainingCapacity == 2,
+                "Night availability enforces three hours before check-in");
+            Check((await Search(today, today.AddDays(1))).Count==(expected?1:0),
+                "Parent search agrees with check-in lead time");
+            Check((await agenda.GetDailyAgendaAsync(provider, service, today, null, default)).Entries.Single().IsBookable==expected,
+                "Parent night calendar agrees with check-in lead time");
         }
+        offering=offering with { DropOffTime=TimeOnly.MaxValue };
         Check(!(await Nights(today.AddDays(-1))).Nights!.Single().IsAvailable, "Past nights remain unavailable");
         Check((await Search(today.AddDays(-1), today)).Count == 0, "Search excludes a past start date");
         Check(!(await agenda.GetDailyAgendaAsync(provider, service, today.AddDays(-1), null, default)).Entries.Single().IsBookable,

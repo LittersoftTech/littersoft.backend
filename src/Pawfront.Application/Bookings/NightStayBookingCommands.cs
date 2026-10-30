@@ -220,7 +220,8 @@ public sealed record UpdateNightStayBookingStatusCommand(
     BookingStatusActor Actor,
     Guid ActorId,
     string? Note,
-    CapturedLocation? Location = null);
+    CapturedLocation? Location = null,
+    string? NoShowReason = null);
 
 /// <summary>
 /// Either party proposes a new check-in / check-out range for a night-stay

@@ -17,29 +17,28 @@ fields and the Agenda's top-level `paidAtUtc` remain available.
 The server enforces the window whenever a `BookingIncident` ticket is created,
 including JSON and photo-report flows on either API:
 
-- Reporting opens when the job ends. Completion history or an actual end marker
-  permits an early-finished job to be reported before its booked end. Payment
-  evidence is also sufficient when older records have no completion history.
-- If paid, the last permitted instant is `paidAtUtc + 24 hours`, regardless of
-  the booked end. Exactly 24 hours is permitted; later requests are refused.
-- If no payment is recorded, the deadline is the booked end plus 24 hours.
-  For night stays, booked end means check-out date plus pick-up time.
-- A job still in progress cannot be reported merely because its booked end passed.
+- Reporting opens at confirmation, including before the scheduled start and while
+  the job runs. Never-confirmed requests and declined requests cannot be reported.
+  Confirmation history preserves eligibility through cancellation or a pending
+  modification. Confirmed and later job states also support legacy records.
+- The deadline is cash confirmation plus 24 hours when payment was recorded;
+  otherwise it is the booked end plus 24 hours. Exactly 24 hours is permitted.
+  Night stays use check-out date plus pick-up time for the unpaid fallback.
 
 Rejected creations return HTTP 409 using the normal API error envelope:
 
 | Code | Meaning |
 |---|---|
-| `TicketWindowNotOpen` | The job has not ended yet. |
+| `TicketWindowNotOpen` | The job has not been confirmed. |
 | `TicketWindowExpired` | The 24-hour reporting window has passed. |
 
 The check runs in `Support.CreateTicket`. It locks the booking while reading its
-payment, serializing with payment confirmation. This protects older app versions
+status and schedule, serializing with booking updates. This protects older app versions
 and direct API callers. Existing tickets remain readable and actionable; other
 ticket kinds keep their existing rules.
 
 Deploy the updated database procedures and both APIs. `Deployment/DeployAll.sql`
 contains the changes. Run `dotnet run --project tests/Pawfront.ServicesModule.Checks -- --sql`
 against the disposable `PawfrontServicesModuleChecks` database after deployment to
-verify timestamps, list mappings, early/late payment windows, unpaid fallback,
-unfinished jobs, and HTTP error mappings.
+verify timestamps, list mappings, confirmation eligibility, reporting before and
+during a job, payment-independent deadlines, photo uploads, and HTTP error mappings.

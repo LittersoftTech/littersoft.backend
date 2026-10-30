@@ -6,14 +6,8 @@
 -- a modifiable state, 51143 a proposal is already open, 51151 the modification
 -- window has closed.
 --
--- NEITHER PARTY may open a proposal once the service starts in less than 2 hours
--- (THROW 51151) — by then the job is imminent and whoever is left waiting needs a
--- settled schedule. Same cutoff that expires an unanswered proposal, which the
--- scheduled external job settles (reverting the booking to CONFIRMED); together
--- the two rules mean that from T-2h a booking is never left sitting in either
--- MODIFICATION_REQUEST_BY_* status, so it stays startable. (Widened 2026-08-02 —
--- the provider side was previously ungated and never auto-expired; both parties
--- are now symmetric.)
+-- Requests require three hours of notice for both the original and proposed
+-- start. Responses expire two hours before the earlier start or after 24 hours.
 --
 -- When the provider's terms have drifted since the booking was created and the
 -- requester acknowledged the drift, @HasAcknowledgedTerms = 1 and the
@@ -85,7 +79,7 @@ BEGIN
         THROW 51142, 'A modification can only be requested on a confirmed booking.', 1;
     END
 
-    -- The modification window closes 2 hours before the service starts (all
+    -- The modification window closes 3 hours before the service starts (all
     -- times UTC), for either party's proposal.
     DECLARE @StartsAtUtc DATETIME2(7) =
         DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
@@ -97,12 +91,12 @@ BEGIN
         DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @ProposedStartTime),
                 CAST(@ProposedBookingDate AS DATETIME2(0)));
 
-    -- Both schedules must retain at least two hours of notice.
+    -- Both schedules must retain at least three hours of notice.
     IF @ProposedStartUtc < @StartsAtUtc SET @StartsAtUtc = @ProposedStartUtc;
 
-    IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
+    IF @Now > DATEADD(HOUR, -3, @StartsAtUtc)
     BEGIN
-        THROW 51151, 'A booking can no longer be modified within 2 hours of the service start time.', 1;
+        THROW 51151, 'A booking can no longer be modified within 3 hours of the service start time.', 1;
     END
 
     IF EXISTS (SELECT 1 FROM [Booking].[BookingModifications] WHERE [BookingId] = @BookingId)

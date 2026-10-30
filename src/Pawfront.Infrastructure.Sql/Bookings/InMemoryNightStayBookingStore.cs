@@ -234,7 +234,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         Guid actorId,
         string? note,
         CapturedLocation? location,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? noShowReason = null)
     {
         if (!bookings.TryGetValue(bookingId, out var row))
         {
@@ -263,7 +263,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
         // A CREATED stay expires after its check-in date —
         // mirror of the sproc's THROW 51273, and reject-only for the same reason.
         if (row.Status == BookingStatuses.Created
-            && row.CheckInDate < DateOnly.FromDateTime(DateTime.UtcNow))
+            && DateTimeOffset.UtcNow >= BookingAcceptanceDeadline.ComputeNightStay(row.CreatedAtUtc, row.CheckInDate, row.DropOffTime))
         {
             throw BookingExpiredException.ServiceTooClose(bookingId);
         }
@@ -402,7 +402,7 @@ internal sealed class InMemoryNightStayBookingStore : INightStayBookingSqlStore
     public Task<NightStayBookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<NightStayBookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken)
+    public Task<NightStayBookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false)
         => throw NotInMemory();
 
     public Task<NightStayBookingResult> MarkPaidAsync(Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee, string paymentMethod, CapturedLocation? location, CancellationToken cancellationToken)

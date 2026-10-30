@@ -481,7 +481,8 @@ public sealed record UpdateBookingStatusCommand(
     BookingStatusActor Actor,
     Guid ActorId,
     string? Note,
-    CapturedLocation? Location = null);
+    CapturedLocation? Location = null,
+    string? NoShowReason = null);
 
 /// <summary>One audited booking status change (or the seeded creation entry).</summary>
 public sealed record BookingStatusHistoryEntry(
@@ -597,7 +598,7 @@ public sealed class BookingNoShowTooEarlyException(Guid bookingId, bool isNightS
 /// The booking was never accepted in time, so it is expired — no further status
 /// change (including accept) is possible. Two triggers produce it, both meaning
 /// the provider ran out of time: sitting in CREATED for 24+ hours (BR-17), or
-/// still sitting in CREATED with under <see cref="BookingLeadTime.Minimum"/> to
+/// still sitting in CREATED with under <see cref="BookingAcceptanceDeadline.AcceptanceLeadTime"/> to
 /// the service (BR-53). Both surface as 409 <c>BookingExpired</c>; only the
 /// message differs.
 /// <para>
@@ -616,7 +617,7 @@ public sealed class BookingExpiredException(Guid bookingId, string reason)
     /// <summary>BR-53 — still in CREATED with the service now too close to start.</summary>
     public static BookingExpiredException ServiceTooClose(Guid bookingId)
         => new(bookingId,
-            $"because it was never accepted and the service now starts in under {BookingLeadTime.Minimum.TotalHours:0.#} hours");
+            $"because it was never accepted and the service now starts in under {BookingAcceptanceDeadline.AcceptanceLeadTime.TotalHours:0.#} hours");
 }
 
 // --- Job lifecycle: start-OTP, evidence, modifications ----------------------
@@ -733,7 +734,8 @@ public sealed record CompleteBookingCommand(
     Guid BookingId,
     Guid ProviderId,
     DateOnly? NextConsultationDate,
-    PrescriptionInput? Prescription = null);
+    PrescriptionInput? Prescription = null,
+    bool CustomerArrivedForCollection = false);
 
 /// <summary>
 /// The vet's per-visit prescription payload — free-text notes, the vaccinated
@@ -800,20 +802,18 @@ public sealed class BookingNotStartableException(Guid bookingId)
     : Exception($"Booking '{bookingId}' is not in a state the job can be started from.");
 
 /// <summary>
-/// The provider tapped "Start Job" outside their own weekly working hours — a job
-/// can only be started while the provider is open (their saved availability for
-/// today, UTC). The time of day the booking itself is scheduled for does not gate
-/// the action; only the working-hours window and the service DATE do (see
-/// <see cref="BookingStartNotOnServiceDateException"/>).
+/// The provider tapped "Start Job" before the slot's 15-minute lead-in or after
+/// the closing time stored at acceptance. The service date is checked separately
+/// (see <see cref="BookingStartNotOnServiceDateException"/>).
 /// </summary>
 public sealed class BookingStartOutsideWorkingHoursException(Guid bookingId)
-    : Exception($"The job on booking '{bookingId}' can only be started during your working hours.");
+    : Exception($"The job on booking '{bookingId}' can only be started within its accepted working hours.");
 
 /// <summary>
 /// The provider tapped "Start Job" on a day other than the one the booking is
 /// scheduled for (single-day: BookingDate; night-stay: CheckInDate, the drop-off
-/// day) — both compared against today in UTC. The time of day within the booked
-/// window is not checked, so a provider who runs early or late can still start.
+/// day) — both compared against today in UTC. The start window is checked
+/// separately against the slot's lead-in and accepted closing time.
 /// </summary>
 public sealed class BookingStartNotOnServiceDateException(Guid bookingId)
     : Exception($"The job on booking '{bookingId}' can only be started on the day it is scheduled for.");
@@ -865,14 +865,14 @@ public sealed class BookingModificationCapacityException(Guid bookingId)
     : Exception($"The proposed time for booking '{bookingId}' has no remaining capacity.");
 
 /// <summary>
-/// Either party tried to modify a booking less than 2 hours before the service
+/// Either party tried to modify a booking less than 3 hours before the service
 /// starts (BookingDate + StartTime; CheckInDate + DropOffTime for a stay). Past
 /// that point the schedule needs to be settled so the job can start — the app
 /// hides "Modify Job" from the same cutoff. Widened 2026-08-02 to gate the
 /// provider identically; previously only the parent was gated.
 /// </summary>
 public sealed class BookingModificationWindowClosedException(Guid bookingId)
-    : Exception($"Booking '{bookingId}' can no longer be modified within 2 hours of the service start time.");
+    : Exception($"Booking '{bookingId}' can no longer be modified within 3 hours of the service start time.");
 
 /// <summary>
 /// The proposal — from either party (widened 2026-08-02; previously

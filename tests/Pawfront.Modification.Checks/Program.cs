@@ -74,8 +74,13 @@ foreach (var night in new[] { false, true })
     drifted = true;
 }
 var today = DateOnly.FromDateTime(DateTime.UtcNow);
-await nightService.RequestModificationAsync(new(booking.NightStayBookingId,
-    BookingStatusActor.Provider, providerId, today, today.AddDays(1), null), default);
+try
+{
+    await nightService.RequestModificationAsync(new(booking.NightStayBookingId,
+        BookingStatusActor.Provider, providerId, today, today.AddDays(1), null), default);
+    throw new Exception("Night-stay modification ignored the check-in sending cutoff");
+}
+catch (BookingModificationWindowClosedException) { }
 try
 {
     await nightService.RequestModificationAsync(new(booking.NightStayBookingId,
@@ -83,9 +88,9 @@ try
     throw new Exception("Past night-stay check-in was accepted");
 }
 catch (InvalidNightStayDatesException) { }
-var dateDeadline = BookingAcceptanceDeadline.ComputeNightStay(DateTimeOffset.UtcNow, today);
-if (dateDeadline != new DateTimeOffset(today.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero))
-    throw new Exception("Night-stay acceptance deadline does not last through check-in day");
+var dateDeadline = BookingAcceptanceDeadline.ComputeNightStay(DateTimeOffset.UtcNow, today, new(18,0));
+if (dateDeadline != new DateTimeOffset(today.ToDateTime(new(16,0)), TimeSpan.Zero))
+    throw new Exception("Night-stay acceptance deadline must be two hours before check-in");
 foreach (var fixedTimes in new[] { true, false })
 {
     TimeOnly? savedDropOff = fixedTimes ? TimeOnly.MinValue : null;
@@ -103,7 +108,7 @@ foreach (var fixedTimes in new[] { true, false })
         "CreateAsync" => CaptureCreation(args),
         "GetAsync" => Task.FromResult<NightStayBookingResult?>(booking),
         "GetPendingModificationAsync" => Task.FromResult<NightStayBookingModificationResult?>(new(
-            Guid.NewGuid(), booking.NightStayBookingId, "Provider", providerId, today, today.AddDays(1), null, DateTimeOffset.UtcNow)),
+            Guid.NewGuid(), booking.NightStayBookingId, "Provider", providerId, monday, monday.AddDays(1), null, DateTimeOffset.UtcNow)),
         "RespondModificationAsync" => Task.FromResult(booking),
         _ => throw new Exception(m.Name)
     });
@@ -115,12 +120,12 @@ foreach (var fixedTimes in new[] { true, false })
         return Task.FromResult(booking);
     }
     var sameDayService = (INightStayBookingService)Make("Pawfront.Application.Bookings.NightStayBookingService", dependencies);
-    await sameDayService.CreateAsync(new(providerId, booking.PetParentId, serviceId, today,
-        today.AddDays(1)), default);
+    await sameDayService.CreateAsync(new(providerId, booking.PetParentId, serviceId, monday,
+        monday.AddDays(1)), default);
     if (!creationCaptured) throw new Exception("Date-only stay was not created");
     if (fixedTimes)
-        await sameDayService.CreateAsync(new(providerId, booking.PetParentId, serviceId, today,
-            today.AddDays(1), DropOffTime: new(14, 0), PickUpTime: new(15, 0)), default);
+        await sameDayService.CreateAsync(new(providerId, booking.PetParentId, serviceId, monday,
+            monday.AddDays(1), DropOffTime: new(14, 0), PickUpTime: new(15, 0)), default);
     await sameDayService.RespondModificationAsync(new(booking.NightStayBookingId,
         BookingStatusActor.Parent, booking.PetParentId, true, null), default);
 }
@@ -175,7 +180,7 @@ foreach (var night in new[] { false, true })
         catch (ArgumentException) { }
     }
 }
-Console.WriteLine("Passed provider and parent modification checks and date-only night-stay regressions.");
+Console.WriteLine("Passed provider and parent modification checks and night-stay timing regressions.");
 object Make(string name, Dictionary<Type, object> dependencies)
 {
     var constructor = assembly.GetType(name)!.GetConstructors().Single();

@@ -124,7 +124,7 @@ BEGIN
     INNER JOIN [Booking].[NightStayBookingModifications] m
         ON m.[NightStayBookingId] = n.[NightStayBookingId]
     WHERE n.[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER')
-      AND @Now >= [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], n.[CheckInDate]);
+      AND @Now >= [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], n.[CheckInDate], COALESCE(n.[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE(n.[DropOffTime],CAST('00:00' AS TIME)) END);
 
     UPDATE n
     SET [Status] = N'CONFIRMED',

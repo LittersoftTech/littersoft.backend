@@ -462,7 +462,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         Guid actorId,
         string? note,
         CapturedLocation? location,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? noShowReason = null)
     {
         if (!bookings.TryGetValue(bookingId, out var row))
         {
@@ -492,7 +492,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         // BR-53: still CREATED with under 2 hours to the service — mirror of the
         // sproc's THROW 51153, and reject-only for the same reason.
         if (row.Status == BookingStatuses.Created
-            && BookingLeadTime.IsTooSoon(row.BookingDate, row.StartTime, DateTimeOffset.UtcNow))
+            && DateTimeOffset.UtcNow >= BookingAcceptanceDeadline.Compute(row.CreatedAtUtc, row.BookingDate, row.StartTime))
         {
             throw BookingExpiredException.ServiceTooClose(bookingId);
         }
@@ -667,7 +667,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
     public Task<BookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<BookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken)
+    public Task<BookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false)
         => throw NotInMemory();
 
     public Task<BookingResult> MarkPaidAsync(Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee, string paymentMethod, CapturedLocation? location, CancellationToken cancellationToken)

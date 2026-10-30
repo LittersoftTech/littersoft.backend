@@ -169,7 +169,7 @@ internal sealed class ProviderAvailabilitySlotService(
     /// [<paramref name="fromNight"/>, <paramref name="toNight"/>] with the
     /// night's active-stay count and remaining capacity. A night is unavailable
     /// when a weekly day off or service time off covers it, capacity is exhausted,
-    /// or the date is in the past. Pickup and drop-off times do not filter nights.
+    /// or check-in would be less than three hours away.
     /// </summary>
     private async Task<AvailableSlotsResult> GetNightAvailabilityAsync(
         Guid providerId,
@@ -194,9 +194,8 @@ internal sealed class ProviderAvailabilitySlotService(
         var occupancy = await nightStayOccupancyReader.GetNightlyOccupancyAsync(
             serviceId, fromNight, lastNight, cancellationToken);
 
-        // Night-stay discovery is date-based. Today's night can be shown regardless
-        // of the provider's handover times; past nights remain unavailable.
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        // Capacity is nightly; the sending limit is measured against check-in time.
+        var now = DateTimeOffset.UtcNow;
 
         var weekly = await availabilityService.GetAsync(providerId, cancellationToken);
         var nights = new List<NightAvailability>();
@@ -205,7 +204,7 @@ internal sealed class ProviderAvailabilitySlotService(
             var closures = await closureReader.GetActiveClosuresForDateAsync(serviceId, night, cancellationToken);
             var isClosed = closures.Count > 0
                 || !weekly.Days.Any(d => d.DayOfWeek == (int)night.DayOfWeek && d.IsOpen);
-            var isPastDate = night < today;
+            var tooSoon = BookingLeadTime.IsTooSoon(night, offering.DropOffTime ?? TimeOnly.MinValue, now);
 
             var activeStays = occupancy.TryGetValue(night, out var count) ? count : 0;
             var remaining = isClosed ? 0 : Math.Max(0, offering.Capacity - activeStays);
@@ -215,7 +214,7 @@ internal sealed class ProviderAvailabilitySlotService(
                 activeStays,
                 remaining,
                 isClosed,
-                IsAvailable: remaining > 0 && !isPastDate));
+                IsAvailable: remaining > 0 && !tooSoon));
         }
 
         return new AvailableSlotsResult(

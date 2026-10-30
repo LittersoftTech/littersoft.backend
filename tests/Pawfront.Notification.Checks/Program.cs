@@ -31,7 +31,8 @@ foreach (var (deadline, duration) in new[]
     };
     var rendered = NotificationRenderer.Render(NotificationTypes.BookingModificationRequestedByParent,
         NotificationAudience.Provider, data)!;
-    Check(rendered.Body.Contains($"Review it within {duration}"), "Modification push quotes the supplied deadline");
+    Check(rendered.Body.EndsWith("Tap to review!"), "Modification push uses V4 review wording");
+    Check(rendered.Data[NotificationDataKeys.ReviewWithin] == duration, "Review duration stays available to the app");
     Check(rendered.Data[NotificationDataKeys.ReviewByUtc] == deadline,
         "Modification app payload preserves the review deadline");
 }
@@ -93,6 +94,8 @@ try { checks += await AccountCleanupChecks.RunAsync(); }
 catch (Exception exception) { Console.Error.WriteLine(exception); Environment.Exit(1); }
 checks += await CashNotificationChecks.RunAsync();
 checks += EventNotificationCopyChecks.Run();
+checks += ServiceNotificationCopyChecks.Run();
+if (args.Contains("--sql")) checks += await ServiceNotificationSqlChecks.RunAsync();
 
 foreach (var type in new[] { NotificationTypes.EventBookingCashReceived, NotificationTypes.EventBookingPaymentPending })
 {
@@ -127,7 +130,7 @@ foreach (var (date, expectedTime) in new[] { ("2026-07-18", "16:30"), ("2026-12-
     foreach (var type in new[] { NotificationTypes.BookingRequested, NotificationTypes.NightStayBookingRequested })
     {
         var rendered = NotificationRenderer.Render(type, NotificationAudience.Provider, scheduled)!;
-        Check(rendered.Body.Contains("at " + expectedTime), "Booking push quotes scheduled Swiss time: " + date);
+        Check(rendered.Body.EndsWith("Tap to review!"), "Booking push uses the shared V4 card: " + date);
         Check(rendered.Data[NotificationDataKeys.StartTime] == expectedTime, "Push body and app scheduled time agree");
     }
 }

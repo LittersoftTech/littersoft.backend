@@ -135,8 +135,8 @@ public interface IBookingService
     /// service date and while the provider is inside their own weekly working hours.
     /// Throws <see cref="BookingNotStartableException"/> (wrong from-state),
     /// <see cref="BookingStartNotOnServiceDateException"/> (wrong day), or
-    /// <see cref="BookingStartOutsideWorkingHoursException"/> (provider is closed
-    /// right now).
+    /// <see cref="BookingStartOutsideWorkingHoursException"/> (before the 15-minute
+    /// start window or after the booking's accepted closing time).
     /// </summary>
     Task<BookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken);
 

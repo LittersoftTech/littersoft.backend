@@ -1,10 +1,10 @@
 # Push notifications — mobile integration contract
 
-Status: **engine built; every booking trigger in the Notifications V3 spec is
-wired.** `MESSAGE_RECEIVED` was wired on 2026-08-09 with the chat module (see
-`docs/chat.md`). The only types with no trigger are the three whose product
-modules still do not exist — invoicing, disputes and promotional (see §3.4). This
-document is the contract the two mobile apps code against.
+Status: **Services V4 and Events V3 implemented.** Exact copy, scenario selection,
+intentional delays and rollout details are documented in
+[Services notifications V4](services-notifications-v4.md). Invoice and service
+support-resolution triggers are wired; promotional messages remain caller-supplied.
+Stable machine types are retained, with `notificationCode` identifying the selected card.
 
 ## The `data` object
 
@@ -36,46 +36,27 @@ Branch on `type` when you handle a notification specifically; fall back to
 `category` when you don't recognise the type. That fallback is what makes adding
 a new `type` a non-breaking change — see rule 4 in §1.
 
-## 0. Worked example — "New Service Booking"
+## 0. Worked example — "New Job Request Received"
 
 Fires to the **provider** when a parent creates a booking on the pet-parent host.
-Shown in full because its accept-by deadline is the one piece of copy the app
-must not recompute for itself.
+Both booking kinds use card V-S1. Their exact response deadlines remain in the
+payload for the app to display; the shortened notification no longer quotes them.
 
 | | Single-day | Night-stay |
 |---|---|---|
 | `type` | `BOOKING_REQUESTED` | `NIGHT_STAY_BOOKING_REQUESTED` |
-| Title | `New Service Booking` | `New Service Booking` |
-| Body | `John has requested Bath & Dry for Bruno on 5 Aug 2026. Respond within 24 hours.` | `John has requested Night Stay (3 nights) for Bruno on 5 Aug 2026. Respond within 24 hours.` |
+| Title | `New Job Request Received` | `New Job Request Received` |
+| Body | `John has requested Bath & Dry on 5 Aug. Tap to review!` | `John has requested Night Stay (3 nights) on 5 Aug. Tap to review!` |
 | `entityType` | `Booking` | `NightStayBooking` |
 | `bookingType` | `SingleDay` | `NightStay` |
 | Date shown | the service date | the check-in date |
 
 ### The response window
 
-The body quotes **how long the provider has**, not the deadline instant — that is
-the one number they act on, and it is **not always 24 hours**:
-
-- `Respond within 24 hours.` — the ordinary case.
-- `Respond within 2 hours 15 minutes.` — a booking made close to its own service
-  time, where the window is cut short.
-
-**Why it varies.** Two rules expire an unaccepted booking and the deadline is
-whichever fires **first**:
-
-- **BR-17** — 24 hours after the booking was created.
-- **BR-53** — when the service is less than 2 hours away, however recently it was
-  made.
-
-So a booking made at 09:45 for a service at 14:00 **the same day** must be
-accepted by **12:00 that day**, not 09:45 tomorrow — a window of 2 hours 15
-minutes. A flat "24 hours" would be a promise the server does not keep.
-
-`respondWithin` is measured from the moment the booking was **created**, which is
-what makes the ordinary case read as a clean "24 hours" rather than "23 hours 59
-minutes"; the push leaves within about a minute of the booking. **For an exact
-live countdown use `acceptByUtc`**, which carries the deadline itself as an
-instant — the rendered strings are frozen at send time.
+`acceptByUtc`, `createdAtUtc`, and derived `respondWithin` remain available. Use
+the deadline from the backend for a live countdown. V4's visible message says
+“Tap to review!” for both ordinary and short-notice bookings. Notification copy
+changes do not change the booking acceptance rules in [booking rules](booking-rules.md).
 
 ### `data` keys on these two
 
@@ -140,13 +121,14 @@ Every push is a **hybrid `notification` + `data`** message.
 ```jsonc
 {
   "notification": {
-    "title": "Booking confirmed",
-    "body": "Anna accepted your booking for Max on 5 Aug at 14:00."
+    "title": "Booking Confirmed",
+    "body": "Anna accepted your Grooming booking. Tap to view!"
   },
   "data": {
     // --- envelope: present on EVERY notification ---
     "v": "1",                                   // payload contract version
     "type": "BOOKING_ACCEPTED",                 // branch on this
+    "notificationCode": "P-U1",                  // selected V4 card
     "route": "/bookings/detail",                // where a tap goes
     "entityType": "Booking",
     "entityId": "8f3c1d2e-....",
@@ -196,8 +178,8 @@ Every push is a **hybrid `notification` + `data`** message.
    or ignoring the tap.
 5. **The same `type` can be worded differently in the two apps.** A notification
    mirrored to both parties (a reminder, a no-show, a modification expiry) is ONE
-   event with ONE `type`, rendered per audience: the parent is told to bring
-   cash, the provider to ask for the OTP. Do not assume identical copy on both
+   event with ONE `type`, rendered per audience: each receives the card
+   for their role and the reason the event occurred. Do not assume identical copy on both
    sides, and do not treat the two as different events.
 6. **Never convert a time.** `startTime` / `serviceDate` are the same readings the
    booking endpoints return — print them. The `*Utc` twins carry the same reading
@@ -272,12 +254,12 @@ token that is never reported means the device silently stops receiving anything.
 ## 3. Notification types
 
 Every type below is defined, renderable and — except where §3.4 says otherwise —
-**wired to a real trigger**. The `V3 card` column cites the card in the
-Notifications V3 spec, so the two documents can be checked against each other.
+**wired to a real trigger**. The `V4 card` column identifies the visible Services V4 card. Old wire types
+remain supported when two causes now share the same card.
 
 ### 3.1 To the pet parent — the provider acted
 
-| `type` | When | V3 card |
+| `type` | When | V4 card |
 |---|---|---|
 | `BOOKING_ACCEPTED` | Provider accepted | P-U1 |
 | `BOOKING_DECLINED` | Provider rejected | P-U2 |
@@ -289,12 +271,12 @@ Notifications V3 spec, so the two documents can be checked against each other.
 | `BOOKING_IN_PROGRESS` | Provider entered the code; the job is under way | P-U8 |
 | `BOOKING_COMPLETED` | Job done — collect the pet and pay | P-U11 / P-U12 |
 | `BOOKING_PAID` | Provider confirmed receiving the cash | P-U13 |
-| `BOOKING_CASH_NOT_RECEIVED` | Provider reported cash was not received; same booking envelope as `BOOKING_PAID` | Cash sheet |
-| `BOOKING_PRESCRIPTION_RECORDED` | Vet added a prescription | *(not in V3)* |
+| `BOOKING_CASH_NOT_RECEIVED` | Unpaid completed job with a provider Cash Not Received ticket | P-U15 |
+| `BOOKING_PRESCRIPTION_RECORDED` | Retired: no new delivery | — |
 
 ### 3.2 To the provider — the parent acted
 
-| `type` | When | V3 card |
+| `type` | When | V4 card |
 |---|---|---|
 | `BOOKING_REQUESTED` | Parent booked a single-day service | V-S1 |
 | `NIGHT_STAY_BOOKING_REQUESTED` | Parent booked a multi-night stay | V-S1 |
@@ -303,19 +285,20 @@ Notifications V3 spec, so the two documents can be checked against each other.
 | `BOOKING_MODIFICATION_ACCEPTED_BY_PARENT` | Your proposal was accepted | V-U3 |
 | `BOOKING_MODIFICATION_DECLINED_BY_PARENT` | Your proposal was declined | V-U4 |
 | `BOOKING_START_OTP_NOT_ENTERED` | You still haven't entered the customer's code | V-S10 |
-| `BOOKING_NOT_MARKED_COMPLETE` | Past closing time, job still not completed | V-S12 |
+| `BOOKING_NOT_MARKED_COMPLETE` | Ten minutes before accepted closing, still in progress and late for collection | V-S12 |
+| `BOOKING_COMPLETION_OVERDUE` | Scheduled end plus ten minutes, OTP-started and still in progress | V-S15 |
 
 ### 3.3 System-driven
 
 Timer- or state-derived. **Copy differs per app** where the card exists in both —
 one `type`, two renderings (see rule 5 in §1).
 
-| `type` | Audience | When | V3 card |
+| `type` | Audience | When | V4 card |
 |---|---|---|---|
 | `BOOKING_EXPIRED_FOR_PARENT` | Parent | Nobody accepted in time (24h, or <2h to service) | P-S1 |
 | `BOOKING_EXPIRED_FOR_PROVIDER` | Provider | Ran out of time to accept — job lost | V-S2 |
 | `BOOKING_MODIFICATION_TIMED_OUT` | Both | Proposal unanswered for 24 hours | P-S2 / V-S3 |
-| `BOOKING_MODIFICATION_EXPIRED` | Both | Proposal hit the 2h-before-service cutoff | P-S3 / V-S4 |
+| `BOOKING_MODIFICATION_EXPIRED` | Both | Proposal hit the pre-service cutoff; same card as timeout | P-S2 / V-S3 |
 | `BOOKING_REMINDER_DAY_BEFORE` | Both | The service is on **tomorrow's calendar day**, from T-24h | P-S4 / V-S5 |
 | `BOOKING_REMINDER_STARTING_SOON` | Both | T-5min before the service | P-S5 / V-S6 |
 | `BOOKING_NOT_STARTED_HALFWAY` | Both | Half-way through the window, not started | P-S6 / V-S7 |
@@ -332,69 +315,24 @@ one `type`, two renderings (see rule 5 in §1).
 the party who tapped it already saw the result. `_AUTO_SETTLED` goes to BOTH,
 because nobody tapped anything. Both carry `absentParty` naming who was missing.
 
-**Two modification-expiry types, on purpose.** Exactly one fires per proposal,
-whichever deadline arrives first. They read differently to a user ("nobody
-replied in a day" vs "modifications close 2 hours before the service"), so they
-are separate keys rather than one with a reason code.
+**Modification expiry is one visible card per audience.** The existing timeout
+and cut-off machine types both render P-S2 / V-S3. Exactly one cause fires per proposal.
 
-### 3.4 Defined but NOT wired — module does not exist
+### 3.4 Chat, invoices, support and promotional messages
 
-These have a type, copy, a route and the full `data` contract, so you can build
-against them now. **Nothing enqueues them**, because the backend has no such
-feature yet.
-
-> `MESSAGE_RECEIVED` used to be listed here. It is now wired — enqueued by
-> `Chat.CommitMessageAppend`, and only when the recipient has no live connection viewing
-> that thread, so an open chat never buzzes. It is also the one type normally sent
-> by an API host rather than the scheduled dispatcher: its outbox row is written
-> pre-claimed so the timer skips it, and the dispatcher only takes over if the
-> chat host dies mid-send. Its `data` carries `conversationId` (now part of the
-> canonical id block) and `senderName`. See `docs/chat.md`.
-
-| `type` | `category` | Blocked on | V3 card |
-|---|---|---|---|
-| `DISPUTE_RESOLVED` | `BOOKING` | No Helpline / ticket module | P-S15 / V-S13 |
-| `PROMOTIONAL_MESSAGE` | `PROMOTIONAL` | No campaign module | *(not in V3)* |
-
-> `INVOICE_ISSUED` is **fully wired as of 2026-08-26**, but the two halves fire
-> from different places and at different times. Read this before building either.
->
-> The **provider** side (V-S14) fires from `Booking.MarkBookingPaid` and its
-> night-stay twin — the moment the provider records the cash on a COMPLETED job,
-> which is when their invoice for it is settled. It arrives alongside the parent's
-> `BOOKING_PAID` receipt for the same event, carries the same `amount`, and
-> **routes to `/bookings/detail`, not `/invoices/detail`**. That is unchanged and
-> deliberate: the provider's card is about the job being settled, and the booking
-> summary is what the spec asks for. Their own fee invoice IS now downloadable
-> (`GET /providers/{id}/bookings/{bookingId}/invoice`) — it is simply not what this
-> notification opens.
->
-> The **parent** side (P-S16) fires from **`Billing.CompleteInvoiceGeneration`** —
-> NOT from mark-paid. This matters: invoice PDFs are rendered asynchronously by
-> `InvoiceGenerationFunction`, so at mark-paid time the invoice row exists but its
-> document does not. A push sent there would say "your invoice is ready, tap to
-> view" about a URL that answers **409 `InvoiceNotReady`**. Firing it when the
-> render completes makes the notification true the moment it is sent, and atomic
-> with the URL that makes it true.
->
-> **Consequence for the app:** the parent gets TWO notifications for one payment —
-> `BOOKING_PAID` (the receipt, immediately) and then `INVOICE_ISSUED` (the
-> document, typically seconds later). They are deliberately separate cards: one
-> confirms the money, the other delivers a file.
->
-> The parent's card routes to `/invoices/detail` and its `data` carries
-> **`invoiceId`** — the invoice NUMBER (`PF-INV-2026-004812`), not a GUID, because
-> that is what the document prints and what a customer would quote — plus
-> **`issuedBy`**, the provider's business name. Open the document with the booking
-> ids already in the canonical block: `GET /pet-parents/{petParentId}/bookings/{bookingId}/invoice`,
-> or the `/night-stay-bookings/` variant when `isNightStay` is `true`.
->
-> If the render never succeeds, no parent `INVOICE_ISSUED` is ever sent — which is
-> correct, and why the card must not be treated as guaranteed to follow a
-> `BOOKING_PAID`.
-
-`PROMOTIONAL_MESSAGE` takes its `title`/`body` from the caller rather than a
-template, since campaign wording is the point of a campaign.
+- `MESSAGE_RECEIVED` renders P-U14 / V-U5 with the actual sender's name and
+  “Sent you a message.” Chat's immediate delivery and active-thread suppression
+  are unchanged; see [chat](chat.md).
+- `DISPUTE_RESOLVED` renders P-S15 / V-S13 when `Support.CloseTicket` closes a
+  booking ticket. Only the raiser receives it, with `ticketId` and a 60-second delay.
+- `INVOICE_ISSUED` renders P-S16 / V-S14. Both recipients are notified from
+  `Billing.CompleteInvoiceGeneration` after their own PDF is durable, followed
+  by a 60-second intentional delay. Both open `/invoices/detail`; the provider's
+  old mark-paid/booking-summary notification is replaced. `invoiceId` is the
+  document number, while booking identity and `isNightStay` select the existing
+  invoice-download endpoint. A failed render produces no invoice-ready notice.
+- `PROMOTIONAL_MESSAGE` stays a caller-supplied title/body contract; no campaign
+  module is introduced by the notification changes.
 
 ### 3.5 Events V3
 
@@ -414,30 +352,10 @@ in the catalog for compatibility; new event notifications use the V3 types.
 
 ### 3.6 The modification review window — `reviewWithin`
 
-The two "requested a modification" cards
-(`BOOKING_MODIFICATION_REQUESTED_BY_PARENT` / `..._BY_PROVIDER`) quote **how long
-the counterparty has to answer**, and — exactly like `respondWithin` in §0 — it is
-**not always 24 hours**:
-
-- `Review it within 24 hours.` — the ordinary case.
-- `Review it within 3 hours 20 minutes.` — a proposal made close to the service.
-
-**Why it varies.** Two deadlines end an open proposal and
-`Booking.RevertExpiredModificationRequests` enforces whichever arrives **first**:
-
-- the **24-hour review window** — 24 hours after the proposal was made;
-- the **2-hour pre-service cutoff** — modifications close at `serviceStart − 2h`.
-
-So a proposal made at 08:40 on a booking that starts at 14:00 the same day dies at
-**12:00**, three hours and twenty minutes later — not the following morning. Until
-2026-08-11 the copy said a flat "24 hours" in every case, which on a short-notice
-booking promised a review window outliving the service itself.
-
-`data` carries `reviewByUtc` (the deadline) and `requestedAtUtc` (when it was
-proposed); `reviewWithin` is the span between them. **For a live countdown use
-`reviewByUtc`** — the rendered string is frozen at send time. A notification
-enqueued before this shipped carries neither key and falls back to "the time shown
-in the app".
+V4 modification prompts say “Tap to review!” rather than quoting a duration.
+`reviewByUtc`, `requestedAtUtc`, and derived `reviewWithin` remain in the payload.
+Use `reviewByUtc` for the live response deadline. Existing acceptance/modification
+rules are preserved; see [booking rules](booking-rules.md).
 
 ## 4. In-app inbox
 
@@ -463,32 +381,23 @@ order, permissions, rules, failure behavior, and verification.
 
 ## 5. Delivery timing
 
-Notifications are queued in the same database transaction as the change that
-caused them, then dispatched by a timer job that runs **every minute**. So
-expect **up to ~60 seconds** from event to device.
+`NotificationDispatchFunction` drains eligible outbox rows every 15 seconds.
+“Immediate” means no intentional hold; timer and transport latency still apply.
+`BookingReminderFunction` stages due reminders every minute, while the booking
+settlement sweep retains its existing cadence. Chat uses its immediate sender.
 
-Time-driven notifications have a second delay on top of that — how long until the
-job that *notices* them runs:
+Services V4's 0/15/60-second intentional waits are configured in
+`Notification.ServiceNotificationDelivery`. Enqueueing sets the earliest delivery
+instant, and SQL inbox text and Firestore documents are not created before dispatch.
+Re-deployments insert missing policy rows without overwriting configured delays.
+Events retain their separate [Events V3 policy](event-notifications-v3.md), including
+09:00 holds and the attendance thank-you at scheduled event end plus 24 hours.
 
-| Producer | Cadence | What it raises |
-|---|---|---|
-| API hosts (booking sprocs) | immediate | everything in §3.1 / §3.2 |
-| `BookingReminderFunction` | **1 minute** | the reminders and nudges in §3.3 |
-| `BookingSweepFunction` | 5 minutes | expiry, no-show settle, modification revert |
+V-S12 triggers ten minutes before accepted closing when the job is still in progress
+and its scheduled end has passed. V-S15 triggers ten minutes after scheduled end
+only for an OTP-started, unfinished job (night stays use their scheduled pickup).
+They use distinct dedupe keys and can both be due. Pending completion/pickup reminders
+are rechecked against booking state before dispatch; completed jobs retire them.
 
-The reminder job runs every minute specifically so `BOOKING_REMINDER_STARTING_SOON`
-means what it says; on the 5-minute sweep it could have landed anywhere from 0 to
-5 minutes before the service.
-
-**Reminders can arrive a little late but never twice.** Re-firing is prevented by
-a unique key on the outbox row rather than by a flag on the booking, so a missed
-tick is self-healing and a duplicate tick is a no-op.
-
-This is deliberate. Booking statuses are changed by three separate processes —
-the provider API, the parent API, and a scheduled sweep — and only a durable
-queue can carry all three with retries. If a specific notification needs to be
-near-instant (the start-OTP is the likeliest candidate), say so and we'll add an
-inline dispatch nudge for that path, keeping the timer as the retry backstop.
-
-Failed sends retry with exponential backoff (2/4/8/16/32 minutes) up to five
-attempts before being abandoned.
+Failed sends retain the existing retry policy. No historical inbox deletion is
+part of this change. Deploy the consolidated database script before updated hosts.

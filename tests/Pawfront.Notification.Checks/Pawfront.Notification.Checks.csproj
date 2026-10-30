@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <None Update="Fixtures/*.json" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../../src/Pawfront.Functions/Notifications/NotificationDispatcher.cs" Link="NotificationDispatcher.cs" />
     <ProjectReference Include="../../src/Pawfront.Infrastructure.Firebase/Pawfront.Infrastructure.Firebase.csproj" />
     <ProjectReference Include="../../src/Pawfront.Api/Pawfront.Api.csproj" />

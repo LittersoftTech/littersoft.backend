@@ -73,7 +73,7 @@ public interface INightStayBookingService
 
     /// <summary>Provider completes the job: IN_PROGRESS → COMPLETED (no OTP).</summary>
     Task<NightStayBookingResult> CompleteAsync(
-        Guid bookingId, Guid providerId, CancellationToken cancellationToken);
+        Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false);
 
     /// <summary>
     /// Records that the parent has paid the provider for a stay (COMPLETED or PAYMENT_NOT_RECEIVED → PAID)

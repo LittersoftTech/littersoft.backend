@@ -85,7 +85,7 @@ public interface INightStayBookingSqlStore
         Guid actorId,
         string? note,
         CapturedLocation? location,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, string? noShowReason = null);
 
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
         Guid bookingId,
@@ -118,7 +118,8 @@ public interface INightStayBookingSqlStore
     Task<NightStayBookingResult> CompleteAsync(
         Guid bookingId,
         Guid providerId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool customerArrivedForCollection = false);
 
     /// <summary>
     /// Flips a COMPLETED or PAYMENT_NOT_RECEIVED stay to PAID and inserts the payment ledger row. Maps

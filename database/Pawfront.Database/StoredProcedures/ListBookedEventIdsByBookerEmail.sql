@@ -1,5 +1,5 @@
 CREATE OR ALTER PROCEDURE [Event].[ListBookedEventIdsByBookerEmail]
-    @BookerEmail NVARCHAR(320)
+    @BookerEmail NVARCHAR(320), @BookerAccountId UNIQUEIDENTIFIER=NULL, @BookerType NVARCHAR(16)=NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -10,5 +10,6 @@ BEGIN
     SELECT DISTINCT b.[EventId]
     FROM [Event].[EventBookings] AS b
     WHERE b.[BookerEmail] = @BookerEmail
+      AND (@BookerAccountId IS NULL OR (b.BookerAccountId=@BookerAccountId AND b.BookerType=@BookerType))
       AND b.[Status] IN (N'Confirmed',N'Attended');
 END;

@@ -8,7 +8,7 @@ namespace Pawfront.Application.Bookings;
 /// <list type="bullet">
 ///   <item><b>BR-17</b> — it has sat in <c>CREATED</c> for 24 hours.</item>
 ///   <item><b>BR-53</b> — the service is now less than
-///     <see cref="BookingLeadTime.Minimum"/> away, however recently it was made.</item>
+///     <see cref="AcceptanceLeadTime"/> away, however recently it was made.</item>
 /// </list>
 ///
 /// Taking BR-17 alone would be wrong in a common case: a booking made at 10:00
@@ -20,6 +20,8 @@ namespace Pawfront.Application.Bookings;
 /// </summary>
 public static class BookingAcceptanceDeadline
 {
+    /// <summary>Acceptance and expiry keep a two-hour cutoff, independent of sending.</summary>
+    public static readonly TimeSpan AcceptanceLeadTime = TimeSpan.FromHours(2);
     /// <summary>
     /// How long a booking may sit unaccepted (BR-17). Mirrors the
     /// <c>@PendingHours</c> default on <c>Booking.ExpireStaleCreatedBookings</c> —
@@ -34,7 +36,7 @@ public static class BookingAcceptanceDeadline
     public static DateTimeOffset Compute(DateTimeOffset createdAtUtc, DateTimeOffset serviceStartUtc)
     {
         var pendingExpiry = createdAtUtc + PendingWindow;      // BR-17
-        var leadTimeExpiry = serviceStartUtc - BookingLeadTime.Minimum; // BR-53
+        var leadTimeExpiry = serviceStartUtc - AcceptanceLeadTime; // BR-53
 
         return pendingExpiry <= leadTimeExpiry ? pendingExpiry : leadTimeExpiry;
     }
@@ -43,13 +45,9 @@ public static class BookingAcceptanceDeadline
         DateTimeOffset originalStartUtc, DateTimeOffset proposedStartUtc)
         => Compute(requestedAtUtc, originalStartUtc <= proposedStartUtc ? originalStartUtc : proposedStartUtc);
 
-    /// <summary>Night stays expire after 24 hours or at the end of the original check-in day.</summary>
-    public static DateTimeOffset ComputeNightStay(DateTimeOffset createdAtUtc, DateOnly checkInDate)
-    {
-        var pendingExpiry = createdAtUtc + PendingWindow;
-        var dateExpiry = new DateTimeOffset(checkInDate.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
-        return pendingExpiry <= dateExpiry ? pendingExpiry : dateExpiry;
-    }
+    /// <summary>Night stays expire after 24 hours or two hours before check-in.</summary>
+    public static DateTimeOffset ComputeNightStay(DateTimeOffset createdAtUtc, DateOnly checkInDate, TimeOnly? dropOffTime = null)
+        => Compute(createdAtUtc, checkInDate, dropOffTime ?? TimeOnly.MinValue);
 
     /// <inheritdoc cref="Compute(DateTimeOffset, DateTimeOffset)"/>
     /// <remarks>

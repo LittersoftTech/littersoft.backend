@@ -2,9 +2,8 @@
 -- confirmed-equivalent (live) state to START_JOB that ALSO issues the parent-facing
 -- start-OTP (@NewCode, @TtlMinutes) atomically. Two gates, both on "right now" (UTC):
 -- the booking's own [BookingDate] must be TODAY, and the provider must be inside
--- their own weekly working hours ([Provider].[ProviderWeeklyAvailability]). The
--- time-of-day within the booked window is deliberately NOT checked — a provider
--- running early or late can still start the job, as long as it is the service day.
+-- the accepted opening instant through its accepted closing
+-- time. Later weekly edits do not change that stored working day.
 -- The parent reads the issued code to the provider, who enters it via
 -- [Booking].[VerifyBookingStartOtp] to move the job to IN_PROGRESS.
 -- THROWs: 51131 not found, 51132 forbidden, 51133 not in a startable state,
@@ -53,11 +52,13 @@ BEGIN
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @BookingDate DATE;
     DECLARE @SlotStartTime TIME(0);
+    DECLARE @OpensAt DATETIME2(7), @ClosesAt DATETIME2(7);
     DECLARE @Source NVARCHAR(16);
 
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @BookingDate = [BookingDate], @SlotStartTime = [StartTime],
+           @OpensAt = [WorkingHoursOpensAtUtc], @ClosesAt = [WorkingHoursClosesAtUtc],
            @Source = [Source]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
@@ -90,32 +91,28 @@ BEGIN
         THROW 51144, 'The job can only be started on the day the booking is scheduled for.', 1;
     END
 
-    -- The job can only be started while the provider is inside their own weekly
-    -- working hours. 1970-01-04 was a Sunday, so the modulo gives 0 = Sunday
-    -- (matching System.DayOfWeek / the [DayOfWeek] column) independently of DATEFIRST.
-    DECLARE @IsOpen BIT, @OpensAt DATETIME2(7), @ClosesAt DATETIME2(7);
-    SELECT @IsOpen = [IsOpen], @OpensAt = [OpensAtUtc], @ClosesAt = [ClosesAtUtc]
-    FROM [Provider].[WorkingHoursAtUtc](@ProviderId, @Now);
+    -- Accepted hours survive weekly edits. Legacy rows resolve the booked day,
+    -- never the weekday at the time of this request.
+    IF @ClosesAt IS NULL
+        SELECT @OpensAt = [OpensAtUtc], @ClosesAt = [ClosesAtUtc]
+        FROM [Booking].[AcceptedWorkingHours](@ProviderId, @BookingDate, @SlotStartTime);
 
-    -- A provider who has never saved their weekly hours is not gated — nor is a
-    -- Custom walk-in, which is precisely the customer who turns up outside the
-    -- hours the provider advertised.
-    IF @Source <> N'Custom'
-       AND @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @Now < @OpensAt OR @Now > @ClosesAt)
-    BEGIN
-        THROW 51137, 'The job can only be started during your working hours.', 1;
-    END
+    DECLARE @StartsAtUtc DATETIME2(7) = DATEADD(SECOND,
+        DATEDIFF(SECOND, CAST('00:00' AS TIME), COALESCE(@SlotStartTime, CAST('00:00' AS TIME))),
+        CAST(@BookingDate AS DATETIME2(7)));
+    IF @Source <> N'Custom' AND (@Now < @OpensAt OR @Now > @ClosesAt)
+        THROW 51137, 'The job can only be started within its accepted working hours.', 1;
 
-    -- Waiting is available from the booked start until closing, including after
+    -- Waiting is available from the accepted opening until closing, including after
     -- the short booked slot has ended. No saved hours falls back to midnight UTC.
     IF @WaitForCustomer = 1 AND @Source = N'Custom'
         THROW 51133, 'A walk-in has no customer start-code flow.', 1;
 
     IF @WaitForCustomer = 1
     BEGIN
-        IF @Now < DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), @SlotStartTime), CAST(@BookingDate AS DATETIME2(7)))
+        IF @Now < @OpensAt
            OR @Now >= COALESCE(@ClosesAt, DATEADD(DAY, 1, CAST(@BookingDate AS DATETIME2(7))))
-            THROW 51133, 'Waiting for the customer is only available from the slot start until closing.', 1;
+            THROW 51133, 'Waiting for the customer is only available within the accepted working hours.', 1;
     END
 
     -- A retry in START_JOB must not rotate the OTP or repeat arrival/push writes.

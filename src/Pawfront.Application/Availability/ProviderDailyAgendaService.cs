@@ -127,9 +127,8 @@ internal sealed class ProviderDailyAgendaService(
         bool isClosedForDay,
         Guid? callerPetParentId)
     {
-        // Match date-based night availability: handover times do not hide today's
-        // night on the parent's calendar. Past dates remain unavailable.
-        TimeOnly? bookableFrom = date >= DateOnly.FromDateTime(DateTime.UtcNow) ? DayStart : null;
+        // Match the check-in sending cutoff used by night availability.
+        TimeOnly? bookableFrom = !BookingLeadTime.IsTooSoon(date, offering.DropOffTime ?? TimeOnly.MinValue, DateTimeOffset.UtcNow) ? DayStart : null;
 
         var entries = isClosedForDay
             ? [Blocked((DayStart, DayEnd), AgendaEntryType.Closed, AgendaStatuses.Closed)]

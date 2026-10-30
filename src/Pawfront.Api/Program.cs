@@ -18,6 +18,7 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ICurrentProviderContext, CurrentProviderContext>();
+builder.Services.AddScoped<Pawfront.Application.Blocks.ICurrentBlockParty, CurrentBlockParty>();
 
 builder.Services
     .AddPawfrontAzureInfrastructure(builder.Configuration, builder.Environment)

@@ -19,6 +19,31 @@ BEGIN
         THROW 51050, 'Provider profile was not found.', 1;
     END
 
+    -- Preserve accepted legacy bookings before replacing their schedule.
+    UPDATE b
+    SET [WorkingHoursOpensAtUtc] = w.[OpensAtUtc],
+        [WorkingHoursClosesAtUtc] = w.[ClosesAtUtc]
+    FROM [Booking].[Bookings] b
+    CROSS APPLY [Booking].[AcceptedWorkingHours](b.[ProviderId], b.[BookingDate], b.[StartTime]) w
+    WHERE b.[ProviderId] = @ProviderId AND b.[WorkingHoursClosesAtUtc] IS NULL AND b.[Source] <> N'Custom'
+      AND (b.[Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
+                         N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
+                         N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED', N'JOB_INCOMPLETE')
+           OR EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] h
+                      WHERE h.[BookingId] = b.[BookingId] AND h.[ToStatus] = N'CONFIRMED'));
+
+    UPDATE b
+    SET [WorkingHoursOpensAtUtc] = w.[OpensAtUtc],
+        [WorkingHoursClosesAtUtc] = w.[ClosesAtUtc]
+    FROM [Booking].[NightStayBookings] b
+    CROSS APPLY [Booking].[AcceptedWorkingHours](b.[ProviderId], b.[CheckInDate], b.[DropOffTime]) w
+    WHERE b.[ProviderId] = @ProviderId AND b.[WorkingHoursClosesAtUtc] IS NULL
+      AND (b.[Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
+                         N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
+                         N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED', N'JOB_INCOMPLETE')
+           OR EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] h
+                      WHERE h.[NightStayBookingId] = b.[NightStayBookingId] AND h.[ToStatus] = N'CONFIRMED'));
+
     -- Replace all 7 day rows atomically.
     DELETE FROM [Provider].[ProviderWeeklyAvailability]
     WHERE [ProviderId] = @ProviderId;

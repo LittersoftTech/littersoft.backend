@@ -1,5 +1,5 @@
 CREATE OR ALTER PROCEDURE [Event].[ListEventBookingsByBookerEmail]
-    @BookerEmail NVARCHAR(320)
+    @BookerEmail NVARCHAR(320), @BookerAccountId UNIQUEIDENTIFIER=NULL, @BookerType NVARCHAR(16)=NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -37,5 +37,6 @@ BEGIN
     INNER JOIN [Event].[Events] AS e
         ON e.[EventId] = b.[EventId]
     WHERE b.[BookerEmail] = @BookerEmail
+      AND (@BookerAccountId IS NULL OR (b.BookerAccountId=@BookerAccountId AND b.BookerType=@BookerType))
     ORDER BY b.[CreatedAtUtc] DESC;
 END;

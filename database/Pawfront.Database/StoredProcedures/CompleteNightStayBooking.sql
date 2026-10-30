@@ -15,7 +15,8 @@
 -- completed).
 CREATE OR ALTER PROCEDURE [Booking].[CompleteNightStayBooking]
     @NightStayBookingId UNIQUEIDENTIFIER,
-    @ProviderId UNIQUEIDENTIFIER
+    @ProviderId UNIQUEIDENTIFIER,
+    @CustomerArrivedForCollection BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -50,6 +51,11 @@ BEGIN
     BEGIN
         THROW 51253, 'Booking is not in a state the job can be completed from.', 1;
     END
+
+    -- P-U12 describes photo-evidenced hand-over; old body-less completion uses P-U11.
+    IF @CustomerArrivedForCollection = 1 AND NOT EXISTS (
+        SELECT 1 FROM [Booking].[NightStayBookingEvidence] WHERE [NightStayBookingId] = @NightStayBookingId)
+        THROW 51253, 'Upload hand-over evidence before completing with the customer present.', 1;
 
     -- Same payout namespace as single-day bookings (one shared SEQUENCE), so a
     -- 'PO-...' reference identifies a payout without needing the booking kind.
@@ -97,11 +103,13 @@ BEGIN
     VALUES
         (@NightStayBookingId, @CurrentStatus, N'COMPLETED', N'Provider', @ProviderId, N'Job completed by provider');
 
+    DECLARE @CompletionScenario NVARCHAR(32) = CASE WHEN @CustomerArrivedForCollection=1 THEN N'HandOver' ELSE N'AwaitingCollection' END;
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @NightStayBookingId,
         @IsNightStay = 1,
         @Audience = N'PetParent',
-        @NotificationType = N'BOOKING_COMPLETED';
+        @NotificationType = N'BOOKING_COMPLETED',
+        @CompletionScenario = @CompletionScenario;
 
     SELECT [NightStayBookingId],
            [ProviderId],
@@ -121,9 +129,9 @@ BEGIN
            [CashNotReceivedAtUtc], [CancellationReason],
            CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
            CASE WHEN [Booking].[NightStayBookings].[Status] = N'CREATED' THEN
-               [Booking].[NightStayRequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+               [Booking].[RequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), NULL, NULL)
            WHEN [Booking].[NightStayBookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
-               (SELECT [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)) END)
                 FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId])
            END AS [RequestExpiresAtUtc],
            (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay

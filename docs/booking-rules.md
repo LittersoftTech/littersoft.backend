@@ -25,8 +25,8 @@ for a night stay.
 
 ## A. Timing and scheduling
 
-**BR-01 — A single-day booking must start at least 2 hours from now.**
-A parent browsing at 11:00 sees 13:00 as the first bookable slot. Measured against
+**BR-01 — A new single-day or night-stay booking must start at least 3 hours from now.**
+A parent browsing at 11:00 sees 14:00 as the first bookable slot. Measured against
 `serviceStart`. Slots inside the window are not shown at all (not shown as full),
 and the same test hides today's already-elapsed slots.
 *Enforced:* Application — the shared slot service (so both hosts' slot endpoints,
@@ -60,11 +60,9 @@ not a stayed night.** At least one night, at most 30.
 
 **BR-06 — Night-stay availability is per night, not per time window.**
 Capacity, closures and occupancy are evaluated for each stayed night; the weekly
-time grid is deliberately not consulted. Night-stay searches, nightly availability
-and calendars ignore configured pickup/drop-off times and use the date only:
-today and future nights are eligible when open with capacity; past nights are
-unavailable. Booking creation and modification still enforce BR-01 against the
-scheduled drop-off time.
+time grid is deliberately not consulted for nightly capacity. Night-stay searches,
+nightly availability and calendars enforce BR-01 against check-in date plus the
+configured drop-off time (midnight UTC for legacy date-only offers).
 *Enforced:* Application + SQL.
 
 ---
@@ -127,12 +125,9 @@ design.
 **BR-53 — A single-day booking still in `CREATED` when the service is less than 2 hours
 away expires, however recently it was made.**
 The provider has run out of time to accept it. Measured against `serviceStart`,
-so it is the **same cutoff as BR-01**: an unaccepted booking dies exactly when a
-fresh booking for that slot could no longer be created. A booking whose start has
-already passed is caught by the same test. Independent of BR-17 — a booking made
-90 minutes before the service expires on the next tick, hours short of 24.
-Night stays instead expire once their check-in date is before today; drop-off
-time does not shorten the acceptance window. BR-17's 24-hour timeout still applies.
+independently of BR-01's three-hour sending limit. The acceptance deadline is
+24 hours after creation or two hours before start, whichever comes first.
+Night stays use check-in date plus drop-off time (midnight UTC if absent).
 *Enforced:* SQL rejects the transition (THROW 51153, night stay 51273); **Job**
 writes the `EXPIRED` status — the same sproc and tick as BR-17, which is why the
 guard matters: without it the rule would only hold to the job's 5-minute
@@ -153,14 +148,14 @@ identically.
 *Violation:* 409 `BookingNotStartable`.
 
 **BR-19 — A job can only be started on its service date.**
-Today must equal `BookingDate` (night stay: `CheckInDate`). The time of day within
-the booked window is deliberately **not** checked, so a provider running early or
-late can still start.
+Today must equal `BookingDate` (night stay: `CheckInDate`). The separate start
+window runs from its accepted opening time until its accepted closing time.
 *Enforced:* SQL. *Violation:* 409 `BookingNotOnServiceDate`.
 
-**BR-20 — A job can only be started while the provider is inside their own weekly
-working hours.** The break window is not consulted, and a provider who has never
-saved working hours is not gated.
+**BR-20 — A job can start at any time within its accepted working hours.** Opening and closing instants are stored at confirmation and
+preserved through weekly availability changes. Accepted reschedules capture the
+new day's hours. Breaks do not restrict accepted jobs; no saved hours falls back
+to the end of the UTC service date. Custom walk-ins keep their existing bypass.
 *Enforced:* SQL. *Violation:* 409 `OutsideWorkingHours`.
 
 **BR-21 — Starting a job issues a start-OTP to the parent; the provider enters it.**
@@ -201,20 +196,15 @@ confirmed-equivalent resting state.
 **BR-28 — Only date and time may be changed.** The service, the service item and
 the pet are not editable through a modification.
 
-**BR-29 — The single-day modification window closes 2 hours before `serviceStart`, for
-EITHER party's proposal** (widened 2026-08-02 to the provider side — previously
-parent-only, see the retired BR-31 below).
-Same cutoff instant as BR-01, so the two rules bracket a booking's life
-symmetrically: creatable up to `serviceStart − 2h`, changeable up to the same point.
-For night stays, the window closes at the end of the original check-in date.
-The 24-hour review window remains an independent upper bound for either party's
-modification request; drop-off and proposed times do not shorten it.
-Proposed night-stay check-in dates must be today or later, including at acceptance.
-*Enforced:* SQL. *Violation:* 409 `ModificationWindowClosed`.
+**BR-29 — Modification requests require at least 3 hours before the earlier
+of the original and proposed start, for either party.** For night stays, use
+check-in date plus the applicable drop-off time, including acknowledged terms.
+*Enforced:* Application + SQL. *Violation:* 409 `ModificationWindowClosed`
+(or 400 `BookingLeadTimeTooShort` for an invalid proposed single-day start).
 
-**BR-30 — An unanswered proposal — from either party — expires at that same
-cutoff and the booking reverts to `CONFIRMED`** (widened 2026-08-02; previously
-parent-only).
+**BR-30 — An unanswered proposal expires after 24 hours or 2 hours before the
+earlier of the original and proposed start, whichever comes first.**
+The booking reverts to `CONFIRMED` when the sweep settles it.
 *Enforced:* SQL rejects a late response; **Job** performs the revert — sproc
 `Booking.RevertExpiredModificationRequests`, called by
 `BookingSweepFunction` (`Pawfront.Functions`) every 5 minutes, **before** BR-38's
@@ -396,7 +386,7 @@ terminal status because existing rows carry it, but nothing produces it.
 
 ## Open questions
 
-1. **BR-01's 2 hours is a hardcoded constant**, not per-provider configuration. A
+1. **BR-01's 3 hours is a hardcoded constant**, not per-provider configuration. A
    vet may want 24 hours' notice where a groomer takes near-walk-ins.
 2. **The single-instance guarantee behind BR-17/BR-30/BR-38 depends on exactly
    one Function App being deployed** for `BookingSweepFunction`. The Azure

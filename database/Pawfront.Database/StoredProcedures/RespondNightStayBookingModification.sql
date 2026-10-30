@@ -47,6 +47,8 @@ BEGIN
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
+    SET @Now = SYSUTCDATETIME(); -- Evaluate acceptance after acquiring the booking lock.
+
     IF @CurrentStatus IS NULL
     BEGIN
         THROW 51265, 'Night stay booking was not found.', 1;
@@ -69,7 +71,7 @@ BEGIN
         IF EXISTS (
             SELECT 1 FROM [Booking].[NightStayBookingModifications] m
             WHERE m.[NightStayBookingId] = @NightStayBookingId
-              AND @Now >= [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], @CheckInDate))
+              AND @Now >= [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], @CheckInDate, COALESCE(@DropOffTime,CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE(@DropOffTime,CAST('00:00' AS TIME)) END))
             THROW 51272, 'The modification request has expired and can no longer be answered.', 1;
     END
 
@@ -159,6 +161,13 @@ BEGIN
             [Status] = @NewStatus,
             [UpdatedAtUtc] = @Now
         WHERE [NightStayBookingId] = @NightStayBookingId;
+
+        UPDATE b
+        SET [WorkingHoursOpensAtUtc] = w.[OpensAtUtc],
+            [WorkingHoursClosesAtUtc] = w.[ClosesAtUtc]
+        FROM [Booking].[NightStayBookings] b
+        CROSS APPLY [Booking].[AcceptedWorkingHours](b.[ProviderId], b.[CheckInDate], b.[DropOffTime]) w
+        WHERE b.[NightStayBookingId] = @NightStayBookingId;
     END
     ELSE
     BEGIN
@@ -241,9 +250,9 @@ BEGIN
            [CashNotReceivedAtUtc], [CancellationReason],
            CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
            CASE WHEN [Booking].[NightStayBookings].[Status] = N'CREATED' THEN
-               [Booking].[NightStayRequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+               [Booking].[RequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), NULL, NULL)
            WHEN [Booking].[NightStayBookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
-               (SELECT [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)) END)
                 FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId])
            END AS [RequestExpiresAtUtc],
            (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay

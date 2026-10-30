@@ -29,10 +29,12 @@ BEGIN
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @CheckInDate DATE;
     DECLARE @SlotStartTime TIME(0);
+    DECLARE @OpensAt DATETIME2(7), @ClosesAt DATETIME2(7);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @CheckInDate = [CheckInDate], @SlotStartTime = [DropOffTime]
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @CheckInDate = [CheckInDate], @SlotStartTime = [DropOffTime],
+           @OpensAt = [WorkingHoursOpensAtUtc], @ClosesAt = [WorkingHoursClosesAtUtc]
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
@@ -62,26 +64,25 @@ BEGIN
         THROW 51264, 'The job can only be started on the day the booking is scheduled for.', 1;
     END
 
-    -- The job can only be started while the provider is inside their own weekly
-    -- working hours. 1970-01-04 was a Sunday, so the modulo gives 0 = Sunday
-    -- (matching System.DayOfWeek / the [DayOfWeek] column) independently of DATEFIRST.
-    DECLARE @IsOpen BIT, @OpensAt DATETIME2(7), @ClosesAt DATETIME2(7);
-    SELECT @IsOpen = [IsOpen], @OpensAt = [OpensAtUtc], @ClosesAt = [ClosesAtUtc]
-    FROM [Provider].[WorkingHoursAtUtc](@ProviderId, @Now);
+    -- Accepted hours survive weekly edits. Legacy rows resolve the booked day,
+    -- never the weekday at the time of this request.
+    IF @ClosesAt IS NULL
+        SELECT @OpensAt = [OpensAtUtc], @ClosesAt = [ClosesAtUtc]
+        FROM [Booking].[AcceptedWorkingHours](@ProviderId, @CheckInDate, @SlotStartTime);
 
-    -- A provider who has never saved their weekly hours is not gated.
-    IF @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @Now < @OpensAt OR @Now > @ClosesAt)
-    BEGIN
-        THROW 51257, 'The job can only be started during your working hours.', 1;
-    END
+    DECLARE @StartsAtUtc DATETIME2(7) = DATEADD(SECOND,
+        DATEDIFF(SECOND, CAST('00:00' AS TIME), COALESCE(@SlotStartTime, CAST('00:00' AS TIME))),
+        CAST(@CheckInDate AS DATETIME2(7)));
+    IF (@Now < @OpensAt OR @Now > @ClosesAt)
+        THROW 51257, 'The job can only be started within its accepted working hours.', 1;
 
-    -- Waiting is available from the booked start until closing, including after
+    -- Waiting is available from the accepted opening until closing, including after
     -- the short booked slot has ended. No saved hours falls back to midnight UTC.
     IF @WaitForCustomer = 1
     BEGIN
-        IF @Now < DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), @SlotStartTime), CAST(@CheckInDate AS DATETIME2(7)))
+        IF @Now < @OpensAt
            OR @Now >= COALESCE(@ClosesAt, DATEADD(DAY, 1, CAST(@CheckInDate AS DATETIME2(7))))
-            THROW 51253, 'Waiting for the customer is only available from the slot start until closing.', 1;
+            THROW 51253, 'Waiting for the customer is only available within the accepted working hours.', 1;
     END
 
     -- A retry in START_JOB must not rotate the OTP or repeat arrival/push writes.
@@ -157,9 +158,9 @@ BEGIN
            [CashNotReceivedAtUtc], [CancellationReason],
            CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
            CASE WHEN [Booking].[NightStayBookings].[Status] = N'CREATED' THEN
-               [Booking].[NightStayRequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+               [Booking].[RequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), NULL, NULL)
            WHEN [Booking].[NightStayBookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
-               (SELECT [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)) END)
                 FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId])
            END AS [RequestExpiresAtUtc],
            (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay

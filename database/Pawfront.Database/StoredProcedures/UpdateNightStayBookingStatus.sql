@@ -41,11 +41,17 @@ CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
     @Latitude DECIMAL(9, 6) = NULL,
     @Longitude DECIMAL(9, 6) = NULL,
     @AccuracyMetres DECIMAL(9, 2) = NULL,
-    @DeviceCapturedAtUtc DATETIME2(7) = NULL
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL,
+    @NoShowReason NVARCHAR(32) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
+
+    IF @NoShowReason IS NOT NULL AND (@NoShowReason NOT IN (N'NotArrived',N'OtpNotShared')
+        OR @Actor<>N'Provider' OR @NewStatus<>N'PARENT_NO_SHOW')
+        THROW 51215, 'No-show reason is only valid on a provider report of customer absence.', 1;
+
 
     IF @Actor NOT IN (N'Provider', N'Parent')
     BEGIN
@@ -108,7 +114,7 @@ BEGIN
     -- Night stays remain acceptable through the check-in date. The expiry
     -- sweep owns the status change; this guard rejects a response after that date.
     IF @CurrentStatus = N'CREATED'
-       AND @Now >= [Booking].[NightStayRequestExpiresAtUtc](@CreatedAtUtc, @CheckInDate)
+       AND @Now >= [Booking].[RequestExpiresAtUtc](@CreatedAtUtc, @CheckInDate, COALESCE(@DropOffTime,CAST('00:00' AS TIME)), NULL, NULL)
     BEGIN
         THROW 51273, 'Booking has expired: the acceptance deadline has passed.', 1;
     END
@@ -193,6 +199,15 @@ BEGIN
             CASE WHEN @Today <= @CheckInDate THEN DATEADD(DAY, 1, @CheckInDate) ELSE @Today END;
     END
 
+    -- Capture on acceptance, in the same transaction as the status change.
+    IF @NewStatus = N'CONFIRMED'
+        UPDATE b
+        SET [WorkingHoursOpensAtUtc] = w.[OpensAtUtc],
+            [WorkingHoursClosesAtUtc] = w.[ClosesAtUtc]
+        FROM [Booking].[NightStayBookings] b
+        CROSS APPLY [Booking].[AcceptedWorkingHours](b.[ProviderId], b.[CheckInDate], b.[DropOffTime]) w
+        WHERE b.[NightStayBookingId] = @NightStayBookingId;
+
     UPDATE [Booking].[NightStayBookings]
     SET [Status] = @NewStatus,
         [CashNotReceivedAtUtc] = CASE WHEN @NewStatus = N'PAYMENT_NOT_RECEIVED' THEN @Now ELSE [CashNotReceivedAtUtc] END,
@@ -267,12 +282,19 @@ BEGIN
         DECLARE @Audience NVARCHAR(16) =
             CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
 
+        DECLARE @ResolvedNoShowReason NVARCHAR(32) = COALESCE(@NoShowReason, CASE
+            WHEN @NewStatus=N'PARENT_NO_SHOW' AND @CurrentStatus=N'START_JOB'
+                 AND NOT EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory]
+                     WHERE [NightStayBookingId]=@NightStayBookingId AND [Note]=N'Waiting for customer')
+            THEN N'OtpNotShared' ELSE N'NotArrived' END);
+
         EXEC [Notification].[EnqueueBookingNotification]
             @BookingId = @NightStayBookingId,
             @IsNightStay = 1,
             @Audience = @Audience,
             @NotificationType = @NotificationType,
-            @AbsentParty = @AbsentParty;
+            @AbsentParty = @AbsentParty,
+            @NoShowReason = @ResolvedNoShowReason;
     END
 
     SELECT [NightStayBookingId],
@@ -293,9 +315,9 @@ BEGIN
            [CashNotReceivedAtUtc], [CancellationReason],
            CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
            CASE WHEN [Booking].[NightStayBookings].[Status] = N'CREATED' THEN
-               [Booking].[NightStayRequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+               [Booking].[RequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), NULL, NULL)
            WHEN [Booking].[NightStayBookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
-               (SELECT [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate])
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)) END)
                 FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId])
            END AS [RequestExpiresAtUtc],
            (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay

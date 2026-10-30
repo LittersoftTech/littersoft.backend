@@ -56,6 +56,8 @@ BEGIN
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
 
+    SET @Now = SYSUTCDATETIME(); -- Evaluate acceptance after acquiring the booking lock.
+
     IF @CurrentStatus IS NULL
     BEGIN
         THROW 51145, 'Booking was not found.', 1;
@@ -183,6 +185,13 @@ BEGIN
             [Status] = @NewStatus,
             [UpdatedAtUtc] = @Now
         WHERE [BookingId] = @BookingId;
+
+        UPDATE b
+        SET [WorkingHoursOpensAtUtc] = w.[OpensAtUtc],
+            [WorkingHoursClosesAtUtc] = w.[ClosesAtUtc]
+        FROM [Booking].[Bookings] b
+        CROSS APPLY [Booking].[AcceptedWorkingHours](b.[ProviderId], b.[BookingDate], b.[StartTime]) w
+        WHERE b.[BookingId] = @BookingId;
     END
     ELSE
     BEGIN

@@ -24,6 +24,9 @@ CREATE TABLE [Booking].[NightStayBookings]
     -- bookings; NULL for provider-host bookings that don't capture it.
     [PetId] UNIQUEIDENTIFIER NULL,
     [CheckInDate] DATE NOT NULL,
+    -- Accepted check-in day's working hours, independent of later weekly edits.
+    [WorkingHoursOpensAtUtc] DATETIME2(7) NULL,
+    [WorkingHoursClosesAtUtc] DATETIME2(7) NULL,
     -- Checkout day; NOT a stayed night. Stayed nights = [CheckInDate, CheckOutDate).
     [CheckOutDate] DATE NOT NULL,
     -- The day the pet ACTUALLY went home, if the stay ended early. Stamped by

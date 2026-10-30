@@ -51,11 +51,17 @@ CREATE OR ALTER PROCEDURE [Booking].[UpdateBookingStatus]
     @Latitude DECIMAL(9, 6) = NULL,
     @Longitude DECIMAL(9, 6) = NULL,
     @AccuracyMetres DECIMAL(9, 2) = NULL,
-    @DeviceCapturedAtUtc DATETIME2(7) = NULL
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL,
+    @NoShowReason NVARCHAR(32) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
+
+    IF @NoShowReason IS NOT NULL AND (@NoShowReason NOT IN (N'NotArrived',N'OtpNotShared')
+        OR @Actor<>N'Provider' OR @NewStatus<>N'PARENT_NO_SHOW')
+        THROW 51125, 'No-show reason is only valid on a provider report of customer absence.', 1;
+
 
     -- Static validation of the inputs (defense-in-depth; the API validates too).
     IF @Actor NOT IN (N'Provider', N'Parent')
@@ -212,6 +218,15 @@ BEGIN
         END
     END
 
+    -- Capture on acceptance, in the same transaction as the status change.
+    IF @NewStatus = N'CONFIRMED'
+        UPDATE b
+        SET [WorkingHoursOpensAtUtc] = w.[OpensAtUtc],
+            [WorkingHoursClosesAtUtc] = w.[ClosesAtUtc]
+        FROM [Booking].[Bookings] b
+        CROSS APPLY [Booking].[AcceptedWorkingHours](b.[ProviderId], b.[BookingDate], b.[StartTime]) w
+        WHERE b.[BookingId] = @BookingId;
+
     UPDATE [Booking].[Bookings]
     SET [Status] = @NewStatus,
         [CashNotReceivedAtUtc] = CASE WHEN @NewStatus = N'PAYMENT_NOT_RECEIVED' THEN @Now ELSE [CashNotReceivedAtUtc] END,
@@ -298,12 +313,19 @@ BEGIN
         DECLARE @Audience NVARCHAR(16) =
             CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
 
+        DECLARE @ResolvedNoShowReason NVARCHAR(32) = COALESCE(@NoShowReason, CASE
+            WHEN @NewStatus=N'PARENT_NO_SHOW' AND @CurrentStatus=N'START_JOB'
+                 AND NOT EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory]
+                     WHERE [BookingId]=@BookingId AND [Note]=N'Waiting for customer')
+            THEN N'OtpNotShared' ELSE N'NotArrived' END);
+
         EXEC [Notification].[EnqueueBookingNotification]
             @BookingId = @BookingId,
             @IsNightStay = 0,
             @Audience = @Audience,
             @NotificationType = @NotificationType,
-            @AbsentParty = @AbsentParty;
+            @AbsentParty = @AbsentParty,
+            @NoShowReason = @ResolvedNoShowReason;
     END
 
     SELECT [BookingId],

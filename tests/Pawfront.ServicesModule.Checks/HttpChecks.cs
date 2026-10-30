@@ -23,6 +23,11 @@ static class HttpChecks
             var instance=DispatchProxy.Create(serviceType,typeof(EndpointProxy));
             ((EndpointProxy)instance).Call=(method,args)=>
             {
+                if(method.Name=="GetProviderIdAsync") return Task.FromResult<Guid?>(provider);
+                if(method.Name=="GetAsync")
+                    return serviceType==typeof(IBookingService)
+                        ? (object)store.GetAsync((Guid)args![0]!,default)
+                        : nightStore.GetAsync((Guid)args![0]!,default);
                 if(method.Name=="StartJobAsync")
                 {
                     var c=(StartBookingCommand)args![0]!;

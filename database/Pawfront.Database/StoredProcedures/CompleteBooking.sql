@@ -15,7 +15,8 @@
 -- completed).
 CREATE OR ALTER PROCEDURE [Booking].[CompleteBooking]
     @BookingId UNIQUEIDENTIFIER,
-    @ProviderId UNIQUEIDENTIFIER
+    @ProviderId UNIQUEIDENTIFIER,
+    @CustomerArrivedForCollection BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -52,6 +53,11 @@ BEGIN
     BEGIN
         THROW 51133, 'Booking is not in a state the job can be completed from.', 1;
     END
+
+    -- P-U12 describes photo-evidenced hand-over; old body-less completion uses P-U11.
+    IF @CustomerArrivedForCollection = 1 AND NOT EXISTS (
+        SELECT 1 FROM [Booking].[BookingEvidence] WHERE [BookingId] = @BookingId)
+        THROW 51133, 'Upload hand-over evidence before completing with the customer present.', 1;
 
     -- Mint the payout reference. Custom walk-ins are deliberately left unstamped:
     -- they are arranged off-platform, carry no Pawfront commission, and can never
@@ -111,11 +117,13 @@ BEGIN
 
     -- The provider completed it, so only the parent is told — and the copy asks
     -- for the cash, since payment is always still pending at this point.
+    DECLARE @CompletionScenario NVARCHAR(32) = CASE WHEN @CustomerArrivedForCollection=1 THEN N'HandOver' ELSE N'AwaitingCollection' END;
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @BookingId,
         @IsNightStay = 0,
         @Audience = N'PetParent',
-        @NotificationType = N'BOOKING_COMPLETED';
+        @NotificationType = N'BOOKING_COMPLETED',
+        @CompletionScenario = @CompletionScenario;
 
     SELECT [BookingId],
            [ProviderId],

@@ -27,6 +27,20 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
 
+    -- V4 reminders are relevant only while the job is still running. Recheck
+    -- at dispatch because completion can race a scheduled reminder.
+    UPDATE n SET Status=N'Failed',UpdatedAtUtc=@Now,LastError=N'Superseded service notification.'
+    FROM [Notification].[NotificationOutbox] n
+    LEFT JOIN [Booking].[Bookings] b ON b.BookingId=TRY_CONVERT(UNIQUEIDENTIFIER,
+        JSON_VALUE(CASE WHEN ISJSON(n.DataJson)=1 THEN n.DataJson ELSE N'{}' END,'$.bookingId'))
+    LEFT JOIN [Booking].[NightStayBookings] s ON s.NightStayBookingId=TRY_CONVERT(UNIQUEIDENTIFIER,
+        JSON_VALUE(CASE WHEN ISJSON(n.DataJson)=1 THEN n.DataJson ELSE N'{}' END,'$.bookingId'))
+    WHERE n.Status=N'Pending' AND (
+        n.NotificationType=N'BOOKING_PRESCRIPTION_RECORDED'
+        OR (n.NotificationType IN (N'BOOKING_NOT_MARKED_COMPLETE',N'BOOKING_COMPLETION_OVERDUE',N'BOOKING_COMPLETION_TIME_PASSED',N'BOOKING_PICKUP_OVERDUE')
+            AND ISNULL(CASE WHEN n.EntityType=N'NightStayBooking' THEN s.Status ELSE b.Status END,N'')<>N'IN_PROGRESS')
+    );
+
     -- Re-check Events V3 relevance before the first delivery. A delayed notice
     -- must not describe a booking that was cancelled, a seat already filled, or
     -- an event that has since ended. Retired rows never enter either inbox.

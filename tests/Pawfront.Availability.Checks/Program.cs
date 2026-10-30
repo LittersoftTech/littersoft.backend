@@ -58,9 +58,9 @@ var store = Fake<INightStayBookingSqlStore>((m, a) => m.Name switch
 var nightService = (INightStayBookingService)Make("Pawfront.Application.Bookings.NightStayBookingService",
     new Dictionary<Type, object> { [typeof(INightStayBookingSqlStore)] = store,
         [typeof(IProviderAvailabilityService)] = weekly, [typeof(IProviderClosureReader)] = timeOff });
-await Reject<BookingLeadTimeTooShortException>(() => nightService.RequestModificationAsync(
+await Reject<InvalidNightStayDatesException>(() => nightService.RequestModificationAsync(
     new(booking.NightStayBookingId, default, booking.PetParentId, proposedDate, proposedDate.AddDays(2), null), default));
-await Reject<BookingLeadTimeTooShortException>(() => nightService.RespondModificationAsync(
+await Reject<InvalidNightStayDatesException>(() => nightService.RespondModificationAsync(
     new(booking.NightStayBookingId, default, providerId, true, null), default));
 proposedDate = monday;
 days[1] = days[1] with { IsOpen = false };
@@ -117,7 +117,7 @@ var hourlyService = (IBookingService)Make("Pawfront.Application.Bookings.Booking
 proposedDate = DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-1);
 await Reject<BookingLeadTimeTooShortException>(() => hourlyService.RequestModificationAsync(
     new(hourlyBooking.BookingId, default, booking.PetParentId, proposedDate, new(9, 0), new(10, 0), null), default));
-await Reject<BookingLeadTimeTooShortException>(() => hourlyService.RespondModificationAsync(
+await Reject<BookingModificationExpiredException>(() => hourlyService.RespondModificationAsync(
     new(hourlyBooking.BookingId, default, providerId, true, null), default));
 proposedDate = monday;
 days[1] = days[1] with { IsOpen = false };
@@ -149,13 +149,13 @@ var nightCatalog = Fake<IProviderServiceCatalog>((m, a) => Task.FromResult<Provi
     new(serviceId, providerId, "PetSitter", "PetHotel", "NightStay", true, default, default)));
 var registry = Fake<IPetSitterServiceRegistry>((m, a) => Task.FromResult<PetSitterServiceResult?>(
     new(providerId, "PetHotel", "", "", "", null,
-        new("", "", "", "", "", null, null, new(null, new(10, [], 1, 0, new(9, 0), new(10, 0)), [], 10, [], "", false)),
+        new("", "", "", "", "", null, null, new(null, new(10, [], 1, 0, new(9, 0), new(10, 0), true), [], 10, [], "", false)),
         null, default, default)));
 nightService = (INightStayBookingService)Make("Pawfront.Application.Bookings.NightStayBookingService",
     new() { [typeof(INightStayBookingSqlStore)] = store, [typeof(IProviderServiceCatalog)] = nightCatalog,
         [typeof(IPetSitterServiceRegistry)] = registry,
         [typeof(IProviderAvailabilityService)] = weekly, [typeof(IProviderClosureReader)] = timeOff });
-await Reject<BookingLeadTimeTooShortException>(() => nightService.CreateAsync(
+await Reject<InvalidNightStayDatesException>(() => nightService.CreateAsync(
     new(providerId, booking.PetParentId, serviceId, DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-1), DateOnly.FromDateTime(DateTime.UtcNow).AddDays(1)), default));
 
 foreach (var offset in new[] { 0, 1, 2 })
@@ -249,6 +249,22 @@ foreach (var endpoint in new[] { host == "Pawfront.Api" ? "BookingEndpoints" : "
         Assert(envelope.Error?.Code == (error is ProviderClosedOnDateException ? "ServiceClosed" : "BookingLeadTimeTooShort"), "Stable error code");
     }
 }
+var openAllDay = Fake<IProviderAvailabilityService>((_,_) => Task.FromResult(new ProviderWeeklyAvailabilityResult(providerId,
+    Enumerable.Range(0,7).Select(d=>new DayAvailabilityResult(d,true,TimeOnly.MinValue,new(23,59),null,null)).ToArray())));
+var leadSlots=(IProviderAvailabilitySlotService)Make("Pawfront.Application.Availability.ProviderAvailabilitySlotService",new()
+{
+    [typeof(IProviderOfferingResolver)]=Fake<IProviderOfferingResolver>((_,_)=>Task.FromResult<OfferingResolution>(new OfferingResolution.Resolved(serviceId,providerId,"PetSitter","PetHotel","DayCare",2,0.25m,false,10))),
+    [typeof(IProviderAvailabilityService)]=openAllDay,
+    [typeof(IDailyBookingReader)]=Fake<IDailyBookingReader>((_,_)=>Task.FromResult<IReadOnlyList<BookingWindow>>([])),
+    [typeof(IProviderClosureReader)]=Fake<IProviderClosureReader>((_,_)=>Task.FromResult<IReadOnlyList<ActiveClosure>>([]))
+});
+var leadNow=DateTimeOffset.UtcNow;
+var firstDay=DateOnly.FromDateTime(leadNow.UtcDateTime);
+var offeredStarts=new List<DateTimeOffset>();
+foreach(var d in new[]{firstDay,firstDay.AddDays(1)})
+    offeredStarts.AddRange((await leadSlots.GetAvailableSlotsAsync(providerId,serviceId,d,0.25m,15,null,default)).Slots.Select(slot=>BookingLeadTime.ServiceStartUtc(d,slot.StartTime)));
+Assert(offeredStarts.Count>0 && offeredStarts.All(t=>t>=leadNow.AddHours(3)),"Slots exclude every start below three hours");
+Assert(offeredStarts.Min()<leadNow.AddHours(3).AddMinutes(16),"Slots remain available immediately after the three-hour cutoff");
 checks += await NightStaySearchChecks.RunAsync();
 Console.WriteLine($"Passed {checks} availability, timezone, lifecycle and HTTP mapping checks.");
 void Assert(bool condition, string description) { if (!condition) throw new Exception(description); checks++; }

@@ -2,14 +2,9 @@
 -- EITHER of two triggers, both of which mean the same thing: the provider has
 -- run out of time to accept.
 --   * BR-17: it has been pending for @PendingHours (default 24).
---   * BR-53: the service now starts in under @LeadTimeHours (default 2), i.e.
---     serviceStart < @Now + @LeadTimeHours. That is the SAME cutoff BR-01 uses
---     to decide a booking is too soon to be created, so an unaccepted booking
---     dies exactly when a fresh one for that slot could no longer be made.
---     serviceStart is BookingDate + StartTime for single-day bookings.
---     Night stays instead expire when CheckInDate is before the current UTC date. Comparison is strict (<), so a
---     booking whose service is exactly @LeadTimeHours away survives this tick —
---     mirroring BookingLeadTime.IsTooSoon.
+--   * BR-53: the service starts within @LeadTimeHours (default 2).
+--     This acceptance cutoff is separate from the three-hour sending limit.
+--     Start is BookingDate + StartTime, or CheckInDate + DropOffTime for stays.
 -- A booking already past its start time is caught by the same test.
 --
 -- Run periodically by the scheduled external job (Azure Function, timer-
@@ -82,12 +77,12 @@ BEGIN
     INTO @ExpiredNightStays ([NightStayBookingId], [Reason])
     WHERE [Status] = N'CREATED'
       AND ([CreatedAtUtc] <= @PendingCutoff
-           OR [CheckInDate] < CAST(@Now AS DATE));
+           OR DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),COALESCE([DropOffTime],CAST('00:00' AS TIME))),CAST([CheckInDate] AS DATETIME2(7))) <= @LeadTimeCutoff);
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
     SELECT [NightStayBookingId], N'CREATED', N'EXPIRED', N'System', NULL,
-           CASE WHEN [Reason] = N'Pending' THEN @PendingNote ELSE N'Automatically expired: the check-in date has passed.' END
+           CASE WHEN [Reason] = N'Pending' THEN @PendingNote ELSE @LeadTimeNote END
     FROM @ExpiredNightStays;
 
     -- ONE expiry event, TWO notifications (V3 cards P-S1 + V-S2) — the parent is

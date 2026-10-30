@@ -155,7 +155,7 @@ public interface IBookingSqlStore
         // The acting party's position. Written only for the two NO-SHOW
         // transitions; null for every other status this engine serves.
         CapturedLocation? location,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, string? noShowReason = null);
 
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
         Guid bookingId,
@@ -206,7 +206,8 @@ public interface IBookingSqlStore
     Task<BookingResult> CompleteAsync(
         Guid bookingId,
         Guid providerId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool customerArrivedForCollection = false);
 
     /// <summary>
     /// Flips a COMPLETED or PAYMENT_NOT_RECEIVED booking to PAID and inserts the payment ledger row

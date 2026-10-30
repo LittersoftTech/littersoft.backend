@@ -210,6 +210,9 @@ public sealed record UpdateBookingStatusRequest(
 /// </summary>
 public sealed record BookingLocationOnlyRequest(CapturedLocationRequest? Location);
 
+/// <summary>Provider no-show report. Reason is NotArrived or OtpNotShared; omitted uses booking state.</summary>
+public sealed record MarkBookingNoShowRequest(CapturedLocationRequest? Location, string? NoShowReason = null);
+
 /// <summary>
 /// Body for <c>POST .../bookings/{bookingId}/start-job</c> (provider). The provider
 /// reaches this by answering the arrival question — "have you arrived at the
@@ -272,7 +275,11 @@ public sealed record BookingLocationEventResponse(
 /// </summary>
 public sealed record CompleteBookingRequest(
     DateOnly? NextConsultationDate = null,
-    PrescriptionRequest? Prescription = null);
+    PrescriptionRequest? Prescription = null,
+    bool CustomerArrivedForCollection = false);
+
+/// <summary>Optional hand-over context for a night-stay completion.</summary>
+public sealed record CompleteNightStayBookingRequest(bool CustomerArrivedForCollection = false);
 
 /// <summary>
 /// Body for <c>POST .../bookings/{bookingId}/paid</c> (provider) — records that

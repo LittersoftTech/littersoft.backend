@@ -608,7 +608,8 @@ internal static class BookingEndpoints
             var result = await bookingService.CompleteAsync(
                 new CompleteBookingCommand(
                     bookingId, providerId, request?.NextConsultationDate,
-                    ToPrescriptionInput(request?.Prescription)),
+                    ToPrescriptionInput(request?.Prescription),
+                    request?.CustomerArrivedForCollection ?? false),
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
@@ -726,21 +727,21 @@ internal static class BookingEndpoints
     /// LocationRequired without it).
     /// </remarks>
     private static Task<IResult> MarkParentNoShow(
-        Guid providerId, Guid bookingId, BookingLocationOnlyRequest? request,
+        Guid providerId, Guid bookingId, MarkBookingNoShowRequest? request,
         IBookingService s, CancellationToken ct)
         => SetStatusAsync(
             providerId, bookingId, BookingStatuses.ParentNoShow, s, ct,
-            request?.Location.ToCapturedLocation());
+            request?.Location.ToCapturedLocation(), request?.NoShowReason);
 
     private static async Task<IResult> SetStatusAsync(
         Guid providerId, Guid bookingId, string status, IBookingService bookingService,
-        CancellationToken cancellationToken, CapturedLocation? location = null)
+        CancellationToken cancellationToken, CapturedLocation? location = null, string? noShowReason = null)
     {
         try
         {
             var result = await bookingService.UpdateStatusAsync(
                 new UpdateBookingStatusCommand(
-                    bookingId, status, BookingStatusActor.Provider, providerId, null, location),
+                    bookingId, status, BookingStatusActor.Provider, providerId, null, location, noShowReason),
                 cancellationToken);
             return ApiResults.Ok(ToResponse(result));
         }
@@ -753,8 +754,8 @@ internal static class BookingEndpoints
     /// <summary>
     /// Provider taps "Start Job" or "Wait for Customer". Moves the booking to START_JOB
     /// and issues the parent-facing start-OTP. Only on the booking's own service
-    /// date (409 BookingNotOnServiceDate otherwise) and only while the provider is
-    /// inside their own weekly working hours (409 OutsideWorkingHours otherwise).
+    /// date (409 BookingNotOnServiceDate otherwise), from 15 minutes before the
+    /// slot until its accepted closing time (409 OutsideWorkingHours otherwise).
     /// </summary>
     /// <remarks>
     /// The body carries the provider's position when they answered the arrival

@@ -407,7 +407,7 @@ internal static class NightStayBookingEndpoints
             TicketRef: myTicket?.TicketRef,
             CancellationReason: row.CancellationReason,
             RequestExpiresAtUtc: row.RequestExpiresAtUtc ?? (row.Status == BookingStatuses.Created
-                ? BookingAcceptanceDeadline.ComputeNightStay(row.CreatedAtUtc, row.CheckInDate) : null),
+                ? BookingAcceptanceDeadline.ComputeNightStay(row.CreatedAtUtc, row.CheckInDate, row.DropOffTime) : null),
             ProviderModificationUsed: row.ProviderModificationUsed,
             IsDisputeRaised: isDisputeRaised,
             IsBlocked: block.IsBlocked,
@@ -778,7 +778,7 @@ internal static class NightStayBookingEndpoints
             CancellationReason: result.CancellationReason,
             PaymentDetails: new BookingPaymentTimestampDetails(result.PaidAtUtc),
             RequestExpiresAtUtc: result.RequestExpiresAtUtc ?? (result.Status == BookingStatuses.Created
-                ? BookingAcceptanceDeadline.ComputeNightStay(result.CreatedAtUtc, result.CheckInDate) : null),
+                ? BookingAcceptanceDeadline.ComputeNightStay(result.CreatedAtUtc, result.CheckInDate, result.DropOffTime) : null),
             ProviderModificationUsed: result.ProviderModificationUsed,
             IsDisputeRaised: isDisputeRaised || result.IsDisputeRaised,
             IsBlocked: block.IsBlocked,

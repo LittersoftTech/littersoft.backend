@@ -28,18 +28,17 @@ public static class NotificationTypes
     public const string BookingModificationRequestedByProvider = "BOOKING_MODIFICATION_REQUESTED_BY_PROVIDER";
     public const string BookingModificationAcceptedByProvider = "BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER";
     public const string BookingModificationDeclinedByProvider = "BOOKING_MODIFICATION_DECLINED_BY_PROVIDER";
+    /// <summary>Retired in V4; kept for compatibility with historical rows.</summary>
     public const string BookingPrescriptionRecorded = "BOOKING_PRESCRIPTION_RECORDED";
 
     // --- Booking lifecycle, to the PROVIDER -----------------------------------
 
-    /// <summary>A parent booked a single-day service — "New Service Booking".</summary>
+    /// <summary>A parent booked a single-day service (shared V-S1 card).</summary>
     public const string BookingRequested = "BOOKING_REQUESTED";
 
     /// <summary>
-    /// A parent booked a multi-night boarding stay. Separate from
-    /// <see cref="BookingRequested"/> because a stay has no start/end time — it
-    /// spans check-in to check-out — so it needs its own wording, and because it
-    /// deep-links to a different entity.
+    /// A parent booked a multi-night stay. The stable wire type and booking kind
+    /// are preserved; V4 shares the V-S1 wording with ordinary requests.
     /// </summary>
     public const string NightStayBookingRequested = "NIGHT_STAY_BOOKING_REQUESTED";
     public const string BookingCancelledByParent = "BOOKING_CANCELLED_BY_PARENT";
@@ -130,8 +129,10 @@ public static class NotificationTypes
     /// <summary>To the PARENT: the provider is closing and the pet is still there (P-S14).</summary>
     public const string BookingPickupOverdue = "BOOKING_PICKUP_OVERDUE";
 
-    /// <summary>To the PROVIDER: past closing time with the job still not completed (V-S12).</summary>
+    /// <summary>V-S12: ten minutes before closing with an unfinished job and late collection.</summary>
     public const string BookingNotMarkedComplete = "BOOKING_NOT_MARKED_COMPLETE";
+    /// <summary>V-S15: ten minutes after the scheduled end, if still in progress.</summary>
+    public const string BookingCompletionOverdue = "BOOKING_COMPLETION_OVERDUE";
 
     // --- No-show, split by who decided it -------------------------------------
 
@@ -150,13 +151,12 @@ public static class NotificationTypes
     // --- Modification expiry, split by which deadline bit ---------------------
 
     /// <summary>
-    /// The 24-hour review window lapsed (P-S2 / V-S3). Separate from
-    /// <see cref="BookingModificationExpired"/> so the copy can name the reason;
-    /// exactly one of the two fires per proposal.
+    /// The review window lapsed. This stable type and BookingModificationExpired
+    /// both display P-S2 / V-S3 in V4; exactly one fires per proposal.
     /// </summary>
     public const string BookingModificationTimedOut = "BOOKING_MODIFICATION_TIMED_OUT";
 
-    // --- Modules not built yet: contract only, nothing enqueues these ---------
+    // --- Chat, invoices, support and promotional content ----------------------
 
     /// <summary>
     /// Chat message (P-U14 / V-U5). <b>Wired 2026-08-09.</b> Enqueued by
@@ -170,24 +170,10 @@ public static class NotificationTypes
     /// </summary>
     public const string MessageReceived = "MESSAGE_RECEIVED";
 
-    /// <summary>
-    /// Invoice ready (P-S16 / V-S14).
-    ///
-    /// <b>The PROVIDER half is wired (2026-08-11)</b> — enqueued by
-    /// <c>Booking.MarkBookingPaid</c> and its night-stay twin when the provider
-    /// records the cash, which is the moment their invoice for the job is settled.
-    /// It deep-links to the booking rather than to a document, since there is none.
-    ///
-    /// <b>The PARENT half has no trigger</b>: issuing them an invoice needs an
-    /// invoicing module, which does not exist. Their receipt for the same event is
-    /// <see cref="BookingPaid"/>.
-    /// </summary>
+    /// <summary>P-S16 / V-S14: the recipient's invoice PDF is generated and available.</summary>
     public const string InvoiceIssued = "INVOICE_ISSUED";
 
-    /// <summary>
-    /// Support closed a ticket (P-S15 / V-S13), to the raiser only. <b>No trigger</b>
-    /// — the Helpline / ticket module does not exist.
-    /// </summary>
+    /// <summary>P-S15 / V-S13: support closed a booking ticket; only its raiser is notified.</summary>
     public const string DisputeResolved = "DISPUTE_RESOLVED";
 
     /// <summary>
@@ -235,6 +221,9 @@ public static class NotificationCategories
 /// </summary>
 public static class NotificationDataKeys
 {
+    public const string NotificationCode = "notificationCode";
+    public const string CompletionScenario = "completionScenario";
+    public const string NoShowReason = "noShowReason";
     // --- Envelope keys the mobile apps read on every notification ------------
 
     /// <summary>Payload contract version, so the apps can evolve the shape safely.</summary>

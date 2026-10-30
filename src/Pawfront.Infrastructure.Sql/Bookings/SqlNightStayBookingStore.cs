@@ -316,7 +316,7 @@ internal sealed class SqlNightStayBookingStore(
         Guid actorId,
         string? note,
         CapturedLocation? location,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? noShowReason = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -330,6 +330,7 @@ internal sealed class SqlNightStayBookingStore(
         command.Parameters.AddWithValue("@Actor", actor.ToString());
         command.Parameters.AddWithValue("@ActorId", actorId);
         command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
+        if (noShowReason is not null) command.Parameters.AddWithValue("@NoShowReason", noShowReason);
         LocationParameters.Add(command, location);
 
         try
@@ -556,7 +557,7 @@ internal sealed class SqlNightStayBookingStore(
     }
 
     public async Task<NightStayBookingResult> CompleteAsync(
-        Guid bookingId, Guid providerId, CancellationToken cancellationToken)
+        Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -566,6 +567,7 @@ internal sealed class SqlNightStayBookingStore(
         };
         command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
         command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@CustomerArrivedForCollection", customerArrivedForCollection);
 
         try
         {

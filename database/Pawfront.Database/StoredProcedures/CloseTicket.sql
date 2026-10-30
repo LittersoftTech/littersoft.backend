@@ -62,6 +62,20 @@ BEGIN
             SET @Data=(SELECT CONVERT(NVARCHAR(36),@TicketId) AS ticketId FOR JSON PATH,WITHOUT_ARRAY_WRAPPER);
             EXEC [Event].[NotifyEventAccount] @EventId,@AccountId,@Audience,N'EVENT_ISSUE_RESOLVED',@Key,@ExtraData=@Data;
         END
+        ELSE
+        BEGIN
+            DECLARE @BookingId UNIQUEIDENTIFIER, @BookingType NVARCHAR(16), @IsNightStay BIT, @Suffix NVARCHAR(64);
+            SELECT @BookingId=BookingId,@BookingType=BookingType,@Audience=RaisedByType
+            FROM [Support].[Tickets] WHERE TicketId=@TicketId AND TicketType=N'BookingIncident';
+            IF @BookingId IS NOT NULL
+            BEGIN
+                SET @IsNightStay=CASE WHEN @BookingType=N'NightStay' THEN 1 ELSE 0 END;
+                SET @Suffix=CONVERT(NVARCHAR(36),@TicketId);
+                EXEC [Notification].[EnqueueBookingNotification]
+                    @BookingId=@BookingId,@IsNightStay=@IsNightStay,@Audience=@Audience,
+                    @NotificationType=N'DISPUTE_RESOLVED',@TicketId=@TicketId,@DedupeSuffix=@Suffix;
+            END;
+        END;
     END
 
     SELECT [TicketId],

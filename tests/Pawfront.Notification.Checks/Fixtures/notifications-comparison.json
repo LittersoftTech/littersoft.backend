@@ -1,0 +1,662 @@
+[
+  {
+    "code": "P-U1",
+    "type": "BOOKING_ACCEPTED",
+    "audience": "PetParent",
+    "title": "Booking Confirmed",
+    "body": "{providerName} accepted your {serviceName} booking. Tap to view!",
+    "delay": 15,
+    "parameters": {}
+  },
+  {
+    "code": "P-U2",
+    "type": "BOOKING_DECLINED",
+    "audience": "PetParent",
+    "title": "Booking Request Declined",
+    "body": "{providerName} declined your {serviceName} booking. Try another slot or provider.",
+    "delay": 15,
+    "parameters": {}
+  },
+  {
+    "code": "P-U3",
+    "type": "BOOKING_CANCELLED_BY_PROVIDER",
+    "audience": "PetParent",
+    "title": "Booking Cancelled by Provider",
+    "body": "{providerName} cancelled your {serviceName} booking. Try another slot or provider.",
+    "delay": 15,
+    "parameters": {}
+  },
+  {
+    "code": "P-S1",
+    "type": "BOOKING_EXPIRED_FOR_PARENT",
+    "audience": "PetParent",
+    "title": "Job Request Expired",
+    "body": "{providerName} didn’t respond in time, so your {serviceName} request has expired. Please re-book.",
+    "delay": 15,
+    "parameters": {}
+  },
+  {
+    "code": "P-U7",
+    "type": "BOOKING_START_OTP_ISSUED",
+    "audience": "PetParent",
+    "title": "Share your OTP",
+    "body": "{providerName} has started {serviceName}. Tap to view and share your OTP with the provider.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-U8",
+    "type": "BOOKING_IN_PROGRESS",
+    "audience": "PetParent",
+    "title": "Your Job Has Started",
+    "body": "Thank you for the OTP! We’ll let you know once the service is complete.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-U11",
+    "type": "BOOKING_COMPLETED",
+    "audience": "PetParent",
+    "title": "Service Completed! Pay & Collect {petName}",
+    "body": "{providerName} has completed {serviceName}. Please collect your pet and pay the provider.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-U12",
+    "type": "BOOKING_COMPLETED",
+    "audience": "PetParent",
+    "title": "Payment Requested",
+    "body": "Please pay CHF {amount} in cash to {providerName}.",
+    "delay": 0,
+    "parameters": {
+      "completionScenario": "HandOver"
+    }
+  },
+  {
+    "code": "P-U13",
+    "type": "BOOKING_PAID",
+    "audience": "PetParent",
+    "title": "Thank You for Your Payment",
+    "body": "{providerName} has confirmed receiving CHF {amount} in cash for {serviceName}.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-U15",
+    "type": "BOOKING_CASH_NOT_RECEIVED",
+    "audience": "PetParent",
+    "title": "Payment Not Received",
+    "body": "{providerName} has reported that you have not made the payment for {serviceName}. Please make the payment to avoid receiving a red flag.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-U4",
+    "type": "BOOKING_MODIFICATION_REQUESTED_BY_PROVIDER",
+    "audience": "PetParent",
+    "title": "Provider Requested a Modification",
+    "body": "{providerName} has proposed a new timing for your {serviceName} booking. Tap to review!",
+    "delay": 15,
+    "parameters": {}
+  },
+  {
+    "code": "P-U5",
+    "type": "BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER",
+    "audience": "PetParent",
+    "title": "Modification Confirmed",
+    "body": "{providerName} accepted your modification request for {serviceName}. Tap to view!",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-U6",
+    "type": "BOOKING_MODIFICATION_DECLINED_BY_PROVIDER",
+    "audience": "PetParent",
+    "title": "Modification Declined",
+    "body": "{providerName} declined your modification request for {serviceName}. Your booking stays as originally scheduled.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S11",
+    "type": "BOOKING_OTP_ATTEMPTS_EXCEEDED",
+    "audience": "PetParent",
+    "title": "Booking Cancelled: OTP Not Verified",
+    "body": "The OTP for your {serviceName} booking couldn’t be verified, so your booking is cancelled.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S9",
+    "type": "BOOKING_START_OTP_NOT_SEEN",
+    "audience": "PetParent",
+    "title": "You’re Late for Your Appointment!",
+    "body": "Tap to view and share your OTP with the provider.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S10",
+    "type": "BOOKING_START_OTP_NOT_SHARED",
+    "audience": "PetParent",
+    "title": "Share Your OTP Now",
+    "body": "Please share your OTP with {providerName} or you’ll be marked as a no-show.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-S10",
+    "type": "BOOKING_START_OTP_NOT_ENTERED",
+    "audience": "Provider",
+    "title": "Ask for the Customer’s OTP",
+    "body": "Please enter {parentName}'s OTP to start the job.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S13",
+    "type": "BOOKING_COMPLETION_TIME_PASSED",
+    "audience": "PetParent",
+    "title": "Service Completion Time Has Passed",
+    "body": "Your {serviceName} appointment completion time has passed. Please chat with {providerName} to check whether you can pick up your pet.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S14",
+    "type": "BOOKING_PICKUP_OVERDUE",
+    "audience": "PetParent",
+    "title": "You’re Late to Pick Up {petName}",
+    "body": "{providerName}’s shop is closing. Please collect {petName}.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-S12",
+    "type": "BOOKING_NOT_MARKED_COMPLETE",
+    "audience": "Provider",
+    "title": "Please Complete The Job",
+    "body": "{parentName}’s {serviceName} job still isn’t marked complete. Please mark the job complete or report an issue.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-S15",
+    "type": "BOOKING_COMPLETION_OVERDUE",
+    "audience": "Provider",
+    "title": "Please Complete The Job",
+    "body": "{parentName}’s {serviceName} job still isn’t marked complete. Please mark the job complete.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-S1",
+    "type": "BOOKING_REQUESTED",
+    "audience": "Provider",
+    "title": "New Job Request Received",
+    "body": "{parentName} has requested {serviceName} on {serviceDate}. Tap to review!",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-U1",
+    "type": "BOOKING_CANCELLED_BY_PARENT",
+    "audience": "Provider",
+    "title": "Booking Cancelled by Customer",
+    "body": "{parentName} has cancelled the {serviceName} appointment scheduled for {serviceDate}.",
+    "delay": 15,
+    "parameters": {}
+  },
+  {
+    "code": "V-S2",
+    "type": "BOOKING_EXPIRED_FOR_PROVIDER",
+    "audience": "Provider",
+    "title": "You Missed a Job Opportunity",
+    "body": "{parentName}’s {serviceName} request expired because you didn't answer in time.",
+    "delay": 15,
+    "parameters": {}
+  },
+  {
+    "code": "V-U2",
+    "type": "BOOKING_MODIFICATION_REQUESTED_BY_PARENT",
+    "audience": "Provider",
+    "title": "Customer Requested a Modification",
+    "body": "{parentName} has proposed a new timing for {serviceName} appointment. Tap to review!",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-U3",
+    "type": "BOOKING_MODIFICATION_ACCEPTED_BY_PARENT",
+    "audience": "Provider",
+    "title": "Modification Confirmed",
+    "body": "{parentName} accepted your modification request for {serviceName}. Your Agenda has been updated.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-U4",
+    "type": "BOOKING_MODIFICATION_DECLINED_BY_PARENT",
+    "audience": "Provider",
+    "title": "Modification Declined",
+    "body": "{parentName} declined your modification request for {serviceName}. The job stays in your agenda as originally scheduled.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S2",
+    "type": "BOOKING_MODIFICATION_TIMED_OUT",
+    "audience": "PetParent",
+    "title": "Modification Request Expired",
+    "body": "Your modification request for {serviceName} has expired. Your booking stays as originally scheduled.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-S3",
+    "type": "BOOKING_MODIFICATION_TIMED_OUT",
+    "audience": "Provider",
+    "title": "Modification Request Expired",
+    "body": "Your modification request for {parentName}'s {serviceName} has expired. The job stays in your agenda as originally scheduled.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S4",
+    "type": "BOOKING_REMINDER_DAY_BEFORE",
+    "audience": "PetParent",
+    "title": "Service Tomorrow",
+    "body": "Don't forget your {serviceName} booking with {providerName} tomorrow. Be there on time.",
+    "delay": 60,
+    "parameters": {}
+  },
+  {
+    "code": "V-S5",
+    "type": "BOOKING_REMINDER_DAY_BEFORE",
+    "audience": "Provider",
+    "title": "Job Tomorrow",
+    "body": "Don't forget your {serviceName} booking with {parentName} tomorrow. Be there on time.",
+    "delay": 60,
+    "parameters": {}
+  },
+  {
+    "code": "P-S5",
+    "type": "BOOKING_REMINDER_STARTING_SOON",
+    "audience": "PetParent",
+    "title": "Service Starts Soon",
+    "body": "Your {serviceName} booking with {providerName} starts soon. Please be there on time.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-S6",
+    "type": "BOOKING_REMINDER_STARTING_SOON",
+    "audience": "Provider",
+    "title": "Job Starts Soon",
+    "body": "{parentName}’s {serviceName} starts soon. Please be there on time.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S6",
+    "type": "BOOKING_NOT_STARTED_HALFWAY",
+    "audience": "PetParent",
+    "title": "Has the Service Started?",
+    "body": "Your {serviceName} with {providerName} hasn’t started yet. Is everything OK?",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-S7",
+    "type": "BOOKING_NOT_STARTED_HALFWAY",
+    "audience": "Provider",
+    "title": "You Haven’t Started the Job",
+    "body": "{parentName}’s {serviceName} hasn’t started yet. Tap to start the job.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S7",
+    "type": "BOOKING_NOT_STARTED_WINDOW_ENDED",
+    "audience": "PetParent",
+    "title": "Service Time Has Ended",
+    "body": "Your {serviceName} time has ended but the job still hasn’t started. Is everything OK?",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-S8",
+    "type": "BOOKING_NOT_STARTED_WINDOW_ENDED",
+    "audience": "Provider",
+    "title": "Service Time Has Ended",
+    "body": "{parentName}’s {serviceName} time has ended but the job hasn’t started. Is everything OK?",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-U9",
+    "type": "BOOKING_NO_SHOW_REPORTED",
+    "audience": "PetParent",
+    "title": "You're marked as No-Show",
+    "body": "{providerName} marked you as a no-show for {serviceName} as you did not arrive on time.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-U10",
+    "type": "BOOKING_NO_SHOW_REPORTED",
+    "audience": "PetParent",
+    "title": "You're marked as No-Show",
+    "body": "{providerName} marked you as a no-show for {serviceName} as you did not share the OTP with them.",
+    "delay": 0,
+    "parameters": {
+      "noShowReason": "OtpNotShared"
+    }
+  },
+  {
+    "code": "P-S8",
+    "type": "BOOKING_NO_SHOW_AUTO_SETTLED",
+    "audience": "PetParent",
+    "title": "Provider Didn’t Start the Service",
+    "body": "{providerName} didn’t start your {serviceName} as per the booking time. Book another provider.",
+    "delay": 15,
+    "parameters": {
+      "absentParty": "the provider"
+    }
+  },
+  {
+    "code": "V-S9",
+    "type": "BOOKING_NO_SHOW_AUTO_SETTLED",
+    "audience": "Provider",
+    "title": "You're marked as No-Show",
+    "body": "You did not start {parentName}’s {serviceName} job within your working hours. You have been marked as no-show.",
+    "delay": 60,
+    "parameters": {
+      "absentParty": "the provider"
+    }
+  },
+  {
+    "code": "P-S12",
+    "type": "BOOKING_NO_SHOW_AUTO_SETTLED",
+    "audience": "PetParent",
+    "title": "You're marked as No-Show",
+    "body": "You were marked as a no-show for the {serviceName} booking with {providerName} as you did not arrive for the service.",
+    "delay": 15,
+    "parameters": {
+      "absentParty": "the customer"
+    }
+  },
+  {
+    "code": "V-S11",
+    "type": "BOOKING_NO_SHOW_AUTO_SETTLED",
+    "audience": "Provider",
+    "title": "Customer No-Show",
+    "body": "{parentName} has been marked as No Show as they did not arrive for the {serviceName} appointment today.",
+    "delay": 15,
+    "parameters": {
+      "absentParty": "the customer"
+    }
+  },
+  {
+    "code": "P-U14",
+    "type": "MESSAGE_RECEIVED",
+    "audience": "PetParent",
+    "title": "{providerName}",
+    "body": "Sent you a message.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "V-U5",
+    "type": "MESSAGE_RECEIVED",
+    "audience": "Provider",
+    "title": "{parentName}",
+    "body": "Sent you a message.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "P-S16",
+    "type": "INVOICE_ISSUED",
+    "audience": "PetParent",
+    "title": "Invoice Ready",
+    "body": "Your invoice issued by {providerName} for {serviceName} is ready. Tap to view.",
+    "delay": 60,
+    "parameters": {}
+  },
+  {
+    "code": "V-S14",
+    "type": "INVOICE_ISSUED",
+    "audience": "Provider",
+    "title": "Pawfront Invoice Issued",
+    "body": "Pawfront has issued you an invoice for {parentName}'s service. Tap to view.",
+    "delay": 60,
+    "parameters": {}
+  },
+  {
+    "code": "P-S15",
+    "type": "DISPUTE_RESOLVED",
+    "audience": "PetParent",
+    "title": "Dispute Resolved",
+    "body": "Your ticket for {serviceName} with {providerName} has been resolved. Tap to see the outcome.",
+    "delay": 60,
+    "parameters": {}
+  },
+  {
+    "code": "V-S13",
+    "type": "DISPUTE_RESOLVED",
+    "audience": "Provider",
+    "title": "Dispute Resolved",
+    "body": "Your ticket for {serviceName} with {parentName} has been resolved. Tap to see the outcome.",
+    "delay": 60,
+    "parameters": {}
+  },
+  {
+    "code": "A-U2",
+    "type": "EVENT_BOOKING_CASH_RECEIVED",
+    "audience": "PetParent",
+    "title": "Thank You for Your Payment",
+    "body": "{hostName} has confirmed receiving CHF {amount} for {eventTitle}.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "A-U3",
+    "type": "EVENT_BOOKING_PAYMENT_PENDING",
+    "audience": "PetParent",
+    "title": "Event Payment Pending",
+    "body": "{hostName} marked your CHF {amount} payment for {eventTitle} as pending. Please check with the host.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "A-U1",
+    "type": "EVENT_CANCELLED",
+    "audience": "PetParent",
+    "title": "Event Cancelled by Host",
+    "body": "{hostName} cancelled {eventTitle} scheduled for {serviceDate}.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "A-S4",
+    "type": "EVENT_SEATS_AVAILABLE",
+    "audience": "PetParent",
+    "title": "A Spot Just Opened Up",
+    "body": "A spot opened up for {eventTitle}. Book now before it’s gone!",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "A-S1",
+    "type": "EVENT_REMINDER_DAY_BEFORE",
+    "audience": "PetParent",
+    "title": "Be There For The Event Tomorrow",
+    "body": "Don’t forget to be there on time for {eventTitle} tomorrow.",
+    "delay": 60,
+    "parameters": {}
+  },
+  {
+    "code": "A-S2",
+    "type": "EVENT_REMINDER_STARTING_SOON",
+    "audience": "PetParent",
+    "title": "Event Starts Soon",
+    "body": "{eventTitle} starts in 1 hour. Please be there on time.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "A-S5",
+    "type": "EVENT_ATTENDED",
+    "audience": "PetParent",
+    "title": "Thanks for Attending!",
+    "body": "We hope you and your pet enjoyed {eventTitle}. See you at the next one!",
+    "delay": "24h",
+    "parameters": {}
+  },
+  {
+    "code": "A-S6",
+    "type": "EVENT_MISSED",
+    "audience": "PetParent",
+    "title": "You Missed the Event",
+    "body": "Your attendance at {eventTitle} wasn’t recorded, so you’re marked as a no-show. This counts towards a red flag.",
+    "delay": "hold",
+    "parameters": {}
+  },
+  {
+    "code": "A-S7",
+    "type": "EVENT_PROFILE_FLAGGED",
+    "audience": "PetParent",
+    "title": "Your Events Profile Is Flagged",
+    "body": "Your last two event bookings were cancelled late or missed, so your Events profile has a red flag for 30 days. Tap to see how to remove it.",
+    "delay": "hold",
+    "parameters": {}
+  },
+  {
+    "code": "A-S8",
+    "type": "EVENT_PROFILE_FLAG_REMOVED",
+    "audience": "PetParent",
+    "title": "Red Flag Removed",
+    "body": "Congratulations! The red flag is removed from your Events profile. You can again book up to 5 events at a time and host your own events.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "A-S9",
+    "type": "EVENT_ISSUE_RESOLVED",
+    "audience": "PetParent",
+    "title": "Issue Resolved",
+    "body": "Your ticket for {eventTitle} has been resolved. Tap to see the outcome.",
+    "delay": 60,
+    "parameters": {}
+  },
+  {
+    "code": "H-U1",
+    "type": "EVENT_FIRST_BOOKING",
+    "audience": "PetParent",
+    "title": "First Booking For Your Event!",
+    "body": "Congratulations! {parentName} booked the first ticket for {eventTitle}. Your event details can no longer be changed.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "H-U4",
+    "type": "EVENT_EDITABLE_AGAIN",
+    "audience": "PetParent",
+    "title": "Your Event Is Editable Again",
+    "body": "All bookings for {eventTitle} were cancelled. You can edit your event details again.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "H-S1",
+    "type": "EVENT_SOLD_OUT",
+    "audience": "PetParent",
+    "title": "Your Event Is Sold Out!",
+    "body": "Congratulations! All {seats} seats for {eventTitle} are booked.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "H-S2",
+    "type": "EVENT_HOST_REMINDER_DAY_BEFORE",
+    "audience": "PetParent",
+    "title": "Get Ready For Your Event Tomorrow",
+    "body": "{attendees} {attendeeVerb} booked for {eventTitle}. Good luck!",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "H-S3",
+    "type": "EVENT_HOST_REMINDER_STARTING_SOON",
+    "audience": "PetParent",
+    "title": "Your Event Starts Soon!",
+    "body": "{attendees} {attendeeVerb} coming. Bookings are now closed.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "H-S4",
+    "type": "EVENT_LIVE",
+    "audience": "PetParent",
+    "title": "Your Event Is Live",
+    "body": "Record attendance and cash received in the Attendees tab as guests arrive.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "H-S4-Free",
+    "type": "EVENT_LIVE_FREE",
+    "audience": "PetParent",
+    "title": "Your Event Is Live",
+    "body": "{eventTitle} has started. Check who’s coming in the Attendees tab.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "H-S5",
+    "type": "EVENT_RECORD_REMAINING",
+    "audience": "PetParent",
+    "title": "Record Remaining Attendance and Cash",
+    "body": "Please record the remaining {attendees} by midnight. Unrecorded attendees are marked as no-show.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "H-S6",
+    "type": "EVENT_HOSTED",
+    "audience": "PetParent",
+    "title": "Thank You for Hosting!",
+    "body": "{attendees} joined your event. You received CHF {totalAmount}. Congratulations!",
+    "delay": "hold",
+    "parameters": {}
+  },
+  {
+    "code": "H-S6-Free",
+    "type": "EVENT_HOSTED_FREE",
+    "audience": "PetParent",
+    "title": "Thank You for Hosting!",
+    "body": "{attendees} joined your event. Congratulations!",
+    "delay": "hold",
+    "parameters": {}
+  },
+  {
+    "code": "ID-1",
+    "type": "IDENTITY_ADDED",
+    "audience": "PetParent",
+    "title": "ID added",
+    "body": "Your ID has been accepted. Your ID Added badge is now visible.",
+    "delay": 0,
+    "parameters": {}
+  },
+  {
+    "code": "ID-2",
+    "type": "IDENTITY_NOT_APPROVED",
+    "audience": "PetParent",
+    "title": "ID not approved",
+    "body": "Your ID was not approved. Open your ID to see the reason and upload a replacement.",
+    "delay": 0,
+    "parameters": {}
+  }
+]

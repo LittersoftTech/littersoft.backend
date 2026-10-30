@@ -80,8 +80,8 @@ internal sealed class NightStayBookingService(
         var dropOffTime = nightStay.HasFixedTimes ? nightStay.DropOffTime : command.DropOffTime;
         var pickUpTime = nightStay.HasFixedTimes ? nightStay.PickUpTime : command.PickUpTime;
 
-        // Night stays use calendar dates, matching search and availability.
         EnsureCheckInDate(command.CheckInDate);
+        BookingLeadTime.EnsureFarEnoughAhead(command.CheckInDate, dropOffTime ?? TimeOnly.MinValue, DateTimeOffset.UtcNow);
 
         await ProviderDateAvailability.EnsureOpenAsync(
             availabilityService, closureReader, command.ProviderId, command.ServiceId,
@@ -242,6 +242,7 @@ internal sealed class NightStayBookingService(
                 ? CapturedLocation.Require(command.Location, "report payment not received")
             : command.Location;
         location?.Validate();
+        var noShowReason = BookingNoShowReasons.Normalize(command.NoShowReason, newStatus, command.Actor);
 
         return WithDisputeAsync(sqlStore.UpdateStatusAsync(
             command.NightStayBookingId,
@@ -250,7 +251,7 @@ internal sealed class NightStayBookingService(
             command.ActorId,
             command.Note,
             location,
-            cancellationToken), cancellationToken);
+            cancellationToken, noShowReason), cancellationToken);
     }
 
     public Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
@@ -287,8 +288,8 @@ internal sealed class NightStayBookingService(
     }
 
     public Task<NightStayBookingResult> CompleteAsync(
-        Guid bookingId, Guid providerId, CancellationToken cancellationToken)
-        => WithDisputeAsync(sqlStore.CompleteAsync(bookingId, providerId, cancellationToken), cancellationToken);
+        Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false)
+        => WithDisputeAsync(sqlStore.CompleteAsync(bookingId, providerId, cancellationToken, customerArrivedForCollection), cancellationToken);
 
     public async Task<NightStayBookingResult> MarkPaidAsync(
         MarkBookingPaidCommand command, CancellationToken cancellationToken)
@@ -362,6 +363,13 @@ internal sealed class NightStayBookingService(
                 acknowledgedTerms = drift.AcknowledgedTerms;
             }
         }
+
+        var now = DateTimeOffset.UtcNow;
+        var originalStart = BookingLeadTime.ServiceStartUtc(booking.CheckInDate, booking.DropOffTime ?? TimeOnly.MinValue);
+        var proposedStart = BookingLeadTime.ServiceStartUtc(command.CheckInDate,
+            (acknowledgedTerms is null ? booking.DropOffTime : acknowledgedTerms.DropOffTime) ?? TimeOnly.MinValue);
+        if (BookingLeadTime.IsTooSoon(originalStart <= proposedStart ? originalStart : proposedStart, now))
+            throw new BookingModificationWindowClosedException(command.NightStayBookingId);
 
         return await WithDisputeAsync(sqlStore.RequestModificationAsync(
             command.NightStayBookingId, command.Actor, command.ActorId,

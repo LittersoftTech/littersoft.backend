@@ -330,14 +330,14 @@ BEGIN
         [CashNotReceivedAtUtc],
         [ProviderModificationUsed],
         CASE WHEN [Status]=N'CREATED' THEN
-            CASE WHEN [BookingType]=N'NightStay' THEN [Booking].[NightStayRequestExpiresAtUtc]([CreatedAtUtc],[JobDate])
+            CASE WHEN [BookingType]=N'NightStay' THEN [Booking].[RequestExpiresAtUtc]([CreatedAtUtc], [JobDate], COALESCE([StartTime],CAST('00:00' AS TIME)), NULL, NULL)
                  ELSE [Booking].[RequestExpiresAtUtc]([CreatedAtUtc],[JobDate],[StartTime],NULL,NULL) END
         WHEN [Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
             CASE WHEN [BookingType]=N'SingleDay' THEN
                 (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc],Filtered.[JobDate],Filtered.[StartTime],m.[ProposedBookingDate],m.[ProposedStartTime])
                  FROM [Booking].[BookingModifications] m WHERE m.[BookingId]=Filtered.[BookingId])
             ELSE
-                (SELECT [Booking].[NightStayRequestExpiresAtUtc](m.[CreatedAtUtc],Filtered.[JobDate])
+                (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], Filtered.[JobDate], COALESCE(Filtered.[StartTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE(Filtered.[StartTime],CAST('00:00' AS TIME)) END)
                  FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId]=Filtered.[BookingId])
             END
         END AS [RequestExpiresAtUtc]

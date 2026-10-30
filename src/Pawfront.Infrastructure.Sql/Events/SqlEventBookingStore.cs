@@ -1,3 +1,4 @@
+using Pawfront.Application.Blocks;
 using System.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.SqlClient.Server;
@@ -71,7 +72,7 @@ internal sealed class SqlEventBookingStore(
 
     public async Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
         string bookerEmail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, BlockParty? booker = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -81,6 +82,8 @@ internal sealed class SqlEventBookingStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)booker?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", (object?)booker?.Type.ToString() ?? DBNull.Value);
 
         var rows = new List<EventBookingSummary>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -121,7 +124,7 @@ internal sealed class SqlEventBookingStore(
 
     public async Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
         string bookerEmail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, BlockParty? booker = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -131,6 +134,8 @@ internal sealed class SqlEventBookingStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)booker?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", (object?)booker?.Type.ToString() ?? DBNull.Value);
 
         var eventIds = new HashSet<Guid>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -144,7 +149,7 @@ internal sealed class SqlEventBookingStore(
     public async Task<EventBookingResult> CancelByBookerAsync(
         Guid bookingId,
         string bookerEmail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, BlockParty? booker = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -155,6 +160,8 @@ internal sealed class SqlEventBookingStore(
         };
         command.Parameters.AddWithValue("@BookingId", bookingId);
         command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)booker?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", (object?)booker?.Type.ToString() ?? DBNull.Value);
 
         try
         {
@@ -172,7 +179,7 @@ internal sealed class SqlEventBookingStore(
         }
     }
 
-    public async Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)
+    public async Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken, BlockParty? booker = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -182,6 +189,8 @@ internal sealed class SqlEventBookingStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@BookingId", bookingId);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)booker?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", (object?)booker?.Type.ToString() ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await ReadBookingWithTicketsAsync(reader, cancellationToken);

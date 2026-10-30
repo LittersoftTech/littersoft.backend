@@ -634,6 +634,7 @@ internal sealed class BookingService(
                 ? CapturedLocation.Require(command.Location, "report payment not received")
             : command.Location;
         location?.Validate();
+        var noShowReason = BookingNoShowReasons.Normalize(command.NoShowReason, newStatus, command.Actor);
 
         return WithDisputeAsync(sqlStore.UpdateStatusAsync(
             command.BookingId,
@@ -642,7 +643,7 @@ internal sealed class BookingService(
             command.ActorId,
             command.Note,
             location,
-            cancellationToken), cancellationToken);
+            cancellationToken, noShowReason), cancellationToken);
     }
 
     public async Task<BookingResult> CompleteAsync(
@@ -695,7 +696,7 @@ internal sealed class BookingService(
         var result = await WithDisputeAsync(sqlStore.CompleteAsync(
             command.BookingId,
             command.ProviderId,
-            cancellationToken), cancellationToken);
+            cancellationToken, command.CustomerArrivedForCollection), cancellationToken);
 
         // Extras are stored only once the transition succeeded — the status engine
         // is the authority on party/from-state rules.
@@ -903,6 +904,9 @@ internal sealed class BookingService(
             };
         }
 
+        if (BookingLeadTime.IsTooSoon(booking.BookingDate, booking.StartTime, DateTimeOffset.UtcNow))
+            throw new BookingModificationWindowClosedException(command.BookingId);
+
         BookingLeadTime.EnsureFarEnoughAhead(command.BookingDate, command.StartTime, DateTimeOffset.UtcNow);
 
         var durationHours = (decimal)(command.EndTime - command.StartTime).TotalHours;
@@ -954,8 +958,10 @@ internal sealed class BookingService(
                 ?? throw new BookingNotFoundException(command.BookingId);
             var pending = await sqlStore.GetPendingModificationAsync(command.BookingId, cancellationToken)
                 ?? throw new NoPendingModificationException(command.BookingId);
-            BookingLeadTime.EnsureFarEnoughAhead(
-                pending.ProposedBookingDate, pending.ProposedStartTime, DateTimeOffset.UtcNow);
+            if (DateTimeOffset.UtcNow >= BookingAcceptanceDeadline.ComputeModification(pending.CreatedAtUtc,
+                    BookingLeadTime.ServiceStartUtc(booking.BookingDate, booking.StartTime),
+                    BookingLeadTime.ServiceStartUtc(pending.ProposedBookingDate, pending.ProposedStartTime)))
+                throw new BookingModificationExpiredException(command.BookingId);
             await ValidateAgainstAvailabilityAsync(booking.ProviderId, pending.ProposedBookingDate,
                 pending.ProposedStartTime, pending.ProposedEndTime, cancellationToken);
             await ValidateAgainstClosuresAsync(booking.ServiceId, pending.ProposedBookingDate,

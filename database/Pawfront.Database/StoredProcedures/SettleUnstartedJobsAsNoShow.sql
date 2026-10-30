@@ -7,7 +7,7 @@
 --     much as tapped Start)
 --
 -- Single-day cutoff = the LATER of (a) the provider's closing time on the
--- booking date, from Provider.ProviderWeeklyAvailability for that weekday, and
+-- booking date, frozen on the booking at acceptance, and
 -- (b) the booking's own EndTime. Keying off closing time (not the booking's own
 -- end) is the point: a provider running badly late has not no-showed just
 -- because a slot came and went — they still have the rest of their day to serve
@@ -89,11 +89,11 @@ BEGIN
             [BookingEndsAtUtc] =
                 DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[EndTime]),
                         CAST(b.[BookingDate] AS DATETIME2(7))),
-            [ProviderClosesAtUtc] = CASE
+            [ProviderClosesAtUtc] = COALESCE(b.[WorkingHoursClosesAtUtc], CASE
                 WHEN wa.[IsOpen] = 1
                     THEN wa.[ClosesAtUtc]
                 ELSE DATEADD(DAY, 1, CAST(b.[BookingDate] AS DATETIME2(7)))
-            END
+            END)
     ) AS [Cutoffs]
     WHERE b.[Status] IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
                          N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION', N'START_JOB')
@@ -128,7 +128,7 @@ BEGIN
             CAST(b.[BookingDate] AS DATETIME2(7)))) wa
     CROSS APPLY (
         SELECT [BookingEndsAtUtc] = DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[EndTime]), CAST(b.[BookingDate] AS DATETIME2(7))),
-               [ProviderClosesAtUtc] = CASE WHEN wa.[IsOpen] = 1 THEN wa.[ClosesAtUtc] ELSE DATEADD(DAY, 1, CAST(b.[BookingDate] AS DATETIME2(7))) END
+               [ProviderClosesAtUtc] = COALESCE(b.[WorkingHoursClosesAtUtc], CASE WHEN wa.[IsOpen] = 1 THEN wa.[ClosesAtUtc] ELSE DATEADD(DAY, 1, CAST(b.[BookingDate] AS DATETIME2(7))) END)
     ) AS [Cutoffs]
     WHERE b.[Status] IN (N'IN_PROGRESS', N'ENDING', N'JOB_STARTED')
       AND @Now >= (CASE WHEN [Cutoffs].[BookingEndsAtUtc] >= [Cutoffs].[ProviderClosesAtUtc]

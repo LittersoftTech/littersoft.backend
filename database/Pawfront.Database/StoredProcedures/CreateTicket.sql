@@ -55,7 +55,7 @@
 -- THROWs: 51340 booking not found, 51341 caller is not a party to the subject,
 -- 51342 conversation not found, 51343 invalid request (defensive), 51348 Custom
 -- walk-in (no pet parent to report or be reported), 51355 event not found,
--- 51357 job has not ended, 51358 booking ticket window expired.
+-- 51357 job has not been confirmed, 51358 booking ticket window expired.
 CREATE OR ALTER PROCEDURE [Support].[CreateTicket]
     @TicketType NVARCHAR(24),
     @RaisedByType NVARCHAR(16),
@@ -125,7 +125,7 @@ BEGIN
     BEGIN
         -- Serialize with payment confirmation, which locks this same booking
         -- before inserting its payment ledger row.
-        DECLARE @BookedEndUtc DATETIME2(7), @ActualEndUtc DATETIME2(7), @PaidAtUtc DATETIME2(7);
+        DECLARE @BookedEndUtc DATETIME2(7);
         DECLARE @BookingStatus NVARCHAR(48);
         IF @BookingType = N'SingleDay'
         BEGIN
@@ -133,8 +133,7 @@ BEGIN
                    @PetParentId = [PetParentId],
                    @PetId = [PetId],
                    @Found = 1, @BookingStatus = [Status],
-                   @BookedEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),[EndTime]),CAST([BookingDate] AS DATETIME2(7))),
-                   @ActualEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),[ActualEndTime]),CAST([BookingDate] AS DATETIME2(7)))
+                   @BookedEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),[EndTime]),CAST([BookingDate] AS DATETIME2(7)))
             FROM [Booking].[Bookings] WITH (UPDLOCK,HOLDLOCK)
             WHERE [BookingId] = @BookingId;
         END
@@ -144,8 +143,7 @@ BEGIN
                    @PetParentId = [PetParentId],
                    @PetId = [PetId],
                    @Found = 1, @BookingStatus = [Status],
-                   @BookedEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),COALESCE([PickUpTime], CAST('00:00' AS TIME))),CAST([CheckOutDate] AS DATETIME2(7))),
-                   @ActualEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),COALESCE([PickUpTime], CAST('00:00' AS TIME))),CAST([ActualCheckOutDate] AS DATETIME2(7)))
+                   @BookedEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),COALESCE([PickUpTime], CAST('00:00' AS TIME))),CAST([CheckOutDate] AS DATETIME2(7)))
             FROM [Booking].[NightStayBookings] WITH (UPDLOCK,HOLDLOCK)
             WHERE [NightStayBookingId] = @BookingId;
         END
@@ -213,27 +211,33 @@ BEGIN
 
     IF @TicketType = N'BookingIncident'
     BEGIN
-        SELECT @PaidAtUtc = [PaidAtUtc]
-        FROM [Booking].[BookingPayments]
-        WHERE [BookingType] = @BookingType AND [BookingId] = @BookingId;
-
         SET @Now = SYSUTCDATETIME();
 
-        DECLARE @CompletedAtUtc DATETIME2(7);
-        IF @BookingType = N'SingleDay'
-            SELECT @CompletedAtUtc = MIN([ChangedAtUtc]) FROM [Booking].[BookingStatusHistory]
-            WHERE [BookingId] = @BookingId AND [ToStatus] = N'COMPLETED';
-        ELSE
-            SELECT @CompletedAtUtc = MIN([ChangedAtUtc]) FROM [Booking].[NightStayBookingStatusHistory]
-            WHERE [NightStayBookingId] = @BookingId AND [ToStatus] = N'COMPLETED';
+        -- Current confirmed/later states support older rows with no audit history.
+        -- History keeps reporting open after a confirmed booking is cancelled or
+        -- enters a pending modification; a never-confirmed request stays closed.
+        DECLARE @WasConfirmed BIT = 0;
+        IF @BookingStatus IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
+                              N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
+                              N'START_JOB', N'IN_PROGRESS', N'JOB_STARTED', N'ENDING', N'JOB_INCOMPLETE',
+                              N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                              N'OTP_MAX_ATTEMPTS_EXCEEDED')
+            SET @WasConfirmed = 1;
+        IF @BookingType = N'SingleDay' AND EXISTS (
+            SELECT 1 FROM [Booking].[BookingStatusHistory]
+            WHERE [BookingId] = @BookingId AND [ToStatus] = N'CONFIRMED')
+            SET @WasConfirmed = 1;
+        IF @BookingType = N'NightStay' AND EXISTS (
+            SELECT 1 FROM [Booking].[NightStayBookingStatusHistory]
+            WHERE [NightStayBookingId] = @BookingId AND [ToStatus] = N'CONFIRMED')
+            SET @WasConfirmed = 1;
 
-        -- Completion/payment evidence permits reporting an early-finished job
-        -- before its booked end. Unpaid jobs retain the booked-end fallback.
-        IF (@PaidAtUtc IS NULL AND @CompletedAtUtc IS NULL AND @ActualEndUtc IS NULL
-            AND @BookingStatus IN (N'IN_PROGRESS',N'JOB_STARTED',N'ENDING'))
-           OR @Now < COALESCE(@CompletedAtUtc,@ActualEndUtc,@PaidAtUtc,@BookedEndUtc)
-            THROW 51357, 'A booking ticket can only be raised after the job ends.', 1;
-        IF @Now > DATEADD(HOUR,24,COALESCE(@PaidAtUtc,@BookedEndUtc))
+        IF @WasConfirmed = 0
+            THROW 51357, 'A booking ticket can only be raised after the job is confirmed.', 1;
+        DECLARE @CashConfirmedAtUtc DATETIME2(7) = (
+            SELECT MAX([PaidAtUtc]) FROM [Booking].[BookingPayments]
+            WHERE [BookingType]=@BookingType AND [BookingId]=@BookingId);
+        IF @Now > DATEADD(HOUR, 24, COALESCE(@CashConfirmedAtUtc,@BookedEndUtc))
             THROW 51358, 'The booking ticket window has expired.', 1;
     END
 
@@ -319,6 +323,20 @@ BEGIN
         ELSE
             UPDATE [Booking].[NightStayBookings] SET [CashNotReceivedAtUtc] = SYSUTCDATETIME(), [UpdatedAtUtc] = SYSUTCDATETIME()
             WHERE [NightStayBookingId] = @BookingId AND [Status] <> N'PAID';
+
+        -- V4: announce an unpaid completed job when its support report exists.
+        -- The booking enqueuer uses this ticket as its dedupe suffix, including
+        -- if the legacy unpaid-status endpoint is called after this request.
+        IF (@BookingType=N'SingleDay' AND EXISTS (SELECT 1 FROM [Booking].[Bookings]
+                WHERE BookingId=@BookingId AND Status IN (N'COMPLETED',N'PAYMENT_NOT_RECEIVED')))
+            OR (@BookingType=N'NightStay' AND EXISTS (SELECT 1 FROM [Booking].[NightStayBookings]
+                WHERE NightStayBookingId=@BookingId AND Status IN (N'COMPLETED',N'PAYMENT_NOT_RECEIVED')))
+        BEGIN
+            DECLARE @NotificationIsNightStay BIT=CASE WHEN @BookingType=N'NightStay' THEN 1 ELSE 0 END;
+            EXEC [Notification].[EnqueueBookingNotification]
+                @BookingId=@BookingId,@IsNightStay=@NotificationIsNightStay,@Audience=N'PetParent',
+                @NotificationType=N'BOOKING_CASH_NOT_RECEIVED',@TicketId=@TicketId;
+        END;
     END
 
     SELECT @Outcome AS [Outcome],

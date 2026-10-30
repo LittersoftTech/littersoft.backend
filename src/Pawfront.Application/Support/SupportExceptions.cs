@@ -1,7 +1,7 @@
 namespace Pawfront.Application.Support;
 
 public sealed class SupportBookingTicketWindowException(bool notOpen) : Exception(
-    notOpen ? "A booking ticket can only be raised after the job ends." : "The booking ticket window has expired.")
+    notOpen ? "A booking ticket can only be raised after the job is confirmed." : "The booking ticket window has expired.")
 {
     public string Code => notOpen ? "TicketWindowNotOpen" : "TicketWindowExpired";
 }

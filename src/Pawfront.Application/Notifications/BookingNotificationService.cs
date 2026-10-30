@@ -74,7 +74,7 @@ public sealed class BookingNotificationService(INotificationPublisher publisher)
         AddAcceptByDeadline(
             data,
             booking.CreatedAtUtc,
-            BookingAcceptanceDeadline.ComputeNightStay(booking.CreatedAtUtc, booking.CheckInDate));
+            BookingAcceptanceDeadline.ComputeNightStay(booking.CreatedAtUtc, booking.CheckInDate, booking.DropOffTime));
 
         return publisher.PublishAsync(
             new NotificationRequest(

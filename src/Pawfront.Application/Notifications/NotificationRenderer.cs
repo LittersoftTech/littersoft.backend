@@ -99,7 +99,7 @@ public static class NotificationRenderer
         IReadOnlyDictionary<string, string>? data,
         TimeZoneInfo? timeZone = null)
     {
-        var template = NotificationTemplateCatalog.Find(notificationType, audience);
+        var template = NotificationTemplateCatalog.Find(notificationType, audience, data);
         if (template is null)
         {
             return null;
@@ -110,6 +110,27 @@ public static class NotificationRenderer
         data = WithDerivedResponseWindow(data);
         data = WithDerivedReviewWindow(data);
         data = WithAttendeeCount(data);
+        var parameters = data is null
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : new Dictionary<string, string>(data, StringComparer.Ordinal);
+        if (template.Code is not null)
+            parameters[NotificationDataKeys.NotificationCode] = template.Code;
+
+        // Booking producers historically supply "CHF 50.00". V4 puts the
+        // currency in the template, so normalize only cards that print it there.
+        if (template.Code is "P-U12" or "P-U13"
+            && parameters.TryGetValue(NotificationDataKeys.Amount, out var amount)
+            && amount.StartsWith("CHF ", StringComparison.OrdinalIgnoreCase))
+            parameters[NotificationDataKeys.Amount] = amount[4..].Trim();
+        // Chat also serves non-booking conversations; retain the actual sender.
+        if (notificationType == NotificationTypes.MessageReceived
+            && parameters.TryGetValue(NotificationDataKeys.SenderName, out var sender))
+        {
+            var nameKey = audience == NotificationAudience.Provider
+                ? NotificationDataKeys.ParentName : NotificationDataKeys.ProviderName;
+            parameters.TryAdd(nameKey, sender);
+        }
+        data = parameters;
 
         return new RenderedNotification(
             Truncate(Substitute(template.TitleTemplate, data), MaxTitleLength),
