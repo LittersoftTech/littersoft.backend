@@ -174,7 +174,7 @@ internal sealed class SqlInvoiceGenerationStore(
 
             logger.LogWarning(
                 "Invoice generation for {BookingType} booking {BookingId} has been waiting since " +
-                "{WaitingSince:u} ({Attempts} attempt(s)); re-queueing.",
+                "{WaitingSince:u} ({Attempts} attempt(s)); recovering.",
                 bookingType, bookingId, waitingSince, attempts);
 
             results.Add(new InvoiceGenerationRequest(bookingType, bookingId));

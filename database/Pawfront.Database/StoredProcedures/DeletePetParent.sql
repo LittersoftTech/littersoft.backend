@@ -136,6 +136,10 @@ BEGIN
     );
 
     BEGIN TRANSACTION;
+    -- Same lock order as event booking/payment/cancellation, before the parent row.
+    DECLARE @EventLockResult INT;
+    EXEC @EventLockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @EventLockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
 
     -- UPDLOCK + HOLDLOCK: serialise against a concurrent booking create or
     -- profile edit on this parent.
@@ -202,9 +206,9 @@ BEGIN
         LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = b.[PetId]
         WHERE b.[PetParentId] = @PetParentId
           AND b.[Status] NOT IN (
-                N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
+                N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
                 N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+                N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
         UNION ALL
         SELECT n.[NightStayBookingId],
                N'NightStay',
@@ -227,9 +231,9 @@ BEGIN
         LEFT JOIN [Parent].[Pets] AS pet ON pet.[PetId] = n.[PetId]
         WHERE n.[PetParentId] = @PetParentId
           AND n.[Status] NOT IN (
-                N'COMPLETED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
+                N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED',
                 N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED');
+                N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED');
 
         IF EXISTS (SELECT 1 FROM @PendingJobs)
         BEGIN
@@ -268,6 +272,44 @@ BEGIN
     -- Everything below only runs when the account is live AND unblocked.
     IF @IsDeleted = 0 AND @BlockedByPendingJobs = 0 AND @BlockedByOpenTickets = 0
     BEGIN
+        IF NOT EXISTS (SELECT 1 FROM [Notification].[AccountNotificationCleanup] WHERE [Audience]=N'PetParent' AND [AccountId]=@PetParentId)
+            INSERT [Notification].[AccountNotificationCleanup]([Audience],[AccountId],[FirebaseUserId],[DeletedAtUtc])
+            SELECT N'PetParent',@PetParentId,[FirebaseUserId],@Now FROM Parent.ParentAuthIdentities
+            WHERE [ParentAuthIdentityId]=@ParentAuthIdentityId;
+
+        -- Cancel hosted events through the normal host flow before releasing
+        -- bookings elsewhere; all notifications commit with the anonymisation.
+        DELETE FROM [Event].[Waitlist] WHERE PetParentId=@PetParentId;
+        DECLARE @DeletedHostEventId UNIQUEIDENTIFIER;
+        DECLARE hostedEvents CURSOR LOCAL FAST_FORWARD FOR
+            SELECT EventId FROM [Event].[Events] WHERE PetParentId=@PetParentId AND EventStatus=N'Active'
+              AND [Event].[EventStartUtc](StartDate,StartTime)>@Now;
+        OPEN hostedEvents; FETCH NEXT FROM hostedEvents INTO @DeletedHostEventId;
+        WHILE @@FETCH_STATUS=0
+        BEGIN
+            EXEC [Event].[CancelHostedEvent] @EventId=@DeletedHostEventId,@PetParentId=@PetParentId;
+            FETCH NEXT FROM hostedEvents INTO @DeletedHostEventId;
+        END
+        CLOSE hostedEvents; DEALLOCATE hostedEvents;
+
+        DECLARE @ReleasedEventBookings TABLE (BookingId UNIQUEIDENTIFIER, EventId UNIQUEIDENTIFIER, BookerName NVARCHAR(200), TicketCount INT);
+        UPDATE b SET Status=N'AccountDeleted',CancelledAtUtc=@Now,UpdatedAtUtc=@Now,ReliabilitySettled=1
+        OUTPUT inserted.BookingId,inserted.EventId,inserted.BookerName,inserted.TicketCount INTO @ReleasedEventBookings
+        FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+        WHERE b.BookerAccountId=@PetParentId AND b.BookerType=N'PetParent' AND b.Status IN (N'Confirmed',N'Attended')
+          AND [Event].[EventStartUtc](e.StartDate,e.StartTime)>@Now;
+        DECLARE @ReleasedBookingId UNIQUEIDENTIFIER,@ReleasedEventId UNIQUEIDENTIFIER,@ReleasedName NVARCHAR(200),@ReleasedCount INT;
+        DECLARE releasedBookings CURSOR LOCAL FAST_FORWARD FOR SELECT BookingId,EventId,BookerName,TicketCount FROM @ReleasedEventBookings;
+        OPEN releasedBookings; FETCH NEXT FROM releasedBookings INTO @ReleasedBookingId,@ReleasedEventId,@ReleasedName,@ReleasedCount;
+        WHILE @@FETCH_STATUS=0
+        BEGIN
+            EXEC [Notification].[EnqueueEventNotification] @EventId=@ReleasedEventId,@EventBookingId=@ReleasedBookingId,
+                @NotificationType=N'EVENT_TICKET_CANCELLED',@BookerName=@ReleasedName,@TicketCount=@ReleasedCount;
+            EXEC [Event].[NotifyEventWaitlist] @EventId=@ReleasedEventId;
+            FETCH NEXT FROM releasedBookings INTO @ReleasedBookingId,@ReleasedEventId,@ReleasedName,@ReleasedCount;
+        END
+        CLOSE releasedBookings; DEALLOCATE releasedBookings;
+
         INSERT INTO @BlobUrls ([BlobUrl], [Kind])
         SELECT [ProfilePhotoUrl], N'ParentProfilePhoto'
         FROM [Parent].[PetParents]
@@ -375,6 +417,21 @@ BEGIN
         FROM [Parent].[PetNextConsultations] nc
         INNER JOIN [Parent].[Pets] p ON p.[PetId] = nc.[PetId]
         WHERE p.[PetParentId] = @PetParentId;
+    END
+
+    -- Only completed deletes purge private data; a refused delete changes nothing.
+    -- Repeat calls also remove any stale operational rows.
+    IF @BlockedByPendingJobs = 0 AND @BlockedByOpenTickets = 0
+    BEGIN
+        DELETE [Notification].[NotificationOutbox] WHERE [Audience]=N'PetParent' AND [RecipientId]=@PetParentId;
+        DELETE [Chat].[ChatConnections] WHERE [ParticipantType]=N'PetParent' AND [ParticipantId]=@PetParentId;
+        UPDATE [Chat].[ConversationParticipants] SET [DeletedAtUtc]=COALESCE([DeletedAtUtc],@Now),
+            [UnreadCount]=0,[IsMuted]=1,[UpdatedAtUtc]=@Now
+        WHERE [ParticipantType]=N'PetParent' AND [ParticipantId]=@PetParentId;
+        DELETE [Event].[EventViews] WHERE [ViewerType]=N'PetParent' AND [ViewerAccountId]=@PetParentId;
+        DELETE [Provider].[ProviderServiceViews] WHERE [PetParentId]=@PetParentId;
+        DELETE [Event].[Waitlist] WHERE [PetParentId]=@PetParentId;
+        DELETE [Parent].[ParentDeviceTokens] WHERE [PetParentId]=@PetParentId OR [ParentAuthIdentityId]=@ParentAuthIdentityId;
     END
 
     -- Result set 1: summary. The retained counts are reported so the caller can

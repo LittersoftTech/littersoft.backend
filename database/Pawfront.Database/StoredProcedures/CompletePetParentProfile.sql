@@ -2,7 +2,7 @@
 -- POST /parent-onboarding/profile, linking it to the caller's auth identity.
 -- Idempotent: an identity that already has a profile gets its existing row back.
 --
--- A mobile number can back only ONE account. That is enforced twice: an explicit
+-- A mobile number can back only ONE parent account; providers are independent. That is enforced twice: an explicit
 -- pre-check here (THROW 51222 -> 409 MobileNumberAlreadyExists), which is what
 -- gives the caller a clean, deterministic error, and the UNIQUE index
 -- UX_PetParents_MobileNumber, which is the race-safe backstop for two

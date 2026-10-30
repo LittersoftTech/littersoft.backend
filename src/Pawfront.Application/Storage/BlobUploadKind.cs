@@ -37,5 +37,6 @@ public enum BlobUploadKind
     // media, they are the one thing here with a retention obligation, and both
     // documents for a job belong side by side under one BookingId folder. It is
     // also the only non-image kind — application/pdf, not JPEG/PNG/WebP.
-    Invoice = 15
+    Invoice = 15,
+    ProviderDocument = 16
 }

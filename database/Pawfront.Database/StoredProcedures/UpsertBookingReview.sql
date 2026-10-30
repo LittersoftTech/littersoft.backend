@@ -116,7 +116,7 @@ BEGIN
     -- PAID counts as well as COMPLETED. PAID sits downstream of COMPLETED, so
     -- gating on COMPLETED alone would close the review window the moment the
     -- provider recorded the payment — which for cash is often immediately.
-    IF @Status NOT IN (N'COMPLETED', N'PAID')
+    IF @Status NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID')
     BEGIN
         THROW 51302, 'Booking must be completed before it can be reviewed.', 1;
     END

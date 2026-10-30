@@ -82,7 +82,8 @@ public sealed record ParentBookingHistoryRow(
     bool IsPaid,
     decimal? Amount,
     DateTimeOffset? PaidAtUtc,
-    string? PaymentMethod);
+    string? PaymentMethod,
+    DateTimeOffset? CashNotReceivedAtUtc = null);
 
 /// <summary>Sort key for the parent's booking history.</summary>
 public enum ParentHistorySortBy

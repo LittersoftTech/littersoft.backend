@@ -87,13 +87,13 @@ public interface IBookingService
         CancellationToken cancellationToken);
 
     /// <summary>
-    /// Records that the parent has paid the provider for a booking (COMPLETED →
+    /// Records that the parent has paid the provider for a booking (COMPLETED or PAYMENT_NOT_RECEIVED →
     /// PAID) and writes the payment ledger row. The amount is computed from the
     /// booking's price-locked total (the same figure the detail read shows).
     /// Throws <see cref="BookingNotFoundException"/>,
     /// <see cref="BookingStatusForbiddenException"/> (not the provider),
     /// <see cref="BookingPaymentNotAppException"/> (Custom walk-in),
-    /// <see cref="BookingNotPayableException"/> (not COMPLETED),
+    /// <see cref="BookingNotPayableException"/> (not COMPLETED or PAYMENT_NOT_RECEIVED),
     /// <see cref="BookingAlreadyPaidException"/>, or
     /// <see cref="BookingNotPriceableException"/> (can't resolve a price).
     /// </summary>
@@ -135,8 +135,8 @@ public interface IBookingService
     /// service date and while the provider is inside their own weekly working hours.
     /// Throws <see cref="BookingNotStartableException"/> (wrong from-state),
     /// <see cref="BookingStartNotOnServiceDateException"/> (wrong day), or
-    /// <see cref="BookingStartOutsideWorkingHoursException"/> (provider is closed
-    /// right now).
+    /// <see cref="BookingStartOutsideWorkingHoursException"/> (before the 15-minute
+    /// start window or after the booking's accepted closing time).
     /// </summary>
     Task<BookingResult> StartJobAsync(StartBookingCommand command, CancellationToken cancellationToken);
 

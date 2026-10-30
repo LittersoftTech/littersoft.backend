@@ -30,9 +30,9 @@
 -- is public: anyone signed in can see one, so anyone signed in can report one —
 -- there is no attendance check.
 --
--- ONE open ticket per SUBJECT, not per person:
---   booking      -> per (BookingType, BookingId), either direction
---   conversation -> per ConversationId, either direction
+-- ONE open ticket per SUBJECT per RAISER:
+--   booking      -> per (BookingType, BookingId, RaisedByType)
+--   conversation -> per (ConversationId, RaisedByType)
 --   event        -> per (EventId, REPORTER). An event has many attendees and each
 --                   of them reporting it is a separate account; what is refused
 --                   is the same person reporting it twice.
@@ -54,7 +54,8 @@
 --
 -- THROWs: 51340 booking not found, 51341 caller is not a party to the subject,
 -- 51342 conversation not found, 51343 invalid request (defensive), 51348 Custom
--- walk-in (no pet parent to report or be reported), 51355 event not found.
+-- walk-in (no pet parent to report or be reported), 51355 event not found,
+-- 51357 job has not been confirmed, 51358 booking ticket window expired.
 CREATE OR ALTER PROCEDURE [Support].[CreateTicket]
     @TicketType NVARCHAR(24),
     @RaisedByType NVARCHAR(16),
@@ -64,7 +65,8 @@ CREATE OR ALTER PROCEDURE [Support].[CreateTicket]
     @ConversationId UNIQUEIDENTIFIER = NULL,
     @Category NVARCHAR(100) = NULL,
     @Reason NVARCHAR(500) = NULL,
-    @EventId UNIQUEIDENTIFIER = NULL
+    @EventId UNIQUEIDENTIFIER = NULL,
+    @EventBookingId UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -82,6 +84,11 @@ BEGIN
     BEGIN
         THROW 51343, 'Invalid support ticket request.', 1;
     END
+
+    IF @EventBookingId IS NOT NULL AND (@TicketType<>N'EventIncident' OR NOT EXISTS (
+        SELECT 1 FROM [Event].[EventBookings] WHERE BookingId=@EventBookingId AND EventId=@EventId
+            AND BookerAccountId=@ActorId AND BookerType=@RaisedByType))
+        THROW 51343, 'The event booking does not belong to this reporter or event.', 1;
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @ProviderId UNIQUEIDENTIFIER;
@@ -105,21 +112,29 @@ BEGIN
         SET @Reason = NULL;
     END
 
+    IF @TicketType = N'ChatIncident'
+       AND (@Reason IS NULL OR @Reason NOT IN
+            (N'Offensive or threatening messages', N'Unwanted advertising',
+             N'Fraud or fake profile', N'Asking to book outside Pawfront',
+             N'Concern for an animal''s welfare', N'Something else'))
+        THROW 51343, 'Select one of the six Report a User reasons.', 1;
+
     BEGIN TRANSACTION;
 
     IF @TicketType = N'BookingIncident'
     BEGIN
-        -- No UPDLOCK on the booking: nothing about its status affects whether it
-        -- can be reported, so this read cannot go stale in a way that matters.
-        -- Any booking either party is on is reportable, at any point in its life —
-        -- an incident is a statement about what happened, not a transition.
+        -- Serialize with payment confirmation, which locks this same booking
+        -- before inserting its payment ledger row.
+        DECLARE @BookedEndUtc DATETIME2(7);
+        DECLARE @BookingStatus NVARCHAR(48);
         IF @BookingType = N'SingleDay'
         BEGIN
             SELECT @ProviderId = [ProviderId],
                    @PetParentId = [PetParentId],
                    @PetId = [PetId],
-                   @Found = 1
-            FROM [Booking].[Bookings]
+                   @Found = 1, @BookingStatus = [Status],
+                   @BookedEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),[EndTime]),CAST([BookingDate] AS DATETIME2(7)))
+            FROM [Booking].[Bookings] WITH (UPDLOCK,HOLDLOCK)
             WHERE [BookingId] = @BookingId;
         END
         ELSE
@@ -127,8 +142,9 @@ BEGIN
             SELECT @ProviderId = [ProviderId],
                    @PetParentId = [PetParentId],
                    @PetId = [PetId],
-                   @Found = 1
-            FROM [Booking].[NightStayBookings]
+                   @Found = 1, @BookingStatus = [Status],
+                   @BookedEndUtc = DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),COALESCE([PickUpTime], CAST('00:00' AS TIME))),CAST([CheckOutDate] AS DATETIME2(7)))
+            FROM [Booking].[NightStayBookings] WITH (UPDLOCK,HOLDLOCK)
             WHERE [NightStayBookingId] = @BookingId;
         END
 
@@ -193,6 +209,38 @@ BEGIN
         THROW 51341, 'You are not a party to this.', 1;
     END
 
+    IF @TicketType = N'BookingIncident'
+    BEGIN
+        SET @Now = SYSUTCDATETIME();
+
+        -- Current confirmed/later states support older rows with no audit history.
+        -- History keeps reporting open after a confirmed booking is cancelled or
+        -- enters a pending modification; a never-confirmed request stays closed.
+        DECLARE @WasConfirmed BIT = 0;
+        IF @BookingStatus IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
+                              N'PROVIDER_DECLINED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
+                              N'START_JOB', N'IN_PROGRESS', N'JOB_STARTED', N'ENDING', N'JOB_INCOMPLETE',
+                              N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
+                              N'OTP_MAX_ATTEMPTS_EXCEEDED')
+            SET @WasConfirmed = 1;
+        IF @BookingType = N'SingleDay' AND EXISTS (
+            SELECT 1 FROM [Booking].[BookingStatusHistory]
+            WHERE [BookingId] = @BookingId AND [ToStatus] = N'CONFIRMED')
+            SET @WasConfirmed = 1;
+        IF @BookingType = N'NightStay' AND EXISTS (
+            SELECT 1 FROM [Booking].[NightStayBookingStatusHistory]
+            WHERE [NightStayBookingId] = @BookingId AND [ToStatus] = N'CONFIRMED')
+            SET @WasConfirmed = 1;
+
+        IF @WasConfirmed = 0
+            THROW 51357, 'A booking ticket can only be raised after the job is confirmed.', 1;
+        DECLARE @CashConfirmedAtUtc DATETIME2(7) = (
+            SELECT MAX([PaidAtUtc]) FROM [Booking].[BookingPayments]
+            WHERE [BookingType]=@BookingType AND [BookingId]=@BookingId);
+        IF @Now > DATEADD(HOUR, 24, COALESCE(@CashConfirmedAtUtc,@BookedEndUtc))
+            THROW 51358, 'The booking ticket window has expired.', 1;
+    END
+
     -- Scoped to the SUBJECT, not to the pair: this is what lets a parent report
     -- every booking they have with one provider, while still refusing a second
     -- report of the SAME job.
@@ -208,6 +256,7 @@ BEGIN
         FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [BookingId] = @BookingId
           AND [BookingType] = @BookingType
+          AND [RaisedByType] = @RaisedByType
           AND [Status] <> N'CLOSED';
     END
     ELSE IF @TicketType = N'ChatIncident'
@@ -215,6 +264,7 @@ BEGIN
         SELECT @ExistingTicketId = [TicketId]
         FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [ConversationId] = @ConversationId
+          AND [RaisedByType] = @RaisedByType
           AND [Status] <> N'CLOSED';
     END
     ELSE IF @TicketType = N'EventIncident'
@@ -226,7 +276,7 @@ BEGIN
         SELECT @ExistingTicketId = [TicketId]
         FROM [Support].[Tickets] WITH (UPDLOCK, HOLDLOCK)
         WHERE [EventId] = @EventId
-          AND [Status] <> N'CLOSED'
+          AND ((@EventBookingId IS NOT NULL AND EventBookingId=@EventBookingId) OR [Status] <> N'CLOSED')
           AND ((@RaisedByType = N'Provider'  AND [ProviderId]  = @ActorId)
             OR (@RaisedByType = N'PetParent' AND [PetParentId] = @ActorId));
     END
@@ -253,15 +303,40 @@ BEGIN
         -- until support decides otherwise off-platform.
         INSERT INTO [Support].[Tickets]
             ([TicketType], [ProviderId], [PetParentId], [RaisedByType],
-             [BookingType], [BookingId], [PetId], [ConversationId], [EventId],
+             [BookingType], [BookingId], [PetId], [ConversationId], [EventId], [EventBookingId],
              [Category], [Reason], [Status], [CreatedAtUtc], [UpdatedAtUtc])
         OUTPUT inserted.[TicketId] INTO @Inserted
         VALUES
             (@TicketType, @ProviderId, @PetParentId, @RaisedByType,
-             @BookingType, @BookingId, @PetId, @ConversationId, @EventId,
+             @BookingType, @BookingId, @PetId, @ConversationId, @EventId, @EventBookingId,
              @Category, @Reason, N'OPENED', @Now, @Now);
 
         SELECT @TicketId = [TicketId] FROM @Inserted;
+    END
+
+    IF @TicketType = N'BookingIncident' AND @RaisedByType = N'Provider'
+       AND (@Category = N'Cash Not Received' OR @Reason = N'Cash Not Received')
+    BEGIN
+        IF @BookingType = N'SingleDay'
+            UPDATE [Booking].[Bookings] SET [CashNotReceivedAtUtc] = SYSUTCDATETIME(), [UpdatedAtUtc] = SYSUTCDATETIME()
+            WHERE [BookingId] = @BookingId AND [Status] <> N'PAID';
+        ELSE
+            UPDATE [Booking].[NightStayBookings] SET [CashNotReceivedAtUtc] = SYSUTCDATETIME(), [UpdatedAtUtc] = SYSUTCDATETIME()
+            WHERE [NightStayBookingId] = @BookingId AND [Status] <> N'PAID';
+
+        -- V4: announce an unpaid completed job when its support report exists.
+        -- The booking enqueuer uses this ticket as its dedupe suffix, including
+        -- if the legacy unpaid-status endpoint is called after this request.
+        IF (@BookingType=N'SingleDay' AND EXISTS (SELECT 1 FROM [Booking].[Bookings]
+                WHERE BookingId=@BookingId AND Status IN (N'COMPLETED',N'PAYMENT_NOT_RECEIVED')))
+            OR (@BookingType=N'NightStay' AND EXISTS (SELECT 1 FROM [Booking].[NightStayBookings]
+                WHERE NightStayBookingId=@BookingId AND Status IN (N'COMPLETED',N'PAYMENT_NOT_RECEIVED')))
+        BEGIN
+            DECLARE @NotificationIsNightStay BIT=CASE WHEN @BookingType=N'NightStay' THEN 1 ELSE 0 END;
+            EXEC [Notification].[EnqueueBookingNotification]
+                @BookingId=@BookingId,@IsNightStay=@NotificationIsNightStay,@Audience=N'PetParent',
+                @NotificationType=N'BOOKING_CASH_NOT_RECEIVED',@TicketId=@TicketId;
+        END;
     END
 
     SELECT @Outcome AS [Outcome],
@@ -284,7 +359,7 @@ BEGIN
            -- the existing reader ordinals did not shift when they were added.
            t.[Category],
            t.[Reason],
-           t.[EventId]
+           t.[EventId], t.[EventBookingId]
     FROM [Support].[Tickets] AS t
     WHERE t.[TicketId] = @TicketId;
 

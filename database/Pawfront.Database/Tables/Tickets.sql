@@ -91,6 +91,7 @@ CREATE TABLE [Support].[Tickets]
     -- Event incidents only. No FK, same posture as every other subject column
     -- here — and the event outlives the ticket's usefulness either way.
     [EventId] UNIQUEIDENTIFIER NULL,
+    [EventBookingId] UNIQUEIDENTIFIER NULL,
 
     -- How the reporter classified the incident, alongside the free-text account
     -- that goes to the Cosmos narrative: [Category] is what kind of problem it is,
@@ -184,14 +185,8 @@ CREATE TABLE [Support].[Tickets]
 
 GO
 
--- ONE open ticket per BOOKING, in either direction: while a report on a job is
--- open, that job cannot be reported again. Reporting a DIFFERENT booking with the
--- same provider is unaffected, which is the whole point — a ticket is about an
--- incident, and two jobs are two incidents.
---
--- Still "either direction": both parties reporting the same job is one incident
--- seen from two sides, and support works it as one case. The second reporter is
--- handed the open ticket rather than opening a duplicate.
+-- ONE open ticket per BOOKING per RAISER. Both parties may report the same
+-- booking independently, while repeat reports from one party are refused.
 --
 -- A filtered UNIQUE index rather than a check in the procedure, so the rule is
 -- race-safe for free — two reports landing together cannot both find "no open
@@ -203,7 +198,7 @@ GO
 -- separate ranges; the two tables share no id space in practice, so the pair is
 -- belt and braces.
 CREATE UNIQUE INDEX [UX_Tickets_OpenBooking]
-    ON [Support].[Tickets] ([BookingType], [BookingId])
+    ON [Support].[Tickets] ([BookingType], [BookingId], [RaisedByType])
     WHERE [BookingId] IS NOT NULL AND [Status] <> N'CLOSED';
 
 GO
@@ -236,7 +231,7 @@ GO
 -- Filtered to open tickets because a closed one neither holds a thread nor blocks
 -- a fresh report.
 CREATE UNIQUE INDEX [UX_Tickets_OpenConversation]
-    ON [Support].[Tickets] ([ConversationId])
+    ON [Support].[Tickets] ([ConversationId], [RaisedByType])
     INCLUDE ([TicketNumber], [Status])
     WHERE [ConversationId] IS NOT NULL AND [Status] <> N'CLOSED';
 

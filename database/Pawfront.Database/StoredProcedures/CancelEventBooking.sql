@@ -1,79 +1,34 @@
--- Soft-cancels an event ticket booking on behalf of the booker. Ownership is
--- proven by matching @BookerEmail (the caller's Firebase email claim) against
--- the booking's free-text BookerEmail — there is no FK to any user table.
---
--- The row is kept (payment/history preserved); flipping Status to N'Cancelled'
--- releases the seat capacity automatically, because [Event].[CreateEventBooking]
--- only SUMs TicketCount over rows where Status = N'Confirmed'. The UPDLOCK +
--- HOLDLOCK on the row read serialises against a concurrent double-cancel and
--- against the capacity check in CreateEventBooking.
---
--- THROW 51218 — booking not found for this booker (unknown id OR not theirs).
--- THROW 51219 — booking already cancelled.
 CREATE OR ALTER PROCEDURE [Event].[CancelEventBooking]
-    @BookingId UNIQUEIDENTIFIER,
-    @BookerEmail NVARCHAR(320)
+ @BookingId UNIQUEIDENTIFIER, @BookerEmail NVARCHAR(320), @BookerAccountId UNIQUEIDENTIFIER=NULL, @BookerType NVARCHAR(16)=NULL
 AS
 BEGIN
-    SET NOCOUNT ON;
+ SET NOCOUNT ON;
+ SET XACT_ABORT ON;
+ BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
 
-    DECLARE @CurrentStatus NVARCHAR(32);
-    DECLARE @EventId UNIQUEIDENTIFIER;
-    DECLARE @BookerName NVARCHAR(200);
-    DECLARE @TicketCount INT;
-
-    SELECT @CurrentStatus = [Status],
-           @EventId = [EventId],
-           @BookerName = [BookerName],
-           @TicketCount = [TicketCount]
-    FROM [Event].[EventBookings] WITH (UPDLOCK, HOLDLOCK)
-    WHERE [BookingId] = @BookingId
-      AND [BookerEmail] = @BookerEmail;
-
-    IF @CurrentStatus IS NULL
-        THROW 51218, 'Event booking was not found for this booker.', 1;
-
-    IF @CurrentStatus = N'Cancelled'
-        THROW 51219, 'Event booking is already cancelled.', 1;
-
-    UPDATE [Event].[EventBookings]
-    SET [Status] = N'Cancelled',
-        [CancelledAtUtc] = SYSUTCDATETIME(),
-        [UpdatedAtUtc] = SYSUTCDATETIME()
-    WHERE [BookingId] = @BookingId;
-
-    -- Tell the ORGANISER their seats are free again — they need to know the
-    -- attendee list changed, and they didn't perform this action. The booker gets
-    -- nothing: cancelling is their own tap.
-    EXEC [Notification].[EnqueueEventNotification]
-        @EventId = @EventId,
-        @EventBookingId = @BookingId,
-        @NotificationType = N'EVENT_TICKET_CANCELLED',
-        @BookerName = @BookerName,
-        @TicketCount = @TicketCount;
-
-    -- Result set 1: the cancelled booking row (same shape as GetEventBooking RS1).
-    SELECT [BookingId],
-           [EventId],
-           [BookerName],
-           [BookerEmail],
-           [BookerMobile],
-           [TicketCount],
-           [PaymentMethod],
-           [PaymentStatus],
-           [PaymentReference],
-           [TotalAmount],
-           [Status],
-           [CreatedAtUtc],
-           [UpdatedAtUtc],
-           [CancelledAtUtc]
-    FROM [Event].[EventBookings]
-    WHERE [BookingId] = @BookingId;
-
-    -- Result set 2: tickets (zero or more, ordered by TicketNumber) so the
-    -- response carries the full shape the client got on create / GET.
-    SELECT [TicketId], [BookingId], [EventId], [TicketNumber], [AttendeeName], [CreatedAtUtc]
-    FROM [Event].[EventBookingTickets]
-    WHERE [BookingId] = @BookingId
-    ORDER BY [TicketNumber];
+ DECLARE @Now DATETIME2(7)=SYSUTCDATETIME();
+ DECLARE @Status NVARCHAR(32), @EventId UNIQUEIDENTIFIER, @Name NVARCHAR(200), @Count INT;
+ SELECT @Status=Status,@EventId=EventId,@Name=BookerName,@Count=TicketCount FROM [Event].[EventBookings]
+ WHERE BookingId=@BookingId AND BookerEmail=@BookerEmail
+   AND (@BookerAccountId IS NULL OR (BookerAccountId=@BookerAccountId AND BookerType=@BookerType));
+ IF @Status IS NULL THROW 51218, 'Event booking was not found for this booker.', 1;
+ IF @Status IN (N'Cancelled',N'CancelledByParent',N'EventCancelled') THROW 51219, 'Event booking is already cancelled.', 1;
+ IF @Status<>N'Confirmed' OR EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND [Event].[EventStartUtc](StartDate,StartTime)<=@Now)
+     THROW 51468, 'Only bookings for events that have not started can be cancelled.', 1;
+ DECLARE @Hours INT,@Start DATETIME2(7),@IsPaid BIT;
+ SELECT @Hours=CASE CancellationPolicy WHEN N'FullRefundUpTo48Hours' THEN 48 WHEN N'FullRefundUpTo24Hours' THEN 24
+     WHEN N'FullRefundUpTo4Hours' THEN 4 WHEN N'FullRefundUpTo2Hours' THEN 2 ELSE 0 END,
+     @IsPaid=IsPaid, @Start=[Event].[EventStartUtc](StartDate,StartTime) FROM [Event].[Events] WHERE EventId=@EventId;
+ UPDATE [Event].[EventBookings] SET Status=N'CancelledByParent',CancelledAtUtc=@Now,UpdatedAtUtc=@Now
+ WHERE BookingId=@BookingId;
+ IF @IsPaid=1 AND (@Hours=0 OR @Now>DATEADD(hour,-@Hours,@Start))
+     EXEC [Event].[RecordReliabilityOutcome] @BookingId,N'Negative';
+ EXEC [Notification].[EnqueueEventNotification] @EventId=@EventId,@EventBookingId=@BookingId,
+     @NotificationType=N'EVENT_TICKET_CANCELLED',@BookerName=@Name,@TicketCount=@Count;
+ EXEC [Event].[NotifyEventWaitlist] @EventId;
+ COMMIT TRANSACTION;
+ EXEC [Event].[GetEventBooking] @BookingId;
 END;

@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc;
 using Pawfront.Contracts.Metadata;
 
 namespace Pawfront.Api.Endpoints;
@@ -10,6 +11,9 @@ internal static class MetadataEndpoints
         // behaviours). Derived from the domain enums, so there is nothing to
         // persist or cache-bust — it always reflects the deployed vocabulary.
         builder.MapGet("/metadata", () => ApiResults.Ok(MetadataCatalog.Build()));
+
+        builder.MapGet("/metadata/services", ([FromQuery(Name = "SR")] string? serviceName) =>
+            ApiResults.Ok(ServiceMetadataCatalog.Build(serviceName)));
 
         return builder;
     }

@@ -14,6 +14,9 @@ public interface IEventBookingService
     /// <summary>Returns the booking with one entry per ticket, or null if unknown.</summary>
     Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken);
 
+    /// <summary>Whether this caller previously cancelled a booking for the event.</summary>
+    Task<bool> HasCancelledBookingAsync(Guid eventId, string? bookerEmail, CancellationToken cancellationToken);
+
     /// <summary>
     /// External payment-gateway callback. Flips PaymentStatus to Paid or Failed
     /// and records the gateway reference. Idempotent for redelivery of the same

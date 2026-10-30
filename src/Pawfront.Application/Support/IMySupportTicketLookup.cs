@@ -16,7 +16,7 @@ public sealed record MySupportTicketRef(Guid TicketId, int TicketNumber, string 
 }
 
 /// <summary>
-/// One caller's open tickets, indexed by what they were raised on.
+/// One caller's open tickets and booking dispute markers, indexed by subject.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -26,9 +26,9 @@ public sealed record MySupportTicketRef(Guid TicketId, int TicketNumber, string 
 /// <c>Review.ListPetParentBookingReviews</c>.
 /// </para>
 /// <para>
-/// OPEN tickets only, and RAISED BY the caller only. Both restrictions matter: a closed
-/// ticket is exactly the state in which a fresh report is allowed again, and the
-/// counterparty's ticket is neither the caller's to open nor theirs to be told about.
+/// Ticket references cover open tickets raised by the caller. Booking dispute markers
+/// cover tickets raised by either party, including closed tickets, and disclose only
+/// that an incident has been reported on a booking the caller participates in.
 /// </para>
 /// </remarks>
 public sealed class MySupportTicketSubjects
@@ -41,8 +41,11 @@ public sealed class MySupportTicketSubjects
     private readonly Dictionary<string, MySupportTicketRef> _byBooking = new(StringComparer.Ordinal);
     private readonly Dictionary<Guid, MySupportTicketRef> _byConversation = [];
     private readonly Dictionary<Guid, MySupportTicketRef> _byEvent = [];
+    private readonly HashSet<string> _disputedBookings = new(StringComparer.Ordinal);
 
-    public MySupportTicketSubjects(IEnumerable<MySupportTicketSubject> tickets)
+    public MySupportTicketSubjects(
+        IEnumerable<MySupportTicketSubject> tickets,
+        IEnumerable<BookingDisputeSubject>? bookingDisputes = null)
     {
         ArgumentNullException.ThrowIfNull(tickets);
 
@@ -55,6 +58,7 @@ public sealed class MySupportTicketSubjects
             if (ticket.BookingId is { } bookingId && ticket.BookingType is { } bookingType)
             {
                 _byBooking.TryAdd(BookingKey(bookingType, bookingId), reference);
+                _disputedBookings.Add(BookingKey(bookingType, bookingId));
             }
             else if (ticket.ConversationId is { } conversationId)
             {
@@ -68,7 +72,16 @@ public sealed class MySupportTicketSubjects
             // An app issue has no subject and so appears on no card. It is carried this far
             // rather than filtered in SQL so the query stays "my open tickets".
         }
+
+        if (bookingDisputes is not null)
+        {
+            foreach (var dispute in bookingDisputes)
+                _disputedBookings.Add(BookingKey(dispute.BookingType, dispute.BookingId));
+        }
     }
+
+    public bool IsDisputeRaisedForBooking(string bookingType, Guid bookingId) =>
+        _disputedBookings.Contains(BookingKey(bookingType, bookingId));
 
     public MySupportTicketRef? ForBooking(string? bookingType, Guid bookingId) =>
         bookingType is null
@@ -95,6 +108,9 @@ public sealed record MySupportTicketSubject(
     Guid? ConversationId,
     Guid? EventId);
 
+/// <summary>A booking with a ticket from either party, regardless of ticket status.</summary>
+public sealed record BookingDisputeSubject(string BookingType, Guid BookingId);
+
 /// <summary>
 /// "Which of my subjects have I already reported?" — read once per request by every surface
 /// that offers a Report button: the booking detail and both booking lists, the event list
@@ -108,7 +124,8 @@ public sealed record MySupportTicketSubject(
 public interface IMySupportTicketLookup
 {
     /// <summary>
-    /// The caller's open tickets, keyed by subject. <b>Best-effort by contract</b>:
+    /// The caller's open tickets and participant-scoped booking dispute markers.
+    /// <b>Best-effort by contract</b>:
     /// implementations return <see cref="MySupportTicketSubjects.Empty"/> rather than
     /// throwing, because this decorates a list and must never be the reason one fails.
     /// </summary>

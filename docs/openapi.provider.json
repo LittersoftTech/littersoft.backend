@@ -5651,9 +5651,7 @@
           "pricePerHour",
           "addOns",
           "minimumBookingHours",
-          "latePickupCharges",
-          "dropOffTime",
-          "pickUpTime"
+          "latePickupCharges"
         ],
         "type": "object",
         "properties": {
@@ -5688,12 +5686,15 @@
             "format": "double"
           },
           "dropOffTime": {
-            "type": "string",
+            "type": ["null", "string"],
             "format": "time"
           },
           "pickUpTime": {
-            "type": "string",
+            "type": ["null", "string"],
             "format": "time"
+          },
+          "hasFixedTimes": {
+            "type": ["null", "boolean"]
           }
         }
       },

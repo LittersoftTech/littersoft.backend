@@ -6,10 +6,10 @@
 -- @ActorId come from the authenticated route, never the client body. Enforces:
 --   * the actor is a party to the booking            (THROW 51121)
 --   * the status is one the actor may set            (THROW 51122)
---   * the booking is not already terminal            (THROW 51123)
+--   * finished jobs only allow COMPLETED -> PAYMENT_NOT_RECEIVED (THROW 51123)
 --   * the status actually changes                    (THROW 51124)
 --   * the transition is allowed from the current state (THROW 51126)
---   * a no-show is only reportable 30+ minutes after the scheduled start (THROW 51128)
+--   * a no-show is only reportable from the scheduled end (THROW 51128)
 --   * a booking left in CREATED for 24+ hours has expired, so the attempted
 --     transition is rejected (THROW 51129) — the provider can no longer accept
 --     it. This guard REJECTS ONLY; it does not write the EXPIRED status. Settling
@@ -24,13 +24,13 @@
 --               COMPLETED (legacy /status shim, from IN_PROGRESS — ENDING
 --               tolerated for legacy rows),
 --               PROVIDER_CANCELLED, PARENT_NO_SHOW (from confirmed-equivalent or
---               START_JOB, 30 min after start)
+--               START_JOB, at scheduled end)
 --   Parent   -> PARENT_CANCELLED,
---               PROVIDER_NO_SHOW (from confirmed-equivalent or START_JOB, 30 min after start)
+--               PROVIDER_NO_SHOW (from confirmed-equivalent or START_JOB, at scheduled end)
 -- A cancel is blocked once the job is underway (IN_PROGRESS; the retired ENDING
 -- kept for legacy rows) → THROW 51149.
--- Terminal states (no further change): COMPLETED, PROVIDER_DECLINED,
--- PROVIDER_CANCELLED, PARENT_CANCELLED, PARENT_NO_SHOW, PROVIDER_NO_SHOW.
+-- COMPLETED may move to PAYMENT_NOT_RECEIVED. Both allow payment through the
+-- dedicated MarkBookingPaid procedure; other terminal states reject this engine.
 --
 -- A geolocation fix may be supplied, and is written only for the NO-SHOW
 -- transitions — the one moment this engine handles that is being evidenced.
@@ -51,11 +51,17 @@ CREATE OR ALTER PROCEDURE [Booking].[UpdateBookingStatus]
     @Latitude DECIMAL(9, 6) = NULL,
     @Longitude DECIMAL(9, 6) = NULL,
     @AccuracyMetres DECIMAL(9, 2) = NULL,
-    @DeviceCapturedAtUtc DATETIME2(7) = NULL
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL,
+    @NoShowReason NVARCHAR(32) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
+
+    IF @NoShowReason IS NOT NULL AND (@NoShowReason NOT IN (N'NotArrived',N'OtpNotShared')
+        OR @Actor<>N'Provider' OR @NewStatus<>N'PARENT_NO_SHOW')
+        THROW 51125, 'No-show reason is only valid on a provider report of customer absence.', 1;
+
 
     -- Static validation of the inputs (defense-in-depth; the API validates too).
     IF @Actor NOT IN (N'Provider', N'Parent')
@@ -63,7 +69,7 @@ BEGIN
         THROW 51125, 'Actor must be Provider or Parent.', 1;
     END
 
-    IF @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED',
+    IF @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PAYMENT_NOT_RECEIVED',
                           N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                           N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
     BEGIN
@@ -72,6 +78,7 @@ BEGIN
 
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
     DECLARE @CurrentStatus NVARCHAR(48);
+    DECLARE @Source NVARCHAR(16);
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
     DECLARE @BookingDate DATE;
@@ -82,6 +89,7 @@ BEGIN
     BEGIN TRANSACTION;
 
     SELECT @CurrentStatus = [Status],
+           @Source = [Source],
            @ProviderId = [ProviderId],
            @PetParentId = [PetParentId],
            @BookingDate = [BookingDate],
@@ -90,6 +98,8 @@ BEGIN
            @CreatedAtUtc = [CreatedAtUtc]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
+
+    SET @Now = SYSUTCDATETIME(); -- Capture report time after acquiring the booking lock.
 
     IF @CurrentStatus IS NULL
     BEGIN
@@ -102,6 +112,9 @@ BEGIN
     BEGIN
         THROW 51121, 'You are not a party to this booking.', 1;
     END
+
+    IF @Source = N'Custom' AND (@Actor <> N'Provider' OR @NewStatus NOT IN (N'COMPLETED', N'PROVIDER_CANCELLED'))
+        THROW 51122, 'Custom bookings only allow provider completion or cancellation on this route.', 1;
 
     -- A booking left pending (CREATED) for 24+ hours has expired: reject the
     -- attempted transition — the provider can no longer accept it.
@@ -125,7 +138,7 @@ BEGIN
     -- the service starts.
     IF @CurrentStatus = N'CREATED'
        AND DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
-                   CAST(@BookingDate AS DATETIME2(7))) < DATEADD(HOUR, 2, @Now)
+                   CAST(@BookingDate AS DATETIME2(7))) <= DATEADD(HOUR, 2, @Now)
     BEGIN
         THROW 51153, 'Booking has expired: it was never accepted and the service now starts in under 2 hours.', 1;
     END
@@ -134,21 +147,22 @@ BEGIN
     -- A no-show always names the OTHER party: the provider reports the parent's
     -- no-show, the parent reports the provider's.
     IF (@Actor = N'Provider'
-            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PROVIDER_CANCELLED', N'PARENT_NO_SHOW'))
+            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PROVIDER_CANCELLED', N'PARENT_NO_SHOW'))
        OR (@Actor = N'Parent'
             AND @NewStatus NOT IN (N'PARENT_CANCELLED', N'PROVIDER_NO_SHOW'))
     BEGIN
         THROW 51122, 'This status is not permitted for this actor.', 1;
     END
 
-    -- A booking in a terminal state can't change further.
-    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
-                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+    -- Finished jobs allow only the provider's report of non-payment here.
+    IF @CurrentStatus IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+       AND NOT (@CurrentStatus IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED') AND @NewStatus = N'PAYMENT_NOT_RECEIVED')
     BEGIN
         THROW 51123, 'Booking is in a terminal state and cannot change.', 1;
     END
 
-    IF @CurrentStatus = @NewStatus
+    IF @CurrentStatus = @NewStatus AND @NewStatus <> N'PAYMENT_NOT_RECEIVED'
     BEGIN
         THROW 51124, 'Booking is already in the requested status.', 1;
     END
@@ -156,7 +170,8 @@ BEGIN
     -- From-state rules for the engine transitions.
     IF (@NewStatus = N'CONFIRMED'        AND @CurrentStatus <> N'CREATED')
        OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
-       OR (@NewStatus = N'COMPLETED'     AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
+       OR (@NewStatus = N'PAYMENT_NOT_RECEIVED' AND @CurrentStatus NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED'))
+       OR (@NewStatus = N'COMPLETED' AND @Source <> N'Custom' AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
        OR (@NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
            AND @CurrentStatus NOT IN (N'CONFIRMED',
                                       N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION',
@@ -169,22 +184,21 @@ BEGIN
     -- A cancel is allowed from any non-terminal state EXCEPT once the job is
     -- actively underway (IN_PROGRESS; the retired ENDING kept for legacy rows)
     -- — by then it runs to completion.
-    IF @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
+    IF @Source <> N'Custom' AND @NewStatus IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED')
        AND @CurrentStatus IN (N'IN_PROGRESS', N'ENDING')
     BEGIN
         THROW 51149, 'The job is already in progress and can no longer be cancelled.', 1;
     END
 
-    -- A no-show can only be reported once the counterparty is actually late:
-    -- 30 minutes past the booking's scheduled start (all times are UTC).
+    -- A no-show can only be reported from the booking's scheduled end (UTC).
     IF @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
     BEGIN
-        DECLARE @StartsAtUtc DATETIME2(7) =
-            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
+        DECLARE @EndsAtUtc DATETIME2(7) =
+            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @EndTime),
                     CAST(@BookingDate AS DATETIME2(7)));
-        IF @Now < DATEADD(MINUTE, 30, @StartsAtUtc)
+        IF @Now < @EndsAtUtc
         BEGIN
-            THROW 51128, 'A no-show can only be reported 30 minutes after the booking''s scheduled start.', 1;
+            THROW 51128, 'A no-show can only be reported from the booking''s scheduled end.', 1;
         END
     END
 
@@ -195,7 +209,7 @@ BEGIN
     -- rule and the same clamps as the dedicated sproc; see it for the reasoning.
     DECLARE @ActualEndTime TIME(0) = NULL;
 
-    IF @NewStatus = N'COMPLETED' AND CAST(@Now AS DATE) = @BookingDate
+    IF @Source <> N'Custom' AND @NewStatus = N'COMPLETED' AND CAST(@Now AS DATE) = @BookingDate
     BEGIN
         DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
         IF @NowTime < @EndTime
@@ -204,14 +218,23 @@ BEGIN
         END
     END
 
+    -- Capture on acceptance, in the same transaction as the status change.
+    IF @NewStatus = N'CONFIRMED'
+        UPDATE b
+        SET [WorkingHoursOpensAtUtc] = w.[OpensAtUtc],
+            [WorkingHoursClosesAtUtc] = w.[ClosesAtUtc]
+        FROM [Booking].[Bookings] b
+        CROSS APPLY [Booking].[AcceptedWorkingHours](b.[ProviderId], b.[BookingDate], b.[StartTime]) w
+        WHERE b.[BookingId] = @BookingId;
+
     UPDATE [Booking].[Bookings]
     SET [Status] = @NewStatus,
+        [CashNotReceivedAtUtc] = CASE WHEN @NewStatus = N'PAYMENT_NOT_RECEIVED' THEN @Now ELSE [CashNotReceivedAtUtc] END,
         [UpdatedAtUtc] = @Now,
         -- Only ever written on the COMPLETED transition; every other status
-        -- leaves whatever is there alone (it is NULL for all of them anyway,
-        -- since COMPLETED is terminal apart from the move to PAID).
+        -- preserves the actual finish, including non-payment and later payment.
         [ActualEndTime] = CASE
-            WHEN @NewStatus = N'COMPLETED' THEN @ActualEndTime
+            WHEN @NewStatus = N'COMPLETED' AND @Source <> N'Custom' THEN @ActualEndTime
             ELSE [ActualEndTime]
         END,
         -- A no-show ends the job with nobody having performed and nobody owing,
@@ -252,6 +275,16 @@ BEGIN
              @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
     END
 
+    IF @NewStatus = N'PAYMENT_NOT_RECEIVED' AND @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[BookingLocationEvents]
+            ([BookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@BookingId, N'CashNotReceived', N'Provider', @ActorId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
+
     -- Notify the OTHER party, inside this transaction so the notification can
     -- never exist without the status change (or vice versa). The actor never gets
     -- one: they tapped it and saw the result — the "relevance rule".
@@ -262,11 +295,12 @@ BEGIN
             WHEN N'PROVIDER_CANCELLED' THEN N'BOOKING_CANCELLED_BY_PROVIDER'
             WHEN N'PARENT_CANCELLED'   THEN N'BOOKING_CANCELLED_BY_PARENT'
             WHEN N'COMPLETED'          THEN N'BOOKING_COMPLETED'
+            WHEN N'PAYMENT_NOT_RECEIVED' THEN N'BOOKING_CASH_NOT_RECEIVED'
             WHEN N'PARENT_NO_SHOW'     THEN N'BOOKING_NO_SHOW_REPORTED'
             WHEN N'PROVIDER_NO_SHOW'   THEN N'BOOKING_NO_SHOW_REPORTED'
         END;
 
-    IF @NotificationType IS NOT NULL
+    IF @Source <> N'Custom' AND @NotificationType IS NOT NULL
     BEGIN
         -- A no-show always names the absent party, which is what lets one
         -- template read correctly in both directions.
@@ -279,12 +313,19 @@ BEGIN
         DECLARE @Audience NVARCHAR(16) =
             CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
 
+        DECLARE @ResolvedNoShowReason NVARCHAR(32) = COALESCE(@NoShowReason, CASE
+            WHEN @NewStatus=N'PARENT_NO_SHOW' AND @CurrentStatus=N'START_JOB'
+                 AND NOT EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory]
+                     WHERE [BookingId]=@BookingId AND [Note]=N'Waiting for customer')
+            THEN N'OtpNotShared' ELSE N'NotArrived' END);
+
         EXEC [Notification].[EnqueueBookingNotification]
             @BookingId = @BookingId,
             @IsNightStay = 0,
             @Audience = @Audience,
             @NotificationType = @NotificationType,
-            @AbsentParty = @AbsentParty;
+            @AbsentParty = @AbsentParty,
+            @NoShowReason = @ResolvedNoShowReason;
     END
 
     SELECT [BookingId],
@@ -311,7 +352,17 @@ BEGIN
            [CustomerLocation],
            [PricePerHour],
            [JobNotes],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] mh WHERE mh.[BookingId] = [Booking].[Bookings].[BookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[Bookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[Bookings].[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], NULL, NULL)
+           WHEN [Booking].[Bookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], m.[ProposedBookingDate], m.[ProposedStartTime])
+                FROM [Booking].[BookingModifications] m WHERE m.[BookingId] = [Booking].[Bookings].[BookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'SingleDay' AND pay.[BookingId]=[Booking].[Bookings].[BookingId]) AS [PaidAtUtc]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

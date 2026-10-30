@@ -32,6 +32,9 @@ Set `Firebase:ProjectId` before running against real mobile clients. Every `/api
 Authorization: Bearer <Firebase ID token>
 ```
 
+Exception: the parent API's `POST /auth/email-status` (also `/api/v1/auth/email-status`)
+is anonymous and rate-limited. See [email status and booking changes](docs/email-status-and-booking-modification-limits.md).
+
 Google ID tokens can also be accepted for Google sign-in when their OAuth client IDs are listed in `Firebase:GoogleClientIds`.
 
 ## Azure Key Vault

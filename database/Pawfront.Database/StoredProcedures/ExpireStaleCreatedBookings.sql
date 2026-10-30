@@ -2,15 +2,9 @@
 -- EITHER of two triggers, both of which mean the same thing: the provider has
 -- run out of time to accept.
 --   * BR-17: it has been pending for @PendingHours (default 24).
---   * BR-53: the service now starts in under @LeadTimeHours (default 2), i.e.
---     serviceStart < @Now + @LeadTimeHours. That is the SAME cutoff BR-01 uses
---     to decide a booking is too soon to be created, so an unaccepted booking
---     dies exactly when a fresh one for that slot could no longer be made.
---     serviceStart is BookingDate + StartTime (single-day) and
---     CheckInDate + DropOffTime (night stay), matching the modification-window
---     and lead-time arithmetic elsewhere. Comparison is strict (<), so a
---     booking whose service is exactly @LeadTimeHours away survives this tick —
---     mirroring BookingLeadTime.IsTooSoon.
+--   * BR-53: the service starts within @LeadTimeHours (default 2).
+--     This acceptance cutoff is separate from the three-hour sending limit.
+--     Start is BookingDate + StartTime, or CheckInDate + DropOffTime for stays.
 -- A booking already past its start time is caught by the same test.
 --
 -- Run periodically by the scheduled external job (Azure Function, timer-
@@ -66,7 +60,7 @@ BEGIN
     WHERE [Status] = N'CREATED'
       AND ([CreatedAtUtc] <= @PendingCutoff
            OR DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), [StartTime]),
-                      CAST([BookingDate] AS DATETIME2(7))) < @LeadTimeCutoff);
+                      CAST([BookingDate] AS DATETIME2(7))) <= @LeadTimeCutoff);
 
     INSERT INTO [Booking].[BookingStatusHistory]
         ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
@@ -83,8 +77,7 @@ BEGIN
     INTO @ExpiredNightStays ([NightStayBookingId], [Reason])
     WHERE [Status] = N'CREATED'
       AND ([CreatedAtUtc] <= @PendingCutoff
-           OR DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), [DropOffTime]),
-                      CAST([CheckInDate] AS DATETIME2(7))) < @LeadTimeCutoff);
+           OR DATEADD(SECOND,DATEDIFF(SECOND,CAST('00:00' AS TIME),COALESCE([DropOffTime],CAST('00:00' AS TIME))),CAST([CheckInDate] AS DATETIME2(7))) <= @LeadTimeCutoff);
 
     INSERT INTO [Booking].[NightStayBookingStatusHistory]
         ([NightStayBookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])

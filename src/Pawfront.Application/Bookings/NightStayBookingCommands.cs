@@ -5,7 +5,7 @@ namespace Pawfront.Application.Bookings;
 /// Distinct from <see cref="CreateBookingCommand"/>, which is single-day. The
 /// stay spans <c>[CheckInDate, CheckOutDate)</c> — the checkout day is NOT a
 /// stayed night. Drop-off / pick-up times are resolved server-side from the
-/// provider's offering, not supplied by the caller.
+/// provider's offering when fixed; otherwise caller-supplied times are optional.
 /// </summary>
 public sealed record CreateNightStayBookingCommand(
     Guid ProviderId,
@@ -22,7 +22,9 @@ public sealed record CreateNightStayBookingCommand(
     string? JobNotes = null,
     // Where the service is delivered: ParentLocation or ProviderLocation
     // (see <see cref="BookingLocationTypes"/>). Required on the parent host.
-    string? LocationType = null);
+    string? LocationType = null,
+    TimeOnly? DropOffTime = null,
+    TimeOnly? PickUpTime = null);
 
 public sealed record NightStayBookingResult(
     Guid NightStayBookingId,
@@ -33,8 +35,8 @@ public sealed record NightStayBookingResult(
     string SubCategory,
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime,
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
@@ -53,7 +55,14 @@ public sealed record NightStayBookingResult(
     string? PetName = null,
     string? AnimalType = null,
     string? Breed = null,
-    string? PetGender = null);
+    string? PetGender = null,
+    // Shared dispute display marker, populated after booking mutations.
+    bool IsDisputeRaised = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    DateTimeOffset? PaidAtUtc = null);
 
 /// <summary>
 /// One row of the parent's night-stay "my bookings" list: the flat booking plus
@@ -86,8 +95,8 @@ public sealed record NightStayBookingDetailRow(
     string SubCategory,
     DateOnly CheckInDate,
     DateOnly CheckOutDate,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime,
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
@@ -156,7 +165,13 @@ public sealed record NightStayBookingDetailRow(
     // trail, not from Booking.BookingModifications: that table is a staging area
     // holding only the OPEN proposal, and its row is deleted on accept and on
     // decline alike, so after the fact it can say nothing about what happened.
-    bool IsModificationDone = false);
+    bool IsModificationDone = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    bool IsParentModificationDone = false,
+    bool IsProviderModificationDone = false);
 
 /// <summary>
 /// Fully resolved night-stay booking-detail view: the raw <see cref="Row"/> plus the
@@ -205,7 +220,8 @@ public sealed record UpdateNightStayBookingStatusCommand(
     BookingStatusActor Actor,
     Guid ActorId,
     string? Note,
-    CapturedLocation? Location = null);
+    CapturedLocation? Location = null,
+    string? NoShowReason = null);
 
 /// <summary>
 /// Either party proposes a new check-in / check-out range for a night-stay
@@ -215,6 +231,7 @@ public sealed record UpdateNightStayBookingStatusCommand(
 /// command.
 /// </summary>
 /// <param name="AcknowledgeTermsChanges">
+/// Applies only to parent proposals; ignored for provider schedule-only proposals.
 /// The requester has seen and accepted the provider's current terms — see
 /// <see cref="RequestBookingModificationCommand.AcknowledgeTermsChanges"/>. For a
 /// stay the drifting set also covers the offering's drop-off / pick-up times.

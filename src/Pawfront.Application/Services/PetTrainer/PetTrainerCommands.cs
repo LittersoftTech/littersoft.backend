@@ -24,9 +24,9 @@ public sealed record RegisterFreelanceTrainerCommand(
 
 public sealed record SaveTrainingSchoolOfferingCommand(
     Guid ProviderId,
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     TrainingSessionInput Session,
     IReadOnlyCollection<string> PetsTrained,
     IReadOnlyCollection<string> AgeGroups,
@@ -41,9 +41,9 @@ public sealed record SaveTrainingSchoolOfferingCommand(
 
 public sealed record SaveFreelanceTrainerOfferingCommand(
     Guid ProviderId,
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     TrainingSessionInput Session,
     IReadOnlyCollection<string> PetsTrained,
     IReadOnlyCollection<string> AgeGroups,

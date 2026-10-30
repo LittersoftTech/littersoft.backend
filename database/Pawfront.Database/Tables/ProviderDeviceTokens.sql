@@ -34,3 +34,9 @@ GO
 
 CREATE INDEX [IX_ProviderDeviceTokens_ProviderAuthIdentityId_IsActive]
     ON [Provider].[ProviderDeviceTokens] ([ProviderAuthIdentityId], [IsActive]);
+
+GO
+
+CREATE UNIQUE INDEX [UX_ProviderDeviceTokens_ActiveDeviceId]
+    ON [Provider].[ProviderDeviceTokens] ([DeviceId])
+    WHERE [DeviceId] IS NOT NULL AND [IsActive] = 1;

@@ -79,10 +79,8 @@ internal sealed class SupportTicketService(
 
         if (created.Outcome == CreateSupportTicketOutcome.TicketAlreadyOpen)
         {
-            // This call created nothing. Attaching evidence to a ticket somebody already
-            // had open on this booking — possibly the counterparty's, about their own
-            // account of it — would be wrong, so the photos are dropped and the caller is
-            // handed the conflict.
+            // This call created nothing. Only the caller's own open ticket can
+            // conflict, so evidence stays off this retry and the caller receives it.
             return new CreateSupportTicketWithPhotosResult(created.Outcome, created.Ticket, []);
         }
 
@@ -211,7 +209,8 @@ internal sealed class SupportTicketService(
         // Both classifiers are optional and free-form: blank collapses to null so a read
         // never has to tell an empty picker value apart from an unset one. Their VALUES
         // are deliberately unvalidated — the vocabulary belongs to the app's picker, and
-        // pinning it here would make adding a category a backend release.
+        // pinning it here would make adding a category a backend release. Chat Report User
+        // reasons are the exception: that screen uses the six canonical choices.
         var category = string.IsNullOrWhiteSpace(command.Category) ? null : command.Category.Trim();
         if (category is { Length: > SupportTicketLimits.MaxCategoryLength })
         {
@@ -228,19 +227,20 @@ internal sealed class SupportTicketService(
                 nameof(command));
         }
 
+        if (command.TicketType == SupportTicketTypes.ChatIncident)
+        {
+            if (!ReportUserReasons.IsKnown(reason))
+                throw new ArgumentException("Select one of the six Report a User reasons.", nameof(command));
+
+            if (reason == ReportUserReasons.SomethingElse && string.IsNullOrEmpty(comment))
+                throw new ArgumentException("A description is required for Something else.", nameof(command));
+        }
+
+        if (command.TicketType == SupportTicketTypes.BookingIncident && string.IsNullOrEmpty(comment))
+            throw new ArgumentException("A description is required for a booking ticket.", nameof(command));
+
         if (string.IsNullOrEmpty(comment))
         {
-            // The comment is the substance of a report AGAINST somebody, so those two kinds
-            // require it — a ticket accusing a person with no account of what they did gives
-            // support nothing to act on. An app issue or an event report is a different
-            // shape: its picker's Reason can carry the whole thing, and it opens the
-            // narrative in the comment's place. Neither ⇒ there is nothing to report at all.
-            if (SupportTicketTypes.RequiresComment(command.TicketType))
-            {
-                throw new ArgumentException(
-                    "A description of the incident is required.", nameof(command));
-            }
-
             comment = reason
                 ?? throw new ArgumentException(
                     "A description or a reason is required.", nameof(command));
@@ -301,7 +301,8 @@ internal sealed class SupportTicketService(
             BookingType = bookingType,
             BookingId = bookingId,
             ConversationId = conversationId,
-            EventId = eventId
+            EventId = eventId,
+            EventBookingId = command.TicketType == SupportTicketTypes.EventIncident ? command.EventBookingId : null
         };
     }
 

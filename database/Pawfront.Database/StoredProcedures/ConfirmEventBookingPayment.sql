@@ -20,6 +20,10 @@ BEGIN
     END
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     DECLARE @CurrentStatus NVARCHAR(32);
     DECLARE @CurrentReference NVARCHAR(200);
@@ -46,7 +50,10 @@ BEGIN
     END
     ELSE
     BEGIN
-        UPDATE [Event].[EventBookings]
+        IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE BookingId=@BookingId AND Status NOT IN (N'Confirmed',N'Attended'))
+        THROW 51468, 'This booking cannot accept payment.', 1;
+
+    UPDATE [Event].[EventBookings]
         SET [PaymentStatus]    = @PaymentStatus,
             [PaymentReference] = @PaymentReference,
             [UpdatedAtUtc]     = SYSUTCDATETIME()

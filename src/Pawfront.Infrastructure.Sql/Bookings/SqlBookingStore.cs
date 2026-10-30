@@ -505,7 +505,7 @@ internal sealed class SqlBookingStore(
         Guid actorId,
         string? note,
         CapturedLocation? location,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? noShowReason = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -519,6 +519,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@Actor", actor.ToString());
         command.Parameters.AddWithValue("@ActorId", actorId);
         command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
+        if (noShowReason is not null) command.Parameters.AddWithValue("@NoShowReason", noShowReason);
         LocationParameters.Add(command, location);
 
         try
@@ -648,7 +649,7 @@ internal sealed class SqlBookingStore(
 
     public async Task<BookingResult> StartJobAsync(
         Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool waitForCustomer = false)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -661,6 +662,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@NewCode", newCode);
         command.Parameters.AddWithValue("@TtlMinutes", ttlMinutes);
         LocationParameters.Add(command, location);
+        command.Parameters.AddWithValue("@WaitForCustomer", waitForCustomer);
 
         try
         {
@@ -745,7 +747,7 @@ internal sealed class SqlBookingStore(
     }
 
     public async Task<BookingResult> CompleteAsync(
-        Guid bookingId, Guid providerId, CancellationToken cancellationToken)
+        Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -755,6 +757,7 @@ internal sealed class SqlBookingStore(
         };
         command.Parameters.AddWithValue("@BookingId", bookingId);
         command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@CustomerArrivedForCollection", customerArrivedForCollection);
 
         try
         {
@@ -858,6 +861,10 @@ internal sealed class SqlBookingStore(
             }
             return ReadBookingRow(reader);
         }
+        catch (SqlException exception) when (exception.Number == 51990)
+        {
+            throw new BookingModificationLimitReachedException(bookingId);
+        }
         catch (SqlException exception) when (exception.Number == 51140)
         {
             throw new BookingNotFoundException(bookingId);
@@ -882,7 +889,7 @@ internal sealed class SqlBookingStore(
 
     public async Task<BookingResult> RespondModificationAsync(
         Guid bookingId, BookingStatusActor actor, Guid actorId,
-        bool accept, int capacity, string? note, CancellationToken cancellationToken)
+        bool accept, int capacity, string? note, CancellationToken cancellationToken, bool cancelBooking = false)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -894,6 +901,7 @@ internal sealed class SqlBookingStore(
         command.Parameters.AddWithValue("@Actor", actor.ToString());
         command.Parameters.AddWithValue("@ActorId", actorId);
         command.Parameters.AddWithValue("@Accept", accept);
+        command.Parameters.AddWithValue("@CancelBooking", cancelBooking);
         command.Parameters.AddWithValue("@Capacity", capacity);
         command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
 
@@ -1165,6 +1173,28 @@ internal sealed class SqlBookingStore(
             Longitude: reader.IsDBNull(next + 4) ? null : reader.GetDecimal(next + 4));
     }
 
+    private static DateTimeOffset? ReadCashReport(SqlDataReader reader)
+    {
+        var ordinal = reader.GetOrdinal("CashNotReceivedAtUtc");
+        return reader.IsDBNull(ordinal) ? null : new DateTimeOffset(reader.GetDateTime(ordinal), TimeSpan.Zero);
+    }
+
+    private static DateTimeOffset? ReadPaidTimestamp(SqlDataReader reader)
+    {
+        for (var i = 0; i < reader.FieldCount; i++)
+            if (reader.GetName(i) == "PaidAtUtc")
+                return reader.IsDBNull(i) ? null : new DateTimeOffset(reader.GetDateTime(i), TimeSpan.Zero);
+        return null;
+    }
+
+    private static DateTimeOffset? ReadRequestExpiry(SqlDataReader reader)
+    {
+        for (var i = 0; i < reader.FieldCount; i++)
+            if (reader.GetName(i) == "RequestExpiresAtUtc")
+                return reader.IsDBNull(i) ? null : new DateTimeOffset(reader.GetDateTime(i), TimeSpan.Zero);
+        return null;
+    }
+
     private static BookingResult ReadBookingRow(SqlDataReader reader)
     {
         return new BookingResult(
@@ -1194,7 +1224,12 @@ internal sealed class SqlBookingStore(
             CustomerLocation: reader.IsDBNull(21) ? null : reader.GetString(21),
             PricePerHour: reader.IsDBNull(22) ? null : reader.GetDecimal(22),
             JobNotes: reader.IsDBNull(23) ? null : reader.GetString(23),
-            PetId: reader.IsDBNull(24) ? null : reader.GetGuid(24));
+            PetId: reader.IsDBNull(24) ? null : reader.GetGuid(24),
+            CashNotReceivedAtUtc: ReadCashReport(reader),
+            CancellationReason: reader.IsDBNull(reader.GetOrdinal("CancellationReason")) ? null : reader.GetString(reader.GetOrdinal("CancellationReason")),
+            PaidAtUtc: ReadPaidTimestamp(reader),
+            RequestExpiresAtUtc: ReadRequestExpiry(reader),
+            ProviderModificationUsed: reader.GetBoolean(reader.GetOrdinal("ProviderModificationUsed")));
     }
 
     private static BookingDetailRow ReadDetailRow(SqlDataReader reader)
@@ -1273,11 +1308,17 @@ internal sealed class SqlBookingStore(
             SnapshotLongitude: reader.IsDBNull(67) ? null : reader.GetDecimal(67),
             // Payment ledger join — null until the booking is marked PAID.
             // Appended LAST to the sproc's projection, so no ordinal above moved.
+            IsParentModificationDone: reader.GetBoolean(reader.GetOrdinal("IsParentModificationDone")),
+            IsProviderModificationDone: reader.GetBoolean(reader.GetOrdinal("IsProviderModificationDone")),
             IsModificationDone: !reader.IsDBNull(70) && reader.GetBoolean(70),
             PayoutMethod: reader.IsDBNull(68) ? null : reader.GetString(68),
             PaidAtUtc: reader.IsDBNull(69)
                 ? null
-                : new DateTimeOffset(reader.GetDateTime(69), TimeSpan.Zero));
+                : new DateTimeOffset(reader.GetDateTime(69), TimeSpan.Zero),
+            CashNotReceivedAtUtc: ReadCashReport(reader),
+            CancellationReason: reader.IsDBNull(reader.GetOrdinal("CancellationReason")) ? null : reader.GetString(reader.GetOrdinal("CancellationReason")),
+            RequestExpiresAtUtc: ReadRequestExpiry(reader),
+            ProviderModificationUsed: reader.GetBoolean(reader.GetOrdinal("ProviderModificationUsed")));
     }
 
     private static BookingPrescriptionResult ReadPrescription(SqlDataReader reader) =>

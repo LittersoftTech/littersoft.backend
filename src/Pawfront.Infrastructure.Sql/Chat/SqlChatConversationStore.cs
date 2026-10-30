@@ -289,6 +289,7 @@ internal sealed class SqlChatConversationStore(
             var notificationDataJson = reader.IsDBNull(6) ? null : reader.GetString(6);
             var sequence = reader.GetInt64(7);
             var createdAtUtc = ReadUtc(reader, 8) ?? DateTimeOffset.UtcNow;
+            var recipientFirebaseUserId = reader.IsDBNull(9) ? null : reader.GetString(9);
 
             // Result set 2 — the devices to push to. Empty when no notification
             // was queued, so no branch is needed here.
@@ -316,7 +317,8 @@ internal sealed class SqlChatConversationStore(
                 recipientIsMuted,
                 notificationId,
                 tokens,
-                notificationDataJson);
+                notificationDataJson,
+                recipientFirebaseUserId);
         }
         catch (SqlException exception) when (exception.Number is 51325 or 51328)
         {

@@ -15,7 +15,7 @@
 -- rather than an error, so a redelivered queue message cannot overwrite a good
 -- URL or reset the clock.
 --
--- IT IS ALSO WHERE THE PARENT'S 'INVOICE_ISSUED' PUSH IS ENQUEUED, and that is a
+-- This is where each recipient's INVOICE_ISSUED notification is enqueued, a
 -- deliberate departure from every other booking notification, which fires from the
 -- transition that caused it. This one cannot: at [Booking].[MarkBookingPaid] the
 -- invoice row exists but its PDF does not — rendering is asynchronous — so a push
@@ -23,9 +23,8 @@
 -- answers 409 InvoiceNotReady. Sending it here makes the notification true the
 -- moment it is sent, and atomic with the URL that makes it true.
 --
--- The PROVIDER's INVOICE_ISSUED is unaffected and still fires from mark-paid: its
--- copy routes to the booking summary, not to a document, so it has no such
--- dependency.
+-- Services V4 also announces the provider's own invoice here: both audiences
+-- now open an actual invoice, with the configured 60-second delivery delay.
 CREATE OR ALTER PROCEDURE [Billing].[CompleteInvoiceGeneration]
     @InvoiceId UNIQUEIDENTIFIER,
     @Succeeded BIT,
@@ -76,19 +75,20 @@ BEGIN
         WHERE [InvoiceId] = @InvoiceId
           AND [Status] <> N'Generated';
 
-        -- Only the PARENT's document is announced. The provider was already told at
-        -- mark-paid, and telling them twice about one job would be noise.
+        -- Both V4 invoice cards promise an available document. Announce each
+        -- recipient's own generated PDF, never a mark-paid placeholder.
         DECLARE @BookingType NVARCHAR(16);
         DECLARE @BookingId UNIQUEIDENTIFIER;
         DECLARE @InvoiceNumber NVARCHAR(64);
+        DECLARE @Audience NVARCHAR(16);
         DECLARE @Amount DECIMAL(10, 2);
 
         SELECT @BookingType = [BookingType],
                @BookingId = [BookingId],
                @InvoiceNumber = [InvoiceNumber],
-               @Amount = [Amount]
-        FROM @Notify
-        WHERE [Recipient] = N'PetParent';
+               @Amount = [Amount],
+               @Audience = [Recipient]
+        FROM @Notify;
 
         IF @BookingId IS NOT NULL
         BEGIN
@@ -105,7 +105,7 @@ BEGIN
             EXEC [Notification].[EnqueueBookingNotification]
                 @BookingId = @BookingId,
                 @IsNightStay = @IsNightStay,
-                @Audience = N'PetParent',
+                @Audience = @Audience,
                 @NotificationType = N'INVOICE_ISSUED',
                 @Amount = @AmountText,
                 @InvoiceId = @InvoiceNumber,

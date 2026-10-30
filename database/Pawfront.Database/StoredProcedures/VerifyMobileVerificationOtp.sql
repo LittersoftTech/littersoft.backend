@@ -32,6 +32,18 @@ BEGIN
         THROW 51003, 'Provider mobile OTP entry was not found.', 1;
     END
 
+    IF EXISTS (SELECT 1 FROM [Provider].[ProviderMobileOtps] o
+               INNER JOIN [Provider].[Providers] p ON p.[ProviderId] = o.[ProviderId]
+               WHERE o.[ProviderMobileOtpId] = @ProviderMobileOtpId
+                 AND (o.[MobileCountryCode] <> p.[MobileCountryCode]
+                      OR o.[MobileNumber] <> p.[MobileNumber]))
+    BEGIN
+        UPDATE [Provider].[ProviderMobileOtps]
+        SET [ValidationStatus] = N'Expired', [UpdatedAtUtc] = @Now
+        WHERE [ProviderMobileOtpId] = @ProviderMobileOtpId AND [ValidationStatus] = N'Pending';
+        SET @ValidationStatus = N'Expired';
+    END
+
     IF @ValidationStatus = N'Validated'
     BEGIN
         SET @IsValidated = 1;

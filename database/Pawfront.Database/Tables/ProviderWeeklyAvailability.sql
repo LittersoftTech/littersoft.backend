@@ -3,6 +3,8 @@ CREATE TABLE [Provider].[ProviderWeeklyAvailability]
     [ProviderId] UNIQUEIDENTIFIER NOT NULL,
     [DayOfWeek] TINYINT NOT NULL,            -- 0 = Sunday .. 6 = Saturday (matches System.DayOfWeek)
     [IsOpen] BIT NOT NULL,
+    [TimeZone] NVARCHAR(128) NOT NULL CONSTRAINT [DF_ProviderWeeklyAvailability_TimeZone] DEFAULT N'UTC',
+    [WindowsTimeZone] NVARCHAR(128) NOT NULL CONSTRAINT [DF_ProviderWeeklyAvailability_WindowsTimeZone] DEFAULT N'UTC',
     [StartTime] TIME(0) NULL,
     [EndTime] TIME(0) NULL,
     [BreakStartTime] TIME(0) NULL,

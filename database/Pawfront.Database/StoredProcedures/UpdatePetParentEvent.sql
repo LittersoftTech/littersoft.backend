@@ -22,13 +22,18 @@ CREATE OR ALTER PROCEDURE [Event].[UpdatePetParentEvent]
     @Price DECIMAL(18, 2) = NULL,
     @CancellationPolicy NVARCHAR(32) = NULL,
     @EventLink NVARCHAR(1000) = NULL,
-    @AmenitiesJson NVARCHAR(MAX) = N'[]'
+    @AmenitiesJson NVARCHAR(MAX) = N'[]',
+    @MaximumCapacity INT = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     IF NOT EXISTS (
         SELECT 1
@@ -39,8 +44,29 @@ BEGIN
         THROW 51217, 'Event was not found for this pet parent.', 1;
     END
 
+
+    IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId AND Status IN (N'Confirmed',N'Attended'))
+        THROW 51465, 'Events are locked while attendees are booked.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND [Event].[EventStartUtc](StartDate,StartTime)<=SYSUTCDATETIME())
+        THROW 51465, 'Events that have started cannot be edited.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus<>N'Active')
+        THROW 51465, 'Cancelled events cannot be edited.', 1;
+    IF EXISTS (
+        SELECT @EventCategory,@IsChildFriendly,@Title,@EventType,@IsPaid,@Price,@CancellationPolicy,@EventLink
+        EXCEPT
+        SELECT EventCategory,IsChildFriendly,Title,EventType,IsPaid,Price,CancellationPolicy,EventLink
+        FROM [Event].[Events] WHERE EventId=@EventId)
+        THROW 51468, 'Only schedule, banner, description, capacity and amenities can be edited.', 1;
+    DECLARE @PreviousCapacity INT=(SELECT MaximumCapacity FROM [Event].[Events] WHERE EventId=@EventId);
+
+    IF EXISTS (SELECT @StartDate,@EndDate,@StartTime,@EndTime
+        EXCEPT SELECT StartDate,EndDate,StartTime,EndTime FROM [Event].[Events] WHERE EventId=@EventId)
+        EXEC [Event].[AssertHostEventNoOverlap] @StartDate, @EndDate, @StartTime, @EndTime,
+            @PetParentId=@PetParentId, @ExcludedEventId=@EventId;
+
     UPDATE [Event].[Events]
-    SET [EventCategory]      = @EventCategory,
+    SET [MaximumCapacity] = @MaximumCapacity,
+        [EventCategory]      = @EventCategory,
         [IsChildFriendly]    = @IsChildFriendly,
         [Title]              = @Title,
         [Description]        = @Description,
@@ -98,8 +124,15 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
@@ -119,12 +152,15 @@ BEGIN
 
     -- Result set 4: attendees — names only (+ ticket number), non-cancelled.
     SELECT t.[AttendeeName],
-           t.[TicketNumber]
+           t.[TicketNumber], b.BookingId, t.PaymentStatus,
+           CAST(b.TotalAmount/b.TicketCount AS DECIMAL(18,2)) AS Amount,
+           (SELECT ProfilePhotoUrl FROM [Parent].[PetParents] WHERE PetParentId=b.BookerAccountId) AS ProfileImageUrl
     FROM [Event].[EventBookingTickets] t
     INNER JOIN [Event].[EventBookings] b ON b.[BookingId] = t.[BookingId]
     WHERE t.[EventId] = @EventId
-      AND b.[Status] = N'Confirmed'
+      AND b.[Status] IN (N'Confirmed',N'Attended',N'NoShow')
     ORDER BY b.[CreatedAtUtc] ASC, t.[TicketNumber] ASC;
 
+    IF @MaximumCapacity>@PreviousCapacity EXEC [Event].[NotifyEventWaitlist] @EventId;
     COMMIT TRANSACTION;
 END;

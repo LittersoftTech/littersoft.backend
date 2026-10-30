@@ -15,6 +15,7 @@
          legacy server-key API was shut down in 2024, so a service account is the
          only supported path. -->
     <PackageReference Include="FirebaseAdmin" Version="3.4.0" />
+    <PackageReference Include="Google.Cloud.Firestore" Version="4.4.0" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />

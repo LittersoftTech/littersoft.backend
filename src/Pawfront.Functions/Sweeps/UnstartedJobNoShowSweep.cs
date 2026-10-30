@@ -6,12 +6,14 @@ namespace Pawfront.Functions.Sweeps;
 /// <summary>
 /// BR-38: an accepted job still unstarted once the provider's working day ends
 /// settles as a no-show (single-day), or once the check-in day ends (night-stay).
+/// Started but unfinished single-day jobs become JOB_INCOMPLETE.
 /// </summary>
 internal sealed record NoShowSweepResult(
     int ProviderNoShowBookings,
     int ParentNoShowBookings,
     int ProviderNoShowNightStayBookings,
-    int ParentNoShowNightStayBookings);
+    int ParentNoShowNightStayBookings,
+    int IncompleteBookings);
 
 internal static class UnstartedJobNoShowSweep
 {
@@ -27,6 +29,6 @@ internal static class UnstartedJobNoShowSweep
         await reader.ReadAsync(cancellationToken);
 
         return new NoShowSweepResult(
-            reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3));
+            reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3), reader.GetInt32(4));
     }
 }

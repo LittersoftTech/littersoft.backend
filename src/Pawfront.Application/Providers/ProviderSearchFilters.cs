@@ -128,11 +128,8 @@ public static class ProviderPaymentMethodFilters
 /// Sort keys for the five per-service provider searches.
 /// </summary>
 /// <remarks>
-/// "Distance" is deliberately absent. It needs a reference coordinate the server
-/// does not have — neither the parent's device position nor a decision about
-/// whether their saved address stands in for it — so offering the key before
-/// that lands would mean silently sorting by something other than what the
-/// parent asked for.
+/// Distance is response enrichment only; it does not change ordering. Distance
+/// sorting would need to evaluate every candidate before pagination.
 /// </remarks>
 public enum ProviderSearchSortBy
 {

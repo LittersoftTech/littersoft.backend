@@ -60,27 +60,17 @@ internal sealed class ProviderDailyAgendaService(
         // 3. The weekly schedule frames the day. A closed weekday or an all-day
         //    closure leaves nothing to lay out.
         var weekly = await availabilityService.GetAsync(providerId, cancellationToken);
-        var daySchedule = weekly.Days.FirstOrDefault(d => d.DayOfWeek == (int)date.DayOfWeek);
-
-        if (daySchedule is null
-            || !daySchedule.IsOpen
-            || daySchedule.StartTime is null
-            || daySchedule.EndTime is null
-            || isClosedForDay)
-        {
+        var workingWindows = ProviderWorkingHours.Windows(weekly, date);
+        var outerWindows = ProviderWorkingHours.Windows(weekly, date, includeBreak: true);
+        if (outerWindows.Count == 0 || isClosedForDay)
             return new ProviderDailyAgendaResult(
                 providerId, serviceId, date,
                 offering.ServiceCategory, offering.SubCategory, offering.ServiceType,
-                offering.Capacity,
-                IsOpen: false,
-                IsClosedForDay: isClosedForDay,
-                OpeningTime: daySchedule?.StartTime,
-                ClosingTime: daySchedule?.EndTime,
-                Entries: Array.Empty<AgendaEntry>());
-        }
+                offering.Capacity, IsOpen: false, IsClosedForDay: isClosedForDay,
+                OpeningTime: null, ClosingTime: null, Entries: Array.Empty<AgendaEntry>());
 
-        var openingTime = daySchedule.StartTime.Value;
-        var closingTime = daySchedule.EndTime.Value;
+        var openingTime = outerWindows[0].Start;
+        var closingTime = outerWindows[^1].End;
 
         // 4. Partition the working day. Closures win over the break where they
         //    overlap (being away is the stronger signal), so the blocks the
@@ -93,15 +83,9 @@ internal sealed class ProviderDailyAgendaService(
                 .Where(w => w is not null)
                 .Select(w => w!.Value));
 
-        var breakWindows = daySchedule is { BreakStartTime: not null, BreakEndTime: not null }
-            ? Subtract(
-                Clip((daySchedule.BreakStartTime.Value, daySchedule.BreakEndTime.Value), openingTime, closingTime) is { } b
-                    ? [b]
-                    : [],
-                closedWindows)
-            : [];
-
-        var openWindows = Subtract(Subtract([(openingTime, closingTime)], closedWindows), breakWindows);
+        var breakWindows = Subtract(Subtract(outerWindows, workingWindows), closedWindows);
+        var openWindows = Subtract(workingWindows, closedWindows);
+        var offHours = Subtract([(openingTime, closingTime)], outerWindows);
 
         // 5. Lay out the bookable time, then fold the blocked windows back in so
         //    the timeline reads continuously from opening to closing. Time inside
@@ -118,6 +102,7 @@ internal sealed class ProviderDailyAgendaService(
                 window, bookings, offering.Capacity, callerPetParentId, bookableFrom));
         }
 
+        entries.AddRange(offHours.Select(w => Blocked(w, AgendaEntryType.Closed, AgendaStatuses.Closed)));
         entries.AddRange(closedWindows.Select(w => Blocked(w, AgendaEntryType.Closed, AgendaStatuses.Closed)));
         entries.AddRange(breakWindows.Select(w => Blocked(w, AgendaEntryType.Break, AgendaStatuses.Break)));
         entries.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
@@ -142,13 +127,8 @@ internal sealed class ProviderDailyAgendaService(
         bool isClosedForDay,
         Guid? callerPetParentId)
     {
-        // A stay begins at drop-off on its check-in day, so the whole-day block is
-        // bookable only if that instant clears the lead time. Expressed as a
-        // day-wide "bookable from" so the shared Label stays uniform: DayStart
-        // when the stay is far enough ahead, null when it isn't.
-        var staysFarEnoughAhead = !BookingLeadTime.IsTooSoon(
-            date, offering.DropOffTime ?? TimeOnly.MinValue, DateTimeOffset.UtcNow);
-        TimeOnly? bookableFrom = staysFarEnoughAhead ? DayStart : null;
+        // Match the check-in sending cutoff used by night availability.
+        TimeOnly? bookableFrom = !BookingLeadTime.IsTooSoon(date, offering.DropOffTime ?? TimeOnly.MinValue, DateTimeOffset.UtcNow) ? DayStart : null;
 
         var entries = isClosedForDay
             ? [Blocked((DayStart, DayEnd), AgendaEntryType.Closed, AgendaStatuses.Closed)]

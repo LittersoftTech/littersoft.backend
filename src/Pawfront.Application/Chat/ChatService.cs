@@ -439,7 +439,8 @@ public sealed class ChatService(
                 append.RecipientId,
                 append.ConversationId,
                 append.NotificationDataJson,
-                append.RecipientTokens));
+                append.RecipientTokens,
+                append.RecipientFirebaseUserId));
         }
 
         return new ChatSendResult(stored, append);

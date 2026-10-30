@@ -1,4 +1,6 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
+using Pawfront.Application.Providers;
+using Pawfront.Application.Services.ProviderServiceLocations;
 using Microsoft.Extensions.Logging;
 using Pawfront.Domain.Events;
 
@@ -7,6 +9,8 @@ namespace Pawfront.Application.Events;
 internal sealed class EventService(
     IEventSqlStore sqlStore,
     IEventCosmosStore cosmosStore,
+    IProviderServiceLocationRegistry providerLocations,
+    IProviderDiscoveryService providerDiscovery,
     // Who is reading, so a blocked pair never see each other's events. Null on
     // a host that does not model a caller, which filters nothing.
     ICurrentBlockParty currentBlockParty,
@@ -14,14 +18,16 @@ internal sealed class EventService(
 {
     private static readonly IReadOnlySet<string> AllowedCategories = new HashSet<string>(StringComparer.Ordinal)
     {
-        nameof(EventCategory.AdoptionAndRescue),
-        nameof(EventCategory.PetTraining),
-        nameof(EventCategory.Charity),
-        nameof(EventCategory.Volunteering),
+        nameof(EventCategory.MeetupsAndSocials),
+        nameof(EventCategory.WalksAndOutdoors),
+        nameof(EventCategory.TrainingAndWorkshops),
+        nameof(EventCategory.SportsAndCompetitions),
+        nameof(EventCategory.ShowsAndDemonstrations),
+        nameof(EventCategory.TalksAndLearning),
         nameof(EventCategory.HealthAndWellness),
-        nameof(EventCategory.SocialAndCultural),
-        nameof(EventCategory.OutdoorActivities),
-        nameof(EventCategory.ParentEducation)
+        nameof(EventCategory.AdoptionAndRescue),
+        nameof(EventCategory.CharityAndVolunteering),
+        nameof(EventCategory.Celebrations)
     };
 
     private static readonly IReadOnlySet<string> AllowedEventTypes = new HashSet<string>(StringComparer.Ordinal)
@@ -34,9 +40,16 @@ internal sealed class EventService(
     {
         nameof(EventCancellationPolicy.FullRefundUpTo4Hours),
         nameof(EventCancellationPolicy.FullRefundUpTo2Hours),
+        nameof(EventCancellationPolicy.FullRefundUpTo24Hours),
+        nameof(EventCancellationPolicy.FullRefundUpTo48Hours),
         nameof(EventCancellationPolicy.NoRefund)
     };
 
+    private static void ValidateSchedule(DateOnly startDate, DateOnly endDate, TimeOnly startTime, TimeOnly endTime)
+    {
+        if (EventBookingWindow.StartAtUtc(startDate, startTime) >= EventBookingWindow.StartAtUtc(endDate, endTime))
+            throw new ArgumentException("Event end must be after its start.");
+    }
     private const string PayoutMethodCash = "Cash";
     private const string PayoutMethodDigital = "Digital";
 
@@ -53,6 +66,7 @@ internal sealed class EventService(
 
     public async Task<EventResult> CreateAsync(CreateEventCommand command, CancellationToken cancellationToken)
     {
+        ValidateSchedule(command.StartDate, command.EndDate, command.StartTime, command.EndTime);
         var validated = ValidateForCreate(
             command.EventCategory, command.EventType, command.Amenities,
             command.Title, command.Description, command.StartDate, command.EndDate,
@@ -78,19 +92,20 @@ internal sealed class EventService(
                 validated.IsPaid,
                 validated.Price,
                 validated.CancellationPolicy,
-                validated.EventLink),
+                validated.EventLink, validated.PhysicalInput?.MaximumCapacity),
             cancellationToken);
 
         var physicalResult = await WritePhysicalExtensionAsync(
             snapshot.EventId, validated.Category, validated.PhysicalInput, cancellationToken);
 
-        return ToResult(snapshot, physicalResult);
+        return ToResult(await HydrateOrganizerAsync(snapshot, cancellationToken), physicalResult);
     }
 
     public async Task<EventResult> CreateByParentAsync(
         CreateParentEventCommand command,
         CancellationToken cancellationToken)
     {
+        ValidateSchedule(command.StartDate, command.EndDate, command.StartTime, command.EndTime);
         var validated = ValidateForCreate(
             command.EventCategory, command.EventType, command.Amenities,
             command.Title, command.Description, command.StartDate, command.EndDate,
@@ -113,17 +128,18 @@ internal sealed class EventService(
                 validated.IsPaid,
                 validated.Price,
                 validated.CancellationPolicy,
-                validated.EventLink),
+                validated.EventLink, validated.PhysicalInput?.MaximumCapacity),
             cancellationToken);
 
         var physicalResult = await WritePhysicalExtensionAsync(
             snapshot.EventId, validated.Category, validated.PhysicalInput, cancellationToken);
 
-        return ToResult(snapshot, physicalResult);
+        return ToResult(await HydrateOrganizerAsync(snapshot, cancellationToken), physicalResult);
     }
 
     public async Task<EventResult> UpdateAsync(UpdateEventCommand command, CancellationToken cancellationToken)
     {
+        ValidateSchedule(command.StartDate, command.EndDate, command.StartTime, command.EndTime);
         var validated = ValidateForCreate(
             command.EventCategory, command.EventType, command.Amenities,
             command.Title, command.Description, command.StartDate, command.EndDate,
@@ -151,25 +167,34 @@ internal sealed class EventService(
                 validated.IsPaid,
                 validated.Price,
                 validated.CancellationPolicy,
-                validated.EventLink),
+                validated.EventLink, validated.PhysicalInput?.MaximumCapacity),
             cancellationToken);
 
         var physicalResult = await ReconcilePhysicalAsync(
             previous, snapshot, validated.PhysicalInput, cancellationToken);
 
-        return ToResult(snapshot, physicalResult);
+        return ToResult(await HydrateOrganizerAsync(snapshot, cancellationToken), physicalResult);
     }
 
     public async Task<EventResult> UpdateByParentAsync(
         UpdateParentEventCommand command,
         CancellationToken cancellationToken)
     {
+        ValidateSchedule(command.StartDate, command.EndDate, command.StartTime, command.EndTime);
         var validated = ValidateForCreate(
             command.EventCategory, command.EventType, command.Amenities,
             command.Title, command.Description, command.StartDate, command.EndDate,
             command.IsPaid, command.Price, command.CancellationPolicy, command.EventLink, command.Physical);
 
         var previous = await sqlStore.GetAsync(command.EventId, cancellationToken);
+
+        if (previous is not null && command.Physical is not null)
+        {
+            var existingPhysical = await cosmosStore.GetPhysicalAsync(command.EventId, previous.EventCategory, cancellationToken);
+            if (existingPhysical?.Location is { } location && command.Physical.Location != new EventLocationInput(
+                location.HouseNumber, location.Street, location.City, location.Zip, location.Country, location.Latitude, location.Longitude))
+                throw new ArgumentException("The venue of a posted event cannot be changed.");
+        }
 
         var snapshot = await sqlStore.UpdateByParentAsync(
             new UpdateParentEventSqlInput(
@@ -189,13 +214,13 @@ internal sealed class EventService(
                 validated.IsPaid,
                 validated.Price,
                 validated.CancellationPolicy,
-                validated.EventLink),
+                validated.EventLink, validated.PhysicalInput?.MaximumCapacity),
             cancellationToken);
 
         var physicalResult = await ReconcilePhysicalAsync(
             previous, snapshot, validated.PhysicalInput, cancellationToken);
 
-        return ToResult(snapshot, physicalResult);
+        return ToResult(await HydrateOrganizerAsync(snapshot, cancellationToken), physicalResult);
     }
 
     /// <summary>
@@ -370,7 +395,7 @@ internal sealed class EventService(
         var organizerTotalEvents = await sqlStore.CountEventsByOrganizerAsync(
             snapshot.ProviderId, snapshot.PetParentId, cancellationToken);
 
-        return ToResult(snapshot, physical, organizerTotalEvents);
+        return ToResult(await HydrateOrganizerAsync(snapshot, cancellationToken), physical, organizerTotalEvents);
     }
 
     public async Task<IReadOnlyCollection<EventResult>> ListByProviderAsync(
@@ -381,7 +406,7 @@ internal sealed class EventService(
         // Hydrate the Cosmos physical extension so each card carries the
         // venue location + "max bookings" (capacity). Total bookings comes
         // from SQL (result set 1).
-        return await HydratePhysicalAsync(snapshots, cancellationToken);
+        return await HydrateEventsAsync(snapshots, cancellationToken);
     }
 
     public async Task<IReadOnlyCollection<EventResult>> ListByPetParentAsync(
@@ -392,7 +417,7 @@ internal sealed class EventService(
         // Hydrate the Cosmos physical extension so each card carries the
         // venue location + "max bookings" (capacity). Total bookings comes
         // from SQL (result set 1).
-        return await HydratePhysicalAsync(snapshots, cancellationToken);
+        return await HydrateEventsAsync(snapshots, cancellationToken);
     }
 
     public async Task<IReadOnlyCollection<EventResult>> ListAsync(
@@ -406,7 +431,7 @@ internal sealed class EventService(
         // (capacity) for physical events, so hydrate the Cosmos extension here —
         // one point read per physical event, fanned out in parallel. Online
         // events have no Cosmos doc and are returned as-is.
-        var hydrated = await HydratePhysicalAsync(snapshots, cancellationToken);
+        var hydrated = await HydrateEventsAsync(snapshots, cancellationToken);
 
         // The venue city and the seat count only exist once the Cosmos extension
         // has been read, so these two run here rather than in the query. Every
@@ -427,7 +452,7 @@ internal sealed class EventService(
         // Same as the catalog list: hydrate the Cosmos physical extension (venue
         // location + "max bookings") for physical events; online events are
         // returned as-is. The trending order from SQL is preserved.
-        return await HydratePhysicalAsync(snapshots, cancellationToken);
+        return await HydrateEventsAsync(snapshots, cancellationToken);
     }
 
     /// <summary>
@@ -457,18 +482,26 @@ internal sealed class EventService(
     }
 
     /// <summary>
-    /// Maps SQL snapshots to results, hydrating the Cosmos physical extension
-    /// (capacity + venue location) for physical events via parallel point
-    /// reads. A Cosmos read failure for a single event is logged and that event
+    /// Maps SQL snapshots to results with live provider host photos and the
+    /// Cosmos physical extension (capacity + venue location). Provider lookups
+    /// are shared within this response. A physical read failure is logged and that event
     /// is returned without physical details rather than failing the whole list.
     /// Result order matches the input order.
     /// </summary>
-    private async Task<IReadOnlyCollection<EventResult>> HydratePhysicalAsync(
+    private async Task<IReadOnlyCollection<EventResult>> HydrateEventsAsync(
         IReadOnlyCollection<EventSqlSnapshot> snapshots,
         CancellationToken cancellationToken)
     {
+        // Scope reuse to this response so a later request always sees profile edits.
+        var hostPhotos = snapshots.Where(s => s.ProviderId.HasValue)
+            .Select(s => s.ProviderId!.Value).Distinct()
+            .ToDictionary(id => id, id => ReadProviderPhotoAsync(id, cancellationToken));
+
         var tasks = snapshots.Select(async snapshot =>
         {
+            if (snapshot.ProviderId is { } providerId)
+                snapshot = snapshot with { OrganizerImageUrl = await hostPhotos[providerId] };
+
             if (!string.Equals(snapshot.EventType, nameof(EventType.Physical), StringComparison.Ordinal))
             {
                 return ToResult(snapshot, physical: null);
@@ -492,6 +525,35 @@ internal sealed class EventService(
         });
 
         return await Task.WhenAll(tasks);
+    }
+
+    private async Task<EventSqlSnapshot> HydrateOrganizerAsync(
+        EventSqlSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        return snapshot.ProviderId is { } providerId
+            ? snapshot with { OrganizerImageUrl = await ReadProviderPhotoAsync(providerId, cancellationToken) }
+            : snapshot;
+    }
+
+    private async Task<string?> ReadProviderPhotoAsync(Guid providerId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var registration = await providerLocations.GetByProviderIdAsync(providerId, cancellationToken);
+            if (registration is null) return null;
+            var summary = await providerDiscovery.GetSummaryAsync(
+                providerId, registration.ServiceCategory, cancellationToken);
+            return summary?.ImageUrl;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to read profile photo for event organizer {ProviderId}.", providerId);
+            return null;
+        }
     }
 
     private static EventListFilter ValidateFilter(EventListFilter filter)
@@ -564,13 +626,14 @@ internal sealed class EventService(
             filter.SortDirection);
     }
 
-    public Task<EventCounters> IncrementCounterAsync(
+    public async Task<EventCounters> IncrementCounterAsync(
         Guid eventId,
         string counterType,
         CancellationToken cancellationToken)
     {
         var normalised = NormaliseCounterType(counterType);
-        return sqlStore.IncrementCounterAsync(eventId, normalised, cancellationToken);
+        return await sqlStore.IncrementCounterAsync(eventId, normalised, cancellationToken,
+            normalised == EventCounterType.View ? await currentBlockParty.GetAsync(cancellationToken) : null);
     }
 
     public async Task<EventPayoutMethodsResult> SavePayoutMethodsAsync(
@@ -668,14 +731,14 @@ internal sealed class EventService(
             snapshot.Price,
             snapshot.CancellationPolicy,
             snapshot.EventLink,
-            physical,
+            physical is not null && snapshot.MaximumCapacity is int cap ? physical with { MaximumCapacity = cap } : physical,
             snapshot.CreatedAtUtc,
             snapshot.UpdatedAtUtc,
             snapshot.Counters,
             BuildOrganizer(snapshot, organizerTotalEvents),
             snapshot.TotalBookings,
             snapshot.PaymentOptions,
-            snapshot.Attendees);
+            snapshot.Attendees, snapshot.EventStatus, snapshot.AttendedCount, snapshot.EarnedAmount, snapshot.EventsCancelledCount, snapshot.MaximumCapacity);
     }
 
     /// <summary>
@@ -688,13 +751,13 @@ internal sealed class EventService(
     {
         return snapshot.ProviderId is Guid providerId
             ? new EventOrganizer(
-                "Provider", providerId, snapshot.OrganizerName, snapshot.OrganizerImageUrl, totalEventsOrganized)
+                "Provider", providerId, snapshot.OrganizerName, snapshot.OrganizerImageUrl, totalEventsOrganized, snapshot.EventsCancelledCount)
             : new EventOrganizer(
                 "PetParent",
                 snapshot.PetParentId ?? Guid.Empty,
                 snapshot.OrganizerName,
                 snapshot.OrganizerImageUrl,
-                totalEventsOrganized);
+                totalEventsOrganized, snapshot.EventsCancelledCount);
     }
 
     private static (bool IsPaid, decimal? Price) ValidateTicketing(bool isPaid, decimal? price)

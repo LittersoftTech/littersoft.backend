@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using System.Security.Claims;
 using Pawfront.Api.Auth;
 using Pawfront.Application.Events;
@@ -75,10 +75,12 @@ internal static class EventBookingEndpoints
             summary.PaymentStatus,
             summary.PaymentReference,
             summary.TotalAmount,
-            summary.Status,
+            summary.Status == "EventCancelled" ? "host_cancelled" : summary.Status,
             summary.CreatedAtUtc,
             summary.UpdatedAtUtc,
-            summary.CancelledAtUtc);
+            summary.CancelledAtUtc,
+            new EventBookingStatsResponse(summary.MaxBookings, summary.TotalBookings),
+            EventBookingWindow.CloseAtUtc(summary.EventStartDate, summary.EventStartTime));
 
     private static async Task<IResult> Create(
         Guid eventId,
@@ -100,11 +102,11 @@ internal static class EventBookingEndpoints
                 new CreateEventBookingCommand(
                     eventId,
                     request.BookerName,
-                    request.BookerEmail,
+                    httpContext.User.FindFirstValue("email") ?? throw new ArgumentException("Email claim is required."),
                     request.BookerMobile,
                     request.AttendeeNames,
                     request.PaymentMethod,
-                    callerProviderId),
+                    callerProviderId, "Provider"),
                 cancellationToken);
 
             return ApiResults.Created($"/api/v1/event-bookings/{result.BookingId}", ToResponse(result));
@@ -132,6 +134,10 @@ internal static class EventBookingEndpoints
         catch (EventBookingOnlineSingleTicketException exception)
         {
             return ApiResults.BadRequest("OnlineEventSingleTicket", exception.Message);
+        }
+        catch (EventBookingsClosedException exception)
+        {
+            return Results.Json(new { code = "BookingsClosed", message = exception.Message }, statusCode: 409);
         }
         catch (EventBookingCapacityExceededException exception)
         {
@@ -165,11 +171,12 @@ internal static class EventBookingEndpoints
 
     private static async Task<IResult> GetById(
         Guid bookingId,
+        HttpContext httpContext,
         IEventBookingService bookingService,
         CancellationToken cancellationToken)
     {
         var result = await bookingService.GetAsync(bookingId, cancellationToken);
-        return result is null
+        return result is null || !string.Equals(result.BookerEmail, httpContext.User.FindFirstValue("email"), StringComparison.OrdinalIgnoreCase)
             ? ApiResults.NotFound("EventBookingNotFound", $"Event booking '{bookingId}' was not found.")
             : ApiResults.Ok(ToResponse(result));
     }
@@ -249,7 +256,7 @@ internal static class EventBookingEndpoints
         var tickets = new List<EventBookingTicketResponse>(result.Tickets.Count);
         foreach (var ticket in result.Tickets)
         {
-            tickets.Add(new EventBookingTicketResponse(ticket.TicketId, ticket.TicketNumber, ticket.AttendeeName));
+            tickets.Add(new EventBookingTicketResponse(ticket.TicketId, ticket.TicketNumber, ticket.AttendeeName, ticket.PaymentStatus, ticket.Amount));
         }
 
         return new EventBookingResponse(
@@ -263,10 +270,10 @@ internal static class EventBookingEndpoints
             result.PaymentStatus,
             result.PaymentReference,
             result.TotalAmount,
-            result.Status,
+            result.Status == "EventCancelled" ? "host_cancelled" : result.Status,
             tickets,
             result.CreatedAtUtc,
             result.UpdatedAtUtc,
-            result.CancelledAtUtc);
+            result.CancelledAtUtc, result.ConsecutiveNegativeMarks, result.HasReported);
     }
 }

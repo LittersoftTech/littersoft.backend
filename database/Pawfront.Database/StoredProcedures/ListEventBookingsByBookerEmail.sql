@@ -1,5 +1,5 @@
 CREATE OR ALTER PROCEDURE [Event].[ListEventBookingsByBookerEmail]
-    @BookerEmail NVARCHAR(320)
+    @BookerEmail NVARCHAR(320), @BookerAccountId UNIQUEIDENTIFIER=NULL, @BookerType NVARCHAR(16)=NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -27,13 +27,16 @@ BEGIN
            b.[CreatedAtUtc],
            b.[UpdatedAtUtc],
            b.[CancelledAtUtc],
-           -- EventType lets the app decide whether to hydrate the Cosmos venue
-           -- location (physical events only). Appended last so existing ordinals
-           -- don't shift.
-           e.[EventType]        AS [EventType]
+           -- EventType and aggregate counts follow the existing booking columns
+           -- so their reader ordinals do not shift.
+           e.[EventType]        AS [EventType],
+           (SELECT ISNULL(SUM(eb.TicketCount),0) FROM [Event].[EventBookings] eb
+            WHERE eb.EventId=e.EventId AND eb.Status IN (N'Confirmed',N'Attended')) AS TotalBookings,
+           CASE WHEN e.EventType=N'Online' THEN NULL ELSE e.MaximumCapacity END AS MaxBookings
     FROM [Event].[EventBookings] AS b
     INNER JOIN [Event].[Events] AS e
         ON e.[EventId] = b.[EventId]
     WHERE b.[BookerEmail] = @BookerEmail
+      AND (@BookerAccountId IS NULL OR (b.BookerAccountId=@BookerAccountId AND b.BookerType=@BookerType))
     ORDER BY b.[CreatedAtUtc] DESC;
 END;

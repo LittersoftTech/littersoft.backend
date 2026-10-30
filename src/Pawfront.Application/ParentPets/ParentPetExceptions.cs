@@ -23,3 +23,5 @@ public sealed class UnsupportedSterilizationStatusException(string sterilization
 
 public sealed class UnsupportedTemperamentException(string temperament)
     : Exception($"Temperament '{temperament}' is not supported.");
+
+public sealed class PetPhotoLimitReachedException() : Exception("A pet can have at most 12 photos.");

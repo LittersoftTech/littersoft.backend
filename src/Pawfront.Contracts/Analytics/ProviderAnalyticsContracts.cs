@@ -135,7 +135,14 @@ public sealed record ProviderServiceViewerResponse(
     string? PetGender,
     int ViewCount,
     DateTimeOffset FirstViewedAtUtc,
-    DateTimeOffset LastViewedAtUtc);
+    DateTimeOffset LastViewedAtUtc) : Pawfront.Contracts.Badges.IParentBadgeTarget, Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+}
 
 /// <summary>
 /// <c>GET /providers/{providerId}/analytics/views/viewers</c> — level three.

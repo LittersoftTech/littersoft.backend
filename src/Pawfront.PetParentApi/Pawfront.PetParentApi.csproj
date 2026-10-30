@@ -14,6 +14,7 @@
     <ProjectReference Include="..\Pawfront.Infrastructure.Cosmos\Pawfront.Infrastructure.Cosmos.csproj" />
     <ProjectReference Include="..\Pawfront.Infrastructure.Sql\Pawfront.Infrastructure.Sql.csproj" />
     <ProjectReference Include="..\Pawfront.Infrastructure.Azure\Pawfront.Infrastructure.Azure.csproj" />
+    <ProjectReference Include="..\Pawfront.Infrastructure.Firebase\Pawfront.Infrastructure.Firebase.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -26,6 +27,7 @@
     <PackageReference Include="OpenTelemetry.Exporter.Console" Version="1.15.3" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.15.1" />
     <PackageReference Include="OpenTelemetry.Instrumentation.SqlClient" Version="1.15.2" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
   </ItemGroup>
 
 </Project>

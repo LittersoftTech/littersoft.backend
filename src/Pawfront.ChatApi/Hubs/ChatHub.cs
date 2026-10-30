@@ -27,6 +27,7 @@ internal sealed class ChatHub(
     IChatParticipantResolver participantResolver,
     IChatService chatService,
     IChatPresenceStore presenceStore,
+    Pawfront.Application.Badges.IBadgeReader badgeReader,
     ILogger<ChatHub> logger) : Hub
 {
     private const string ParticipantItemKey = "pawfront.chat.participant";
@@ -105,7 +106,9 @@ internal sealed class ChatHub(
         await presenceStore.SetActiveConversationAsync(
             Context.ConnectionId, me, conversationId, Context.ConnectionAborted);
 
-        return ChatMapping.ToResponse(detail);
+        var response = ChatMapping.ToResponse(detail);
+        await Pawfront.Application.Badges.BadgeResponseEnricher.EnrichAsync(response, badgeReader, Context.ConnectionAborted);
+        return response;
     }
 
     /// <summary>

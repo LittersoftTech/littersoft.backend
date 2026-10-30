@@ -89,6 +89,8 @@ public sealed record UpdatePetParentProfileRequest(
     // CompletePetParentProfileRequest for why it carries a default).
     string? Description = null);
 
+public sealed record UpdatePetParentMobileRequest(string MobileCountryCode, string MobileNumber);
+
 /// <summary>
 /// Full profile read-back returned by <c>GET /pet-parents/{petParentId}/profile</c>
 /// and by the profile edit. Email + IsEmailVerified come from the linked
@@ -113,7 +115,12 @@ public sealed record PetParentProfileDetailsResponse(
     string? ProfilePhotoUrl,
     DateTimeOffset? MobileVerifiedAtUtc,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    Pawfront.Contracts.Reliability.ReliabilityResponse? Reliability = null) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>
 /// Response for <c>GET /api/v1/parent-onboarding/me</c>. Resolves the
@@ -195,7 +202,8 @@ public sealed record PendingParentJobResponse(
     string? PetName,
     Guid ServiceId,
     string? ServiceItemCode,
-    PendingJobPriceResponse Price);
+    PendingJobPriceResponse Price,
+    DateTimeOffset? CashNotReceivedAtUtc = null);
 
 /// <summary>
 /// What a pending job costs, in the same shape and by the same arithmetic as the
@@ -352,7 +360,9 @@ public sealed record UpsertPetParentIdentityResponse(
     string IdentityType,
     string IdentityPhotoUrl,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    string Status = "InReview",
+    string? RejectionReason = null);
 
 /// <summary>
 /// Full identity record returned by
@@ -366,12 +376,14 @@ public sealed record PetParentIdentityResponse(
     string IdentityType,
     string IdentityPhotoUrl,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    string Status = "InReview",
+    string? RejectionReason = null);
 
 /// <summary>
 /// Result of <c>DELETE /api/v1/pet-parents/{petParentId}/identity</c>. The
-/// onboarding-status identity stage reverts to Remaining (and
-/// isFullyOnboarded to false) until a new document is uploaded.
+/// identity stage reverts to Remaining. Identity is optional and does not
+/// affect isFullyOnboarded.
 /// </summary>
 public sealed record DeletePetParentIdentityResponse(
     Guid ParentIdentityId,
@@ -382,3 +394,6 @@ public sealed record DeletePetParentIdentityResponse(
     // cached copy.
     string IdentityPhotoUrl,
     DateTimeOffset DeletedAtUtc);
+
+public sealed record ReviewParentIdentityRequest(string Decision, DateTimeOffset ExpectedUpdatedAtUtc, string? RejectionReason = null);
+public sealed record ParentIdentityReviewItem(PetParentIdentityResponse Identity, string FirstName, string LastName);

@@ -44,7 +44,7 @@ public interface IParentBookingEnrichmentService
 /// "not reviewable".
 /// </para>
 /// <para>
-/// A booking is reviewable once it reaches COMPLETED or PAID — PAID sits
+/// A booking is reviewable once it reaches COMPLETED, PAYMENT_NOT_RECEIVED or PAID — PAID sits
 /// downstream of COMPLETED, so gating on COMPLETED alone would close the window
 /// the moment the provider recorded payment. Custom walk-ins can never be
 /// reviewed, though none appear on a parent's list (they have no PetParentId).
@@ -224,7 +224,7 @@ internal sealed class ParentBookingEnrichmentService(
 
         var isReviewable =
             string.Equals(source, "App", StringComparison.OrdinalIgnoreCase)
-            && status is "COMPLETED" or "PAID";
+            && status is BookingStatuses.Completed or BookingStatuses.PaymentNotReceived or BookingStatuses.Paid;
 
         return isReviewable
             ? new ParentBookingReviewState(CanReview: true, Rating: null)

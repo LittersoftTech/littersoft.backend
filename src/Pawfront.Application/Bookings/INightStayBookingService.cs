@@ -73,10 +73,10 @@ public interface INightStayBookingService
 
     /// <summary>Provider completes the job: IN_PROGRESS → COMPLETED (no OTP).</summary>
     Task<NightStayBookingResult> CompleteAsync(
-        Guid bookingId, Guid providerId, CancellationToken cancellationToken);
+        Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false);
 
     /// <summary>
-    /// Records that the parent has paid the provider for a stay (COMPLETED → PAID)
+    /// Records that the parent has paid the provider for a stay (COMPLETED or PAYMENT_NOT_RECEIVED → PAID)
     /// and writes the payment ledger row. The amount is the stay's price-locked
     /// total. Throws <see cref="NightStayBookingNotFoundException"/>,
     /// <see cref="BookingStatusForbiddenException"/>,

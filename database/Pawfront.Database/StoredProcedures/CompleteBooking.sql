@@ -15,7 +15,8 @@
 -- completed).
 CREATE OR ALTER PROCEDURE [Booking].[CompleteBooking]
     @BookingId UNIQUEIDENTIFIER,
-    @ProviderId UNIQUEIDENTIFIER
+    @ProviderId UNIQUEIDENTIFIER,
+    @CustomerArrivedForCollection BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -48,10 +49,15 @@ BEGIN
         THROW 51132, 'You are not the provider on this booking.', 1;
     END
 
-    IF @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING')
+    IF @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING', N'JOB_INCOMPLETE')
     BEGIN
         THROW 51133, 'Booking is not in a state the job can be completed from.', 1;
     END
+
+    -- P-U12 describes photo-evidenced hand-over; old body-less completion uses P-U11.
+    IF @CustomerArrivedForCollection = 1 AND NOT EXISTS (
+        SELECT 1 FROM [Booking].[BookingEvidence] WHERE [BookingId] = @BookingId)
+        THROW 51133, 'Upload hand-over evidence before completing with the customer present.', 1;
 
     -- Mint the payout reference. Custom walk-ins are deliberately left unstamped:
     -- they are arranged off-platform, carry no Pawfront commission, and can never
@@ -96,7 +102,7 @@ BEGIN
     END
 
     -- [PayoutStatus] is not touched: it defaults to 'Pending' at insert and the
-    -- IN_PROGRESS from-state guarantees nothing has moved it since.
+    -- IN_PROGRESS / JOB_INCOMPLETE from-states guarantee nothing has moved it since.
     UPDATE [Booking].[Bookings]
     SET [Status] = N'COMPLETED',
         [UpdatedAtUtc] = @Now,
@@ -111,11 +117,13 @@ BEGIN
 
     -- The provider completed it, so only the parent is told — and the copy asks
     -- for the cash, since payment is always still pending at this point.
+    DECLARE @CompletionScenario NVARCHAR(32) = CASE WHEN @CustomerArrivedForCollection=1 THEN N'HandOver' ELSE N'AwaitingCollection' END;
     EXEC [Notification].[EnqueueBookingNotification]
         @BookingId = @BookingId,
         @IsNightStay = 0,
         @Audience = N'PetParent',
-        @NotificationType = N'BOOKING_COMPLETED';
+        @NotificationType = N'BOOKING_COMPLETED',
+        @CompletionScenario = @CompletionScenario;
 
     SELECT [BookingId],
            [ProviderId],
@@ -141,7 +149,17 @@ BEGIN
            [CustomerLocation],
            [PricePerHour],
            [JobNotes],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] mh WHERE mh.[BookingId] = [Booking].[Bookings].[BookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[Bookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[Bookings].[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], NULL, NULL)
+           WHEN [Booking].[Bookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], m.[ProposedBookingDate], m.[ProposedStartTime])
+                FROM [Booking].[BookingModifications] m WHERE m.[BookingId] = [Booking].[Bookings].[BookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'SingleDay' AND pay.[BookingId]=[Booking].[Bookings].[BookingId]) AS [PaidAtUtc]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

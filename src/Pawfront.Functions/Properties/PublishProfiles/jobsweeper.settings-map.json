@@ -1,0 +1,41 @@
+{
+  "subscription": "2c1457ae-3e88-4e2a-b104-b5e4a1fa8780",
+  "resourceGroup": "LittersoftRG",
+  "functionApp": "jobsweeper",
+  "vaultUri": "https://littersoft.vault.azure.net/",
+  "values": {
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "FUNCTIONS_EXTENSION_VERSION": "~4",
+    "AZURE_FUNCTIONS_ENVIRONMENT": "Production",
+    "AzureKeyVault__Enabled": "true",
+    "AzureKeyVault__VaultUri": "https://littersoft.vault.azure.net/",
+    "InvoiceQueue__QueueName": "invoice-generation",
+    "BlobStorage__InvoiceContainer": "invoices",
+    "Cosmos__Endpoint": "https://littersoft-cosmos.documents.azure.com:443/",
+    "Notifications__Provider__CredentialsFilePath": "",
+    "Notifications__PetParent__CredentialsFilePath": "",
+    "AzureWebJobs.InvoiceGenerationFunction.Disabled": "false",
+    "AzureWebJobs.InvoiceSweepFunction.Disabled": "false"
+  },
+  "keyVaultReferences": {
+    "ConnectionStrings__SqlServer": "SQLKey",
+    "InvoiceStorage": "BlobStorageKey",
+    "InvoiceQueue__ConnectionString": "BlobStorageKey",
+    "BlobStorage__ConnectionString": "BlobStorageKey",
+    "Cosmos__Key": "CosmosKey"
+  },
+  "copySections": ["Payments", "Invoicing", "Notifications"],
+  "copyPaths": [
+    "AzureKeyVault:Secrets:SqlConnectionString",
+    "AzureKeyVault:Secrets:CosmosKey",
+    "AzureKeyVault:Secrets:BlobStorageKey",
+    "BlobStorage:Container",
+    "Cosmos:DatabaseName",
+    "Cosmos:Containers:ProviderServices",
+    "Notifications:Provider:ProjectId",
+    "Notifications:Provider:CredentialsSecretName",
+    "Notifications:PetParent:ProjectId",
+    "Notifications:PetParent:CredentialsSecretName"
+  ],
+  "preserveRequiredRemoteSettings": ["AzureWebJobsStorage"]
+}

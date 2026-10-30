@@ -28,6 +28,10 @@ CREATE TABLE [Booking].[Bookings]
     [BookingDate] DATE NOT NULL,
     [StartTime] TIME(0) NOT NULL,
     [EndTime] TIME(0) NOT NULL,
+    -- Accepted working day, in UTC (including local-date/DST conversion).
+    -- NULL only for requests, Custom walk-ins and legacy rows awaiting capture.
+    [WorkingHoursOpensAtUtc] DATETIME2(7) NULL,
+    [WorkingHoursClosesAtUtc] DATETIME2(7) NULL,
     -- When the job actually finished, if it finished EARLY. Stamped by
     -- [Booking].[CompleteBooking] and left NULL whenever the booked window ran
     -- its course (completed at/after [EndTime], or on a later date), so NULL
@@ -91,6 +95,8 @@ CREATE TABLE [Booking].[Bookings]
     -- which are exactly the outcomes where nobody performed and nobody owes. It
     -- exists because 'Pending' read as "the money is on its way" on a job that
     -- was never going to produce any, and both apps had to special-case it.
+    [CashNotReceivedAtUtc] DATETIME2(7) NULL,
+    [CancellationReason] NVARCHAR(64) NULL,
     [PayoutStatus] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_Bookings_PayoutStatus] DEFAULT N'Pending',
     [PayoutId] NVARCHAR(64) NULL,
@@ -170,13 +176,13 @@ CREATE TABLE [Booking].[Bookings]
     CONSTRAINT [CK_Bookings_Status]
         CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED',
                             N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED',
-                            N'COMPLETED', N'PAID', N'APPROVAL_NEEDED',
+                            N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'APPROVAL_NEEDED',
                             N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER',
                             N'PROVIDER_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
                             N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                             N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                             N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                            N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
+                            N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
     CONSTRAINT [CK_Bookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))

@@ -24,9 +24,9 @@ public sealed record RegisterFreelancePetSitterCommand(
 
 public sealed record SavePetHotelOfferingCommand(
     Guid ProviderId,
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     BoardingOfferingInput? DayCare,
     BoardingOfferingInput? NightStay,
     IReadOnlyCollection<string> AnimalsHandled,
@@ -37,9 +37,9 @@ public sealed record SavePetHotelOfferingCommand(
 
 public sealed record SaveFreelancePetSitterOfferingCommand(
     Guid ProviderId,
-    string LicenseNumber,
-    string LicenseType,
-    string LicenseImageUrl,
+    string? LicenseNumber,
+    string? LicenseType,
+    string? LicenseImageUrl,
     BoardingOfferingInput? DayCare,
     BoardingOfferingInput? NightStay,
     IReadOnlyCollection<string> AnimalsHandled,
@@ -53,8 +53,9 @@ public sealed record BoardingOfferingInput(
     IReadOnlyCollection<string> AddOns,
     int MinimumBookingHours,
     decimal LatePickupCharges,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime);
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
+    bool? HasFixedTimes = null);
 
 public sealed record PetSitterServiceResult(
     Guid ProviderId,
@@ -103,8 +104,9 @@ public sealed record BoardingOfferingResult(
     IReadOnlyCollection<string> AddOns,
     int MinimumBookingHours,
     decimal LatePickupCharges,
-    TimeOnly DropOffTime,
-    TimeOnly PickUpTime);
+    TimeOnly? DropOffTime,
+    TimeOnly? PickUpTime,
+    bool HasFixedTimes);
 
 public sealed class PetHotelNotRegisteredException(Guid providerId)
     : Exception($"Pet Hotel registration was not found for provider '{providerId}'. Complete the basic Pet Hotel registration first.");

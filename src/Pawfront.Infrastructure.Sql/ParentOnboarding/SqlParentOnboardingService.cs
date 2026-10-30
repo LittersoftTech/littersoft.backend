@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using System.Globalization;
 using System.Security.Cryptography;
 using Microsoft.Data.SqlClient;
@@ -48,14 +48,17 @@ internal sealed class SqlParentOnboardingService(
         command.Parameters.AddWithValue("@DeviceId", DbValue(TrimOrNull(commandInput.DeviceId)));
         command.Parameters.AddWithValue("@DevicePlatform", DbValue(NormalizeDevicePlatformOrNull(commandInput.DevicePlatform)));
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-
-        if (!await reader.ReadAsync(cancellationToken))
+        try
         {
-            throw new InvalidOperationException("Parent auth identity was not returned after save.");
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                throw new InvalidOperationException("Parent auth identity was not returned after save.");
+            return ReadAuthIdentity(reader);
         }
-
-        return ReadAuthIdentity(reader);
+        catch (SqlException exception) when (exception.Number == 51981)
+        {
+            throw new Pawfront.Application.Onboarding.EmailAlreadyExistsException();
+        }
     }
 
     public async Task<PetParentProfileResponse> CompletePetParentProfileAsync(
@@ -192,6 +195,42 @@ internal sealed class SqlParentOnboardingService(
         }
 
         return ReadPetParentProfileDetails(reader);
+    }
+
+    public async Task<PetParentProfileDetailsResponse> UpdateMobileAsync(
+        Guid petParentId,
+        UpdatePetParentMobileRequest request,
+        CancellationToken cancellationToken)
+    {
+        var countryCode = Required(request.MobileCountryCode, nameof(request.MobileCountryCode));
+        var mobileNumber = Required(request.MobileNumber, nameof(request.MobileNumber));
+        await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
+        await connection.OpenAsync(cancellationToken);
+        await using var command = CreateStoredProcedureCommand(connection, "Parent.UpdatePetParentMobile");
+        command.Parameters.AddWithValue("@PetParentId", petParentId);
+        command.Parameters.AddWithValue("@MobileCountryCode", countryCode);
+        command.Parameters.AddWithValue("@MobileNumber", mobileNumber);
+
+        try
+        {
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                throw new InvalidOperationException("Pet parent mobile update result was not returned.");
+            return ReadPetParentProfileDetails(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51208)
+        {
+            throw new PetParentNotFoundException(petParentId);
+        }
+        catch (SqlException exception) when (exception.Number == 51224)
+        {
+            throw new PetParentAccountDeletedException(petParentId);
+        }
+        catch (SqlException exception) when (exception.Number == 51222 ||
+            (exception.Number is 2601 or 2627 && exception.Message.Contains(MobileNumberIndexName, StringComparison.Ordinal)))
+        {
+            throw new PetParentMobileNumberAlreadyExistsException(countryCode, mobileNumber);
+        }
     }
 
     public async Task<PetParentProfileDetailsResponse> UpdateProfileAsync(
@@ -563,7 +602,9 @@ internal sealed class SqlParentOnboardingService(
                 reader.GetString(2),
                 reader.GetString(3),
                 new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero),
-                new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero));
+                new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero),
+                reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7));
         }
         catch (SqlException exception) when (exception.Number == 51206)
         {
@@ -598,7 +639,9 @@ internal sealed class SqlParentOnboardingService(
             reader.GetString(2),
             reader.GetString(3),
             new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero),
-            new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero));
+            new DateTimeOffset(reader.GetDateTime(5), TimeSpan.Zero),
+                reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7));
     }
 
     public async Task<DeletePetParentIdentityResponse> DeleteIdentityAsync(
@@ -676,6 +719,7 @@ internal sealed class SqlParentOnboardingService(
             "DriverLicense" => "DriverLicense",
             "NationalId" => "NationalId",
             "ResidencePermit" => "ResidencePermit",
+            "Other" => "Other",
             var unsupported => throw new UnsupportedPetParentIdentityTypeException(unsupported)
         };
     }

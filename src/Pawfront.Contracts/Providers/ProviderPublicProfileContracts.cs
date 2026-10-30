@@ -75,7 +75,11 @@ public sealed record ProviderPublicProfileResponse(
     PetGroomerServiceResponse? PetGroomer,
     PetTrainerServiceResponse? PetTrainer,
     PetAdoptionSaleServiceResponse? PetAdoptionSale,
-    VetServiceResponse? Vet);
+    VetServiceResponse? Vet,
+    Pawfront.Contracts.Reliability.ReliabilityResponse? Reliability = null)
+{
+    public string? Badge { get; set; }
+}
 
 
 public sealed record ProviderWorkingHoursDayResponse(
@@ -126,7 +130,9 @@ public sealed record ProviderSummaryResponse(
     // section, not a filter: a parent whose dog is aggressive would otherwise see
     // a near-empty list with no explanation, and the provider they could still
     // ring up would simply have vanished.
-    bool? MatchesPetTemperament = null);
+    bool? MatchesPetTemperament = null,
+    double? Distance = null,
+    string DistanceUnit = "km");
 
 /// <summary>
 /// Per-provider hit returned by the four per-service booking-search
@@ -182,4 +188,9 @@ public sealed record ProviderSearchResultResponse(
     // section, not a filter: a parent whose dog is aggressive would otherwise see
     // a near-empty list with no explanation, and the provider they could still
     // ring up would simply have vanished.
-    bool? MatchesPetTemperament = null);
+    bool? MatchesPetTemperament = null,
+    double? Distance = null,
+    string DistanceUnit = "km")
+{
+    public string? Badge { get; set; }
+}

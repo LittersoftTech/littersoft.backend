@@ -180,7 +180,14 @@ public sealed record BookingResult(
     // placeholder here instead of leaving real personal data in a list.
     string? Breed = null,
     string? PetGender = null,
-    string? CustomerPhotoUrl = null);
+    string? CustomerPhotoUrl = null,
+    // Shared dispute display marker, populated after booking mutations.
+    bool IsDisputeRaised = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    DateTimeOffset? PaidAtUtc = null);
 
 /// <summary>
 /// One row of the parent's "my bookings" list: the flat booking plus the
@@ -327,7 +334,13 @@ public sealed record BookingDetailRow(
     // trail, not from Booking.BookingModifications: that table is a staging area
     // holding only the OPEN proposal, and its row is deleted on accept and on
     // decline alike, so after the fact it can say nothing about what happened.
-    bool IsModificationDone = false);
+    bool IsModificationDone = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    bool IsParentModificationDone = false,
+    bool IsProviderModificationDone = false);
 
 /// <summary>
 /// Fully resolved booking-detail view: the raw <see cref="Row"/> plus the friendly
@@ -433,7 +446,7 @@ public sealed record BookingPaymentResult(
     string PaymentMethod,
     DateTimeOffset PaidAtUtc);
 
-/// <summary>The booking can't be marked paid from its current status — payment is only allowed from COMPLETED.</summary>
+/// <summary>Payment is only allowed from COMPLETED or PAYMENT_NOT_RECEIVED.</summary>
 public sealed class BookingNotPayableException(Guid bookingId)
     : Exception($"Booking '{bookingId}' must be completed before it can be marked paid.");
 
@@ -458,11 +471,9 @@ public sealed class BookingNotPriceableException(Guid bookingId)
 /// booking and that the transition is permitted for that actor.
 /// </summary>
 /// <param name="Location">
-/// The acting party's position, required for — and only stored on — the two
-/// NO-SHOW transitions. Every other status this engine serves (accept, decline,
-/// cancel, the legacy COMPLETED shim) leaves it null. The no-show routes on both
-/// hosts, and the legacy <c>/status</c> shim when it is used to set one, all refuse
-/// the request without it, so the shim cannot become a way to skip the capture.
+/// The acting party's position, required for the two NO-SHOW transitions and
+/// PAYMENT_NOT_RECEIVED. Both the dedicated endpoints and the generic status
+/// shim require it for these actions.
 /// </param>
 public sealed record UpdateBookingStatusCommand(
     Guid BookingId,
@@ -470,7 +481,8 @@ public sealed record UpdateBookingStatusCommand(
     BookingStatusActor Actor,
     Guid ActorId,
     string? Note,
-    CapturedLocation? Location = null);
+    CapturedLocation? Location = null,
+    string? NoShowReason = null);
 
 /// <summary>One audited booking status change (or the seeded creation entry).</summary>
 public sealed record BookingStatusHistoryEntry(
@@ -575,16 +587,18 @@ public sealed class BookingStatusUnchangedException(Guid bookingId, string statu
 
 /// <summary>
 /// A no-show was reported before the counterparty is actually late — the
-/// 30-minute grace window after the booking's scheduled start hasn't elapsed.
+/// applicable no-show threshold has not elapsed.
 /// </summary>
-public sealed class BookingNoShowTooEarlyException(Guid bookingId)
-    : Exception($"A no-show on booking '{bookingId}' can only be reported 30 minutes after its scheduled start.");
+public sealed class BookingNoShowTooEarlyException(Guid bookingId, bool isNightStay = false)
+    : Exception(isNightStay
+        ? $"A no-show on night stay '{bookingId}' can only be reported 2 hours after scheduled check-in."
+        : $"A no-show on booking '{bookingId}' can only be reported from its scheduled end.");
 
 /// <summary>
 /// The booking was never accepted in time, so it is expired — no further status
 /// change (including accept) is possible. Two triggers produce it, both meaning
 /// the provider ran out of time: sitting in CREATED for 24+ hours (BR-17), or
-/// still sitting in CREATED with under <see cref="BookingLeadTime.Minimum"/> to
+/// still sitting in CREATED with under <see cref="BookingAcceptanceDeadline.AcceptanceLeadTime"/> to
 /// the service (BR-53). Both surface as 409 <c>BookingExpired</c>; only the
 /// message differs.
 /// <para>
@@ -603,7 +617,7 @@ public sealed class BookingExpiredException(Guid bookingId, string reason)
     /// <summary>BR-53 — still in CREATED with the service now too close to start.</summary>
     public static BookingExpiredException ServiceTooClose(Guid bookingId)
         => new(bookingId,
-            $"because it was never accepted and the service now starts in under {BookingLeadTime.Minimum.TotalHours:0.#} hours");
+            $"because it was never accepted and the service now starts in under {BookingAcceptanceDeadline.AcceptanceLeadTime.TotalHours:0.#} hours");
 }
 
 // --- Job lifecycle: start-OTP, evidence, modifications ----------------------
@@ -648,7 +662,8 @@ public sealed record BookingEvidenceResult(
 public sealed record StartBookingCommand(
     Guid BookingId,
     Guid ProviderId,
-    CapturedLocation? Location);
+    CapturedLocation? Location,
+    bool WaitForCustomer = false);
 
 /// <summary>
 /// Either party proposes a new date/time for a single-day booking (editing is
@@ -657,6 +672,7 @@ public sealed record StartBookingCommand(
 /// re-checked race-safely.
 /// </summary>
 /// <param name="AcknowledgeTermsChanges">
+/// Applies only to parent proposals; ignored for provider schedule-only proposals.
 /// The requester has seen and accepted the provider's terms as they stand now.
 /// Required only when those terms have drifted from what the booking froze at
 /// creation (price, cancellation policy, the selected-location address) — an
@@ -680,7 +696,8 @@ public sealed record RespondBookingModificationCommand(
     BookingStatusActor Actor,
     Guid ActorId,
     bool Accept,
-    string? Note);
+    string? Note,
+    bool CancelBooking = false);
 
 /// <summary>
 /// The staged (pending) date/time-change proposal for a single-day booking, as
@@ -717,7 +734,8 @@ public sealed record CompleteBookingCommand(
     Guid BookingId,
     Guid ProviderId,
     DateOnly? NextConsultationDate,
-    PrescriptionInput? Prescription = null);
+    PrescriptionInput? Prescription = null,
+    bool CustomerArrivedForCollection = false);
 
 /// <summary>
 /// The vet's per-visit prescription payload — free-text notes, the vaccinated
@@ -784,20 +802,18 @@ public sealed class BookingNotStartableException(Guid bookingId)
     : Exception($"Booking '{bookingId}' is not in a state the job can be started from.");
 
 /// <summary>
-/// The provider tapped "Start Job" outside their own weekly working hours — a job
-/// can only be started while the provider is open (their saved availability for
-/// today, UTC). The time of day the booking itself is scheduled for does not gate
-/// the action; only the working-hours window and the service DATE do (see
-/// <see cref="BookingStartNotOnServiceDateException"/>).
+/// The provider tapped "Start Job" before the slot's 15-minute lead-in or after
+/// the closing time stored at acceptance. The service date is checked separately
+/// (see <see cref="BookingStartNotOnServiceDateException"/>).
 /// </summary>
 public sealed class BookingStartOutsideWorkingHoursException(Guid bookingId)
-    : Exception($"The job on booking '{bookingId}' can only be started during your working hours.");
+    : Exception($"The job on booking '{bookingId}' can only be started within its accepted working hours.");
 
 /// <summary>
 /// The provider tapped "Start Job" on a day other than the one the booking is
 /// scheduled for (single-day: BookingDate; night-stay: CheckInDate, the drop-off
-/// day) — both compared against today in UTC. The time of day within the booked
-/// window is not checked, so a provider who runs early or late can still start.
+/// day) — both compared against today in UTC. The start window is checked
+/// separately against the slot's lead-in and accepted closing time.
 /// </summary>
 public sealed class BookingStartNotOnServiceDateException(Guid bookingId)
     : Exception($"The job on booking '{bookingId}' can only be started on the day it is scheduled for.");
@@ -849,14 +865,14 @@ public sealed class BookingModificationCapacityException(Guid bookingId)
     : Exception($"The proposed time for booking '{bookingId}' has no remaining capacity.");
 
 /// <summary>
-/// Either party tried to modify a booking less than 2 hours before the service
+/// Either party tried to modify a booking less than 3 hours before the service
 /// starts (BookingDate + StartTime; CheckInDate + DropOffTime for a stay). Past
 /// that point the schedule needs to be settled so the job can start — the app
 /// hides "Modify Job" from the same cutoff. Widened 2026-08-02 to gate the
 /// provider identically; previously only the parent was gated.
 /// </summary>
 public sealed class BookingModificationWindowClosedException(Guid bookingId)
-    : Exception($"Booking '{bookingId}' can no longer be modified within 2 hours of the service start time.");
+    : Exception($"Booking '{bookingId}' can no longer be modified within 3 hours of the service start time.");
 
 /// <summary>
 /// The proposal — from either party (widened 2026-08-02; previously
@@ -895,3 +911,6 @@ public sealed class CustomBookingNotEditableException(Guid bookingId, string cur
 /// </summary>
 public sealed class CustomBookingScheduleLockedException(Guid bookingId, string currentStatus)
     : Exception($"Booking '{bookingId}' is '{currentStatus}'; the service and schedule can only be changed before the job starts.");
+
+public sealed class BookingModificationLimitReachedException(Guid bookingId)
+    : Exception($"This party has already had a modification accepted for booking {bookingId}.");

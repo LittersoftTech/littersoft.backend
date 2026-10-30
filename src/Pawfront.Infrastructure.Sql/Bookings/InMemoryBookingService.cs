@@ -384,6 +384,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
             PricePerHour: row.PricePerHour,
             JobNotes: row.JobNotes,
             PetId: row.PetId,
+            CashNotReceivedAtUtc: row.CashNotReceivedAtUtc,
             PayoutStatus: PayoutStatuses.ForBookingStatus(row.Status),
             PayoutId: null,
             ParentFirstName: null,
@@ -461,7 +462,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         Guid actorId,
         string? note,
         CapturedLocation? location,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? noShowReason = null)
     {
         if (!bookings.TryGetValue(bookingId, out var row))
         {
@@ -491,10 +492,14 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         // BR-53: still CREATED with under 2 hours to the service — mirror of the
         // sproc's THROW 51153, and reject-only for the same reason.
         if (row.Status == BookingStatuses.Created
-            && BookingLeadTime.IsTooSoon(row.BookingDate, row.StartTime, DateTimeOffset.UtcNow))
+            && DateTimeOffset.UtcNow >= BookingAcceptanceDeadline.Compute(row.CreatedAtUtc, row.BookingDate, row.StartTime))
         {
             throw BookingExpiredException.ServiceTooClose(bookingId);
         }
+
+        if (row.Source == "Custom" && (actor != BookingStatusActor.Provider
+            || newStatus is not (BookingStatuses.Completed or BookingStatuses.ProviderCancelled)))
+            throw new BookingStatusNotAllowedException(newStatus, actor);
 
         var allowed = actor == BookingStatusActor.Provider
             ? BookingStatuses.ProviderSettable
@@ -504,15 +509,19 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
             throw new BookingStatusNotAllowedException(newStatus, actor);
         }
 
-        if (BookingStatuses.Terminal.Contains(row.Status))
+        if (BookingStatuses.Terminal.Contains(row.Status)
+            && !((row.Status is BookingStatuses.Completed or BookingStatuses.PaymentNotReceived) && newStatus == BookingStatuses.PaymentNotReceived))
         {
             throw new BookingStatusTerminalException(bookingId, row.Status);
         }
 
-        if (row.Status == newStatus)
+        if (row.Status == newStatus && newStatus != BookingStatuses.PaymentNotReceived)
         {
             throw new BookingStatusUnchangedException(bookingId, newStatus);
         }
+
+        if (newStatus == BookingStatuses.PaymentNotReceived && row.Status is not (BookingStatuses.Completed or BookingStatuses.PaymentNotReceived))
+            throw new BookingNotStartableException(bookingId);
 
         var now = DateTimeOffset.UtcNow;
         if (BookingStatuses.NoShow.Contains(newStatus))
@@ -522,8 +531,8 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
                 throw new BookingNotStartableException(bookingId);
             }
 
-            var startsAtUtc = new DateTimeOffset(row.BookingDate.ToDateTime(row.StartTime), TimeSpan.Zero);
-            if (now < startsAtUtc.AddMinutes(30))
+            var endsAtUtc = new DateTimeOffset(row.BookingDate.ToDateTime(row.EndTime), TimeSpan.Zero);
+            if (now < endsAtUtc)
             {
                 throw new BookingNoShowTooEarlyException(bookingId);
             }
@@ -531,6 +540,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
 
         var from = row.Status;
         row.Status = newStatus;
+        if (newStatus == BookingStatuses.PaymentNotReceived) row.CashNotReceivedAtUtc = now;
         row.UpdatedAtUtc = now;
         if (newStatus is BookingStatuses.ProviderCancelled or BookingStatuses.ParentCancelled)
         {
@@ -651,13 +661,13 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
     public Task<StartOtpResult> IssueStartOtpAsync(Guid bookingId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<BookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken)
+    public Task<BookingResult> StartJobAsync(Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location, CancellationToken cancellationToken, bool waitForCustomer = false)
         => throw NotInMemory();
 
     public Task<BookingResult> VerifyStartOtpAsync(Guid bookingId, Guid providerId, string otpCode, CapturedLocation? location, CancellationToken cancellationToken)
         => throw NotInMemory();
 
-    public Task<BookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken)
+    public Task<BookingResult> CompleteAsync(Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false)
         => throw NotInMemory();
 
     public Task<BookingResult> MarkPaidAsync(Guid bookingId, Guid providerId, decimal amount, decimal pawfrontFee, string paymentMethod, CapturedLocation? location, CancellationToken cancellationToken)
@@ -669,7 +679,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         => throw NotInMemory();
 
     public Task<BookingResult> RespondModificationAsync(Guid bookingId, BookingStatusActor actor, Guid actorId,
-        bool accept, int capacity, string? note, CancellationToken cancellationToken)
+        bool accept, int capacity, string? note, CancellationToken cancellationToken, bool cancelBooking = false)
         => throw NotInMemory();
 
     public Task<BookingModificationResult?> GetPendingModificationAsync(Guid bookingId, CancellationToken cancellationToken)
@@ -757,7 +767,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
             row.CustomerLocation,
             row.PricePerHour,
             row.JobNotes,
-            row.PetId);
+            row.PetId, CashNotReceivedAtUtc: row.CashNotReceivedAtUtc);
 
     private sealed class BookingRow
     {
@@ -777,6 +787,7 @@ internal sealed class InMemoryBookingStore(InMemoryNightStayBookingStore nightSt
         public DateTimeOffset CreatedAtUtc { get; init; }
         public DateTimeOffset UpdatedAtUtc { get; set; }
         public DateTimeOffset? CancelledAtUtc { get; set; }
+        public DateTimeOffset? CashNotReceivedAtUtc { get; set; }
         public required string Source { get; init; }
         public string? CustomerName { get; init; }
         public string? CustomerMobileCountryCode { get; init; }

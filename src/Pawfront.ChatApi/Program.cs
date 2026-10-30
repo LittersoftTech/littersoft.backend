@@ -97,7 +97,7 @@ app.UseAuthorization();
 app.UseRateLimiter();
 app.UseMiddleware<ChatTelemetryEnrichmentMiddleware>();
 
-var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.ChatUserPolicy);
+var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.ChatUserPolicy).AddEndpointFilter<Pawfront.Application.Badges.BadgeResponseFilter>();
 
 api.MapHealthEndpoints();
 api.MapChatIdentityEndpoints();

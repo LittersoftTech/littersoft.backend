@@ -37,11 +37,11 @@ BEGIN
         [CompletedBookings]       = COUNT(CASE WHEN e.[IsEarned] = 1 THEN 1 END),
         [CancelledBookings]       = COUNT(CASE WHEN e.[IsEarned] = 0 AND e.[Status] IN (
                                         N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
-                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED',
+                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE',
                                         N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN 1 END),
         [UpcomingBookings]        = COUNT(CASE WHEN e.[IsEarned] = 0 AND e.[Status] NOT IN (
                                         N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
-                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED',
+                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE',
                                         N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN 1 END),
 
         [PaidBookings]            = COUNT(CASE WHEN e.[IsPaid] = 1 THEN 1 END),
@@ -58,7 +58,7 @@ BEGIN
         -- [AmountSpent], since no money has moved.
         [UpcomingAmount] = ISNULL(SUM(CASE WHEN e.[IsEarned] = 0 AND e.[Status] NOT IN (
                                         N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PROVIDER_DECLINED',
-                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED',
+                                        N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE',
                                         N'OTP_MAX_ATTEMPTS_EXCEEDED') THEN e.[Amount] END), 0)
     FROM [Booking].[BookingAmounts](NULL, @PetParentId, @FeePercentage) e
     WHERE (@FromDate IS NULL OR e.[ServiceDate] >= @FromDate)

@@ -21,7 +21,8 @@ CREATE OR ALTER PROCEDURE [Event].[CreateEventBooking]
     -- online booking is capped to one ticket by the application layer).
     @MaximumCapacity INT = NULL,
     @TotalAmount DECIMAL(18, 2),
-    @AttendeeNames [Event].[EventBookingAttendeeNames] READONLY
+    @AttendeeNames [Event].[EventBookingAttendeeNames] READONLY,
+    @BookerAccountId UNIQUEIDENTIFIER=NULL, @BookerType NVARCHAR(16)=NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -35,6 +36,10 @@ BEGIN
     END
 
     BEGIN TRANSACTION;
+    DECLARE @LockResult INT;
+    EXEC @LockResult = sys.sp_getapplock @Resource=N'EventLifecycle', @LockMode=N'Exclusive', @LockOwner=N'Transaction', @LockTimeout=15000;
+    IF @LockResult < 0 THROW 51468, 'Event operation is busy. Retry the request.', 1;
+
 
     IF NOT EXISTS (
         SELECT 1 FROM [Event].[Events] WHERE [EventId] = @EventId
@@ -43,6 +48,32 @@ BEGIN
         THROW 51090, 'Event was not found.', 1;
     END
 
+
+    IF @BookerAccountId IS NULL OR @BookerType NOT IN (N'PetParent',N'Provider')
+        THROW 51468, 'An authenticated account profile is required to book events.', 1;
+    IF @BookerType=N'PetParent' AND NOT EXISTS
+        (SELECT 1 FROM [Parent].[PetParents] WHERE PetParentId=@BookerAccountId AND IsDeleted=0)
+        THROW 51468, 'Pet parent account has been deleted.', 1;
+    IF NOT EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND EventStatus=N'Active')
+        THROW 51461, 'Cancelled events cannot be booked.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId
+        AND SYSUTCDATETIME() >= DATEADD(hour,-1,[Event].[EventStartUtc](StartDate,StartTime)))
+        THROW 51470, 'Ticket bookings for this event are closed.', 1;
+    IF EXISTS (SELECT 1 FROM [Event].[EventBookings] WHERE EventId=@EventId AND BookerAccountId=@BookerAccountId AND Status IN (N'Confirmed',N'Attended'))
+        THROW 51469, 'You already hold a booking for this event.', 1;
+    DECLARE @ActiveCount INT=(SELECT COUNT(*) FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+        WHERE b.BookerAccountId=@BookerAccountId AND b.Status=N'Confirmed' AND e.EventStatus=N'Active'
+        AND [Event].[EventStartUtc](e.StartDate,e.StartTime)>SYSUTCDATETIME());
+    DECLARE @HeldCount INT=(SELECT COUNT(*) FROM [Event].[EventBookings] b JOIN [Event].[Events] e ON e.EventId=b.EventId
+        WHERE b.BookerAccountId=@BookerAccountId AND b.Status IN (N'Confirmed',N'Attended') AND e.EventStatus=N'Active'
+          AND e.IsPaid=1 AND [Event].[EventStartUtc](e.StartDate,e.StartTime)>SYSUTCDATETIME());
+    IF @HeldCount>=1 AND EXISTS (SELECT 1 FROM [Event].[Events] WHERE EventId=@EventId AND IsPaid=1) AND EXISTS (SELECT 1 FROM [Event].[Reliability] WHERE AccountId=@BookerAccountId AND RedFlagExpiresAt>SYSUTCDATETIME())
+        THROW 51463, 'Red-flagged accounts may hold only one upcoming paid booking.', 1;
+    IF @ActiveCount>=5 THROW 51462, 'An account may hold at most five upcoming event bookings.', 1;
+    SELECT @MaximumCapacity=CASE WHEN EventType=N'Online' THEN NULL ELSE COALESCE(MaximumCapacity,@MaximumCapacity) END,
+        @TotalAmount=CASE WHEN IsPaid=1 THEN ISNULL(Price,0)*@TicketCount ELSE 0 END
+    FROM [Event].[Events] WHERE EventId=@EventId;
+
     -- Race-safe capacity check. UPDLOCK + HOLDLOCK on the SUM forces
     -- concurrent CreateEventBooking calls for the same event to serialise,
     -- so two buyers can't both claim the last seat.
@@ -50,7 +81,7 @@ BEGIN
     SELECT @ReservedTickets = ISNULL(SUM([TicketCount]), 0)
     FROM [Event].[EventBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [EventId] = @EventId
-      AND [Status] = N'Confirmed';
+      AND [Status] IN (N'Confirmed',N'Attended');
 
     IF @MaximumCapacity IS NOT NULL AND @ReservedTickets + @TicketCount > @MaximumCapacity
     BEGIN
@@ -62,6 +93,7 @@ BEGIN
     INSERT INTO [Event].[EventBookings]
     (
         [EventId],
+        [BookerAccountId], [BookerType],
         [BookerName],
         [BookerEmail],
         [BookerMobile],
@@ -73,6 +105,7 @@ BEGIN
     VALUES
     (
         @EventId,
+        @BookerAccountId, @BookerType,
         @BookerName,
         @BookerEmail,
         @BookerMobile,
@@ -88,7 +121,7 @@ BEGIN
     SELECT @BookingId, @EventId, a.[TicketNumber], a.[AttendeeName]
     FROM @AttendeeNames AS a;
 
-    -- Tell the ORGANISER somebody bought tickets. No self-notification risk: an
+    -- Tell the ORGANISER only on the first active booking. No self-notification risk: an
     -- organiser is blocked from booking their own event (403 SelfBookingNotAllowed),
     -- so the buyer is always someone else. The buyer gets nothing here — buying is
     -- their own action, and they saw the confirmation on screen.
@@ -99,29 +132,13 @@ BEGIN
         @BookerName = @BookerName,
         @TicketCount = @TicketCount;
 
-    -- Result set 1: the booking row.
-    SELECT [BookingId],
-           [EventId],
-           [BookerName],
-           [BookerEmail],
-           [BookerMobile],
-           [TicketCount],
-           [PaymentMethod],
-           [PaymentStatus],
-           [PaymentReference],
-           [TotalAmount],
-           [Status],
-           [CreatedAtUtc],
-           [UpdatedAtUtc],
-           [CancelledAtUtc]
-    FROM [Event].[EventBookings]
-    WHERE [BookingId] = @BookingId;
+    IF @MaximumCapacity IS NOT NULL AND @ReservedTickets + @TicketCount = @MaximumCapacity
+    BEGIN
+        EXEC [Notification].[EnqueueEventNotification] @EventId=@EventId,@EventBookingId=@BookingId,
+            @NotificationType=N'EVENT_SOLD_OUT';
+    END
 
-    -- Result set 2: the ticket rows (ordered by TicketNumber).
-    SELECT [TicketId], [BookingId], [EventId], [TicketNumber], [AttendeeName], [CreatedAtUtc]
-    FROM [Event].[EventBookingTickets]
-    WHERE [BookingId] = @BookingId
-    ORDER BY [TicketNumber];
-
+    DELETE FROM [Event].[Waitlist] WHERE EventId=@EventId AND PetParentId=@BookerAccountId;
     COMMIT TRANSACTION;
+    EXEC [Event].[GetEventBooking] @BookingId;
 END;

@@ -10,6 +10,36 @@ internal sealed class GlobalExceptionHandler(ILogger<GlobalExceptionHandler> log
         Exception exception,
         CancellationToken cancellationToken)
     {
+        if (exception is Pawfront.Application.Support.SupportBookingTicketWindowException window)
+        {
+            httpContext.Response.StatusCode = StatusCodes.Status409Conflict;
+            await httpContext.Response.WriteAsJsonAsync(new ApiResponse<object>(false, null,
+                new ApiError(window.Code, window.Message)), cancellationToken);
+            return true;
+        }
+
+        if (exception is Pawfront.Application.Events.HostEventOverlapException overlap)
+        {
+            httpContext.Response.StatusCode = StatusCodes.Status409Conflict;
+            await httpContext.Response.WriteAsJsonAsync(new Pawfront.Contracts.Events.HostEventOverlapResponse(
+                "HostEventOverlap", overlap.ConflictingEventId, overlap.ConflictingEventTitle), cancellationToken);
+            return true;
+        }
+
+        if (exception is Microsoft.Data.SqlClient.SqlException sql && sql.Number is >= 51460 and <= 51469)
+        {
+            var code = sql.Number switch
+            {
+                51460 => "EventNotFound", 51461 => "EventNotBookable", 51462 => "UpcomingBookingLimitReached",
+                51463 => "RedFlagBookingLimitReached", 51464 => "RedFlagCannotCreateEvent",
+                51465 => "EventLocked", 51466 => "EventMustBeCancelled", 51467 => "AttendanceWindowClosed",
+                51468 => "InvalidEventTransition", _ => "EventAlreadyBooked"
+            };
+            httpContext.Response.StatusCode = sql.Number == 51460 ? 404 : 409;
+            await httpContext.Response.WriteAsJsonAsync(new ApiResponse<object>(false, null, new ApiError(code, sql.Message)), cancellationToken);
+            return true;
+        }
+
         logger.LogError(
             exception,
             "Unhandled exception while processing {Method} {Path}.",

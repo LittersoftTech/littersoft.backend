@@ -2842,9 +2842,7 @@ all reference a specific **ServiceId**, not the whole provider.
   (`IsPaid`/`Price`) + `CancellationPolicy` + `EventLink` (online joining URL);
   Cosmos has physical capacity + venue location. Online events have only the
   SQL row (their `EventLink` is the online analog of the physical venue).
-- Categories (8): `AdoptionAndRescue`, `PetTraining`, `Charity`,
-  `Volunteering`, `HealthAndWellness`, `SocialAndCultural`,
-  `OutdoorActivities`, `ParentEducation`.
+- Categories (10): `MeetupsAndSocials`, `WalksAndOutdoors`, `TrainingAndWorkshops`, `SportsAndCompetitions`, `ShowsAndDemonstrations`, `TalksAndLearning`, `HealthAndWellness`, `AdoptionAndRescue`, `CharityAndVolunteering`, `Celebrations`.
 - Amenities (8): `FreeParking`, `PaidParking`, `Restrooms`, `DrinkingWater`,
   `FoodAndBeverage`, `SeatingAreas`, `FirstAidBooth`, `None`. `None` can't
   coexist with others (enforced in validation). **Amenities are mandatory for

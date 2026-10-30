@@ -8,6 +8,9 @@
 -- UPDLOCK + HOLDLOCK so concurrent buyers serialise on the last seat.
 CREATE TABLE [Event].[EventBookings]
 (
+    [ReliabilitySettled] BIT NOT NULL CONSTRAINT DF_EventBookings_Settled DEFAULT 0,
+    [BookerType] NVARCHAR(16) NULL,
+    [BookerAccountId] UNIQUEIDENTIFIER NULL,
     [BookingId] UNIQUEIDENTIFIER NOT NULL
         CONSTRAINT [DF_EventBookings_BookingId] DEFAULT NEWSEQUENTIALID(),
     [EventId] UNIQUEIDENTIFIER NOT NULL,
@@ -46,7 +49,7 @@ CREATE TABLE [Event].[EventBookings]
     CONSTRAINT [CK_EventBookings_PaymentStatus]
         CHECK ([PaymentStatus] IN (N'Pending', N'Paid', N'Failed')),
     CONSTRAINT [CK_EventBookings_Status]
-        CHECK ([Status] IN (N'Confirmed', N'Cancelled')),
+        CHECK ([Status] IN (N'Confirmed', N'Cancelled', N'CancelledByParent', N'EventCancelled', N'AccountDeleted', N'Attended', N'NoShow')),
     CONSTRAINT [CK_EventBookings_CancelledRequiresTimestamp] CHECK (
         ([Status] = N'Cancelled' AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] <> N'Cancelled')
@@ -60,3 +63,6 @@ GO
 CREATE INDEX [IX_EventBookings_Event_Status]
     ON [Event].[EventBookings] ([EventId], [Status])
     INCLUDE ([TicketCount], [BookingId], [BookerEmail], [PaymentStatus], [CreatedAtUtc]);
+
+GO
+CREATE INDEX IX_EventBookings_Account_Status ON [Event].[EventBookings](BookerAccountId,Status) INCLUDE(EventId);

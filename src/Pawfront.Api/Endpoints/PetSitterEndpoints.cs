@@ -1,3 +1,4 @@
+using Pawfront.Application.ProviderTrust;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Services.PetSitter;
 using Pawfront.Application.Services.ProviderServiceLocations;
@@ -127,6 +128,7 @@ internal static class PetSitterEndpoints
         SavePetHotelOfferingRequest request,
         IPetSitterServiceRegistry registry,
         IProviderServiceCatalog serviceCatalog,
+        IProviderTrustService trustService,
         CancellationToken cancellationToken)
     {
         try
@@ -145,6 +147,8 @@ internal static class PetSitterEndpoints
                     request.ServiceLocation,
                     request.AllowParentFood),
                 cancellationToken);
+
+            await trustService.SyncOfferingDocumentAsync(providerId, request.LicenseImageUrl, cancellationToken);
 
             await SyncPetSitterServicesAsync(
                 providerId, result.SubCategory,
@@ -168,6 +172,7 @@ internal static class PetSitterEndpoints
         SaveFreelancePetSitterOfferingRequest request,
         IPetSitterServiceRegistry registry,
         IProviderServiceCatalog serviceCatalog,
+        IProviderTrustService trustService,
         CancellationToken cancellationToken)
     {
         try
@@ -186,6 +191,8 @@ internal static class PetSitterEndpoints
                     request.ServiceLocation,
                     request.AllowParentFood),
                 cancellationToken);
+
+            await trustService.SyncOfferingDocumentAsync(providerId, request.LicenseImageUrl, cancellationToken);
 
             await SyncPetSitterServicesAsync(
                 providerId, result.SubCategory,
@@ -251,7 +258,8 @@ internal static class PetSitterEndpoints
                 request.MinimumBookingHours,
                 request.LatePickupCharges,
                 request.DropOffTime,
-                request.PickUpTime);
+                request.PickUpTime,
+                request.HasFixedTimes);
     }
 
     private static PetSitterServiceResponse ToResponse(PetSitterServiceResult result)
@@ -319,6 +327,7 @@ internal static class PetSitterEndpoints
                 offering.MinimumBookingHours,
                 offering.LatePickupCharges,
                 offering.DropOffTime,
-                offering.PickUpTime);
+                offering.PickUpTime,
+                offering.HasFixedTimes);
     }
 }

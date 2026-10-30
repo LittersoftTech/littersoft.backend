@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using Microsoft.Extensions.Logging;
 using Pawfront.Domain.Events;
 
@@ -73,6 +73,9 @@ internal sealed class EventBookingService(
             }
         }
 
+        if (@event.EventStatus == "Active" && EventBookingWindow.IsClosed(@event.StartDate, @event.StartTime, DateTimeOffset.UtcNow))
+            throw new EventBookingsClosedException();
+
         int? maximumCapacity;
         if (string.Equals(@event.EventType, nameof(EventType.Online), StringComparison.Ordinal))
         {
@@ -109,12 +112,21 @@ internal sealed class EventBookingService(
                 paymentMethod,
                 maximumCapacity,
                 totalAmount,
-                attendeeNames),
+                attendeeNames, command.BookerOrganiserId, command.BookerType),
             cancellationToken);
     }
 
-    public Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)
-        => sqlStore.GetAsync(bookingId, cancellationToken);
+    public async Task<bool> HasCancelledBookingAsync(Guid eventId, string? bookerEmail, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(bookerEmail)) return false;
+        var history = await sqlStore.ListByBookerEmailAsync(bookerEmail.Trim(), cancellationToken,
+            currentBlockParty is null ? null : await currentBlockParty.GetAsync(cancellationToken) ?? new BlockParty(BlockPartyType.PetParent, Guid.Empty));
+        return history.Any(b => b.EventId == eventId && b.Status is "CancelledByParent" or "Cancelled");
+    }
+
+    public async Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)
+        => await sqlStore.GetAsync(bookingId, cancellationToken,
+            currentBlockParty is null ? null : await currentBlockParty.GetAsync(cancellationToken) ?? new BlockParty(BlockPartyType.PetParent, Guid.Empty));
 
     public Task<EventBookingResult> ConfirmPaymentAsync(
         Guid bookingId,
@@ -147,7 +159,8 @@ internal sealed class EventBookingService(
             throw new ArgumentException("Booker email is required.", nameof(bookerEmail));
         }
 
-        var summaries = await sqlStore.ListByBookerEmailAsync(bookerEmail.Trim(), cancellationToken);
+        var summaries = await sqlStore.ListByBookerEmailAsync(bookerEmail.Trim(), cancellationToken,
+            currentBlockParty is null ? null : await currentBlockParty.GetAsync(cancellationToken) ?? new BlockParty(BlockPartyType.PetParent, Guid.Empty));
 
         // The venue location lives in the Cosmos extension doc (physical events
         // only), so hydrate it per booking — one point read each, fanned out in
@@ -164,7 +177,7 @@ internal sealed class EventBookingService(
             {
                 var physical = await cosmosStore.GetPhysicalAsync(
                     summary.EventId, summary.EventCategory, cancellationToken);
-                return summary with { EventLocation = physical?.Location };
+                return summary with { EventLocation = physical?.Location, MaxBookings = summary.MaxBookings ?? physical?.MaximumCapacity };
             }
             catch (Exception ex)
             {
@@ -180,7 +193,7 @@ internal sealed class EventBookingService(
         return hydrated;
     }
 
-    public Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
+    public async Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
         string? bookerEmail,
         CancellationToken cancellationToken)
     {
@@ -188,13 +201,14 @@ internal sealed class EventBookingService(
         // event is bookable. Avoid a round-trip for the empty case.
         if (string.IsNullOrWhiteSpace(bookerEmail))
         {
-            return Task.FromResult<IReadOnlySet<Guid>>(EmptyEventIds);
+            return EmptyEventIds;
         }
 
-        return sqlStore.ListBookedEventIdsByBookerEmailAsync(bookerEmail.Trim(), cancellationToken);
+        return await sqlStore.ListBookedEventIdsByBookerEmailAsync(bookerEmail.Trim(), cancellationToken,
+            currentBlockParty is null ? null : await currentBlockParty.GetAsync(cancellationToken) ?? new BlockParty(BlockPartyType.PetParent, Guid.Empty));
     }
 
-    public Task<EventBookingResult> CancelByBookerAsync(
+    public async Task<EventBookingResult> CancelByBookerAsync(
         Guid bookingId,
         string bookerEmail,
         CancellationToken cancellationToken)
@@ -204,7 +218,8 @@ internal sealed class EventBookingService(
             throw new ArgumentException("Booker email is required.", nameof(bookerEmail));
         }
 
-        return sqlStore.CancelByBookerAsync(bookingId, bookerEmail.Trim(), cancellationToken);
+        return await sqlStore.CancelByBookerAsync(bookingId, bookerEmail.Trim(), cancellationToken,
+            currentBlockParty is null ? null : await currentBlockParty.GetAsync(cancellationToken) ?? new BlockParty(BlockPartyType.PetParent, Guid.Empty));
     }
 
     private static List<string> NormalizeAttendees(IReadOnlyList<string>? values)

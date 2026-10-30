@@ -1,3 +1,4 @@
+using Pawfront.Application.Blocks;
 using System.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.Data.SqlClient.Server;
@@ -30,6 +31,8 @@ internal sealed class SqlEventBookingStore(
 
         command.Parameters.AddWithValue("@EventId", input.EventId);
         command.Parameters.AddWithValue("@BookerName", input.BookerName);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)input.BookerAccountId ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", input.BookerType);
         command.Parameters.AddWithValue("@BookerEmail", input.BookerEmail);
         command.Parameters.AddWithValue("@BookerMobile", DbValue(input.BookerMobile));
         command.Parameters.AddWithValue("@PaymentMethod", input.PaymentMethod);
@@ -57,6 +60,10 @@ internal sealed class SqlEventBookingStore(
             // 51091 is only thrown when a capacity is set (physical events).
             throw new EventBookingCapacityExceededException(input.EventId, input.MaximumCapacity ?? 0);
         }
+        catch (SqlException exception) when (exception.Number == 51470)
+        {
+            throw new EventBookingsClosedException();
+        }
         catch (SqlException exception) when (exception.Number == 51094)
         {
             throw new ArgumentException(exception.Message);
@@ -65,7 +72,7 @@ internal sealed class SqlEventBookingStore(
 
     public async Task<IReadOnlyList<EventBookingSummary>> ListByBookerEmailAsync(
         string bookerEmail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, BlockParty? booker = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -75,6 +82,8 @@ internal sealed class SqlEventBookingStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)booker?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", (object?)booker?.Type.ToString() ?? DBNull.Value);
 
         var rows = new List<EventBookingSummary>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -106,14 +115,16 @@ internal sealed class SqlEventBookingStore(
                 UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(17), TimeSpan.Zero),
                 CancelledAtUtc: reader.IsDBNull(18)
                     ? null
-                    : new DateTimeOffset(reader.GetDateTime(18), TimeSpan.Zero)));
+                    : new DateTimeOffset(reader.GetDateTime(18), TimeSpan.Zero),
+                TotalBookings: reader.GetInt32(20),
+                MaxBookings: reader.IsDBNull(21) ? null : reader.GetInt32(21)));
         }
         return rows;
     }
 
     public async Task<IReadOnlySet<Guid>> ListBookedEventIdsByBookerEmailAsync(
         string bookerEmail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, BlockParty? booker = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -123,6 +134,8 @@ internal sealed class SqlEventBookingStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)booker?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", (object?)booker?.Type.ToString() ?? DBNull.Value);
 
         var eventIds = new HashSet<Guid>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -136,7 +149,7 @@ internal sealed class SqlEventBookingStore(
     public async Task<EventBookingResult> CancelByBookerAsync(
         Guid bookingId,
         string bookerEmail,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, BlockParty? booker = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -147,6 +160,8 @@ internal sealed class SqlEventBookingStore(
         };
         command.Parameters.AddWithValue("@BookingId", bookingId);
         command.Parameters.AddWithValue("@BookerEmail", bookerEmail);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)booker?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", (object?)booker?.Type.ToString() ?? DBNull.Value);
 
         try
         {
@@ -164,7 +179,7 @@ internal sealed class SqlEventBookingStore(
         }
     }
 
-    public async Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken)
+    public async Task<EventBookingResult?> GetAsync(Guid bookingId, CancellationToken cancellationToken, BlockParty? booker = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -174,6 +189,8 @@ internal sealed class SqlEventBookingStore(
             CommandType = CommandType.StoredProcedure
         };
         command.Parameters.AddWithValue("@BookingId", bookingId);
+        command.Parameters.AddWithValue("@BookerAccountId", (object?)booker?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@BookerType", (object?)booker?.Type.ToString() ?? DBNull.Value);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         return await ReadBookingWithTicketsAsync(reader, cancellationToken);
@@ -239,7 +256,7 @@ internal sealed class SqlEventBookingStore(
                 tickets.Add(new EventBookingTicket(
                     TicketId: reader.GetGuid(0),
                     TicketNumber: reader.GetInt32(3),
-                    AttendeeName: reader.GetString(4)));
+                    AttendeeName: reader.GetString(4), PaymentStatus: reader.GetString(6), Amount: reader.GetDecimal(7)));
             }
         }
 
@@ -265,7 +282,9 @@ internal sealed class SqlEventBookingStore(
             UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero),
             CancelledAtUtc: reader.IsDBNull(13)
                 ? null
-                : new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero));
+                : new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero),
+            ConsecutiveNegativeMarks: reader.FieldCount > 14 ? reader.GetInt32(14) : 0,
+            HasReported: reader.FieldCount > 15 && reader.GetBoolean(15));
     }
 
     private static IEnumerable<SqlDataRecord> BuildAttendeeTable(IReadOnlyList<string> attendeeNames)

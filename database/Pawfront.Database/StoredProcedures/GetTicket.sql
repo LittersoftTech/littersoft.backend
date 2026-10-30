@@ -1,4 +1,4 @@
--- One ticket, scoped to a party to it.
+-- One ticket, scoped to its raiser.
 --
 -- Returns TWO result sets — the ticket row, then its photos (oldest-first) —
 -- or NOTHING when the ticket is unknown OR the caller is not a party. Those two
@@ -20,6 +20,7 @@ BEGIN
         SELECT 1
         FROM [Support].[Tickets]
         WHERE [TicketId] = @TicketId
+          AND [RaisedByType] = @ActorType
           AND ((@ActorType = N'Provider'  AND [ProviderId]  = @ActorId)
             OR (@ActorType = N'PetParent' AND [PetParentId] = @ActorId)))
     BEGIN
@@ -44,7 +45,7 @@ BEGIN
            -- so adding them shifted no existing reader ordinal.
            [Category],
            [Reason],
-           [EventId]
+           [EventId], [EventBookingId]
     FROM [Support].[Tickets]
     WHERE [TicketId] = @TicketId;
 

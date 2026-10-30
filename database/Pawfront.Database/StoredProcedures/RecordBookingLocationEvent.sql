@@ -1,9 +1,8 @@
 -- Records one geolocation fix against a single-day booking, standalone — i.e. for
 -- the moments that are NOT themselves a status transition, and therefore have no
 -- transition sproc to ride along inside:
---   * CashNotReceived        the provider records that they were not paid. Log
---                            only: it changes no status and no payout field (see
---                            the endpoint notes) — the row IS the record.
+--   * CashNotReceived        persists the latest provider report on the booking
+--                            alongside its location event.
 --   * the PARENT's own fix   at a moment the PROVIDER drove (NoShowMarked,
 --                            CashReceived, CashNotReceived, EvidenceCaptured).
 --                            Each app reports its own position, so the parent's
@@ -32,11 +31,13 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
+    BEGIN TRANSACTION;
+
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
 
     SELECT @ProviderId = [ProviderId], @PetParentId = [PetParentId]
-    FROM [Booking].[Bookings]
+    FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
 
     IF @ProviderId IS NULL
@@ -63,6 +64,14 @@ BEGIN
         THROW 51362, 'This trigger cannot be recorded on its own by this party.', 1;
     END
 
+    -- The server records the latest provider report; a parent location echo does not report cash.
+    IF @Trigger = N'CashNotReceived' AND @CapturedByType = N'Provider'
+    BEGIN
+        UPDATE [Booking].[Bookings]
+        SET [CashNotReceivedAtUtc] = SYSUTCDATETIME(), [UpdatedAtUtc] = SYSUTCDATETIME()
+        WHERE [BookingId] = @BookingId AND [Status] <> N'PAID';
+    END
+
     DECLARE @Inserted TABLE ([BookingLocationEventId] UNIQUEIDENTIFIER);
 
     INSERT INTO [Booking].[BookingLocationEvents]
@@ -77,4 +86,5 @@ BEGIN
            [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc], [RecordedAtUtc]
     FROM [Booking].[BookingLocationEvents]
     WHERE [BookingLocationEventId] = (SELECT TOP (1) [BookingLocationEventId] FROM @Inserted);
+    COMMIT TRANSACTION;
 END;

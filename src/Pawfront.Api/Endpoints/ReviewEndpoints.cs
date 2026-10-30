@@ -38,8 +38,10 @@ internal static class ReviewEndpoints
         var group = builder.MapGroup("/providers/{providerId:guid}");
 
         // Provider rates the pet parent on a finished job (rating only).
-        group.MapPost("/bookings/{bookingId:guid}/rating", RateParentOnBooking);
-        group.MapPost("/night-stay-bookings/{bookingId:guid}/rating", RateParentOnNightStay);
+        group.MapPost("/bookings/{bookingId:guid}/rating", RateParentOnBooking)
+            .AddEndpointFilter(new ProviderBookingAccessFilter(nightStay: false));
+        group.MapPost("/night-stay-bookings/{bookingId:guid}/rating", RateParentOnNightStay)
+            .AddEndpointFilter(new ProviderBookingAccessFilter(nightStay: true));
 
         // The reviews parents have left for this provider, with the summary.
         group.MapGet("/reviews", ListProviderReviews);

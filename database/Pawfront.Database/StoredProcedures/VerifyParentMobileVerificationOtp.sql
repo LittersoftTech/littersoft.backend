@@ -32,6 +32,18 @@ BEGIN
         THROW 51211, 'Pet parent mobile OTP entry was not found.', 1;
     END
 
+    IF EXISTS (SELECT 1 FROM [Parent].[ParentMobileOtps] o
+               INNER JOIN [Parent].[PetParents] p ON p.[PetParentId] = o.[PetParentId]
+               WHERE o.[ParentMobileOtpId] = @ParentMobileOtpId
+                 AND (o.[MobileCountryCode] <> p.[MobileCountryCode]
+                      OR o.[MobileNumber] <> p.[MobileNumber]))
+    BEGIN
+        UPDATE [Parent].[ParentMobileOtps]
+        SET [ValidationStatus] = N'Expired', [UpdatedAtUtc] = @Now
+        WHERE [ParentMobileOtpId] = @ParentMobileOtpId AND [ValidationStatus] = N'Pending';
+        SET @ValidationStatus = N'Expired';
+    END
+
     IF @ValidationStatus = N'Validated'
     BEGIN
         SET @IsValidated = 1;

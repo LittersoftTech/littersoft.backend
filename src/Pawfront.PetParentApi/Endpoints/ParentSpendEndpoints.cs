@@ -185,5 +185,6 @@ internal static class ParentSpendEndpoints
             row.IsPaid,
             row.Amount,
             row.PaidAtUtc,
-            row.PaymentMethod);
+            row.PaymentMethod,
+            row.CashNotReceivedAtUtc);
 }

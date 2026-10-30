@@ -46,8 +46,8 @@ internal sealed class SqlProviderBookingStatsReader(
             "    FROM [Booking].[Bookings] b " +
             "    INNER JOIN STRING_SPLIT(@ProviderIds, ',') ids " +
             "        ON b.[ProviderId] = TRY_CONVERT(UNIQUEIDENTIFIER, ids.[value]) " +
-            "    WHERE b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED') " +
-            "      AND (b.[Status] IN (N'COMPLETED', N'PAID') " +
+            "    WHERE b.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED') " +
+            "      AND (b.[Status] IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID') " +
             "           OR b.[BookingDate] < @Today " +
             "           OR (b.[BookingDate] = @Today AND b.[EndTime] <= @Now)) " +
             "    GROUP BY b.[ProviderId] " +
@@ -57,7 +57,7 @@ internal sealed class SqlProviderBookingStatsReader(
             "    INNER JOIN STRING_SPLIT(@ProviderIds, ',') ids " +
             "        ON n.[ProviderId] = TRY_CONVERT(UNIQUEIDENTIFIER, ids.[value]) " +
             "    WHERE n.[Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED', N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED') " +
-            "      AND (n.[Status] IN (N'COMPLETED', N'PAID') " +
+            "      AND (n.[Status] IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID') " +
             "           OR n.[CheckOutDate] < @Today) " +
             "    GROUP BY n.[ProviderId] " +
             ") src " +

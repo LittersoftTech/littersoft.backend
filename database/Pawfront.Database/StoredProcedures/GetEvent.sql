@@ -59,8 +59,15 @@ BEGIN
            (SELECT ISNULL(SUM(eb.[TicketCount]), 0)
             FROM [Event].[EventBookings] eb
             WHERE eb.[EventId] = e.[EventId]
-              AND eb.[Status] = N'Confirmed') AS [TotalBookings],
-           e.[EventLink]
+              AND eb.[Status] IN (N'Confirmed',N'Attended')) AS [TotalBookings],
+           e.[EventLink], e.EventStatus,
+           (SELECT COUNT(*) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS AttendedCount,
+           CAST((SELECT ISNULL(SUM(b.TotalAmount/b.TicketCount),0) FROM [Event].[EventBookingTickets] t JOIN [Event].[EventBookings] b ON b.BookingId=t.BookingId
+            WHERE t.EventId=e.EventId AND t.PaymentStatus=N'CashReceived' AND b.Status IN (N'Confirmed',N'Attended',N'NoShow')) AS DECIMAL(18,2)) AS EarnedAmount,
+           (SELECT COUNT(*) FROM [Event].[Events] ce WHERE ce.CancelledWithBookings=1 AND
+             (ce.PetParentId=e.PetParentId OR ce.ProviderId=e.ProviderId)) AS EventsCancelledCount,
+           e.MaximumCapacity
     FROM [Event].[Events] e
     LEFT JOIN [Provider].[Providers] org_pr ON org_pr.[ProviderId] = e.[ProviderId]
     LEFT JOIN [Parent].[PetParents]  org_pp ON org_pp.[PetParentId] = e.[PetParentId]
@@ -81,10 +88,12 @@ BEGIN
     -- Result set 4: attendees — names only (+ ticket number), non-cancelled
     -- bookings. Booker contact / payment stay on the organiser-only dashboard.
     SELECT t.[AttendeeName],
-           t.[TicketNumber]
+           t.[TicketNumber], b.BookingId, t.PaymentStatus,
+           CAST(b.TotalAmount/b.TicketCount AS DECIMAL(18,2)) AS Amount,
+           (SELECT ProfilePhotoUrl FROM [Parent].[PetParents] WHERE PetParentId=b.BookerAccountId) AS ProfileImageUrl
     FROM [Event].[EventBookingTickets] t
     INNER JOIN [Event].[EventBookings] b ON b.[BookingId] = t.[BookingId]
     WHERE t.[EventId] = @EventId
-      AND b.[Status] = N'Confirmed'
+      AND b.[Status] IN (N'Confirmed',N'Attended',N'NoShow')
     ORDER BY b.[CreatedAtUtc] ASC, t.[TicketNumber] ASC;
 END;

@@ -33,7 +33,7 @@ BEGIN
     IF @RowServiceCategory <> N'Vet'
         THROW 51292, 'A prescription can only be recorded on a Vet booking.', 1;
 
-    IF @RowStatus NOT IN (N'IN_PROGRESS', N'ENDING', N'COMPLETED')
+    IF @RowStatus NOT IN (N'IN_PROGRESS', N'ENDING', N'COMPLETED', N'PAYMENT_NOT_RECEIVED')
         THROW 51293, 'A prescription can only be recorded once the job has started or completed.', 1;
 
     UPDATE [Booking].[BookingPrescriptions]

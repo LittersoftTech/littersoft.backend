@@ -7,6 +7,7 @@ namespace Pawfront.Application.ParentOnboarding;
 /// </summary>
 public interface IParentAccountService
 {
+    // Successful deletion also purges SQL notifications and queues retryable inbox cleanup.
     /// <summary>
     /// Deletes a pet-parent account by <b>anonymising</b> it: the personal fields
     /// are scrubbed (the name becomes "Deleted User"), their pets are anonymised

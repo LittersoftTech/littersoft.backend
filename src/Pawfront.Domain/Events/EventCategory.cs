@@ -2,12 +2,14 @@ namespace Pawfront.Domain.Events;
 
 public enum EventCategory
 {
-    AdoptionAndRescue = 0,
-    PetTraining = 1,
-    Charity = 2,
-    Volunteering = 3,
+    MeetupsAndSocials = 8,
+    WalksAndOutdoors = 9,
+    TrainingAndWorkshops = 10,
+    SportsAndCompetitions = 11,
+    ShowsAndDemonstrations = 12,
+    TalksAndLearning = 13,
     HealthAndWellness = 4,
-    SocialAndCultural = 5,
-    OutdoorActivities = 6,
-    ParentEducation = 7
+    AdoptionAndRescue = 0,
+    CharityAndVolunteering = 14,
+    Celebrations = 15
 }

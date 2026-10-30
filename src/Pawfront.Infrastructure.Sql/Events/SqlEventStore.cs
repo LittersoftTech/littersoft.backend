@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using System.Data;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
@@ -11,6 +11,13 @@ internal sealed class SqlEventStore(
     string? configuredConnectionString,
     IPawfrontSecretProvider? secretProvider) : IEventSqlStore
 {
+    private static HostEventOverlapException ReadOverlapException(SqlException exception)
+    {
+        using var conflict = JsonDocument.Parse(exception.Errors.Cast<SqlError>().First(e => e.Number == 51471).Message);
+        return new(conflict.RootElement.GetProperty("conflictingEventId").GetGuid(),
+            conflict.RootElement.GetProperty("conflictingEventTitle").GetString()!);
+    }
+
     public async Task<EventSqlSnapshot> CreateAsync(
         CreateEventSqlInput input,
         CancellationToken cancellationToken)
@@ -38,6 +45,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
         command.Parameters.AddWithValue("@CancellationPolicy", DbValue(input.CancellationPolicy));
         command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
+        command.Parameters.AddWithValue("@MaximumCapacity", (object?)input.MaximumCapacity ?? DBNull.Value);
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
         try
@@ -53,6 +61,10 @@ internal sealed class SqlEventStore(
             var amenities = await ReadAmenitiesAsync(reader, cancellationToken);
 
             return snapshot with { Amenities = amenities };
+        }
+        catch (SqlException exception) when (exception.Number == 51471)
+        {
+            throw ReadOverlapException(exception);
         }
         catch (SqlException exception) when (exception.Number == 51030)
         {
@@ -87,6 +99,7 @@ internal sealed class SqlEventStore(
         command.Parameters.AddWithValue("@Price", input.Price is null ? DBNull.Value : input.Price.Value);
         command.Parameters.AddWithValue("@CancellationPolicy", DbValue(input.CancellationPolicy));
         command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
+        command.Parameters.AddWithValue("@MaximumCapacity", (object?)input.MaximumCapacity ?? DBNull.Value);
         command.Parameters.AddWithValue("@AmenitiesJson", JsonSerializer.Serialize(input.Amenities));
 
         try
@@ -102,6 +115,10 @@ internal sealed class SqlEventStore(
             var amenities = await ReadAmenitiesAsync(reader, cancellationToken);
 
             return snapshot with { Amenities = amenities };
+        }
+        catch (SqlException exception) when (exception.Number == 51471)
+        {
+            throw ReadOverlapException(exception);
         }
         catch (SqlException exception) when (exception.Number == 51207)
         {
@@ -152,6 +169,8 @@ internal sealed class SqlEventStore(
             input.Description, input.BannerImageUrl, input.EventType, input.StartDate, input.EndDate,
             input.StartTime, input.EndTime, input.IsPaid, input.Price, input.CancellationPolicy,
             input.Amenities);
+        command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
+        command.Parameters.AddWithValue("@MaximumCapacity", (object?)input.MaximumCapacity ?? DBNull.Value);
 
         try
         {
@@ -161,6 +180,10 @@ internal sealed class SqlEventStore(
                 throw new InvalidOperationException("Event row was not returned after update.");
             }
             return await ReadEventDetailAsync(reader, cancellationToken);
+        }
+        catch (SqlException exception) when (exception.Number == 51471)
+        {
+            throw ReadOverlapException(exception);
         }
         catch (SqlException exception) when (exception.Number == 51216)
         {
@@ -186,6 +209,8 @@ internal sealed class SqlEventStore(
             input.Description, input.BannerImageUrl, input.EventType, input.StartDate, input.EndDate,
             input.StartTime, input.EndTime, input.IsPaid, input.Price, input.CancellationPolicy,
             input.Amenities);
+        command.Parameters.AddWithValue("@EventLink", DbValue(input.EventLink));
+        command.Parameters.AddWithValue("@MaximumCapacity", (object?)input.MaximumCapacity ?? DBNull.Value);
 
         try
         {
@@ -195,6 +220,10 @@ internal sealed class SqlEventStore(
                 throw new InvalidOperationException("Event row was not returned after update.");
             }
             return await ReadEventDetailAsync(reader, cancellationToken);
+        }
+        catch (SqlException exception) when (exception.Number == 51471)
+        {
+            throw ReadOverlapException(exception);
         }
         catch (SqlException exception) when (exception.Number == 51217)
         {
@@ -255,7 +284,7 @@ internal sealed class SqlEventStore(
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                attendees.Add(new EventAttendeeSummary(reader.GetString(0), reader.GetInt32(1)));
+                attendees.Add(new EventAttendeeSummary(reader.GetString(0), reader.GetInt32(1), reader.GetGuid(2), reader.GetString(3), reader.GetDecimal(4), reader.IsDBNull(5) ? null : reader.GetString(5)));
             }
         }
 
@@ -528,13 +557,15 @@ internal sealed class SqlEventStore(
             // result set 1 in every event-returning sproc (index 24).
             EventLink: reader.IsDBNull(24) ? null : reader.GetString(24),
             // Organiser display fields appended last in result set 1 — joined
-            // from Provider.Providers / Parent.PetParents. ImageUrl is always
+            // from Provider.Providers / Parent.PetParents. The SQL image is always
             // DBNull for provider-organised events (no profile-photo column).
             OrganizerName: reader.IsDBNull(21) ? null : reader.GetString(21),
             OrganizerImageUrl: reader.IsDBNull(22) ? null : reader.GetString(22),
             // Total tickets booked (non-cancelled) — last column of result set 1
             // in every event-returning sproc.
-            TotalBookings: reader.GetInt32(23));
+            TotalBookings: reader.GetInt32(23), EventStatus: reader.GetString(25),
+            AttendedCount: reader.GetInt32(26), EarnedAmount: reader.GetDecimal(27), EventsCancelledCount: reader.GetInt32(28),
+            MaximumCapacity: reader.IsDBNull(29) ? null : reader.GetInt32(29));
     }
 
     private static async Task<List<string>> ReadAmenitiesAsync(
@@ -555,7 +586,8 @@ internal sealed class SqlEventStore(
     public async Task<EventCounters> IncrementCounterAsync(
         Guid eventId,
         string counterType,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Pawfront.Application.Blocks.BlockParty? viewer = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -566,6 +598,8 @@ internal sealed class SqlEventStore(
         };
         command.Parameters.AddWithValue("@EventId", eventId);
         command.Parameters.AddWithValue("@CounterType", counterType);
+        command.Parameters.AddWithValue("@ViewerAccountId", (object?)viewer?.Id ?? DBNull.Value);
+        command.Parameters.AddWithValue("@ViewerType", (object?)viewer?.Type.ToString() ?? DBNull.Value);
 
         try
         {

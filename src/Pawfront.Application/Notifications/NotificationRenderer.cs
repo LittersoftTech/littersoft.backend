@@ -45,6 +45,11 @@ public static class NotificationRenderer
             [NotificationDataKeys.ProviderName] = "Your provider",
             [NotificationDataKeys.ParentName] = "A customer",
             [NotificationDataKeys.EventTitle] = "your event",
+            [NotificationDataKeys.HostName] = "The host",
+            [NotificationDataKeys.Attendees] = "your attendees",
+            [NotificationDataKeys.AttendeeVerb] = "are",
+            [NotificationDataKeys.TotalAmount] = "0",
+            [NotificationDataKeys.Seats] = "available",
             [NotificationDataKeys.ServiceDate] = "the booked date",
             [NotificationDataKeys.ServiceDateWithYear] = "the booked date",
             [NotificationDataKeys.StartTime] = "the booked time",
@@ -94,7 +99,7 @@ public static class NotificationRenderer
         IReadOnlyDictionary<string, string>? data,
         TimeZoneInfo? timeZone = null)
     {
-        var template = NotificationTemplateCatalog.Find(notificationType, audience);
+        var template = NotificationTemplateCatalog.Find(notificationType, audience, data);
         if (template is null)
         {
             return null;
@@ -104,6 +109,28 @@ public static class NotificationRenderer
         data = WithDerivedServiceName(data);
         data = WithDerivedResponseWindow(data);
         data = WithDerivedReviewWindow(data);
+        data = WithAttendeeCount(data);
+        var parameters = data is null
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : new Dictionary<string, string>(data, StringComparer.Ordinal);
+        if (template.Code is not null)
+            parameters[NotificationDataKeys.NotificationCode] = template.Code;
+
+        // Booking producers historically supply "CHF 50.00". V4 puts the
+        // currency in the template, so normalize only cards that print it there.
+        if (template.Code is "P-U12" or "P-U13"
+            && parameters.TryGetValue(NotificationDataKeys.Amount, out var amount)
+            && amount.StartsWith("CHF ", StringComparison.OrdinalIgnoreCase))
+            parameters[NotificationDataKeys.Amount] = amount[4..].Trim();
+        // Chat also serves non-booking conversations; retain the actual sender.
+        if (notificationType == NotificationTypes.MessageReceived
+            && parameters.TryGetValue(NotificationDataKeys.SenderName, out var sender))
+        {
+            var nameKey = audience == NotificationAudience.Provider
+                ? NotificationDataKeys.ParentName : NotificationDataKeys.ProviderName;
+            parameters.TryAdd(nameKey, sender);
+        }
+        data = parameters;
 
         return new RenderedNotification(
             Truncate(Substitute(template.TitleTemplate, data), MaxTitleLength),
@@ -115,6 +142,21 @@ public static class NotificationRenderer
 
     private static readonly IReadOnlyDictionary<string, string> EmptyData =
         new Dictionary<string, string>(StringComparer.Ordinal);
+
+    private static IReadOnlyDictionary<string, string>? WithAttendeeCount(
+        IReadOnlyDictionary<string, string>? data)
+    {
+        if (data is null || !data.TryGetValue(NotificationDataKeys.AttendeeCount, out var raw)
+            || !int.TryParse(raw, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var count) || count < 0)
+            return data;
+
+        return new Dictionary<string, string>(data, StringComparer.Ordinal)
+        {
+            [NotificationDataKeys.Attendees] = count == 1 ? "1 attendee" : $"{count} attendees",
+            [NotificationDataKeys.AttendeeVerb] = count == 1 ? "is" : "are"
+        };
+    }
 
     /// <summary>
     /// Converts the UTC instants a producer emitted into the display strings the

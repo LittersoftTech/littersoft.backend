@@ -1,4 +1,4 @@
-﻿namespace Pawfront.Application.Notifications;
+namespace Pawfront.Application.Notifications;
 
 /// <summary>
 /// The stable machine keys carried as <c>data.type</c> in every push. The mobile
@@ -10,6 +10,8 @@
 /// </summary>
 public static class NotificationTypes
 {
+    public const string IdentityAdded = "IDENTITY_ADDED";
+    public const string IdentityNotApproved = "IDENTITY_NOT_APPROVED";
     // --- Booking lifecycle, to the PET PARENT --------------------------------
 
     public const string BookingAccepted = "BOOKING_ACCEPTED";
@@ -21,22 +23,22 @@ public static class NotificationTypes
     public const string BookingStartOtpIssued = "BOOKING_START_OTP_ISSUED";
     public const string BookingInProgress = "BOOKING_IN_PROGRESS";
     public const string BookingCompleted = "BOOKING_COMPLETED";
+    public const string BookingCashNotReceived = "BOOKING_CASH_NOT_RECEIVED";
     public const string BookingPaid = "BOOKING_PAID";
     public const string BookingModificationRequestedByProvider = "BOOKING_MODIFICATION_REQUESTED_BY_PROVIDER";
     public const string BookingModificationAcceptedByProvider = "BOOKING_MODIFICATION_ACCEPTED_BY_PROVIDER";
     public const string BookingModificationDeclinedByProvider = "BOOKING_MODIFICATION_DECLINED_BY_PROVIDER";
+    /// <summary>Retired in V4; kept for compatibility with historical rows.</summary>
     public const string BookingPrescriptionRecorded = "BOOKING_PRESCRIPTION_RECORDED";
 
     // --- Booking lifecycle, to the PROVIDER -----------------------------------
 
-    /// <summary>A parent booked a single-day service — "New Service Booking".</summary>
+    /// <summary>A parent booked a single-day service (shared V-S1 card).</summary>
     public const string BookingRequested = "BOOKING_REQUESTED";
 
     /// <summary>
-    /// A parent booked a multi-night boarding stay. Separate from
-    /// <see cref="BookingRequested"/> because a stay has no start/end time — it
-    /// spans check-in to check-out — so it needs its own wording, and because it
-    /// deep-links to a different entity.
+    /// A parent booked a multi-night stay. The stable wire type and booking kind
+    /// are preserved; V4 shares the V-S1 wording with ordinary requests.
     /// </summary>
     public const string NightStayBookingRequested = "NIGHT_STAY_BOOKING_REQUESTED";
     public const string BookingCancelledByParent = "BOOKING_CANCELLED_BY_PARENT";
@@ -61,10 +63,33 @@ public static class NotificationTypes
     public const string EventBookingPaymentSucceeded = "EVENT_BOOKING_PAYMENT_SUCCEEDED";
     public const string EventBookingPaymentFailed = "EVENT_BOOKING_PAYMENT_FAILED";
     public const string EventBookingCancelled = "EVENT_BOOKING_CANCELLED";
-    /// <summary>To the organiser: somebody bought tickets for their event.</summary>
+    /// <summary>To the booking account: the host recorded cash for a ticket.</summary>
+    public const string EventBookingCashReceived = "EVENT_BOOKING_CASH_RECEIVED";
+    public const string EventBookingPaymentPending = "EVENT_BOOKING_PAYMENT_PENDING";
+    public const string EventCancelled = "EVENT_CANCELLED";
+    public const string EventSeatsAvailable = "EVENT_SEATS_AVAILABLE";
     public const string EventTicketSold = "EVENT_TICKET_SOLD";
     /// <summary>To the organiser: an attendee cancelled, freeing their seat.</summary>
     public const string EventTicketCancelled = "EVENT_TICKET_CANCELLED";
+
+    // Events V3: host and attendee are roles on an event, not app audiences.
+    public const string EventFirstBooking = "EVENT_FIRST_BOOKING";
+    public const string EventEditableAgain = "EVENT_EDITABLE_AGAIN";
+    public const string EventSoldOut = "EVENT_SOLD_OUT";
+    public const string EventReminderDayBefore = "EVENT_REMINDER_DAY_BEFORE";
+    public const string EventReminderStartingSoon = "EVENT_REMINDER_STARTING_SOON";
+    public const string EventAttended = "EVENT_ATTENDED";
+    public const string EventMissed = "EVENT_MISSED";
+    public const string EventProfileFlagged = "EVENT_PROFILE_FLAGGED";
+    public const string EventProfileFlagRemoved = "EVENT_PROFILE_FLAG_REMOVED";
+    public const string EventIssueResolved = "EVENT_ISSUE_RESOLVED";
+    public const string EventHostReminderDayBefore = "EVENT_HOST_REMINDER_DAY_BEFORE";
+    public const string EventHostReminderStartingSoon = "EVENT_HOST_REMINDER_STARTING_SOON";
+    public const string EventLive = "EVENT_LIVE";
+    public const string EventLiveFree = "EVENT_LIVE_FREE";
+    public const string EventRecordRemaining = "EVENT_RECORD_REMAINING";
+    public const string EventHosted = "EVENT_HOSTED";
+    public const string EventHostedFree = "EVENT_HOSTED_FREE";
 
     // --- Reminders before the service, to BOTH parties ------------------------
 
@@ -104,8 +129,10 @@ public static class NotificationTypes
     /// <summary>To the PARENT: the provider is closing and the pet is still there (P-S14).</summary>
     public const string BookingPickupOverdue = "BOOKING_PICKUP_OVERDUE";
 
-    /// <summary>To the PROVIDER: past closing time with the job still not completed (V-S12).</summary>
+    /// <summary>V-S12: ten minutes before closing with an unfinished job and late collection.</summary>
     public const string BookingNotMarkedComplete = "BOOKING_NOT_MARKED_COMPLETE";
+    /// <summary>V-S15: ten minutes after the scheduled end, if still in progress.</summary>
+    public const string BookingCompletionOverdue = "BOOKING_COMPLETION_OVERDUE";
 
     // --- No-show, split by who decided it -------------------------------------
 
@@ -124,13 +151,12 @@ public static class NotificationTypes
     // --- Modification expiry, split by which deadline bit ---------------------
 
     /// <summary>
-    /// The 24-hour review window lapsed (P-S2 / V-S3). Separate from
-    /// <see cref="BookingModificationExpired"/> so the copy can name the reason;
-    /// exactly one of the two fires per proposal.
+    /// The review window lapsed. This stable type and BookingModificationExpired
+    /// both display P-S2 / V-S3 in V4; exactly one fires per proposal.
     /// </summary>
     public const string BookingModificationTimedOut = "BOOKING_MODIFICATION_TIMED_OUT";
 
-    // --- Modules not built yet: contract only, nothing enqueues these ---------
+    // --- Chat, invoices, support and promotional content ----------------------
 
     /// <summary>
     /// Chat message (P-U14 / V-U5). <b>Wired 2026-08-09.</b> Enqueued by
@@ -144,24 +170,10 @@ public static class NotificationTypes
     /// </summary>
     public const string MessageReceived = "MESSAGE_RECEIVED";
 
-    /// <summary>
-    /// Invoice ready (P-S16 / V-S14).
-    ///
-    /// <b>The PROVIDER half is wired (2026-08-11)</b> — enqueued by
-    /// <c>Booking.MarkBookingPaid</c> and its night-stay twin when the provider
-    /// records the cash, which is the moment their invoice for the job is settled.
-    /// It deep-links to the booking rather than to a document, since there is none.
-    ///
-    /// <b>The PARENT half has no trigger</b>: issuing them an invoice needs an
-    /// invoicing module, which does not exist. Their receipt for the same event is
-    /// <see cref="BookingPaid"/>.
-    /// </summary>
+    /// <summary>P-S16 / V-S14: the recipient's invoice PDF is generated and available.</summary>
     public const string InvoiceIssued = "INVOICE_ISSUED";
 
-    /// <summary>
-    /// Support closed a ticket (P-S15 / V-S13), to the raiser only. <b>No trigger</b>
-    /// — the Helpline / ticket module does not exist.
-    /// </summary>
+    /// <summary>P-S15 / V-S13: support closed a booking ticket; only its raiser is notified.</summary>
     public const string DisputeResolved = "DISPUTE_RESOLVED";
 
     /// <summary>
@@ -209,6 +221,9 @@ public static class NotificationCategories
 /// </summary>
 public static class NotificationDataKeys
 {
+    public const string NotificationCode = "notificationCode";
+    public const string CompletionScenario = "completionScenario";
+    public const string NoShowReason = "noShowReason";
     // --- Envelope keys the mobile apps read on every notification ------------
 
     /// <summary>Payload contract version, so the apps can evolve the shape safely.</summary>
@@ -272,6 +287,12 @@ public static class NotificationDataKeys
     public const string ParentName = "parentName";
     public const string PetName = "petName";
     public const string EventTitle = "eventTitle";
+    public const string HostName = "hostName";
+    public const string AttendeeCount = "attendeeCount";
+    public const string Attendees = "attendees";
+    public const string AttendeeVerb = "attendeeVerb";
+    public const string TotalAmount = "totalAmount";
+    public const string Seats = "seats";
 
     // --- Times: raw instants in, display strings out --------------------------
     // Producers emit the *Utc keys below; NotificationRenderer converts them to

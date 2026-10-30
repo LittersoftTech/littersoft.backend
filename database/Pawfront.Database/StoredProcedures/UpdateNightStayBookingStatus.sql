@@ -5,7 +5,7 @@
 -- @ActorId come from the authenticated route, never the client body. Enforces:
 --   * the actor is a party to the booking            (THROW 51241)
 --   * the status is one the actor may set            (THROW 51242)
---   * the booking is not already terminal            (THROW 51243)
+--   * finished jobs only allow COMPLETED -> PAYMENT_NOT_RECEIVED (THROW 51243)
 --   * the status actually changes                    (THROW 51244)
 --   * the transition is allowed from the current state (THROW 51246)
 --   * a no-show is only reportable 2+ HOURS after check-in + drop-off (THROW 51248)
@@ -28,8 +28,8 @@
 --               PROVIDER_NO_SHOW (from confirmed-equivalent or START_JOB, 2 h after check-in)
 -- A cancel is blocked once the job is underway (IN_PROGRESS; the retired ENDING
 -- kept for legacy rows) → THROW 51269.
--- Terminal states: COMPLETED, PROVIDER_DECLINED, PROVIDER_CANCELLED, PARENT_CANCELLED,
--- PARENT_NO_SHOW, PROVIDER_NO_SHOW.
+-- COMPLETED may move to PAYMENT_NOT_RECEIVED. Both allow payment through the
+-- dedicated MarkNightStayBookingPaid procedure; other terminal states reject this engine.
 -- A geolocation fix may be supplied and is written only for the NO-SHOW
 -- transitions — see [Booking].[UpdateBookingStatus].
 CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
@@ -41,18 +41,24 @@ CREATE OR ALTER PROCEDURE [Booking].[UpdateNightStayBookingStatus]
     @Latitude DECIMAL(9, 6) = NULL,
     @Longitude DECIMAL(9, 6) = NULL,
     @AccuracyMetres DECIMAL(9, 2) = NULL,
-    @DeviceCapturedAtUtc DATETIME2(7) = NULL
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL,
+    @NoShowReason NVARCHAR(32) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
+
+    IF @NoShowReason IS NOT NULL AND (@NoShowReason NOT IN (N'NotArrived',N'OtpNotShared')
+        OR @Actor<>N'Provider' OR @NewStatus<>N'PARENT_NO_SHOW')
+        THROW 51215, 'No-show reason is only valid on a provider report of customer absence.', 1;
+
 
     IF @Actor NOT IN (N'Provider', N'Parent')
     BEGIN
         THROW 51245, 'Actor must be Provider or Parent.', 1;
     END
 
-    IF @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED',
+    IF @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PAYMENT_NOT_RECEIVED',
                           N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                           N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
     BEGIN
@@ -80,6 +86,8 @@ BEGIN
     FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
+    SET @Now = SYSUTCDATETIME(); -- Capture report time after acquiring the booking lock.
+
     IF @CurrentStatus IS NULL
     BEGIN
         THROW 51240, 'Night stay booking was not found.', 1;
@@ -103,41 +111,39 @@ BEGIN
         THROW 51249, 'Booking has expired after 24 hours awaiting provider acceptance and can no longer change.', 1;
     END
 
-    -- BR-53 (mirror of the single-day 51153 guard): a stay still in CREATED with
-    -- under 2 hours to serviceStart — CheckInDate + DropOffTime for a stay — has
-    -- expired; the provider is out of time to accept it. REJECT ONLY: the
-    -- scheduled external job is the single writer of EXPIRED, so the row stays in
-    -- CREATED until it runs.
+    -- Night stays remain acceptable through the check-in date. The expiry
+    -- sweep owns the status change; this guard rejects a response after that date.
     IF @CurrentStatus = N'CREATED'
-       AND DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
-                   CAST(@CheckInDate AS DATETIME2(7))) < DATEADD(HOUR, 2, @Now)
+       AND @Now >= [Booking].[RequestExpiresAtUtc](@CreatedAtUtc, @CheckInDate, COALESCE(@DropOffTime,CAST('00:00' AS TIME)), NULL, NULL)
     BEGIN
-        THROW 51273, 'Booking has expired: it was never accepted and the stay now begins in under 2 hours.', 1;
+        THROW 51273, 'Booking has expired: the acceptance deadline has passed.', 1;
     END
 
     -- A no-show always names the OTHER party: the provider reports the parent's
     -- no-show, the parent reports the provider's.
     IF (@Actor = N'Provider'
-            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PROVIDER_CANCELLED', N'PARENT_NO_SHOW'))
+            AND @NewStatus NOT IN (N'CONFIRMED', N'PROVIDER_DECLINED', N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PROVIDER_CANCELLED', N'PARENT_NO_SHOW'))
        OR (@Actor = N'Parent'
             AND @NewStatus NOT IN (N'PARENT_CANCELLED', N'PROVIDER_NO_SHOW'))
     BEGIN
         THROW 51242, 'This status is not permitted for this actor.', 1;
     END
 
-    IF @CurrentStatus IN (N'COMPLETED', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
-                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+    IF @CurrentStatus IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'PROVIDER_DECLINED', N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
+                          N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW', N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')
+       AND NOT (@CurrentStatus IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED') AND @NewStatus = N'PAYMENT_NOT_RECEIVED')
     BEGIN
         THROW 51243, 'Booking is in a terminal state and cannot change.', 1;
     END
 
-    IF @CurrentStatus = @NewStatus
+    IF @CurrentStatus = @NewStatus AND @NewStatus <> N'PAYMENT_NOT_RECEIVED'
     BEGIN
         THROW 51244, 'Booking is already in the requested status.', 1;
     END
 
     IF (@NewStatus = N'CONFIRMED'           AND @CurrentStatus <> N'CREATED')
        OR (@NewStatus = N'PROVIDER_DECLINED' AND @CurrentStatus <> N'CREATED')
+       OR (@NewStatus = N'PAYMENT_NOT_RECEIVED' AND @CurrentStatus NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED'))
        OR (@NewStatus = N'COMPLETED'        AND @CurrentStatus NOT IN (N'IN_PROGRESS', N'ENDING'))
        OR (@NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
            AND @CurrentStatus NOT IN (N'CONFIRMED',
@@ -160,7 +166,7 @@ BEGIN
     -- A no-show can only be reported once the counterparty is actually late:
     -- 2 HOURS past the stay's scheduled check-in (check-in date + drop-off
     -- time; all times are UTC). A boarding hand-over is a slower affair than a
-    -- single-day appointment, whose gate stays at 30 minutes — so a 09:00
+    -- single-day appointment, whose gate is its scheduled end — so a 09:00
     -- check-in is reportable from 11:00.
     --
     -- Neither party has to wait it out: if the stay is still unstarted when the
@@ -171,7 +177,7 @@ BEGIN
     IF @NewStatus IN (N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW')
     BEGIN
         DECLARE @StartsAtUtc DATETIME2(7) =
-            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @DropOffTime),
+            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), COALESCE(@DropOffTime, CAST('00:00' AS TIME))),
                     CAST(@CheckInDate AS DATETIME2(7)));
         IF @Now < DATEADD(HOUR, 2, @StartsAtUtc)
         BEGIN
@@ -193,8 +199,18 @@ BEGIN
             CASE WHEN @Today <= @CheckInDate THEN DATEADD(DAY, 1, @CheckInDate) ELSE @Today END;
     END
 
+    -- Capture on acceptance, in the same transaction as the status change.
+    IF @NewStatus = N'CONFIRMED'
+        UPDATE b
+        SET [WorkingHoursOpensAtUtc] = w.[OpensAtUtc],
+            [WorkingHoursClosesAtUtc] = w.[ClosesAtUtc]
+        FROM [Booking].[NightStayBookings] b
+        CROSS APPLY [Booking].[AcceptedWorkingHours](b.[ProviderId], b.[CheckInDate], b.[DropOffTime]) w
+        WHERE b.[NightStayBookingId] = @NightStayBookingId;
+
     UPDATE [Booking].[NightStayBookings]
     SET [Status] = @NewStatus,
+        [CashNotReceivedAtUtc] = CASE WHEN @NewStatus = N'PAYMENT_NOT_RECEIVED' THEN @Now ELSE [CashNotReceivedAtUtc] END,
         [UpdatedAtUtc] = @Now,
         -- Only ever written on the COMPLETED transition; every other status
         -- leaves whatever is there alone.
@@ -231,6 +247,16 @@ BEGIN
              @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
     END
 
+    IF @NewStatus = N'PAYMENT_NOT_RECEIVED' AND @Latitude IS NOT NULL AND @Longitude IS NOT NULL
+    BEGIN
+        INSERT INTO [Booking].[NightStayBookingLocationEvents]
+            ([NightStayBookingId], [Trigger], [CapturedByType], [CapturedById],
+             [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc])
+        VALUES
+            (@NightStayBookingId, N'CashNotReceived', N'Provider', @ActorId,
+             @Latitude, @Longitude, @AccuracyMetres, @DeviceCapturedAtUtc);
+    END
+
     -- Mirror of Booking.UpdateBookingStatus: notify the OTHER party, in this
     -- transaction, never the actor who tapped it.
     DECLARE @NotificationType NVARCHAR(64) =
@@ -240,6 +266,7 @@ BEGIN
             WHEN N'PROVIDER_CANCELLED' THEN N'BOOKING_CANCELLED_BY_PROVIDER'
             WHEN N'PARENT_CANCELLED'   THEN N'BOOKING_CANCELLED_BY_PARENT'
             WHEN N'COMPLETED'          THEN N'BOOKING_COMPLETED'
+            WHEN N'PAYMENT_NOT_RECEIVED' THEN N'BOOKING_CASH_NOT_RECEIVED'
             WHEN N'PARENT_NO_SHOW'     THEN N'BOOKING_NO_SHOW_REPORTED'
             WHEN N'PROVIDER_NO_SHOW'   THEN N'BOOKING_NO_SHOW_REPORTED'
         END;
@@ -255,12 +282,19 @@ BEGIN
         DECLARE @Audience NVARCHAR(16) =
             CASE WHEN @Actor = N'Provider' THEN N'PetParent' ELSE N'Provider' END;
 
+        DECLARE @ResolvedNoShowReason NVARCHAR(32) = COALESCE(@NoShowReason, CASE
+            WHEN @NewStatus=N'PARENT_NO_SHOW' AND @CurrentStatus=N'START_JOB'
+                 AND NOT EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory]
+                     WHERE [NightStayBookingId]=@NightStayBookingId AND [Note]=N'Waiting for customer')
+            THEN N'OtpNotShared' ELSE N'NotArrived' END);
+
         EXEC [Notification].[EnqueueBookingNotification]
             @BookingId = @NightStayBookingId,
             @IsNightStay = 1,
             @Audience = @Audience,
             @NotificationType = @NotificationType,
-            @AbsentParty = @AbsentParty;
+            @AbsentParty = @AbsentParty,
+            @NoShowReason = @ResolvedNoShowReason;
     END
 
     SELECT [NightStayBookingId],
@@ -277,7 +311,17 @@ BEGIN
            [CreatedAtUtc],
            [UpdatedAtUtc],
            [CancelledAtUtc],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[NightStayBookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), NULL, NULL)
+           WHEN [Booking].[NightStayBookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)) END)
+                FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'NightStay' AND pay.[BookingId]=[Booking].[NightStayBookings].[NightStayBookingId]) AS [PaidAtUtc]
     FROM [Booking].[NightStayBookings]
     WHERE [NightStayBookingId] = @NightStayBookingId;
 

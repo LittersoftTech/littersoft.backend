@@ -15,7 +15,26 @@ internal static class ProviderServiceCatalogEndpoints
     {
         var group = builder.MapGroup("/providers/{providerId:guid}/services");
         group.MapGet("/", ListServices);
+        group.MapPost("/{serviceId:guid}/deactivate", DeactivateService);
         return builder;
+    }
+
+    // Soft-deactivation preserves the offering configuration, booking history,
+    // and the provider's independent business online/offline switch.
+    private static async Task<IResult> DeactivateService(
+        Guid providerId,
+        Guid serviceId,
+        IProviderServiceCatalog catalog,
+        CancellationToken cancellationToken)
+    {
+        var service = await catalog.GetByIdAsync(serviceId, cancellationToken);
+        if (service is null || service.ProviderId != providerId)
+        {
+            return ApiResults.NotFound("ProviderServiceNotFound", "Service was not found for this provider.");
+        }
+
+        await catalog.DeactivateAsync(providerId, service.ServiceType, cancellationToken);
+        return Results.NoContent();
     }
 
     private static async Task<IResult> ListServices(

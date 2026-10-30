@@ -5,7 +5,7 @@ using Pawfront.Functions.Notifications;
 namespace Pawfront.Functions.Functions;
 
 /// <summary>
-/// Drains the notification outbox to FCM every minute.
+/// Drains the notification outbox to FCM every 15 seconds.
 ///
 /// It lives in the same Function App as <see cref="BookingSweepFunction"/> and
 /// relies on the same guarantee: the Functions host serialises a timer trigger's
@@ -13,7 +13,7 @@ namespace Pawfront.Functions.Functions;
 /// dispatch runs per tick and a notification is never sent twice. That holds only
 /// while this stays the ONE deployed Function App for these triggers.
 ///
-/// One minute is the floor on delivery latency, and the reason the outbox is
+/// One tick is the floor on delivery latency, and the reason the outbox is
 /// worth it anyway: notifications originate in three separate processes (both API
 /// hosts and the booking sweep), and only a durable queue can carry all three
 /// with retries.
@@ -26,7 +26,7 @@ public sealed class NotificationDispatchFunction(
 
     [Function("NotificationDispatchFunction")]
     public async Task Run(
-        [TimerTrigger("0 */1 * * * *")] TimerInfo timer,
+        [TimerTrigger("*/15 * * * * *")] TimerInfo timer,
         CancellationToken cancellationToken)
     {
         try

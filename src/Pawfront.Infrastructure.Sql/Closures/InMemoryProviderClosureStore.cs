@@ -43,8 +43,7 @@ internal sealed class InMemoryProviderClosureStore(
 
             var providerBookings = await bookingStore.ListByProviderAsync(command.ProviderId, date: null, cancellationToken);
             var conflicts = providerBookings
-                // A booking holds its slot unless cancelled by either party.
-                .Where(b => !Pawfront.Application.Bookings.BookingStatuses.Cancelled.Contains(b.Status))
+                .Where(b => !BookingStatuses.Terminal.Contains(b.Status))
                 .Where(b => targetServiceIds.Contains(b.ServiceId))
                 .Where(b => b.BookingDate >= command.StartDate && b.BookingDate <= command.EndDate)
                 .Where(b =>

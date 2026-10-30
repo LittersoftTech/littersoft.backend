@@ -1,0 +1,60 @@
+-- Services V4 intentional delivery delays. Re-deployment preserves configured values.
+CREATE TABLE [Notification].[ServiceNotificationDelivery]
+(
+    Code NVARCHAR(16) NOT NULL PRIMARY KEY,
+    DelaySeconds INT NOT NULL CHECK (DelaySeconds BETWEEN 0 AND 604800)
+);
+GO
+INSERT [Notification].[ServiceNotificationDelivery](Code,DelaySeconds)
+SELECT v.* FROM (VALUES
+    (N'P-U1',15),
+    (N'P-U2',15),
+    (N'P-U3',15),
+    (N'P-S1',15),
+    (N'P-U7',0),
+    (N'P-U8',0),
+    (N'P-U11',0),
+    (N'P-U12',0),
+    (N'P-U13',0),
+    (N'P-U15',0),
+    (N'P-U4',15),
+    (N'P-U5',0),
+    (N'P-U6',0),
+    (N'P-S11',0),
+    (N'P-S9',0),
+    (N'P-S10',0),
+    (N'V-S10',0),
+    (N'P-S13',0),
+    (N'P-S14',0),
+    (N'V-S12',0),
+    (N'V-S15',0),
+    (N'V-S1',0),
+    (N'V-U1',15),
+    (N'V-S2',15),
+    (N'V-U2',0),
+    (N'V-U3',0),
+    (N'V-U4',0),
+    (N'P-S2',0),
+    (N'V-S3',0),
+    (N'P-S4',60),
+    (N'V-S5',60),
+    (N'P-S5',0),
+    (N'V-S6',0),
+    (N'P-S6',0),
+    (N'V-S7',0),
+    (N'P-S7',0),
+    (N'V-S8',0),
+    (N'P-U9',0),
+    (N'P-U10',0),
+    (N'P-S8',15),
+    (N'V-S9',60),
+    (N'P-S12',15),
+    (N'V-S11',15),
+    (N'P-U14',0),
+    (N'V-U5',0),
+    (N'P-S16',60),
+    (N'V-S14',60),
+    (N'P-S15',60),
+    (N'V-S13',60)
+) v(Code,DelaySeconds)
+WHERE NOT EXISTS (SELECT 1 FROM [Notification].[ServiceNotificationDelivery] d WHERE d.Code=v.Code);

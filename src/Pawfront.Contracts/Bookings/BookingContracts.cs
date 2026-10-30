@@ -123,7 +123,8 @@ public sealed record BulkCancelBookingItemRequest(Guid BookingId, string? Bookin
 /// The batch's outcome. Always returned with <b>200</b> when the batch itself was
 /// well-formed, even if every booking in it was refused — the per-booking verdict
 /// is in <paramref name="Results"/>, not in the HTTP status. A 400 means the batch
-/// was unusable (no bookings, or more than 50).
+/// was unusable (no bookings, or more than 50). Authorization failures return
+/// 403 before any booking is changed.
 /// </summary>
 /// <param name="RequestedCount">
 /// Distinct bookings processed, after duplicate ids in the request are collapsed.
@@ -194,8 +195,8 @@ public sealed record CapturedLocationRequest(
 /// <summary>
 /// Body for <c>POST .../bookings/{bookingId}/status</c> — the LEGACY generic status
 /// shim. <see cref="Location"/> is required when <see cref="Status"/> is one of the
-/// two no-show values and ignored otherwise; without it the shim would be a way to
-/// record a no-show with no position, which the dedicated route refuses.
+/// two no-show values or PAYMENT_NOT_RECEIVED; these actions require a position
+/// on both the dedicated route and this shim.
 /// </summary>
 public sealed record UpdateBookingStatusRequest(
     string Status,
@@ -208,6 +209,9 @@ public sealed record UpdateBookingStatusRequest(
 /// payload is where the caller was when they took it.
 /// </summary>
 public sealed record BookingLocationOnlyRequest(CapturedLocationRequest? Location);
+
+/// <summary>Provider no-show report. Reason is NotArrived or OtpNotShared; omitted uses booking state.</summary>
+public sealed record MarkBookingNoShowRequest(CapturedLocationRequest? Location, string? NoShowReason = null);
 
 /// <summary>
 /// Body for <c>POST .../bookings/{bookingId}/start-job</c> (provider). The provider
@@ -271,7 +275,11 @@ public sealed record BookingLocationEventResponse(
 /// </summary>
 public sealed record CompleteBookingRequest(
     DateOnly? NextConsultationDate = null,
-    PrescriptionRequest? Prescription = null);
+    PrescriptionRequest? Prescription = null,
+    bool CustomerArrivedForCollection = false);
+
+/// <summary>Optional hand-over context for a night-stay completion.</summary>
+public sealed record CompleteNightStayBookingRequest(bool CustomerArrivedForCollection = false);
 
 /// <summary>
 /// Body for <c>POST .../bookings/{bookingId}/paid</c> (provider) — records that
@@ -332,8 +340,15 @@ public sealed record VerifyStartOtpRequest(
     string OtpCode,
     CapturedLocationRequest? Location = null);
 
+/// <summary>Provider schedule-only proposal. Acceptance preserves the booked terms.</summary>
+public sealed record RequestProviderBookingModificationRequest(
+    DateOnly BookingDate,
+    TimeOnly StartTime,
+    TimeOnly EndTime,
+    string? Note);
+
 /// <summary>
-/// Body for a single-day modification request
+/// Body for a parent single-day modification request
 /// (<c>POST .../bookings/{bookingId}/modifications</c>). Editing is limited to the
 /// schedule — date + time window only.
 /// </summary>
@@ -388,9 +403,10 @@ public sealed record BookingTermsChangeResponse(
 /// <summary>
 /// Body for accepting/declining a modification
 /// (<c>POST .../modifications/accept</c> | <c>/decline</c>). Accept-vs-decline is
-/// the route, not the body; only an optional note travels here.
+/// the route, not the body. A parent decline can also cancel the booking atomically
+/// by setting CancelBooking; the default leaves the original booking in place.
 /// </summary>
-public sealed record RespondBookingModificationRequest(string? Note);
+public sealed record RespondBookingModificationRequest(string? Note = null, bool CancelBooking = false);
 
 /// <summary>
 /// The staged (pending) date/time-change proposal on a single-day booking, so the
@@ -495,7 +511,15 @@ public sealed record BookingDetailResponse(
     // GET .../bookings/{bookingId}/status-history. Unrelated to
     // pendingModification above, which is the open proposal (if any); a booking
     // modified last week and untouched since reads true here and null there.
-    bool IsModificationDone = false);
+    bool IsModificationDone = false,
+    // A booking incident ticket exists from either party, including closed tickets.
+    // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
+    bool IsDisputeRaised = false,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    bool IsParentModificationDone = false,
+    bool IsProviderModificationDone = false);
 
 /// <summary>
 /// The resolved "where does the service happen" block on a booking-detail read.
@@ -567,7 +591,11 @@ public sealed record ParentDetailsSection(
     string? City = null,
     string? ZipCode = null,
     decimal? Latitude = null,
-    decimal? Longitude = null);
+    decimal? Longitude = null) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>The provider (service-side) facts, joined from the provider's profile —
 /// the counterpart of <see cref="ParentDetailsSection"/> so the parent app can show
@@ -611,7 +639,11 @@ public sealed record PetDetailsSection(
     // walk-ins and until the parent fills them via PATCH /pets/{petId}/medical-info.
     string? SterilizationStatus = null,
     string? MedicalHistory = null,
-    string? Temperament = null);
+    string? Temperament = null) : Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+}
 
 /// <summary>The money facts. <c>PricePerHour</c> is the offering's unit rate (the
 /// stored per-hour price for Custom walk-ins); <c>TotalAmount</c> is rate × time;
@@ -642,7 +674,8 @@ public sealed record PaymentDetailsSection(
     string PayoutStatus,
     string? PayoutId,
     string? PayoutMethod = null,
-    DateTimeOffset? PaidAtUtc = null);
+    DateTimeOffset? PaidAtUtc = null,
+    DateTimeOffset? CashNotReceivedAtUtc = null);
 
 /// <summary>One row of a booking's status-change audit trail.</summary>
 public sealed record BookingStatusHistoryEntryResponse(
@@ -731,4 +764,20 @@ public sealed record BookingResponse(
     // than leaving real personal data frozen in a list.
     string? Breed = null,
     string? PetGender = null,
-    string? CustomerPhotoUrl = null);
+    string? CustomerPhotoUrl = null,
+    // A booking incident ticket exists from either party, including closed tickets.
+    // Both apps show "Dispute Raised" when true. Populated on booking reads and status responses.
+    bool IsDisputeRaised = false,
+    DateTimeOffset? CashNotReceivedAtUtc = null,
+    string? CancellationReason = null,
+    bool ProviderModificationUsed = false,
+    DateTimeOffset? RequestExpiresAtUtc = null,
+    BookingPaymentTimestampDetails? PaymentDetails = null) : Pawfront.Contracts.Badges.IParentBadgeTarget, Pawfront.Contracts.Badges.IPetBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IPetBadgeTarget.BadgePetId => PetId;
+    public bool HasMicrochipBadge { get; set; }
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
+
+public sealed record BookingPaymentTimestampDetails(DateTimeOffset? PaidAtUtc);

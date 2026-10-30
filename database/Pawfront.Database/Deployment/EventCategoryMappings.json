@@ -1,0 +1,11 @@
+{
+  "status": "Approved mappings; unapplied",
+  "database": "littersoft-dev",
+  "mappings": [
+    { "from": "Charity", "to": "CharityAndVolunteering", "observedEventCount": 4 },
+    { "from": "ParentEducation", "to": "TalksAndLearning", "observedEventCount": 2 },
+    { "from": "SocialAndCultural", "to": "MeetupsAndSocials", "observedEventCount": 1 }
+  ],
+  "migrationRequirement": "Copy physical-event Cosmos documents into the new category partition before changing the SQL category. Preserve event IDs and document contents; verify destination documents before removing old copies.",
+  "apply": false
+}

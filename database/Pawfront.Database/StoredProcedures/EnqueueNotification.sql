@@ -30,10 +30,40 @@ CREATE OR ALTER PROCEDURE [Notification].[EnqueueNotification]
     -- a phantom result set after the booking row and break the C# reader.
     -- Defaults to 0 so SqlNotificationPublisher, which reads the id back, is
     -- unaffected.
-    @SuppressResultSet BIT = 0
+    @SuppressResultSet BIT = 0,
+    @NotBeforeUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
+
+    -- Retired by Services V4. Keep old templates readable, but never enqueue
+    -- another prescription notice (including callers outside booking SQL).
+    IF @NotificationType = N'BOOKING_PRESCRIPTION_RECORDED'
+    BEGIN
+        IF @SuppressResultSet = 0
+            SELECT CAST('00000000-0000-0000-0000-000000000000' AS UNIQUEIDENTIFIER) AS NotificationId, CAST(0 AS BIT) AS WasDuplicate;
+        RETURN;
+    END;
+
+    DECLARE @Parameters NVARCHAR(MAX) = CASE WHEN ISJSON(@DataJson)=1 THEN @DataJson ELSE N'{}' END;
+    DECLARE @CardCode NVARCHAR(16) = [Notification].[ServiceNotificationCode](
+        @NotificationType, @Audience, JSON_VALUE(@Parameters,'$.absentParty'),
+        JSON_VALUE(@Parameters,'$.noShowReason'), JSON_VALUE(@Parameters,'$.completionScenario'));
+    IF @CardCode IS NOT NULL
+    BEGIN
+        SET @DataJson = JSON_MODIFY(@Parameters,'$.notificationCode',@CardCode);
+        DECLARE @DelaySeconds INT = ISNULL((SELECT DelaySeconds FROM [Notification].[ServiceNotificationDelivery] WHERE Code=@CardCode),0);
+        DECLARE @EligibleAtUtc DATETIME2(7) = DATEADD(SECOND,@DelaySeconds,SYSUTCDATETIME());
+        IF @NotBeforeUtc IS NULL OR @NotBeforeUtc < @EligibleAtUtc
+            SET @NotBeforeUtc = @EligibleAtUtc;
+    END;
+
+    IF (@Audience=N'Provider' AND EXISTS(SELECT 1 FROM Provider.Providers WHERE ProviderId=@RecipientId AND IsDeleted=1))
+       OR (@Audience=N'PetParent' AND EXISTS(SELECT 1 FROM Parent.PetParents WHERE PetParentId=@RecipientId AND IsDeleted=1))
+    BEGIN
+        IF @SuppressResultSet=0 SELECT CAST('00000000-0000-0000-0000-000000000000' AS UNIQUEIDENTIFIER) AS NotificationId, CAST(0 AS BIT) AS WasDuplicate;
+        RETURN;
+    END
 
     DECLARE @NotificationId UNIQUEIDENTIFIER;
     DECLARE @WasDuplicate BIT = 0;
@@ -67,7 +97,8 @@ BEGIN
                 [EntityId],
                 [DataJson],
                 [ImageUrl],
-                [DedupeKey]
+                [DedupeKey],
+                [NextAttemptAtUtc]
             )
             OUTPUT inserted.[NotificationId] INTO @Inserted
             VALUES
@@ -79,7 +110,8 @@ BEGIN
                 @EntityId,
                 @DataJson,
                 @ImageUrl,
-                @DedupeKey
+                @DedupeKey,
+                COALESCE(@NotBeforeUtc, SYSUTCDATETIME())
             );
 
             SELECT @NotificationId = [NotificationId] FROM @Inserted;

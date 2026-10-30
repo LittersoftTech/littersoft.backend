@@ -1,8 +1,6 @@
 -- One party's tickets — the "my tickets" list on either app.
 --
--- Scoped by the CALLER, not by direction: a ticket the counterparty raised
--- against you is as much yours as one you raised, and both need answering. The
--- row carries [RaisedByType] so the card can say which way round it is.
+-- Scoped to the caller as raiser. The other party's reports stay private to them.
 --
 -- ALL FOUR ticket types come back in one list, discriminated by [TicketType]. A
 -- user thinks "my tickets", not "my four kinds of tickets" — the same reasoning
@@ -53,10 +51,11 @@ BEGIN
            -- positionally, so the two must move together.
            t.[Category],
            t.[Reason],
-           t.[EventId],
+           t.[EventId], t.[EventBookingId],
            COUNT(*) OVER () AS [TotalCount]
     FROM [Support].[Tickets] AS t
-    WHERE ((@ActorType = N'Provider'  AND t.[ProviderId]  = @ActorId)
+    WHERE t.[RaisedByType] = @ActorType
+      AND ((@ActorType = N'Provider'  AND t.[ProviderId]  = @ActorId)
         OR (@ActorType = N'PetParent' AND t.[PetParentId] = @ActorId))
       AND (@Statuses IS NULL OR @Statuses = N''
            OR t.[Status] IN (SELECT LTRIM(RTRIM([value])) FROM STRING_SPLIT(@Statuses, N',')))

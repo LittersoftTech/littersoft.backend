@@ -21,7 +21,7 @@ internal sealed record BookingReminderSweepResult(
 
 /// <summary>
 /// The time-driven booking reminders and nudges (V3 spec cards P-S4..P-S7, P-S9,
-/// P-S10, P-S13, P-S14 and V-S5..V-S8, V-S10, V-S12).
+/// P-S10, P-S13, P-S14 and V-S5..V-S8, V-S10, V-S12, V-S15).
 ///
 /// Unlike the three settlement sweeps this changes no booking status — it only
 /// enqueues notifications — which is why it can safely run every minute.

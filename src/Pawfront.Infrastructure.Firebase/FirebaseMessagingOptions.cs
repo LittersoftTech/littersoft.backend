@@ -15,6 +15,9 @@ public sealed class FirebaseProjectOptions
     /// </summary>
     public string? ProjectId { get; set; }
 
+    /// <summary>Firestore database in this audience's Firebase project.</summary>
+    public string FirestoreDatabaseId { get; set; } = "(default)";
+
     /// <summary>
     /// Path to the service-account JSON on disk. Intended for local development —
     /// keep the file OUT of source control. Takes precedence over

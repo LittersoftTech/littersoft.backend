@@ -52,7 +52,15 @@ public static class BookingStatuses
     public const string Completed = "COMPLETED";
 
     /// <summary>
-    /// The parent has paid the provider (set from <see cref="Completed"/> via the
+    /// The provider reports that payment was not received for a completed job.
+    /// The job remains finished; the provider can record a later payment via the
+    /// mark-paid endpoint.
+    /// </summary>
+    public const string PaymentNotReceived = "PAYMENT_NOT_RECEIVED";
+
+    /// <summary>
+    /// The parent has paid the provider (set from <see cref="Completed"/> or
+    /// <see cref="PaymentNotReceived"/> via the
     /// dedicated mark-paid endpoint). A payment ledger row is written to
     /// <c>Booking.BookingPayments</c>. Terminal; holds the booking's slot like
     /// <see cref="Completed"/>.
@@ -88,7 +96,7 @@ public static class BookingStatuses
 
     /// <summary>
     /// The parent (pet) failed to appear — reported by the PROVIDER, at least
-    /// 30 minutes after the booking's scheduled start (terminal, frees capacity).
+    /// At the booking's scheduled end (terminal, frees capacity).
     /// Also set automatically by the scheduled external job when the provider's
     /// WORKING DAY ends while the booking still sits in <see cref="StartJob"/>:
     /// the provider was there and had the start code issued, but the parent never
@@ -98,7 +106,7 @@ public static class BookingStatuses
 
     /// <summary>
     /// The provider failed to appear — reported by the PARENT, at least
-    /// 30 minutes after the booking's scheduled start (terminal, frees capacity).
+    /// At the booking's scheduled end (terminal, frees capacity).
     /// Also set automatically by the scheduled external job when the provider's
     /// WORKING DAY ends while the booking is still confirmed-equivalent: they
     /// never so much as tapped Start. Keyed off closing time rather than the
@@ -130,6 +138,9 @@ public static class BookingStatuses
     /// </summary>
     public const string JobExpired = "JOB_EXPIRED";
 
+    /// <summary>The provider started the job but did not complete it by the end of the working day. The dedicated complete endpoint may still resolve it.</summary>
+    public const string JobIncomplete = "JOB_INCOMPLETE";
+
     /// <summary>
     /// The provider entered the wrong start-OTP too many times (the 6th failed
     /// attempt) — the job is cancelled. Set by the verify sprocs, never by a
@@ -143,12 +154,12 @@ public static class BookingStatuses
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
     {
         Created, Confirmed, ProviderDeclined, StartJob, InProgress, Ending, JobStarted,
-        Completed, Paid, ApprovalNeeded,
+        Completed, PaymentNotReceived, Paid, ApprovalNeeded,
         ModificationRequestByParent, ModificationRequestByProvider,
         ProviderAcceptedModification, ProviderDeclinedModification,
         ParentAcceptedModification, ParentDeclinedModification,
         ProviderCancelled, ParentCancelled,
-        ParentNoShow, ProviderNoShow, Expired, JobExpired, OtpMaxAttemptsExceeded
+        ParentNoShow, ProviderNoShow, Expired, JobExpired, JobIncomplete, OtpMaxAttemptsExceeded
     };
 
     /// <summary>
@@ -192,7 +203,7 @@ public static class BookingStatuses
     /// </summary>
     public static readonly IReadOnlySet<string> PrescriptionAllowedFrom = new HashSet<string>(StringComparer.Ordinal)
     {
-        InProgress, Ending, Completed
+        InProgress, Ending, Completed, PaymentNotReceived
     };
 
     /// <summary>
@@ -211,7 +222,7 @@ public static class BookingStatuses
     /// </summary>
     public static readonly IReadOnlySet<string> ProviderSettable = new HashSet<string>(StringComparer.Ordinal)
     {
-        Confirmed, ProviderDeclined, Completed, ProviderCancelled, ParentNoShow
+        Confirmed, ProviderDeclined, Completed, PaymentNotReceived, ProviderCancelled, ParentNoShow
     };
 
     /// <summary>Statuses the parent may set via the simple status engine.</summary>
@@ -221,20 +232,21 @@ public static class BookingStatuses
     };
 
     /// <summary>
-    /// Terminal statuses — once a booking reaches one, no further status change
-    /// is allowed.
+    /// Finished statuses that reject the simple status engine, except that
+    /// COMPLETED may move to PAYMENT_NOT_RECEIVED. The dedicated payment path
+    /// also allows COMPLETED or PAYMENT_NOT_RECEIVED to move to PAID.
     /// </summary>
     public static readonly IReadOnlySet<string> Terminal = new HashSet<string>(StringComparer.Ordinal)
     {
-        Completed, Paid, ProviderDeclined, ProviderCancelled, ParentCancelled,
-        ParentNoShow, ProviderNoShow, Expired, JobExpired, OtpMaxAttemptsExceeded
+        Completed, PaymentNotReceived, Paid, ProviderDeclined, ProviderCancelled, ParentCancelled,
+        ParentNoShow, ProviderNoShow, Expired, JobExpired, JobIncomplete, OtpMaxAttemptsExceeded
     };
 
     /// <summary>
     /// The two no-show statuses. A no-show always names the OTHER party: the
     /// provider reports <see cref="ParentNoShow"/>, the parent reports
-    /// <see cref="ProviderNoShow"/> — and only 30+ minutes after the booking's
-    /// scheduled start.
+    /// <see cref="ProviderNoShow"/> — from the scheduled end for a single-day
+    /// booking or two hours after check-in for a night stay.
     /// </summary>
     public static readonly IReadOnlySet<string> NoShow = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -254,7 +266,7 @@ public static class BookingStatuses
     /// <summary>
     /// Trims + validates an incoming status string. Throws
     /// <see cref="UnsupportedBookingStatusException"/> when it is not one of the
-    /// six canonical values.
+    /// canonical values.
     /// </summary>
     public static string Normalize(string? value)
     {

@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Pawfront.Application.ProviderServices;
 using Pawfront.Application.Storage;
 using Pawfront.Contracts.ProviderOnboarding;
+using Pawfront.Application.Notifications;
 
 namespace Pawfront.Application.ProviderOnboarding;
 
@@ -29,13 +30,15 @@ internal sealed class ProviderAccountService(
     IProviderOnboardingService onboardingService,
     IProviderServiceCosmosStore providerServiceCosmosStore,
     IPawfrontBlobStorage blobStorage,
-    ILogger<ProviderAccountService> logger) : IProviderAccountService
+    ILogger<ProviderAccountService> logger,
+    IAccountNotificationCleanup notificationCleanup) : IProviderAccountService
 {
     public async Task<DeleteProviderAccountResponse> DeleteAsync(
         Guid providerId,
         CancellationToken cancellationToken)
     {
         var result = await onboardingService.DeleteProviderAccountAsync(providerId, cancellationToken);
+        await notificationCleanup.TryCleanupAsync(NotificationAudience.Provider, providerId, cancellationToken);
 
         foreach (var serviceCategory in result.ServiceCategories)
         {

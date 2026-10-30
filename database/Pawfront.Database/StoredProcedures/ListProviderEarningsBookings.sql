@@ -113,7 +113,8 @@ BEGIN
         -- instead of leaving their real breed/photo in a provider's report.
         [Breed]            = pet.[Breed],
         [PetGender]        = pet.[Gender],
-        [CustomerPhotoUrl] = pp.[ProfilePhotoUrl]
+        [CustomerPhotoUrl] = pp.[ProfilePhotoUrl],
+        COALESCE(b.[CashNotReceivedAtUtc], n.[CashNotReceivedAtUtc]) AS [CashNotReceivedAtUtc]
     FROM [Booking].[BookingAmounts](@ProviderId, NULL, @FeePercentage) e
     LEFT JOIN [Booking].[Bookings] b
         ON e.[BookingType] = N'SingleDay' AND b.[BookingId] = e.[BookingId]

@@ -156,7 +156,8 @@ public sealed record EventResult(
     // Detail-only (populated by GetAsync / UpdateAsync): the event's payment
     // options (payout methods) and attendee names. Null on list reads.
     IReadOnlyCollection<string>? PaymentOptions = null,
-    IReadOnlyCollection<EventAttendeeSummary>? Attendees = null);
+    IReadOnlyCollection<EventAttendeeSummary>? Attendees = null,
+    string EventStatus = "Active", int AttendedCount = 0, decimal EarnedAmount = 0, int EventsCancelledCount = 0, int? MaximumCapacity = null);
 
 /// <summary>
 /// A single attendee on an event, as surfaced on the public event-detail read.
@@ -165,7 +166,7 @@ public sealed record EventResult(
 /// </summary>
 public sealed record EventAttendeeSummary(
     string AttendeeName,
-    int TicketNumber);
+    int TicketNumber, Guid? BookingId = null, string? PaymentStatus = null, decimal? Amount = null, string? ProfileImageUrl = null);
 
 /// <summary>
 /// Display details for the event's organiser. <see cref="Type"/> is
@@ -180,7 +181,7 @@ public sealed record EventOrganizer(
     string? ImageUrl,
     // Total events this organiser has created. Populated on the event-detail
     // read (GET /events/{eventId}); null on list reads.
-    int? TotalEventsOrganized = null);
+    int? TotalEventsOrganized = null, int EventsCancelledCount = 0);
 
 public sealed record PhysicalEventResult(
     int MaximumCapacity,
@@ -222,7 +223,7 @@ public sealed record EventSqlSnapshot(
     EventCounters Counters,
     // Organiser display fields, joined from Provider.Providers /
     // Parent.PetParents in every event-returning sproc's result set 1.
-    // OrganizerImageUrl is null for provider-organised events.
+    // SQL supplies pet-parent photos; EventService enriches provider photos live.
     string? OrganizerName = null,
     string? OrganizerImageUrl = null,
     // Total tickets booked (non-cancelled) — appended after the organiser
@@ -231,7 +232,8 @@ public sealed record EventSqlSnapshot(
     // Detail-only: filled by GetAsync / UpdateAsync from GetEvent/UpdateEvent's
     // extra result sets (payout methods + attendee names). Null on list reads.
     IReadOnlyCollection<string>? PaymentOptions = null,
-    IReadOnlyCollection<EventAttendeeSummary>? Attendees = null);
+    IReadOnlyCollection<EventAttendeeSummary>? Attendees = null,
+    string EventStatus = "Active", int AttendedCount = 0, decimal EarnedAmount = 0, int EventsCancelledCount = 0, int? MaximumCapacity = null);
 
 public sealed record CreateEventSqlInput(
     Guid ProviderId,
@@ -249,7 +251,7 @@ public sealed record CreateEventSqlInput(
     bool IsPaid,
     decimal? Price,
     string? CancellationPolicy,
-    string? EventLink);
+    string? EventLink, int? MaximumCapacity = null);
 
 /// <summary>
 /// Wire shape sent from the parent-side event service to the SQL store.
@@ -272,7 +274,7 @@ public sealed record CreateParentEventSqlInput(
     bool IsPaid,
     decimal? Price,
     string? CancellationPolicy,
-    string? EventLink);
+    string? EventLink, int? MaximumCapacity = null);
 
 /// <summary>
 /// Wire shape sent from the event service to the SQL store for a provider
@@ -296,7 +298,7 @@ public sealed record UpdateEventSqlInput(
     bool IsPaid,
     decimal? Price,
     string? CancellationPolicy,
-    string? EventLink);
+    string? EventLink, int? MaximumCapacity = null);
 
 /// <summary>
 /// Wire shape for a parent event edit. Mirror of
@@ -319,7 +321,7 @@ public sealed record UpdateParentEventSqlInput(
     bool IsPaid,
     decimal? Price,
     string? CancellationPolicy,
-    string? EventLink);
+    string? EventLink, int? MaximumCapacity = null);
 
 /// <summary>
 /// Catalog-wide event listing filter. Every field is optional; omitting a field

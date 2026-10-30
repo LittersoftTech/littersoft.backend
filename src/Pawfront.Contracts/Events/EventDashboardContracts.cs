@@ -23,4 +23,8 @@ public sealed record EventAttendeeResponse(
     string PaymentMethod,
     string PaymentStatus,
     decimal TotalAmount,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc) : Pawfront.Contracts.Badges.IEventBookerBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IEventBookerBadgeTarget.BadgeEventBookingId => BookingId;
+    public bool HasIdBadge { get; set; }
+}

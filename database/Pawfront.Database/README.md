@@ -20,6 +20,11 @@ Tables are organised into four schemas:
 Deployment is a single idempotent script:
 [`Deployment/DeployAll.sql`](Deployment/DeployAll.sql). Re-runnable; uses
 `IF NOT EXISTS` guards on tables/indexes and `CREATE OR ALTER` on sprocs.
+It includes the event preflight, schema upgrades, verified booking-owner mappings,
+functions and all procedures in dependency order. The individual object files
+under `Tables/`, `Functions/` and `StoredProcedures/` are maintenance sources;
+you do not execute them separately when deploying. `TruncateAll.sql` is a separate
+data-reset utility and is never part of deployment.
 
 ## ER diagram
 
@@ -41,6 +46,9 @@ erDiagram
     PROVIDERS                ||--o| PROVIDER_CANCELLATION_POLICIES : "configures"
     PROVIDERS                ||--o{ EVENTS                       : "creates"
     EVENTS                   ||--o{ EVENT_AMENITIES              : "lists"
+    EVENTS                   ||--o{ EVENT_VIEWS                  : "unique viewers"
+    EVENTS                   ||--o{ EVENT_WAITLIST               : "seat reminders"
+    PET_PARENTS              ||--o{ EVENT_WAITLIST               : "registers"
     EVENTS                   ||--o{ EVENT_BOOKINGS               : "sells tickets for"
     EVENT_BOOKINGS           ||--o{ EVENT_BOOKING_TICKETS        : "issues (1..N attendees)"
     EVENTS                   ||--o{ EVENT_BOOKING_TICKETS        : "denormalised"
@@ -50,6 +58,19 @@ erDiagram
     PET_PARENTS              ||--o{ PETS                         : "has"
     PETS                     ||--o{ PET_PHOTOS                   : "has (ON DELETE CASCADE)"
     PETS                     ||--o{ PET_NEXT_CONSULTATIONS       : "has (ON DELETE CASCADE)"
+
+    EVENT_VIEWS {
+        UNIQUEIDENTIFIER EventId PK,FK
+        NVARCHAR ViewerType PK
+        UNIQUEIDENTIFIER ViewerAccountId PK
+        DATETIME2 ViewedAtUtc
+    }
+    EVENT_WAITLIST {
+        UNIQUEIDENTIFIER EventId PK,FK
+        UNIQUEIDENTIFIER PetParentId PK,FK
+        DATETIME2 JoinedAtUtc
+        DATETIME2 NotifiedAtUtc "nullable until notified"
+    }
 
     PROVIDER_AUTH_IDENTITIES {
         UNIQUEIDENTIFIER ProviderAuthIdentityId PK
@@ -608,9 +629,7 @@ paid too.
 
 - `EventId` — PK.
 - `ProviderId` — FK.
-- `EventCategory` — one of 8 values: `AdoptionAndRescue`, `PetTraining`,
-  `Charity`, `Volunteering`, `HealthAndWellness`, `SocialAndCultural`,
-  `OutdoorActivities`, `ParentEducation`.
+- `EventCategory` — one of 10 values: `MeetupsAndSocials`, `WalksAndOutdoors`, `TrainingAndWorkshops`, `SportsAndCompetitions`, `ShowsAndDemonstrations`, `TalksAndLearning`, `HealthAndWellness`, `AdoptionAndRescue`, `CharityAndVolunteering`, `Celebrations`.
 - `IsChildFriendly`.
 - `Title`, `Description` (NVARCHAR(MAX)), `BannerImageUrl` (nullable).
 - `EventType` — `Physical` or `Online`.
@@ -663,8 +682,11 @@ the event under `UPDLOCK + HOLDLOCK`.
 - `PaymentReference` — external gateway reference, populated on callback.
 - `TotalAmount` — snapshot of `price × TicketCount` at booking time; 0 for
   free events.
-- `Status` — `Confirmed` or `Cancelled`. `Cancelled` requires
-  `CancelledAtUtc` (CHECK). Cancellation/refund flow is not built yet.
+- `Status` — `Confirmed`, `Attended`, `NoShow`, `Cancelled`,
+  `CancelledByParent`, `EventCancelled`, or `AccountDeleted`. Only
+  `Confirmed` and `Attended` reserve seats. Account deletion releases upcoming
+  bookings without recording a reliability mark.
+
 
 ### `Event.EventBookingTickets`
 One row per attendee / printed ticket. The GET endpoint returns one entry
@@ -675,6 +697,20 @@ per row here — if 4 tickets were bought, 4 rows come back.
 - `EventId` — denormalised so per-event listings don't need a join back.
 - `TicketNumber` — 1..N within the booking; UNIQUE with `BookingId`.
 - `AttendeeName` — free text, not validated against any user table.
+
+### `Event.Waitlist`
+Primary key `(EventId, PetParentId)`; both columns reference their event/parent.
+`NotifiedAtUtc` is nullable until a seat reminder is atomically enqueued. Each
+registration receives one reminder, and stays registered until booking, leaving,
+host cancellation, account deletion, or event start. The lifecycle sweep deletes
+started-event rows; reads exclude started events immediately.
+
+### `Event.EventViews`
+Primary key `(EventId, ViewerType, ViewerAccountId)` stores the first view of an
+authenticated parent or provider account. `EventId` references `Event.Events`.
+The account is polymorphic, so its identity has no parent-only foreign key.
+`ViewedAtUtc` records the first view. The insert and counter increment share a
+transaction; host views do neither. Existing aggregate counts are preserved.
 
 ## Booking schema
 
@@ -1131,10 +1167,24 @@ Re-run safely after any change:
 
 ```powershell
 sqlcmd -S <server> -d <database> -U <user> -P "<password>" `
-       -i Deployment\DeployAll.sql
+       -I -b -i Deployment\DeployAll.sql
 ```
 
 Or open `Deployment/DeployAll.sql` in SSMS / Azure Data Studio and Execute.
+Run during a maintenance window. All database changes are committed together at
+the end. On any error in SSMS, stop execution and roll back any open transaction.
+A preflight rejection disables later batches; run `SET NOEXEC OFF` or reconnect
+before retrying in the same SSMS session.
+
+Existing event data is checked automatically. Retired categories need the
+coordinated SQL/Cosmos migration documented in
+[`Deployment/EventLifecycleRollout.md`](Deployment/EventLifecycleRollout.md).
+For ambiguous legacy booking owners, fill `#VerifiedEventBookingMappings` near
+the top of a private copy of `DeployAll.sql` with verified booking/account IDs
+and account types. A unique email match is backfilled automatically; unresolved
+active bookings or invalid mappings fail the deployment and roll it back.
+Keep private mappings outside source control. No separate preflight or event
+deployment script is required.
 
 When **adding or modifying** a table or sproc:
 

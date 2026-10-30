@@ -48,7 +48,10 @@ internal sealed class SqlParentProviderBookingReader(
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            jobs.Add(PendingJobReader.Read(reader));
+            jobs.Add(PendingJobReader.Read(reader) with
+            {
+                CashNotReceivedAtUtc = reader.IsDBNull(17) ? null : new DateTimeOffset(reader.GetDateTime(17), TimeSpan.Zero)
+            });
 
             // Identical on every row; read once. An empty page never sets it,
             // which is correct — no rows means no jobs.

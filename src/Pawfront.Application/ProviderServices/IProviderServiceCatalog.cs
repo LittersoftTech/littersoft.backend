@@ -4,6 +4,8 @@ namespace Pawfront.Application.ProviderServices;
 /// Catalog of services each provider offers (DayCare, NightStay, GroomingSession,
 /// TrainingSession, VetAppointment). Backed by <c>Provider.ProviderServices</c>.
 /// ServiceIds minted here are the keys closures, bookings, and slot queries reference.
+/// Service activation never changes the provider profile's business online/offline
+/// switch, including when the last service is deactivated or the first is activated.
 /// </summary>
 public interface IProviderServiceCatalog
 {

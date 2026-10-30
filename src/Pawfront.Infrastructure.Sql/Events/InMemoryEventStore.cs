@@ -1,4 +1,4 @@
-﻿using Pawfront.Application.Blocks;
+using Pawfront.Application.Blocks;
 using System.Collections.Concurrent;
 using Pawfront.Application.Events;
 
@@ -7,70 +7,79 @@ namespace Pawfront.Infrastructure.Sql.Events;
 internal sealed class InMemoryEventStore : IEventSqlStore
 {
     private readonly ConcurrentDictionary<Guid, EventSqlSnapshot> events = new();
+    private readonly object eventWriteLock = new();
     private readonly ConcurrentDictionary<Guid, IReadOnlyList<string>> payoutMethods = new();
 
     public Task<EventSqlSnapshot> CreateAsync(CreateEventSqlInput input, CancellationToken cancellationToken)
     {
-        var now = DateTimeOffset.UtcNow;
-        var snapshot = new EventSqlSnapshot(
-            EventId: Guid.NewGuid(),
-            ProviderId: input.ProviderId,
-            PetParentId: null,
-            EventCategory: input.EventCategory,
-            IsChildFriendly: input.IsChildFriendly,
-            Title: input.Title,
-            Description: input.Description,
-            BannerImageUrl: input.BannerImageUrl,
-            Amenities: input.Amenities.ToArray(),
-            EventType: input.EventType,
-            StartDate: input.StartDate,
-            EndDate: input.EndDate,
-            StartTime: input.StartTime,
-            EndTime: input.EndTime,
-            IsPaid: input.IsPaid,
-            Price: input.Price,
-            CancellationPolicy: input.CancellationPolicy,
-            EventLink: input.EventLink,
-            CreatedAtUtc: now,
-            UpdatedAtUtc: now,
-            // Counters aren't tracked in the in-memory dev fallback.
-            Counters: new EventCounters(0, 0, 0));
+        lock (eventWriteLock)
+        {
+            AssertNoOverlap(input.ProviderId, null, null, input.StartDate, input.EndDate, input.StartTime, input.EndTime);
+            var now = DateTimeOffset.UtcNow;
+            var snapshot = new EventSqlSnapshot(
+                EventId: Guid.NewGuid(),
+                ProviderId: input.ProviderId,
+                PetParentId: null,
+                EventCategory: input.EventCategory,
+                IsChildFriendly: input.IsChildFriendly,
+                Title: input.Title,
+                Description: input.Description,
+                BannerImageUrl: input.BannerImageUrl,
+                Amenities: input.Amenities.ToArray(),
+                EventType: input.EventType,
+                StartDate: input.StartDate,
+                EndDate: input.EndDate,
+                StartTime: input.StartTime,
+                EndTime: input.EndTime,
+                IsPaid: input.IsPaid,
+                Price: input.Price,
+                CancellationPolicy: input.CancellationPolicy,
+                EventLink: input.EventLink,
+                CreatedAtUtc: now,
+                UpdatedAtUtc: now,
+                // Counters aren't tracked in the in-memory dev fallback.
+                Counters: new EventCounters(0, 0, 0));
 
-        events[snapshot.EventId] = snapshot;
-        return Task.FromResult(snapshot);
+            events[snapshot.EventId] = snapshot;
+            return Task.FromResult(snapshot);
+        }
     }
 
     public Task<EventSqlSnapshot> CreateByParentAsync(
         CreateParentEventSqlInput input,
         CancellationToken cancellationToken)
     {
-        var now = DateTimeOffset.UtcNow;
-        var snapshot = new EventSqlSnapshot(
-            EventId: Guid.NewGuid(),
-            ProviderId: null,
-            PetParentId: input.PetParentId,
-            EventCategory: input.EventCategory,
-            IsChildFriendly: input.IsChildFriendly,
-            Title: input.Title,
-            Description: input.Description,
-            BannerImageUrl: input.BannerImageUrl,
-            Amenities: input.Amenities.ToArray(),
-            EventType: input.EventType,
-            StartDate: input.StartDate,
-            EndDate: input.EndDate,
-            StartTime: input.StartTime,
-            EndTime: input.EndTime,
-            IsPaid: input.IsPaid,
-            Price: input.Price,
-            CancellationPolicy: input.CancellationPolicy,
-            EventLink: input.EventLink,
-            CreatedAtUtc: now,
-            UpdatedAtUtc: now,
-            // Counters aren't tracked in the in-memory dev fallback.
-            Counters: new EventCounters(0, 0, 0));
+        lock (eventWriteLock)
+        {
+            AssertNoOverlap(null, input.PetParentId, null, input.StartDate, input.EndDate, input.StartTime, input.EndTime);
+            var now = DateTimeOffset.UtcNow;
+            var snapshot = new EventSqlSnapshot(
+                EventId: Guid.NewGuid(),
+                ProviderId: null,
+                PetParentId: input.PetParentId,
+                EventCategory: input.EventCategory,
+                IsChildFriendly: input.IsChildFriendly,
+                Title: input.Title,
+                Description: input.Description,
+                BannerImageUrl: input.BannerImageUrl,
+                Amenities: input.Amenities.ToArray(),
+                EventType: input.EventType,
+                StartDate: input.StartDate,
+                EndDate: input.EndDate,
+                StartTime: input.StartTime,
+                EndTime: input.EndTime,
+                IsPaid: input.IsPaid,
+                Price: input.Price,
+                CancellationPolicy: input.CancellationPolicy,
+                EventLink: input.EventLink,
+                CreatedAtUtc: now,
+                UpdatedAtUtc: now,
+                // Counters aren't tracked in the in-memory dev fallback.
+                Counters: new EventCounters(0, 0, 0));
 
-        events[snapshot.EventId] = snapshot;
-        return Task.FromResult(snapshot);
+            events[snapshot.EventId] = snapshot;
+            return Task.FromResult(snapshot);
+        }
     }
 
     public Task<EventSqlSnapshot?> GetAsync(
@@ -101,70 +110,97 @@ internal sealed class InMemoryEventStore : IEventSqlStore
 
     public Task<EventSqlSnapshot> UpdateAsync(UpdateEventSqlInput input, CancellationToken cancellationToken)
     {
-        if (!events.TryGetValue(input.EventId, out var existing) || existing.ProviderId != input.ProviderId)
+        lock (eventWriteLock)
         {
-            throw new EventNotFoundException(input.EventId);
-        }
+            if (!events.TryGetValue(input.EventId, out var existing) || existing.ProviderId != input.ProviderId)
+            {
+                throw new EventNotFoundException(input.EventId);
+            }
 
-        var updated = existing with
-        {
-            EventCategory = input.EventCategory,
-            IsChildFriendly = input.IsChildFriendly,
-            Title = input.Title,
-            Description = input.Description,
-            BannerImageUrl = input.BannerImageUrl,
-            Amenities = input.Amenities.ToArray(),
-            EventType = input.EventType,
-            StartDate = input.StartDate,
-            EndDate = input.EndDate,
-            StartTime = input.StartTime,
-            EndTime = input.EndTime,
-            IsPaid = input.IsPaid,
-            Price = input.IsPaid ? input.Price : null,
-            CancellationPolicy = input.CancellationPolicy,
-            EventLink = input.EventLink,
-            UpdatedAtUtc = DateTimeOffset.UtcNow
-        };
-        events[input.EventId] = updated;
-        if (!input.IsPaid)
-        {
-            payoutMethods.TryRemove(input.EventId, out _);
+            if (ScheduleChanged(existing, input.StartDate, input.EndDate, input.StartTime, input.EndTime))
+                AssertNoOverlap(input.ProviderId, null, input.EventId, input.StartDate, input.EndDate, input.StartTime, input.EndTime);
+            var updated = existing with
+            {
+                EventCategory = input.EventCategory,
+                IsChildFriendly = input.IsChildFriendly,
+                Title = input.Title,
+                Description = input.Description,
+                BannerImageUrl = input.BannerImageUrl,
+                Amenities = input.Amenities.ToArray(),
+                EventType = input.EventType,
+                StartDate = input.StartDate,
+                EndDate = input.EndDate,
+                StartTime = input.StartTime,
+                EndTime = input.EndTime,
+                IsPaid = input.IsPaid,
+                Price = input.IsPaid ? input.Price : null,
+                CancellationPolicy = input.CancellationPolicy,
+                EventLink = input.EventLink,
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            };
+            events[input.EventId] = updated;
+            if (!input.IsPaid)
+            {
+                payoutMethods.TryRemove(input.EventId, out _);
+            }
+            return Task.FromResult(updated);
         }
-        return Task.FromResult(updated);
     }
 
     public Task<EventSqlSnapshot> UpdateByParentAsync(UpdateParentEventSqlInput input, CancellationToken cancellationToken)
     {
-        if (!events.TryGetValue(input.EventId, out var existing) || existing.PetParentId != input.PetParentId)
+        lock (eventWriteLock)
         {
-            throw new EventNotFoundException(input.EventId);
-        }
+            if (!events.TryGetValue(input.EventId, out var existing) || existing.PetParentId != input.PetParentId)
+            {
+                throw new EventNotFoundException(input.EventId);
+            }
 
-        var updated = existing with
-        {
-            EventCategory = input.EventCategory,
-            IsChildFriendly = input.IsChildFriendly,
-            Title = input.Title,
-            Description = input.Description,
-            BannerImageUrl = input.BannerImageUrl,
-            Amenities = input.Amenities.ToArray(),
-            EventType = input.EventType,
-            StartDate = input.StartDate,
-            EndDate = input.EndDate,
-            StartTime = input.StartTime,
-            EndTime = input.EndTime,
-            IsPaid = input.IsPaid,
-            Price = input.IsPaid ? input.Price : null,
-            CancellationPolicy = input.CancellationPolicy,
-            EventLink = input.EventLink,
-            UpdatedAtUtc = DateTimeOffset.UtcNow
-        };
-        events[input.EventId] = updated;
-        if (!input.IsPaid)
-        {
-            payoutMethods.TryRemove(input.EventId, out _);
+            if (ScheduleChanged(existing, input.StartDate, input.EndDate, input.StartTime, input.EndTime))
+                AssertNoOverlap(null, input.PetParentId, input.EventId, input.StartDate, input.EndDate, input.StartTime, input.EndTime);
+            var updated = existing with
+            {
+                EventCategory = input.EventCategory,
+                IsChildFriendly = input.IsChildFriendly,
+                Title = input.Title,
+                Description = input.Description,
+                BannerImageUrl = input.BannerImageUrl,
+                Amenities = input.Amenities.ToArray(),
+                EventType = input.EventType,
+                StartDate = input.StartDate,
+                EndDate = input.EndDate,
+                StartTime = input.StartTime,
+                EndTime = input.EndTime,
+                IsPaid = input.IsPaid,
+                Price = input.IsPaid ? input.Price : null,
+                CancellationPolicy = input.CancellationPolicy,
+                EventLink = input.EventLink,
+                UpdatedAtUtc = DateTimeOffset.UtcNow
+            };
+            events[input.EventId] = updated;
+            if (!input.IsPaid)
+            {
+                payoutMethods.TryRemove(input.EventId, out _);
+            }
+            return Task.FromResult(updated);
         }
-        return Task.FromResult(updated);
+    }
+
+    private static bool ScheduleChanged(EventSqlSnapshot previous, DateOnly startDate, DateOnly endDate,
+        TimeOnly startTime, TimeOnly endTime) => previous.StartDate != startDate || previous.EndDate != endDate
+            || previous.StartTime != startTime || previous.EndTime != endTime;
+
+    private void AssertNoOverlap(Guid? providerId, Guid? parentId, Guid? excludedEventId,
+        DateOnly startDate, DateOnly endDate, TimeOnly startTime, TimeOnly endTime)
+    {
+        var start = EventBookingWindow.StartAtUtc(startDate, startTime);
+        var end = EventBookingWindow.StartAtUtc(endDate, endTime);
+        if (start >= end) throw new ArgumentException("Event end must be after its start.");
+        var conflict = events.Values.Where(e => (providerId.HasValue && e.ProviderId == providerId
+                || parentId.HasValue && e.PetParentId == parentId) && e.EventId != excludedEventId && e.EventStatus != "Cancelled"
+                && start < EventBookingWindow.StartAtUtc(e.EndDate, e.EndTime) && EventBookingWindow.StartAtUtc(e.StartDate, e.StartTime) < end)
+            .OrderBy(e => e.StartDate).ThenBy(e => e.StartTime).ThenBy(e => e.EventId).FirstOrDefault();
+        if (conflict is not null) throw new HostEventOverlapException(conflict.EventId, conflict.Title);
     }
 
     public Task<IReadOnlyList<EventSqlSnapshot>> ListByProviderAsync(
@@ -296,7 +332,8 @@ internal sealed class InMemoryEventStore : IEventSqlStore
     public Task<EventCounters> IncrementCounterAsync(
         Guid eventId,
         string counterType,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Pawfront.Application.Blocks.BlockParty? viewer = null)
     {
         // Dev fallback only — never used in normal runs. Counters aren't tracked
         // in this in-memory snapshot, so we just return zeros after confirming

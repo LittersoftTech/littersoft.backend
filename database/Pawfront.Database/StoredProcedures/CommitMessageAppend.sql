@@ -223,7 +223,13 @@ BEGIN
            @NotificationId AS [NotificationId],
            @DataJson AS [DataJson],
            @Sequence AS [Sequence],
-           @ReservedAtUtc AS [CreatedAtUtc];
+           @ReservedAtUtc AS [CreatedAtUtc],
+           CASE WHEN @RecipientType = N'Provider'
+                THEN (SELECT [FirebaseUserId] FROM [Provider].[ProviderAuthIdentities]
+                      WHERE [ProviderId] = @RecipientId)
+                ELSE (SELECT [FirebaseUserId] FROM [Parent].[ParentAuthIdentities]
+                      WHERE [PetParentId] = @RecipientId)
+           END AS [RecipientFirebaseUserId];
 
     -- Result set 2 — the devices to push to. Empty when no notification was
     -- queued, so the caller can branch on row count alone.

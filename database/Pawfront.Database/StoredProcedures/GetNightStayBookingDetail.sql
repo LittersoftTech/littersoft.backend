@@ -98,7 +98,21 @@ BEGIN
                          FROM [Booking].[NightStayBookingStatusHistory] AS mh
                          WHERE mh.[NightStayBookingId] = b.[NightStayBookingId]
                            AND mh.[ToStatus] IN (N'PROVIDER_ACCEPTED_MODIFICATION', N'PARENT_ACCEPTED_MODIFICATION'))
-                     THEN 1 ELSE 0 END AS BIT) AS [IsModificationDone]
+                     THEN 1 ELSE 0 END AS BIT) AS [IsModificationDone],
+           b.[CashNotReceivedAtUtc], b.[CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = b.[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN b.[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc](b.[CreatedAtUtc], b.[CheckInDate], COALESCE(b.[DropOffTime],CAST('00:00' AS TIME)), NULL, NULL)
+           WHEN b.[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], b.[CheckInDate], COALESCE(b.[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE(b.[DropOffTime],CAST('00:00' AS TIME)) END)
+                FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = b.[NightStayBookingId])
+           END AS [RequestExpiresAtUtc],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh
+               WHERE mh.[NightStayBookingId] = b.[NightStayBookingId] AND mh.[ToStatus] = N'PROVIDER_ACCEPTED_MODIFICATION')
+               THEN 1 ELSE 0 END AS BIT) AS [IsParentModificationDone],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh
+               WHERE mh.[NightStayBookingId] = b.[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION')
+               THEN 1 ELSE 0 END AS BIT) AS [IsProviderModificationDone]
     FROM [Booking].[NightStayBookings] AS b
     LEFT JOIN [Parent].[PetParents] AS pp
         ON pp.[PetParentId] = b.[PetParentId]

@@ -1545,7 +1545,7 @@
               "host": ["{{baseUrl}}"],
               "path": ["api","v1","events"],
               "query": [
-                { "key": "eventCategory", "value": "AdoptionAndRescue", "description": "AdoptionAndRescue | PetTraining | Charity | Volunteering | HealthAndWellness | SocialAndCultural | OutdoorActivities | ParentEducation", "disabled": true },
+                { "key": "eventCategory", "value": "AdoptionAndRescue", "description": "MeetupsAndSocials | WalksAndOutdoors | TrainingAndWorkshops | SportsAndCompetitions | ShowsAndDemonstrations | TalksAndLearning | HealthAndWellness | AdoptionAndRescue | CharityAndVolunteering | Celebrations", "disabled": true },
                 { "key": "eventType", "value": "Physical", "description": "Physical | Online", "disabled": true },
                 { "key": "startDate", "value": "2026-06-01", "disabled": true },
                 { "key": "endDate", "value": "2026-12-31", "disabled": true },

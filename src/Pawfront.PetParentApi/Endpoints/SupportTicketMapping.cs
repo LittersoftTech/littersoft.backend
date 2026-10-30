@@ -50,7 +50,7 @@ internal static class SupportTicketMapping
             Photos: [.. ticket.Photos.Select(ToResponse)],
             CreatedAtUtc: ticket.CreatedAtUtc,
             UpdatedAtUtc: ticket.UpdatedAtUtc,
-            ClosedAtUtc: ticket.ClosedAtUtc);
+            ClosedAtUtc: ticket.ClosedAtUtc, EventBookingId: ticket.EventBookingId);
     }
 
     public static SupportTicketPhotoResponse ToResponse(SupportTicketPhotoRecord photo) =>

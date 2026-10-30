@@ -3,10 +3,12 @@ using Pawfront.Api.Auth;
 using Pawfront.Api.Endpoints;
 using Pawfront.Api.Telemetry;
 using Pawfront.Application;
+using Pawfront.Application.Storage;
 using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
 using Pawfront.Infrastructure.Cosmos;
 using Pawfront.Infrastructure.Sql;
+using Pawfront.Infrastructure.Firebase;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,6 +16,9 @@ builder.Services.AddPawfrontTelemetry(builder.Configuration, builder.Environment
 builder.Services.AddOpenApi();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<ICurrentProviderContext, CurrentProviderContext>();
+builder.Services.AddScoped<Pawfront.Application.Blocks.ICurrentBlockParty, CurrentBlockParty>();
 
 builder.Services
     .AddPawfrontAzureInfrastructure(builder.Configuration, builder.Environment)
@@ -25,6 +30,8 @@ builder.Services
 // Platform fee (% of booking total) surfaced on the booking-detail payment block.
 builder.Services.Configure<PawfrontFeeOptions>(
     builder.Configuration.GetSection(PawfrontFeeOptions.SectionName));
+
+builder.Services.AddPawfrontFirestoreInbox(builder.Configuration);
 
 var app = builder.Build();
 
@@ -40,7 +47,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.UseMiddleware<ProviderTelemetryEnrichmentMiddleware>();
 
-var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.FirebaseUserPolicy);
+var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.FirebaseUserPolicy).AddEndpointFilter<Pawfront.Application.Badges.BadgeResponseFilter>();
 
 api.MapHealthEndpoints();
 api.MapMetadataEndpoints();
@@ -48,6 +55,7 @@ api.MapProviderOnboardingEndpoints();
 // FCM token register/refresh + sign-out. Not scoped under /providers/{id} — a
 // token is bound to the auth identity, which exists before the profile does.
 api.MapDeviceTokenEndpoints();
+api.MapNotificationEndpoints();
 api.MapProviderEndpoints();
 api.MapProviderServiceCatalogEndpoints();
 api.MapProviderPolicyEndpoints();
@@ -79,8 +87,12 @@ api.MapProviderReviewEndpoints();
 api.MapProviderSupportTicketEndpoints();
 api.MapBlockEndpoints();
 api.MapPetParentLookupEndpoints();
+app.MapGroup("/api/v1").MapParentIdentityReviewEndpoints();
+app.MapGroup("/api/v1").MapProviderTrustAdminEndpoints();
+api.MapProviderTrustOwnerEndpoints();
 api.MapProviderNightStayBookingEndpoints();
 api.MapBlobImageEndpoints();
+api.MapDocumentationEndpoints(providerHost: true);
 api.MapProviderClosureEndpoints();
 api.MapProviderActiveStatusEndpoints();
 api.MapProviderAccountEndpoints();

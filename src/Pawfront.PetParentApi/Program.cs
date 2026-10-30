@@ -4,6 +4,7 @@ using Pawfront.Application.Configuration;
 using Pawfront.Infrastructure.Azure;
 using Pawfront.Infrastructure.Cosmos;
 using Pawfront.Infrastructure.Sql;
+using Pawfront.Infrastructure.Firebase;
 using Pawfront.PetParentApi;
 using Pawfront.PetParentApi.Auth;
 using Pawfront.PetParentApi.Endpoints;
@@ -16,6 +17,7 @@ builder.Services.AddOpenApi();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 builder.Services.AddHttpContextAccessor();
+builder.Services.AddEmailStatusRateLimiting();
 
 // Registered BEFORE AddPawfrontApplication on purpose: Application TryAdds a
 // no-op in its place, so a host that wants real block filtering on discovery
@@ -42,6 +44,8 @@ builder.Services.AddScoped<ICurrentPetParentContext, CurrentPetParentContext>();
 builder.Services.AddTransient<OwnedPetParentFilter>();
 builder.Services.AddTransient<OwnedPetFilter>();
 
+builder.Services.AddPawfrontFirestoreInbox(builder.Configuration);
+
 var app = builder.Build();
 
 app.UseExceptionHandler();
@@ -54,9 +58,14 @@ if (app.Configuration.GetValue("Api:UseHttpsRedirection", false))
 app.MapOpenApi();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 app.UseMiddleware<PetParentTelemetryEnrichmentMiddleware>();
 
-var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.PetParentUserPolicy);
+var api = app.MapGroup("/api/v1").RequireAuthorization(AuthServiceCollectionExtensions.PetParentUserPolicy).AddEndpointFilter<Pawfront.Application.Badges.BadgeResponseFilter>().AddEndpointFilter<Pawfront.Application.ProviderTrust.ProviderTrustBadgeFilter>();
+
+// Also expose the unversioned route requested by the email sign-in flow.
+app.MapAuthEndpoints();
+api.MapAuthEndpoints();
 
 api.MapHealthEndpoints();
 api.MapMetadataEndpoints();
@@ -64,6 +73,7 @@ api.MapParentOnboardingEndpoints();
 // FCM token register/refresh + sign-out. Not ownership-filtered — a token is
 // bound to the auth identity, which exists before the profile does.
 api.MapDeviceTokenEndpoints();
+api.MapNotificationEndpoints();
 api.MapPetParentEndpoints();
 api.MapParentSpendEndpoints();
 // Parent reviews a provider after a finished booking (rating + comment + photos),
@@ -84,6 +94,7 @@ api.MapProviderSearchEndpoints();
 // Invoice PDF download (the provider's service invoice for a paid booking).
 api.MapInvoiceEndpoints();
 api.MapBlobImageEndpoints();
+Pawfront.Application.Storage.DocumentationEndpoints.MapDocumentationEndpoints(api, providerHost: false);
 api.MapAvailabilitySlotsEndpoints();
 api.MapProviderAgendaEndpoints();
 

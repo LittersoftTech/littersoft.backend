@@ -209,10 +209,10 @@ internal sealed class CosmosPetTrainerServiceRegistry(
         return document is null ? null : ToResult(document);
     }
 
-    private static (PetTrainerLicense License, PetTrainerOffering Offering) BuildLicenseAndOffering(
-        string licenseNumber,
-        string licenseType,
-        string licenseImageUrl,
+    private static (PetTrainerLicense? License, PetTrainerOffering Offering) BuildLicenseAndOffering(
+        string? licenseNumber,
+        string? licenseType,
+        string? licenseImageUrl,
         TrainingSessionInput session,
         IReadOnlyCollection<string> petsTrained,
         IReadOnlyCollection<string> ageGroups,
@@ -240,10 +240,11 @@ internal sealed class CosmosPetTrainerServiceRegistry(
             throw new ArgumentException("MaxConcurrentSessions must be between 1 and 20.", nameof(maxConcurrentSessions));
         }
 
-        var license = new PetTrainerLicense
+        var license = string.IsNullOrWhiteSpace(licenseImageUrl)
+            ? null : new PetTrainerLicense
         {
-            LicenseNumber = Required(licenseNumber, nameof(licenseNumber)),
-            LicenseType = Required(licenseType, nameof(licenseType)),
+            LicenseNumber = Trim(licenseNumber) ?? string.Empty,
+            LicenseType = Trim(licenseType) ?? string.Empty,
             ImageUrl = Required(licenseImageUrl, nameof(licenseImageUrl))
         };
 

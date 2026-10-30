@@ -54,6 +54,7 @@
     <PackageReference Include="Azure.Monitor.OpenTelemetry.Exporter" Version="1.7.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Http.AspNetCore" Version="2.1.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Sdk" Version="2.0.7" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
   </ItemGroup>
 
   <ItemGroup>
@@ -102,4 +103,8 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Include="../Pawfront.Infrastructure.Sql/DeviceTokens/SqlProviderPushTokenReader.cs" Link="Notifications/SqlProviderPushTokenReader.cs" />
+    <Compile Include="../Pawfront.Infrastructure.Sql/Notifications/SqlAccountNotificationCleanupStore.cs" Link="Notifications/SqlAccountNotificationCleanupStore.cs" />
+  </ItemGroup>
 </Project>

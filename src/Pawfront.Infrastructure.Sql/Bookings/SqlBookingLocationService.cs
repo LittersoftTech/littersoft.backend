@@ -10,7 +10,7 @@ namespace Pawfront.Infrastructure.Sql.Bookings;
 /// fixes that do NOT ride inside a transition procedure. Everything else is written
 /// by the procedure that performs the transition, so this class handles only the
 /// standalone cases: a party's own position for a moment the counterparty drove,
-/// and the log-only "Cash Not Received".
+/// and the provider's "Cash Not Received" report, persisted on the booking.
 /// </summary>
 internal sealed class SqlBookingLocationService(
     string? configuredConnectionString,

@@ -31,6 +31,8 @@ BEGIN
         UPDATE [Parent].[ParentIdentities]
         SET [IdentityType] = @IdentityType,
             [IdentityPhotoUrl] = @IdentityPhotoUrl,
+            [Status] = N'InReview',
+            [RejectionReason] = NULL,
             [UpdatedAtUtc] = SYSUTCDATETIME()
         WHERE [PetParentId] = @PetParentId;
     END
@@ -55,7 +57,9 @@ BEGIN
            [IdentityType],
            [IdentityPhotoUrl],
            [CreatedAtUtc],
-           [UpdatedAtUtc]
+           [UpdatedAtUtc],
+           [Status],
+           [RejectionReason]
     FROM [Parent].[ParentIdentities]
     WHERE [PetParentId] = @PetParentId;
 

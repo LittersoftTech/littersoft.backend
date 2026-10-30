@@ -18,11 +18,13 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
+    BEGIN TRANSACTION;
+
     DECLARE @ProviderId UNIQUEIDENTIFIER;
     DECLARE @PetParentId UNIQUEIDENTIFIER;
 
     SELECT @ProviderId = [ProviderId], @PetParentId = [PetParentId]
-    FROM [Booking].[NightStayBookings]
+    FROM [Booking].[NightStayBookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
     IF @ProviderId IS NULL
@@ -42,6 +44,14 @@ BEGIN
         THROW 51365, 'This trigger cannot be recorded on its own by this party.', 1;
     END
 
+    -- The server records the latest provider report; a parent location echo does not report cash.
+    IF @Trigger = N'CashNotReceived' AND @CapturedByType = N'Provider'
+    BEGIN
+        UPDATE [Booking].[NightStayBookings]
+        SET [CashNotReceivedAtUtc] = SYSUTCDATETIME(), [UpdatedAtUtc] = SYSUTCDATETIME()
+        WHERE [NightStayBookingId] = @NightStayBookingId AND [Status] <> N'PAID';
+    END
+
     DECLARE @Inserted TABLE ([NightStayBookingLocationEventId] UNIQUEIDENTIFIER);
 
     INSERT INTO [Booking].[NightStayBookingLocationEvents]
@@ -56,4 +66,5 @@ BEGIN
            [CapturedById], [Latitude], [Longitude], [AccuracyMetres], [DeviceCapturedAtUtc], [RecordedAtUtc]
     FROM [Booking].[NightStayBookingLocationEvents]
     WHERE [NightStayBookingLocationEventId] = (SELECT TOP (1) [NightStayBookingLocationEventId] FROM @Inserted);
+    COMMIT TRANSACTION;
 END;

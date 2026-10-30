@@ -271,7 +271,8 @@ public sealed record ProviderEarningsBookingRow(
     string? PaymentMethod,
     string? Breed = null,
     string? PetGender = null,
-    string? CustomerPhotoUrl = null)
+    string? CustomerPhotoUrl = null,
+    DateTimeOffset? CashNotReceivedAtUtc = null)
 {
     /// <summary>What the provider keeps on this booking; null when it can't be priced.</summary>
     public decimal? NetAmount => GrossAmount is null ? null : GrossAmount - (PawfrontFee ?? 0m);

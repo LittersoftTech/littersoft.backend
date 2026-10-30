@@ -42,12 +42,6 @@ public static class SupportTicketTypes
     public static bool AllowsPhotos(string? value) =>
         IsKnown(value) && value != ChatIncident;
 
-    /// <summary>
-    /// Whether the reporter's free-text account is required. It is for the two
-    /// counterparty kinds, where it is the whole substance of the accusation; for an app
-    /// issue or an event report the picker's <c>Reason</c> may stand in for it.
-    /// </summary>
-    public static bool RequiresComment(string? value) => HasCounterparty(value);
 }
 
 /// <summary>
@@ -243,7 +237,7 @@ public sealed record SupportTicketRecord(
     IReadOnlyList<SupportTicketPhotoRecord> Photos,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    DateTimeOffset? ClosedAtUtc)
+    DateTimeOffset? ClosedAtUtc, Guid? EventBookingId = null)
 {
     /// <summary>
     /// True for everything but <c>CLOSED</c>. This is the predicate the per-subject
@@ -361,7 +355,7 @@ public sealed record CreateSupportTicketCommand(
     string? Comment,
     string? Category,
     string? Reason,
-    Guid? EventId = null);
+    Guid? EventId = null, Guid? EventBookingId = null);
 
 /// <summary>
 /// What <c>Support.CreateTicket</c> decided. <see cref="Created"/> means the ticket was

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using FirebaseAdmin;
 using FirebaseAdmin.Messaging;
 using Google.Apis.Auth.OAuth2;
+using Google.Cloud.Firestore;
 using Microsoft.Extensions.Options;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.Notifications;
@@ -18,8 +19,7 @@ namespace Pawfront.Infrastructure.Firebase;
 ///
 /// <see cref="FirebaseApp.Create(AppOptions, string)"/> throws if the same name is
 /// created twice, and loading credentials is async, so initialisation is
-/// serialised through a cached <see cref="Lazy{T}"/> of a task: the factory runs
-/// at most once per audience for the lifetime of the process.
+/// serialised through a lock. Successful clients are reused per audience.
 /// </summary>
 public sealed class FirebaseAppRegistry(
     IOptions<NotificationOptions> options,
@@ -34,7 +34,9 @@ public sealed class FirebaseAppRegistry(
     /// next tick, whereas caching the failure would silence that audience until
     /// the Function App recycled.
     /// </summary>
-    private readonly ConcurrentDictionary<NotificationAudience, FirebaseMessaging> _messaging = new();
+    private readonly ConcurrentDictionary<NotificationAudience, FirebaseApp> _apps = new();
+    private readonly ConcurrentDictionary<NotificationAudience, FirestoreDb> _firestore = new();
+    private readonly SemaphoreSlim _firestoreLock = new(1, 1);
 
     /// <summary>Serialises initialisation so two ticks can't race to create the same app.</summary>
     private readonly SemaphoreSlim _initLock = new(1, 1);
@@ -49,8 +51,41 @@ public sealed class FirebaseAppRegistry(
     public async Task<FirebaseMessaging> GetMessagingAsync(
         NotificationAudience audience,
         CancellationToken cancellationToken)
+        => FirebaseMessaging.GetMessaging(await GetAppAsync(audience, cancellationToken));
+
+    public async Task<FirestoreDb> GetFirestoreAsync(
+        NotificationAudience audience,
+        CancellationToken cancellationToken)
     {
-        if (_messaging.TryGetValue(audience, out var cached))
+        if (_firestore.TryGetValue(audience, out var cached)) return cached;
+        await _firestoreLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_firestore.TryGetValue(audience, out cached)) return cached;
+            var app = await GetAppAsync(audience, cancellationToken);
+            // Explicit credentials/project prevent either audience from falling back
+            // to the host's default Google credentials or the other app's project.
+            var projectId = app.Options.ProjectId
+                ?? (app.Options.Credential.UnderlyingCredential as ServiceAccountCredential)?.ProjectId;
+            if (string.IsNullOrWhiteSpace(projectId))
+                throw new InvalidOperationException($"No Firebase project ID is configured for {audience}.");
+            var db = await new FirestoreDbBuilder
+            {
+                ProjectId = projectId,
+                DatabaseId = GetProjectOptions(audience).FirestoreDatabaseId,
+                GoogleCredential = app.Options.Credential
+            }.BuildAsync(cancellationToken);
+            _firestore[audience] = db;
+            return db;
+        }
+        finally { _firestoreLock.Release(); }
+    }
+
+    private async Task<FirebaseApp> GetAppAsync(
+        NotificationAudience audience,
+        CancellationToken cancellationToken)
+    {
+        if (_apps.TryGetValue(audience, out var cached))
         {
             return cached;
         }
@@ -59,14 +94,14 @@ public sealed class FirebaseAppRegistry(
         try
         {
             // Re-check: another caller may have initialised it while we queued.
-            if (_messaging.TryGetValue(audience, out cached))
+            if (_apps.TryGetValue(audience, out cached))
             {
                 return cached;
             }
 
-            var messaging = await CreateMessagingAsync(audience, cancellationToken);
-            _messaging[audience] = messaging;
-            return messaging;
+            var app = await CreateAppAsync(audience, cancellationToken);
+            _apps[audience] = app;
+            return app;
         }
         finally
         {
@@ -80,7 +115,7 @@ public sealed class FirebaseAppRegistry(
     /// </summary>
     public bool IsConfigured(NotificationAudience audience) => GetProjectOptions(audience).IsConfigured;
 
-    private async Task<FirebaseMessaging> CreateMessagingAsync(
+    private async Task<FirebaseApp> CreateAppAsync(
         NotificationAudience audience,
         CancellationToken cancellationToken)
     {
@@ -92,7 +127,7 @@ public sealed class FirebaseAppRegistry(
         var existing = FirebaseApp.GetInstance(appName);
         if (existing is not null)
         {
-            return FirebaseMessaging.GetMessaging(existing);
+            return existing;
         }
 
         var credentialJson = await LoadCredentialJsonAsync(audience, projectOptions, cancellationToken);
@@ -100,12 +135,12 @@ public sealed class FirebaseAppRegistry(
         var app = FirebaseApp.Create(
             new AppOptions
             {
-                Credential = GoogleCredential.FromJson(credentialJson),
+                Credential = CredentialFactory.FromJson<ServiceAccountCredential>(credentialJson).ToGoogleCredential(),
                 ProjectId = projectOptions.ProjectId
             },
             appName);
 
-        return FirebaseMessaging.GetMessaging(app);
+        return app;
     }
 
     private async Task<string> LoadCredentialJsonAsync(

@@ -1,3 +1,4 @@
+using Pawfront.Application.Closures;
 using Pawfront.Application.Availability;
 using Pawfront.Application.Bookings;
 using Pawfront.Application.Offerings;
@@ -30,6 +31,8 @@ internal sealed class ProviderSearchService(
     IProviderServiceCatalog serviceCatalog,
     IProviderOfferingResolver offeringResolver,
     IProviderAvailabilitySlotService slotService,
+    IProviderAvailabilityService availabilityService,
+    IProviderClosureReader closureReader,
     IPetGroomerServiceRegistry petGroomerRegistry,
     IProviderBookingStatsReader bookingStatsReader,
     IProviderPayoutMethodReader payoutMethodReader,
@@ -92,10 +95,17 @@ internal sealed class ProviderSearchService(
             {
                 if (criteria.StartDate is not null)
                 {
-                    // Every stayed night needs free capacity; the pickup date
-                    // itself is checkout and not checked. NightStay availability
-                    // is date-granular — one per-night query covers the whole
-                    // range (closures + occupancy vs the per-night capacity).
+                    // Opening days include pickup; capacity applies only to stayed nights.
+                    try
+                    {
+                        await ProviderDateAvailability.EnsureOpenAsync(
+                            availabilityService, closureReader, resolved.ProviderId, service.ServiceId,
+                            criteria.StartDate.Value, criteria.PickupDate!.Value, ct);
+                    }
+                    catch (ProviderClosedOnDateException)
+                    {
+                        return null;
+                    }
                     var lastNight = criteria.PickupDate!.Value.AddDays(-1);
                     var nightResult = await TryGetSlotsAsync(
                         resolved.ProviderId, service.ServiceId, criteria.StartDate.Value,

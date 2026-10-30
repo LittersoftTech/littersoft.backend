@@ -64,7 +64,17 @@ BEGIN
            -- Appended extras (ordinals 25+), see header.
            [Breed]            = pet.[Breed],
            [PetGender]        = pet.[Gender],
-           [CustomerPhotoUrl] = pp.[ProfilePhotoUrl]
+           [CustomerPhotoUrl] = pp.[ProfilePhotoUrl],
+           b.[CashNotReceivedAtUtc], b.[CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] mh WHERE mh.[BookingId] = b.[BookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN b.[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc](b.[CreatedAtUtc], b.[BookingDate], b.[StartTime], NULL, NULL)
+           WHEN b.[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], b.[BookingDate], b.[StartTime], m.[ProposedBookingDate], m.[ProposedStartTime])
+                FROM [Booking].[BookingModifications] m WHERE m.[BookingId] = b.[BookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'SingleDay' AND pay.[BookingId]=b.[BookingId]) AS [PaidAtUtc]
     FROM [Booking].[Bookings] b
     LEFT JOIN [Parent].[PetParents] pp
         ON pp.[PetParentId] = b.[PetParentId]

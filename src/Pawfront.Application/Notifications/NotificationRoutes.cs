@@ -16,6 +16,7 @@ namespace Pawfront.Application.Notifications;
 /// </summary>
 public static class NotificationRoutes
 {
+    public const string Identity = "/profile/identity";
     /// <summary>Single-day booking detail. Pair with <c>bookingId</c>.</summary>
     public const string BookingDetail = "/bookings/detail";
 
@@ -42,6 +43,12 @@ public static class NotificationRoutes
 
     /// <summary>The organiser's attendee/metrics dashboard for their event.</summary>
     public const string EventDashboard = "/events/dashboard";
+    public const string EventMyTickets = "/events/my-tickets";
+    public const string EventMyEvent = "/events/my-event";
+    public const string EventAttendees = "/events/attendees";
+    public const string EventPawPrints = "/events/pawprints";
+    public const string EventAccountFlagged = "/events/account-flagged";
+    public const string Events = "/events";
 
     /// <summary>
     /// The provider's list of requests that expired unanswered. Per the V3 spec,

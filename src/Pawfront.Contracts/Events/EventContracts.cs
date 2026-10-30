@@ -20,7 +20,7 @@ public sealed record CreateEventRequest(
     bool IsPaid,
     decimal? Price,
     // Refund policy the creator advertises. Optional — one of
-    // FullRefundUpTo4Hours / FullRefundUpTo2Hours / NoRefund, or null/omitted
+    // FullRefundUpTo4Hours / FullRefundUpTo2Hours / FullRefundUpTo24Hours / FullRefundUpTo48Hours / NoRefund, or null/omitted
     // (it doesn't apply to free events, so it's never required). When supplied it
     // must be one of the allowed values.
     string? CancellationPolicy,
@@ -90,7 +90,7 @@ public sealed record PatchEventRequest(
     Optional<string?> EventLink,
     // Send the whole physical block to change capacity/venue; null to drop it
     // (only valid when the merged event is online); omit to keep it.
-    Optional<PhysicalEventRequest?> Physical);
+    Optional<PhysicalEventRequest?> Physical, Optional<int> MaximumCapacity = default);
 
 public sealed record PhysicalEventRequest(
     int MaximumCapacity,
@@ -133,7 +133,7 @@ public sealed record EventResponse(
     // sits on the main object rather than inside the physical-only block.
     bool IsPaid,
     decimal? Price,
-    // Refund policy (FullRefundUpTo4Hours | FullRefundUpTo2Hours | NoRefund);
+    // Refund policy (FullRefundUpTo4Hours | FullRefundUpTo2Hours | FullRefundUpTo24Hours | FullRefundUpTo48Hours | NoRefund);
     // null when the organiser didn't advertise one.
     string? CancellationPolicy,
     // Joining link for online events (e.g. the meeting URL); null for physical
@@ -156,7 +156,7 @@ public sealed record EventResponse(
     // Detail-only (GET /events/{eventId}, PUT edit): the event's payment options
     // (Cash / Digital). Null on list reads.
     IReadOnlyCollection<string>? PaymentOptions,
-    // Detail-only: who is attending — names + ticket number only. Null on list
+    // Detail-only: who is attending — names and ticket numbers, plus payment details for the host. Null on list
     // reads.
     IReadOnlyCollection<EventAttendeeSummaryResponse>? Attendees,
     DateTimeOffset CreatedAtUtc,
@@ -169,7 +169,15 @@ public sealed record EventResponse(
     // are not reporting surfaces — the same posture IsBookable takes.
     bool IsTicketRaisedByMe = false,
     Guid? TicketId = null,
-    string? TicketRef = null);
+    string? TicketRef = null,
+    double? Distance = null,
+    string DistanceUnit = "km", string EventStatus = "Active", bool IsCancelledByHost = false,
+    int AttendedCount = 0, decimal EarnedAmount = 0, bool IsOnWaitlist = false,
+    bool EventCancelledByMe = false, DateTimeOffset? BookingsCloseAtUtc = null) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => PetParentId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>
 /// Booking summary for an event. <see cref="MaxBookings"/> is the maximum
@@ -188,7 +196,11 @@ public sealed record EventBookingStatsResponse(
 /// </summary>
 public sealed record EventAttendeeSummaryResponse(
     string AttendeeName,
-    int TicketNumber);
+    int TicketNumber, Guid? BookingId = null, string? PaymentStatus = null, decimal? Amount = null, string? ProfileImageUrl = null) : Pawfront.Contracts.Badges.IEventBookerBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IEventBookerBadgeTarget.BadgeEventBookingId => BookingId;
+    public bool HasIdBadge { get; set; }
+}
 
 /// <summary>
 /// Identifies the organiser of an event for display in event reads. An event
@@ -205,7 +217,11 @@ public sealed record EventOrganizerResponse(
     string? ImageUrl,
     // Total events this organiser has created. Populated on the event-detail
     // read (GET /events/{eventId}); null on list reads.
-    int? TotalEventsOrganized = null);
+    int? TotalEventsOrganized = null, int EventsCancelledCount = 0) : Pawfront.Contracts.Badges.IParentBadgeTarget
+{
+    Guid? Pawfront.Contracts.Badges.IParentBadgeTarget.BadgeParentId => Type == "PetParent" ? Id : null;
+    public bool HasIdBadge { get; set; }
+}
 
 public sealed record PhysicalEventResponse(
     int MaximumCapacity,

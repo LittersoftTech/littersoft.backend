@@ -18,8 +18,8 @@ namespace Pawfront.PetParentApi.Endpoints;
 /// while support looks at it. Blocking stays the separate, deliberate action it always was.
 /// </para>
 /// <para>
-/// <b>One open ticket per SUBJECT</b> — per booking and per conversation in either
-/// direction, and per event <i>per reporter</i>; an app issue has no subject and is never
+/// <b>One open ticket per subject per raiser</b> — per booking, conversation or event;
+/// an app issue has no subject and is never
 /// refused. Not one per provider: a parent with five bookings from the same provider can
 /// report each of them, because each is a different incident. What is refused answers 409
 /// <c>TicketAlreadyOpen</c> carrying the ticket already open, so the reporter is pointed at
@@ -58,6 +58,8 @@ internal static class SupportTicketEndpoints
         var group = builder
             .MapGroup("/pet-parents/{petParentId:guid}/support-tickets")
             .RequireOwnedPetParent();
+
+        group.MapGet("/report-user-reasons", () => ApiResults.Ok(ReportUserReasons.All));
 
         // One dedicated route per kind rather than one with a discriminator field,
         // following the booking transitions' convention: each takes exactly the fields its
@@ -153,7 +155,7 @@ internal static class SupportTicketEndpoints
         }
 
         return CreateAsync(
-            NewEventReport(petParentId, request.EventId, request.Comment, request.Category, request.Reason),
+            NewEventReport(petParentId, request.EventId, request.Comment, request.Category, request.Reason) with { EventBookingId = request.BookingId },
             petParentId,
             ticketService,
             cancellationToken);

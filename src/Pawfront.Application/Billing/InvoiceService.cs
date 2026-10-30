@@ -8,7 +8,8 @@ namespace Pawfront.Application.Billing;
 /// </summary>
 internal sealed class InvoiceService(
     IInvoiceStore store,
-    IPawfrontBlobStorage blobStorage) : IInvoiceService
+    IPawfrontBlobStorage blobStorage,
+    IInvoiceQueuePublisher queuePublisher) : IInvoiceService
 {
     public async Task<InvoiceDownload> GetDownloadAsync(
         InvoiceDownloadQuery query,
@@ -21,6 +22,14 @@ internal sealed class InvoiceService(
         // because this one is worth retrying in a moment and that one never is.
         if (!invoice.IsDownloadable)
         {
+            // A download can recover a lost payment-time message. SQL claims
+            // enforce leases, backoff and attempt limits on duplicate requests.
+            if (invoice.Status == InvoiceStatuses.Pending)
+            {
+                await queuePublisher.PublishAsync(
+                    new InvoiceGenerationRequest(query.BookingType, query.BookingId), cancellationToken);
+            }
+
             throw new InvoiceNotReadyException(invoice.InvoiceId, invoice.Status);
         }
 

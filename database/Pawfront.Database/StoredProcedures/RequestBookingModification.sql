@@ -6,14 +6,8 @@
 -- a modifiable state, 51143 a proposal is already open, 51151 the modification
 -- window has closed.
 --
--- NEITHER PARTY may open a proposal once the service starts in less than 2 hours
--- (THROW 51151) — by then the job is imminent and whoever is left waiting needs a
--- settled schedule. Same cutoff that expires an unanswered proposal, which the
--- scheduled external job settles (reverting the booking to CONFIRMED); together
--- the two rules mean that from T-2h a booking is never left sitting in either
--- MODIFICATION_REQUEST_BY_* status, so it stays startable. (Widened 2026-08-02 —
--- the provider side was previously ungated and never auto-expired; both parties
--- are now symmetric.)
+-- Requests require three hours of notice for both the original and proposed
+-- start. Responses expire two hours before the earlier start or after 24 hours.
 --
 -- When the provider's terms have drifted since the booking was created and the
 -- requester acknowledged the drift, @HasAcknowledgedTerms = 1 and the
@@ -67,6 +61,17 @@ BEGIN
         THROW 51141, 'You are not a party to this booking.', 1;
     END
 
+    -- Each requester gets one accepted change. Declined/expired proposals do not count.
+    -- The booking row lock serializes requests and responses before reading history.
+    IF EXISTS (
+        SELECT 1 FROM [Booking].[BookingStatusHistory]
+        WHERE [BookingId] = @BookingId
+          AND ((@Actor = N'Parent' AND [ToStatus] = N'PROVIDER_ACCEPTED_MODIFICATION')
+            OR (@Actor = N'Provider' AND [ToStatus] = N'PARENT_ACCEPTED_MODIFICATION')))
+    BEGIN
+        THROW 51990, 'This party has already had a modification accepted for this booking.', 1;
+    END
+
     IF @CurrentStatus NOT IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION',
                               N'PARENT_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
                               N'PARENT_DECLINED_MODIFICATION')
@@ -74,15 +79,24 @@ BEGIN
         THROW 51142, 'A modification can only be requested on a confirmed booking.', 1;
     END
 
-    -- The modification window closes 2 hours before the service starts (all
+    -- The modification window closes 3 hours before the service starts (all
     -- times UTC), for either party's proposal.
     DECLARE @StartsAtUtc DATETIME2(7) =
         DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @StartTime),
                 CAST(@BookingDate AS DATETIME2(7)));
 
-    IF @Now >= DATEADD(HOUR, -2, @StartsAtUtc)
+    -- The proposal as a single UTC instant; the renderer localises it into the
+    -- newServiceDate + newStartTime the copy quotes.
+    DECLARE @ProposedStartUtc DATETIME2(0) =
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @ProposedStartTime),
+                CAST(@ProposedBookingDate AS DATETIME2(0)));
+
+    -- Both schedules must retain at least three hours of notice.
+    IF @ProposedStartUtc < @StartsAtUtc SET @StartsAtUtc = @ProposedStartUtc;
+
+    IF @Now > DATEADD(HOUR, -3, @StartsAtUtc)
     BEGIN
-        THROW 51151, 'A booking can no longer be modified within 2 hours of the service start time.', 1;
+        THROW 51151, 'A booking can no longer be modified within 3 hours of the service start time.', 1;
     END
 
     IF EXISTS (SELECT 1 FROM [Booking].[BookingModifications] WHERE [BookingId] = @BookingId)
@@ -96,13 +110,13 @@ BEGIN
 
     INSERT INTO [Booking].[BookingModifications]
         ([BookingId], [RequestedByActor], [RequestedByActorId],
-         [ProposedBookingDate], [ProposedStartTime], [ProposedEndTime], [RequestNote],
+         [ProposedBookingDate], [ProposedStartTime], [ProposedEndTime], [RequestNote], [CreatedAtUtc],
          [HasAcknowledgedTerms], [AcknowledgedPricePerHour], [AcknowledgedCancellationPolicyHours],
          [AcknowledgedAddressLine], [AcknowledgedCity], [AcknowledgedZipCode],
          [AcknowledgedLatitude], [AcknowledgedLongitude])
     OUTPUT inserted.[BookingModificationId] INTO @InsertedModification
     VALUES
-        (@BookingId, @Actor, @ActorId, @ProposedBookingDate, @ProposedStartTime, @ProposedEndTime, @Note,
+        (@BookingId, @Actor, @ActorId, @ProposedBookingDate, @ProposedStartTime, @ProposedEndTime, @Note, @Now,
          ISNULL(@HasAcknowledgedTerms, 0), @AcknowledgedPricePerHour, @AcknowledgedCancellationPolicyHours,
          @AcknowledgedAddressLine, @AcknowledgedCity, @AcknowledgedZipCode,
          @AcknowledgedLatitude, @AcknowledgedLongitude);
@@ -134,12 +148,6 @@ BEGIN
     -- still collapsing a retry of the same one.
     DECLARE @ReqDedupe NVARCHAR(64) =
         CAST((SELECT TOP 1 [BookingModificationId] FROM @InsertedModification) AS NVARCHAR(36));
-
-    -- The proposal as a single UTC instant; the renderer localises it into the
-    -- newServiceDate + newStartTime the copy quotes.
-    DECLARE @ProposedStartUtc DATETIME2(0) =
-        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), @ProposedStartTime),
-                CAST(@ProposedBookingDate AS DATETIME2(0)));
 
     -- HOW LONG THE COUNTERPARTY ACTUALLY HAS. Two deadlines can end this proposal
     -- and [Booking].[RevertExpiredModificationRequests] enforces whichever arrives
@@ -196,7 +204,17 @@ BEGIN
            [CustomerLocation],
            [PricePerHour],
            [JobNotes],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] mh WHERE mh.[BookingId] = [Booking].[Bookings].[BookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[Bookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[Bookings].[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], NULL, NULL)
+           WHEN [Booking].[Bookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], m.[ProposedBookingDate], m.[ProposedStartTime])
+                FROM [Booking].[BookingModifications] m WHERE m.[BookingId] = [Booking].[Bookings].[BookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'SingleDay' AND pay.[BookingId]=[Booking].[Bookings].[BookingId]) AS [PaidAtUtc]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

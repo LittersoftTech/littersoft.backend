@@ -1,4 +1,4 @@
-﻿using System.Data;
+using System.Data;
 using Microsoft.Data.SqlClient;
 using Pawfront.Application.Configuration;
 using Pawfront.Application.ParentOnboarding;
@@ -24,7 +24,7 @@ internal sealed class SqlParentPetService(
         var breed = Required(request.Breed, nameof(request.Breed));
         var gender = NormalizeGender(request.Gender);
         var weight = ValidateWeight(request.Weight);
-        var microchipId = TrimOrNull(request.MicrochipId);
+        var microchipId = MicrochipId.Validate(request.MicrochipId);
         var description = TrimOrNull(request.Description);
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
@@ -75,7 +75,7 @@ internal sealed class SqlParentPetService(
         var breed = Required(request.Breed, nameof(request.Breed));
         var gender = NormalizeGender(request.Gender);
         var weight = ValidateWeight(request.Weight);
-        var microchipId = TrimOrNull(request.MicrochipId);
+        var microchipId = MicrochipId.Validate(request.MicrochipId);
         var description = TrimOrNull(request.Description);
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
@@ -526,6 +526,10 @@ internal sealed class SqlParentPetService(
                 new DateTimeOffset(reader.GetDateTime(3), TimeSpan.Zero),
                 new DateTimeOffset(reader.GetDateTime(4), TimeSpan.Zero));
         }
+        catch (SqlException exception) when (exception.Number == 51420)
+        {
+            throw new PetPhotoLimitReachedException();
+        }
         catch (SqlException exception) when (exception.Number == 51204)
         {
             throw new PetNotFoundException(petId);
@@ -534,10 +538,10 @@ internal sealed class SqlParentPetService(
 
     public async Task<UpdatePetProfilePhotoResponse> UpdateProfilePhotoAsync(
         Guid petId,
-        string profilePhotoUrl,
+        string? profilePhotoUrl,
         CancellationToken cancellationToken)
     {
-        var url = Required(profilePhotoUrl, nameof(profilePhotoUrl));
+        var url = profilePhotoUrl is null ? null : Required(profilePhotoUrl, nameof(profilePhotoUrl));
 
         await using var connection = new SqlConnection(await GetSqlConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -547,7 +551,7 @@ internal sealed class SqlParentPetService(
             "Parent.UpdatePetProfilePhoto");
 
         command.Parameters.AddWithValue("@PetId", petId);
-        command.Parameters.AddWithValue("@ProfilePhotoUrl", url);
+        command.Parameters.AddWithValue("@ProfilePhotoUrl", DbValue(url));
 
         try
         {
@@ -560,8 +564,14 @@ internal sealed class SqlParentPetService(
 
             return new UpdatePetProfilePhotoResponse(
                 PetId: reader.GetGuid(0),
-                ProfilePhotoUrl: reader.GetString(1),
-                UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero));
+                ProfilePhotoUrl: reader.IsDBNull(1) ? null : reader.GetString(1),
+                UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(2), TimeSpan.Zero),
+                IsPetProfileComplete: PetProfileCompletion.IsComplete(
+                    reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
+                    DateOnly.FromDateTime(reader.GetDateTime(7)),
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9),
+                    reader.IsDBNull(1) ? null : reader.GetString(1)));
         }
         catch (SqlException exception) when (exception.Number == 51220)
         {

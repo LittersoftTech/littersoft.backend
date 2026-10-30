@@ -2,7 +2,7 @@ namespace Pawfront.Application.Bookings;
 
 /// <summary>
 /// How far ahead of the service a booking has to be made. A parent browsing at
-/// 11:00 sees 13:00 as the first bookable slot, however open the provider's day
+/// 11:00 sees 14:00 as the first bookable slot, however open the provider's day
 /// is — the gap gives the provider time to see and accept the job.
 /// <para>
 /// The cutoff is derived from the SAME instant the modification window
@@ -22,7 +22,7 @@ namespace Pawfront.Application.Bookings;
 public static class BookingLeadTime
 {
     /// <summary>The minimum gap between "now" and the start of the service.</summary>
-    public static readonly TimeSpan Minimum = TimeSpan.FromHours(2);
+    public static readonly TimeSpan Minimum = TimeSpan.FromHours(3);
 
     /// <summary>
     /// The instant a booking's service begins, read as UTC — the same

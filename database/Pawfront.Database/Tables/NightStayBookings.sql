@@ -3,7 +3,8 @@
 -- window). A night stay spans [CheckInDate, CheckOutDate): the checkout day is
 -- NOT a stayed night, so capacity must be free on every night in that range.
 -- DropOffTime / PickUpTime are snapshotted from the provider's NightStay
--- offering at booking time. App-only (parent-booked / provider-on-behalf) —
+-- offering at booking time; NULL when no handover time is supplied.
+-- App-only (parent-booked / provider-on-behalf) —
 -- there is no Custom/walk-in shape here.
 CREATE TABLE [Booking].[NightStayBookings]
 (
@@ -23,6 +24,9 @@ CREATE TABLE [Booking].[NightStayBookings]
     -- bookings; NULL for provider-host bookings that don't capture it.
     [PetId] UNIQUEIDENTIFIER NULL,
     [CheckInDate] DATE NOT NULL,
+    -- Accepted check-in day's working hours, independent of later weekly edits.
+    [WorkingHoursOpensAtUtc] DATETIME2(7) NULL,
+    [WorkingHoursClosesAtUtc] DATETIME2(7) NULL,
     -- Checkout day; NOT a stayed night. Stayed nights = [CheckInDate, CheckOutDate).
     [CheckOutDate] DATE NOT NULL,
     -- The day the pet ACTUALLY went home, if the stay ended early. Stamped by
@@ -43,8 +47,8 @@ CREATE TABLE [Booking].[NightStayBookings]
     -- without refunding it. That is a product decision, not a capacity one.
     [ActualCheckOutDate] DATE NULL,
     -- Snapshot of the offering's drop-off / pick-up times at booking time.
-    [DropOffTime] TIME(0) NOT NULL,
-    [PickUpTime] TIME(0) NOT NULL,
+    [DropOffTime] TIME(0) NULL,
+    [PickUpTime] TIME(0) NULL,
     -- Snapshot of the offering's per-night rate at booking time. Locks the price
     -- in so a later rate change by the provider never re-prices an existing stay.
     -- NULL for legacy rows created before snapshotting shipped (the detail read
@@ -75,6 +79,8 @@ CREATE TABLE [Booking].[NightStayBookings]
     -- tracks where the provider's money is in the payout pipeline; [PayoutId] is
     -- the external payout reference once issued. 'NO_PAYOUT' is TERMINAL — see
     -- the note on [Booking].[Bookings].[PayoutStatus].
+    [CashNotReceivedAtUtc] DATETIME2(7) NULL,
+    [CancellationReason] NVARCHAR(64) NULL,
     [PayoutStatus] NVARCHAR(32) NOT NULL
         CONSTRAINT [DF_NightStayBookings_PayoutStatus] DEFAULT N'Pending',
     [PayoutId] NVARCHAR(64) NULL,
@@ -116,13 +122,13 @@ CREATE TABLE [Booking].[NightStayBookings]
     CONSTRAINT [CK_NightStayBookings_Status]
         CHECK ([Status] IN (N'CREATED', N'CONFIRMED', N'PROVIDER_DECLINED',
                             N'START_JOB', N'IN_PROGRESS', N'ENDING', N'JOB_STARTED',
-                            N'COMPLETED', N'PAID', N'APPROVAL_NEEDED',
+                            N'COMPLETED', N'PAYMENT_NOT_RECEIVED', N'PAID', N'APPROVAL_NEEDED',
                             N'MODIFICATION_REQUEST_BY_PARENT', N'MODIFICATION_REQUEST_BY_PROVIDER',
                             N'PROVIDER_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
                             N'PARENT_ACCEPTED_MODIFICATION', N'PARENT_DECLINED_MODIFICATION',
                             N'PROVIDER_CANCELLED', N'PARENT_CANCELLED',
                             N'PARENT_NO_SHOW', N'PROVIDER_NO_SHOW',
-                            N'EXPIRED', N'JOB_EXPIRED', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
+                            N'EXPIRED', N'JOB_EXPIRED', N'JOB_INCOMPLETE', N'OTP_MAX_ATTEMPTS_EXCEEDED')),
     CONSTRAINT [CK_NightStayBookings_CancelledRequiresTimestamp] CHECK (
         ([Status] IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED') AND [CancelledAtUtc] IS NOT NULL)
         OR ([Status] NOT IN (N'PROVIDER_CANCELLED', N'PARENT_CANCELLED'))

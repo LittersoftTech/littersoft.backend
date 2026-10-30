@@ -59,7 +59,8 @@ public sealed class SqlNotificationOutboxStore(
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7),
                 reader.GetInt32(8),
-                new DateTimeOffset(reader.GetDateTime(9), TimeSpan.Zero)));
+                new DateTimeOffset(reader.GetDateTime(9), TimeSpan.Zero),
+                reader.IsDBNull(10) ? null : reader.GetString(10)));
         }
 
         if (notifications.Count == 0)

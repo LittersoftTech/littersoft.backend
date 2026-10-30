@@ -140,9 +140,8 @@ public static class BookingLocationTriggers
 }
 
 /// <summary>
-/// A party records their own position for a moment the COUNTERPARTY drove (or, for
-/// <see cref="BookingLocationTriggers.CashNotReceived"/>, for a moment that changes
-/// no status at all). <paramref name="ActorId"/> comes from the authenticated route,
+/// A party records their own position for a moment the counterparty drove.
+/// <paramref name="ActorId"/> comes from the authenticated route,
 /// never the body, and is checked against the booking.
 /// </summary>
 public sealed record RecordBookingLocationCommand(
@@ -168,20 +167,11 @@ public sealed record BookingLocationEventResult(
 
 /// <summary>
 /// Writes the geolocation fixes that do NOT ride along inside a transition sproc:
-/// a party's own position for a moment the counterparty drove, and the log-only
-/// "Cash Not Received".
+/// a party's own position for a moment the counterparty drove.
 /// <para>
 /// One service for both booking kinds — <see cref="RecordBookingLocationCommand.BookingType"/>
 /// selects the table — for the same reason <see cref="IBulkBookingCancellationService"/>
 /// is: the caller's screen mixes them.
-/// </para>
-/// <para>
-/// <b>"Cash Not Received" changes nothing.</b> It records that the provider raised
-/// the payment prompt and was not paid, with both parties' positions, and leaves the
-/// booking COMPLETED with its payout still <c>Pending</c>. It is deliberately not a
-/// new payout outcome: a cancelled or unpaid booking has a cancellation policy
-/// attached and the refund / chase leg is not built, so freezing a verdict on the
-/// money here would prejudge it.
 /// </para>
 /// </summary>
 public interface IBookingLocationService

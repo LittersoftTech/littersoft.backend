@@ -49,7 +49,8 @@ CREATE TABLE [Provider].[Providers]
 GO
 
 CREATE UNIQUE INDEX [UX_Providers_MobileNumber]
-    ON [Provider].[Providers] ([MobileCountryCode], [MobileNumber]);
+    ON [Provider].[Providers] ([MobileCountryCode], [MobileNumber])
+    WHERE [IsDeleted] = 0;
 
 GO
 

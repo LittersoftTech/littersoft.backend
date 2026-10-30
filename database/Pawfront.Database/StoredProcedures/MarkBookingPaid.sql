@@ -1,10 +1,10 @@
 -- Records that the parent has paid the provider for a single-day booking:
--- flips COMPLETED -> PAID, writes an audit row, and inserts the payment ledger
+-- flips COMPLETED or PAYMENT_NOT_RECEIVED -> PAID, writes an audit row, and inserts the payment ledger
 -- row in [Booking].[BookingPayments]. Provider-only, App bookings only (Custom
 -- walk-ins are off-platform and never reach PAID), a booking is paid at most
 -- once. @Amount / @PawfrontFee are computed by the app layer from the booking's
 -- price-locked snapshot; @PaymentMethod is 'Cash' or 'Digital'.
--- THROWs: 51160 not found, 51161 not the provider, 51162 not COMPLETED,
+-- THROWs: 51160 not found, 51161 not the provider, 51162 not COMPLETED or PAYMENT_NOT_RECEIVED,
 -- 51163 Custom walk-in (App only), 51164 already paid.
 --
 -- This is the provider swiping "Cash Received", so their geolocation is written
@@ -64,7 +64,7 @@ BEGIN
         THROW 51164, 'Booking is already marked paid.', 1;
     END
 
-    IF @CurrentStatus <> N'COMPLETED'
+    IF @CurrentStatus NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED')
     BEGIN
         THROW 51162, 'Booking must be completed before it can be marked paid.', 1;
     END
@@ -84,6 +84,7 @@ BEGIN
     -- separate transfer leg to wait on.
     UPDATE [Booking].[Bookings]
     SET [Status] = N'PAID',
+        [CashNotReceivedAtUtc] = NULL,
         [UpdatedAtUtc] = @Now,
         [PayoutId] = COALESCE([PayoutId], @PayoutId),
         [PayoutStatus] = N'Paid'
@@ -137,21 +138,8 @@ BEGIN
         @NotificationType = N'BOOKING_PAID',
         @Amount = @AmountText;
 
-    -- ...and the PROVIDER gets their invoice (V-S14). This is the moment it is
-    -- settled: the job is COMPLETED, the cash is recorded, the payout above just
-    -- flipped to 'Paid'. Both parties are notified because both did something —
-    -- the relevance rule that suppresses a notification about your own action does
-    -- not apply when the action closes out the other side's money too.
-    --
-    -- Same amount text as the receipt, from the ledger row rather than a second
-    -- derivation: a provider's invoice and a parent's receipt for one payment
-    -- disagreeing about the figure would be the worst possible bug here.
-    EXEC [Notification].[EnqueueBookingNotification]
-        @BookingId = @BookingId,
-        @IsNightStay = 0,
-        @Audience = N'Provider',
-        @NotificationType = N'INVOICE_ISSUED',
-        @Amount = @AmountText;
+    -- V4 invoice copy promises a document. CompleteInvoiceGeneration sends
+    -- V-S14 only after the provider's PDF is durable, with its 60-second delay.
 
     SELECT [BookingId],
            [ProviderId],
@@ -177,7 +165,17 @@ BEGIN
            [CustomerLocation],
            [PricePerHour],
            [JobNotes],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] mh WHERE mh.[BookingId] = [Booking].[Bookings].[BookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[Bookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[Bookings].[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], NULL, NULL)
+           WHEN [Booking].[Bookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], m.[ProposedBookingDate], m.[ProposedStartTime])
+                FROM [Booking].[BookingModifications] m WHERE m.[BookingId] = [Booking].[Bookings].[BookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'SingleDay' AND pay.[BookingId]=[Booking].[Bookings].[BookingId]) AS [PaidAtUtc]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

@@ -13,6 +13,8 @@ public interface IProviderAccountService
     /// severed, the account is permanently disabled so no new bookings can be
     /// made, the bookable services are deactivated, and the provider's public
     /// Cosmos listing + profile blobs are removed.
+    /// SQL notification history is removed atomically; remote inbox cleanup is
+    /// attempted immediately and queued for retry if unavailable.
     /// <para>
     /// The ProviderId and everything referencing it are <b>retained</b> —
     /// bookings, night-stay bookings, the events they organised, and the payment

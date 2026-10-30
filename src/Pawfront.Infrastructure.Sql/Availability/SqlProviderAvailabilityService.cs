@@ -14,6 +14,7 @@ internal sealed class SqlProviderAvailabilityService(
         SaveProviderWeeklyAvailabilityCommand command,
         CancellationToken cancellationToken)
     {
+        ProviderWorkingHours.ResolveTimeZone(command.TimeZone);
         ValidateCommand(command);
 
         var json = JsonSerializer.Serialize(
@@ -36,13 +37,15 @@ internal sealed class SqlProviderAvailabilityService(
         };
         sqlCommand.Parameters.AddWithValue("@ProviderId", command.ProviderId);
         sqlCommand.Parameters.AddWithValue("@AvailabilityJson", json);
+        sqlCommand.Parameters.AddWithValue("@TimeZone", command.TimeZone);
+        var zone = ProviderWorkingHours.ResolveTimeZone(command.TimeZone);
+        var sqlZone = TimeZoneInfo.TryConvertIanaIdToWindowsId(zone.Id, out var windowsId) ? windowsId : zone.Id;
+        sqlCommand.Parameters.AddWithValue("@WindowsTimeZone", sqlZone);
 
         try
         {
             await using var reader = await sqlCommand.ExecuteReaderAsync(cancellationToken);
-            return new ProviderWeeklyAvailabilityResult(
-                command.ProviderId,
-                await ReadDaysAsync(reader, cancellationToken));
+            return await ReadResultAsync(command.ProviderId, reader, cancellationToken);
         }
         catch (SqlException exception) when (exception.Number == 51050)
         {
@@ -64,18 +67,18 @@ internal sealed class SqlProviderAvailabilityService(
         sqlCommand.Parameters.AddWithValue("@ProviderId", providerId);
 
         await using var reader = await sqlCommand.ExecuteReaderAsync(cancellationToken);
-        return new ProviderWeeklyAvailabilityResult(
-            providerId,
-            await ReadDaysAsync(reader, cancellationToken));
+        return await ReadResultAsync(providerId, reader, cancellationToken);
     }
 
-    private static async Task<List<DayAvailabilityResult>> ReadDaysAsync(
-        SqlDataReader reader,
+    private static async Task<ProviderWeeklyAvailabilityResult> ReadResultAsync(
+        Guid providerId, SqlDataReader reader,
         CancellationToken cancellationToken)
     {
         var days = new List<DayAvailabilityResult>(7);
+        var timeZone = "UTC";
         while (await reader.ReadAsync(cancellationToken))
         {
+            timeZone = reader.GetString(reader.GetOrdinal("TimeZone"));
             days.Add(new DayAvailabilityResult(
                 DayOfWeek: reader.GetByte(1),
                 IsOpen: reader.GetBoolean(2),
@@ -84,7 +87,7 @@ internal sealed class SqlProviderAvailabilityService(
                 BreakStartTime: reader.IsDBNull(5) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(5)),
                 BreakEndTime: reader.IsDBNull(6) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(6))));
         }
-        return days;
+        return new ProviderWeeklyAvailabilityResult(providerId, days, timeZone);
     }
 
     private static void ValidateCommand(SaveProviderWeeklyAvailabilityCommand command)

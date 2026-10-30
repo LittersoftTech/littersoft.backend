@@ -2,9 +2,8 @@
 -- confirmed-equivalent (live) state to START_JOB that ALSO issues the parent-facing
 -- start-OTP (@NewCode, @TtlMinutes) atomically. Two gates, both on "right now" (UTC):
 -- the booking's own [BookingDate] must be TODAY, and the provider must be inside
--- their own weekly working hours ([Provider].[ProviderWeeklyAvailability]). The
--- time-of-day within the booked window is deliberately NOT checked — a provider
--- running early or late can still start the job, as long as it is the service day.
+-- the accepted opening instant through its accepted closing
+-- time. Later weekly edits do not change that stored working day.
 -- The parent reads the issued code to the provider, who enters it via
 -- [Booking].[VerifyBookingStartOtp] to move the job to IN_PROGRESS.
 -- THROWs: 51131 not found, 51132 forbidden, 51133 not in a startable state,
@@ -41,7 +40,8 @@ CREATE OR ALTER PROCEDURE [Booking].[StartBooking]
     @Latitude DECIMAL(9, 6) = NULL,
     @Longitude DECIMAL(9, 6) = NULL,
     @AccuracyMetres DECIMAL(9, 2) = NULL,
-    @DeviceCapturedAtUtc DATETIME2(7) = NULL
+    @DeviceCapturedAtUtc DATETIME2(7) = NULL,
+    @WaitForCustomer BIT = 0
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -51,11 +51,14 @@ BEGIN
     DECLARE @CurrentStatus NVARCHAR(48);
     DECLARE @RowProvider UNIQUEIDENTIFIER;
     DECLARE @BookingDate DATE;
+    DECLARE @SlotStartTime TIME(0);
+    DECLARE @OpensAt DATETIME2(7), @ClosesAt DATETIME2(7);
     DECLARE @Source NVARCHAR(16);
 
     BEGIN TRANSACTION;
 
-    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @BookingDate = [BookingDate],
+    SELECT @CurrentStatus = [Status], @RowProvider = [ProviderId], @BookingDate = [BookingDate], @SlotStartTime = [StartTime],
+           @OpensAt = [WorkingHoursOpensAtUtc], @ClosesAt = [WorkingHoursClosesAtUtc],
            @Source = [Source]
     FROM [Booking].[Bookings] WITH (UPDLOCK, HOLDLOCK)
     WHERE [BookingId] = @BookingId;
@@ -73,6 +76,7 @@ BEGIN
     IF @CurrentStatus NOT IN (N'CONFIRMED', N'PROVIDER_ACCEPTED_MODIFICATION',
                               N'PARENT_ACCEPTED_MODIFICATION', N'PROVIDER_DECLINED_MODIFICATION',
                               N'PARENT_DECLINED_MODIFICATION')
+       AND NOT (@WaitForCustomer = 1 AND @CurrentStatus = N'START_JOB')
     BEGIN
         THROW 51133, 'Booking is not in a state the job can be started from.', 1;
     END
@@ -87,26 +91,33 @@ BEGIN
         THROW 51144, 'The job can only be started on the day the booking is scheduled for.', 1;
     END
 
-    -- The job can only be started while the provider is inside their own weekly
-    -- working hours. 1970-01-04 was a Sunday, so the modulo gives 0 = Sunday
-    -- (matching System.DayOfWeek / the [DayOfWeek] column) independently of DATEFIRST.
-    DECLARE @DayOfWeek TINYINT = CAST(DATEDIFF(DAY, '19700104', CAST(@Now AS DATE)) % 7 AS TINYINT);
-    DECLARE @NowTime TIME(0) = CAST(@Now AS TIME(0));
-    DECLARE @IsOpen BIT, @OpensAt TIME(0), @ClosesAt TIME(0);
+    -- Accepted hours survive weekly edits. Legacy rows resolve the booked day,
+    -- never the weekday at the time of this request.
+    IF @ClosesAt IS NULL
+        SELECT @OpensAt = [OpensAtUtc], @ClosesAt = [ClosesAtUtc]
+        FROM [Booking].[AcceptedWorkingHours](@ProviderId, @BookingDate, @SlotStartTime);
 
-    SELECT @IsOpen = [IsOpen], @OpensAt = [StartTime], @ClosesAt = [EndTime]
-    FROM [Provider].[ProviderWeeklyAvailability]
-    WHERE [ProviderId] = @ProviderId AND [DayOfWeek] = @DayOfWeek;
+    DECLARE @StartsAtUtc DATETIME2(7) = DATEADD(SECOND,
+        DATEDIFF(SECOND, CAST('00:00' AS TIME), COALESCE(@SlotStartTime, CAST('00:00' AS TIME))),
+        CAST(@BookingDate AS DATETIME2(7)));
+    IF @Source <> N'Custom' AND (@Now < @OpensAt OR @Now > @ClosesAt)
+        THROW 51137, 'The job can only be started within its accepted working hours.', 1;
 
-    -- A provider who has never saved their weekly hours is not gated — nor is a
-    -- Custom walk-in, which is precisely the customer who turns up outside the
-    -- hours the provider advertised.
-    IF @Source <> N'Custom'
-       AND @IsOpen IS NOT NULL AND (@IsOpen = 0 OR @NowTime < @OpensAt OR @NowTime > @ClosesAt)
+    -- Waiting is available from the accepted opening until closing, including after
+    -- the short booked slot has ended. No saved hours falls back to midnight UTC.
+    IF @WaitForCustomer = 1 AND @Source = N'Custom'
+        THROW 51133, 'A walk-in has no customer start-code flow.', 1;
+
+    IF @WaitForCustomer = 1
     BEGIN
-        THROW 51137, 'The job can only be started during your working hours.', 1;
+        IF @Now < @OpensAt
+           OR @Now >= COALESCE(@ClosesAt, DATEADD(DAY, 1, CAST(@BookingDate AS DATETIME2(7))))
+            THROW 51133, 'Waiting for the customer is only available within the accepted working hours.', 1;
     END
 
+    -- A retry in START_JOB must not rotate the OTP or repeat arrival/push writes.
+    IF @CurrentStatus <> N'START_JOB'
+    BEGIN
     -- A Custom walk-in goes STRAIGHT to IN_PROGRESS, skipping START_JOB and the
     -- start-OTP entirely. The OTP is issued TO the parent and readable only through
     -- the parent host's ownership-filtered route — and a walk-in has no parent
@@ -177,6 +188,14 @@ BEGIN
             @NotificationType = N'BOOKING_START_OTP_ISSUED';
     END
 
+    END
+
+    IF @WaitForCustomer = 1 AND NOT EXISTS (
+        SELECT 1 FROM [Booking].[BookingStatusHistory]
+        WHERE [BookingId] = @BookingId AND [Note] = N'Waiting for customer')
+        INSERT [Booking].[BookingStatusHistory]
+            ([BookingId], [FromStatus], [ToStatus], [ChangedByActor], [ChangedByActorId], [Note])
+        VALUES (@BookingId, N'START_JOB', N'START_JOB', N'Provider', @ProviderId, N'Waiting for customer');
     SELECT [BookingId],
            [ProviderId],
            [PetParentId],
@@ -201,7 +220,17 @@ BEGIN
            [CustomerLocation],
            [PricePerHour],
            [JobNotes],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[BookingStatusHistory] mh WHERE mh.[BookingId] = [Booking].[Bookings].[BookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[Bookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[Bookings].[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], NULL, NULL)
+           WHEN [Booking].[Bookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[Bookings].[BookingDate], [Booking].[Bookings].[StartTime], m.[ProposedBookingDate], m.[ProposedStartTime])
+                FROM [Booking].[BookingModifications] m WHERE m.[BookingId] = [Booking].[Bookings].[BookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'SingleDay' AND pay.[BookingId]=[Booking].[Bookings].[BookingId]) AS [PaidAtUtc]
     FROM [Booking].[Bookings]
     WHERE [BookingId] = @BookingId;
 

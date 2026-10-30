@@ -16,7 +16,8 @@ internal static class PetParentLookupEndpoints
 {
     public static IEndpointRouteBuilder MapPetParentLookupEndpoints(this IEndpointRouteBuilder builder)
     {
-        builder.MapGet("/pet-parents/{petParentId:guid}/details", GetPetParentDetails);
+        builder.MapGet("/pet-parents/{petParentId:guid}/details", GetPetParentDetails)
+            .Produces<Pawfront.Contracts.Common.ApiResponse<PetParentDetailsResponse>>();
         builder.MapGet("/pets/{petId:guid}", GetPetDetails);
 
         return builder;
@@ -27,6 +28,7 @@ internal static class PetParentLookupEndpoints
         IParentOnboardingService onboardingService,
         IParentPetService petService,
         IPetParentRatingReader ratingReader,
+        Pawfront.Application.Reliability.IReliabilityReader reliabilityReader,
         CancellationToken cancellationToken)
     {
         Contracts.ParentOnboarding.PetParentProfileDetailsResponse profile;
@@ -65,7 +67,8 @@ internal static class PetParentLookupEndpoints
             profile.MobileCountryCode,
             profile.MobileNumber,
             pets.Select(pet => ToPetCard(pet, today)).ToArray(),
-            RatingCount: rating.RatingCount));
+            RatingCount: rating.RatingCount,
+            Reliability: await reliabilityReader.GetParentAsync(petParentId, cancellationToken)));
     }
 
     private static async Task<IResult> GetPetDetails(
@@ -86,7 +89,6 @@ internal static class PetParentLookupEndpoints
             pet.PetParentId,
             ProfileImageUrl: pet.ProfilePhotoUrl,
             Name: pet.PetName,
-            pet.MicrochipId,
             pet.PetType,
             pet.Gender,
             pet.Weight,

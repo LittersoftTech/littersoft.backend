@@ -25,6 +25,15 @@ BEGIN
     FROM [Parent].[ParentAuthIdentities] WITH (UPDLOCK, HOLDLOCK)
     WHERE [FirebaseUserId] = @FirebaseUserId;
 
+    -- Contact uniqueness is scoped to this app's Firebase account type.
+    -- Range locks on the email index also serialize concurrent registrations.
+    IF EXISTS (
+        SELECT 1
+        FROM [Parent].[ParentAuthIdentities] WITH (UPDLOCK, HOLDLOCK)
+        WHERE [Email] = @Email AND [FirebaseUserId] <> @FirebaseUserId
+    )
+        THROW 51981, 'Email is already registered to another parent account.', 1;
+
     IF @ParentAuthIdentityId IS NULL
     BEGIN
         INSERT INTO [Parent].[ParentAuthIdentities]

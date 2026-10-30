@@ -1,5 +1,5 @@
 -- Time-driven booking REMINDERS and NUDGES (V3 spec cards P-S4..P-S7, P-S9,
--- P-S10, P-S13, P-S14, V-S5..V-S8, V-S10, V-S12).
+-- P-S10, P-S13, P-S14, V-S5..V-S8, V-S10, V-S12, V-S15).
 --
 -- Purely additive: unlike the three settlement sweeps
 -- (ExpireStaleCreatedBookings / RevertExpiredModificationRequests /
@@ -21,12 +21,13 @@
 -- All comparisons are UTC, like everything else in this schema.
 -- Returns one row of per-arm counts for the function's log line.
 CREATE OR ALTER PROCEDURE [Booking].[SendBookingReminders]
+    @AsOfUtc DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
-    DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
+    DECLARE @Now DATETIME2(7) = COALESCE(@AsOfUtc, SYSUTCDATETIME());
     DECLARE @Today DATE = CAST(@Now AS DATE);
     DECLARE @Tomorrow DATE = DATEADD(DAY, 1, @Today);
 
@@ -88,16 +89,11 @@ BEGIN
                    CAST(b.[BookingDate] AS DATETIME2(7))),
            DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), b.[EndTime]),
                    CAST(b.[BookingDate] AS DATETIME2(7))),
-           CASE WHEN w.[EndTime] IS NOT NULL
-                THEN DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00:00' AS TIME(0)), w.[EndTime]),
-                             CAST(b.[BookingDate] AS DATETIME2(7))) END
+           COALESCE(b.[WorkingHoursClosesAtUtc], CASE WHEN w.[IsOpen] = 1 THEN w.[ClosesAtUtc] END)
     FROM [Booking].[Bookings] b
-    LEFT JOIN [Provider].[ProviderWeeklyAvailability] w
-        ON w.[ProviderId] = b.[ProviderId]
-       -- DATEPART(WEEKDAY) is @@DATEFIRST-dependent; this arithmetic is not.
-       -- 0 = Sunday, matching how the availability rows are stored.
-       AND w.[DayOfWeek] = (DATEDIFF(DAY, '19000107', b.[BookingDate]) % 7)
-       AND w.[IsOpen] = 1
+    OUTER APPLY [Provider].[WorkingHoursAtUtc](b.[ProviderId],
+        DATEADD(SECOND, DATEDIFF(SECOND, CAST('00:00' AS TIME), b.[StartTime]),
+            CAST(b.[BookingDate] AS DATETIME2(7)))) w
     WHERE b.[BookingDate] BETWEEN @WindowFrom AND @WindowTo
       AND (b.[Status] IN (SELECT [Status] FROM @Live)
            OR b.[Status] IN (N'START_JOB', N'IN_PROGRESS'));
@@ -230,10 +226,12 @@ BEGIN
       AND (s.[ClosesAtUtc] IS NULL OR @Now < s.[ClosesAtUtc]);
 
     -- ================================================================
-    -- 6. Pick-up and closure  (P-S13 / P-S14 / V-S12)
+    -- 6. Pick-up, closure and incomplete-job reminders (P-S13 / P-S14 / V-S12 / V-S15)
     -- The job IS under way (IN_PROGRESS), so these are about collecting the pet.
     --   completion time passed        -> parent  (P-S13)
-    --   provider closing, pet still in -> parent (P-S14) + provider (V-S12)
+    --   provider closing, pet still in -> parent (P-S14)
+    --   ten minutes before closing, late collection -> provider (V-S12)
+    --   scheduled end plus ten minutes, still running -> provider (V-S15)
     -- ================================================================
     INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience])
     SELECT s.[BookingId], 0, N'BOOKING_COMPLETION_TIME_PASSED', N'PetParent'
@@ -254,7 +252,30 @@ BEGIN
     FROM @SingleDay s
     WHERE s.[Status] = N'IN_PROGRESS'
       AND s.[ClosesAtUtc] IS NOT NULL
-      AND @Now >= s.[ClosesAtUtc];
+      AND @Now >= DATEADD(MINUTE, -10, s.[ClosesAtUtc])
+      AND @Now < s.[ClosesAtUtc]
+      AND @Now >= s.[EndsAtUtc];
+
+    -- V-S15 is independent of the shop-closing reminder. Custom walk-ins have
+    -- no OTP start and are not part of this reminder flow.
+    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience])
+    SELECT s.[BookingId], 0, N'BOOKING_COMPLETION_OVERDUE', N'Provider'
+    FROM @SingleDay s
+    WHERE s.[Status] = N'IN_PROGRESS'
+      AND @Now >= DATEADD(MINUTE, 10, s.[EndsAtUtc])
+      AND EXISTS (SELECT 1 FROM [Booking].[BookingStartOtps] o
+                  WHERE o.[BookingId]=s.[BookingId] AND o.[ConsumedAtUtc] IS NOT NULL);
+
+    -- A boarding stay has a scheduled end only when pickup time is known.
+    INSERT INTO @Due ([BookingId], [IsNightStay], [NotificationType], [Audience])
+    SELECT n.[NightStayBookingId], 1, N'BOOKING_COMPLETION_OVERDUE', N'Provider'
+    FROM [Booking].[NightStayBookings] n
+    WHERE n.[Status]=N'IN_PROGRESS' AND n.[PickUpTime] IS NOT NULL
+      AND n.[CheckOutDate] BETWEEN @WindowFrom AND @Today
+      AND @Now >= DATEADD(MINUTE,10,DATEADD(SECOND,
+          DATEDIFF(SECOND,CAST('00:00:00' AS TIME(0)),n.[PickUpTime]),CAST(n.[CheckOutDate] AS DATETIME2(7))))
+      AND EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStartOtps] o
+                  WHERE o.[NightStayBookingId]=n.[NightStayBookingId] AND o.[ConsumedAtUtc] IS NOT NULL);
 
     -- ================================================================
     -- Enqueue. Every row here relies on the outbox's DedupeKey to collapse
@@ -301,6 +322,6 @@ BEGIN
             AS [StartOtpNudges],
         (SELECT COUNT(*) FROM @Due WHERE [NotificationType] IN
             (N'BOOKING_COMPLETION_TIME_PASSED', N'BOOKING_PICKUP_OVERDUE',
-             N'BOOKING_NOT_MARKED_COMPLETE'))
+             N'BOOKING_NOT_MARKED_COMPLETE', N'BOOKING_COMPLETION_OVERDUE'))
             AS [PickupNudges];
 END;

@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Pawfront.Api.Auth;
 using Pawfront.Application.Earnings;
 using Pawfront.Application.Events;
 using Pawfront.Application.Storage;
@@ -17,10 +18,11 @@ internal static class EventEndpoints
         var providerScoped = builder.MapGroup("/providers/{providerId:guid}/events");
 
         providerScoped.MapPost("/banner-image", UploadBanner).DisableAntiforgery();
-        providerScoped.MapPost("/", Create);
+        providerScoped.MapPost("/", Create).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
         providerScoped.MapGet("/", ListByProvider);
-        providerScoped.MapPut("/{eventId:guid}", Update);
-        providerScoped.MapPatch("/{eventId:guid}", Patch);
+        providerScoped.MapPut("/{eventId:guid}", Update).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
+        providerScoped.MapPatch("/{eventId:guid}", Patch).Produces<HostEventOverlapResponse>(StatusCodes.Status409Conflict);
+        providerScoped.MapPost("/{eventId:guid}/cancel", Cancel);
 
         // Catalog-wide listing with optional filters. Anchored before the
         // {eventId:guid} route so a literal /events GET resolves to List.
@@ -44,6 +46,31 @@ internal static class EventEndpoints
         eventScoped.MapPost("/payout-methods", SavePayoutMethods);
 
         return builder;
+    }
+
+    private static async Task<IResult> Cancel(
+        Guid providerId,
+        Guid eventId,
+        HttpContext httpContext,
+        IProviderOnboardingService onboardingService,
+        IEventLifecycleStore lifecycle,
+        IEventService events,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var caller = await onboardingService.ResolveProviderByFirebaseUidAsync(
+                FirebaseClaims.GetFirebaseUserId(httpContext.User), cancellationToken);
+            if (caller.ProviderId != providerId)
+                return ApiResults.Forbidden("ProviderOwnershipRequired", "You can only cancel your own events.");
+        }
+        catch (ProviderAuthIdentityForFirebaseUserNotFoundException)
+        {
+            return ApiResults.Forbidden("ProviderOwnershipRequired", "You can only cancel your own events.");
+        }
+
+        await lifecycle.CancelByProviderAsync(eventId, providerId, cancellationToken);
+        return ApiResults.Ok(ToResponse((await events.GetAsync(eventId, cancellationToken))!) with { EventCancelledByMe = true });
     }
 
     private static async Task<IResult> SavePayoutMethods(
@@ -250,7 +277,7 @@ internal static class EventEndpoints
                     request.Price.Or(current.Price),
                     request.CancellationPolicy.Or(current.CancellationPolicy),
                     request.EventLink.Or(current.EventLink),
-                    MergePhysical(request.Physical, current.Physical)),
+                    MergePhysical(request.Physical, current.Physical, request.MaximumCapacity)),
                 cancellationToken);
 
             return ApiResults.Ok(ToResponse(result));
@@ -361,11 +388,13 @@ internal static class EventEndpoints
 
         var bookedEventIds = await bookingService.ListBookedEventIdsByBookerEmailAsync(
             httpContext.User.FindFirstValue("email"), cancellationToken);
+        var cancelledByMe = await bookingService.HasCancelledBookingAsync(
+            eventId, httpContext.User.FindFirstValue("email"), cancellationToken);
         var myTickets = await MySupportTickets.ForCallerAsync(
             httpContext, onboardingService, ticketLookup, cancellationToken);
 
         return ApiResults.Ok(ToResponse(
-            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId)));
+            result, !bookedEventIds.Contains(result.EventId), myTickets.ForEvent(result.EventId)) with { EventCancelledByMe = cancelledByMe });
     }
 
     private static async Task<IResult> Trending(
@@ -431,16 +460,16 @@ internal static class EventEndpoints
                 result.Organizer.Id,
                 result.Organizer.Name,
                 result.Organizer.ImageUrl,
-                result.Organizer.TotalEventsOrganized),
+                result.Organizer.TotalEventsOrganized, result.Organizer.EventsCancelledCount),
             new EventBookingStatsResponse(
                 // "Max bookings" = the physical venue capacity; null/unlimited
                 // for online events.
                 result.Physical?.MaximumCapacity,
                 result.TotalBookings),
-            isBookable,
+            isBookable && result.EventStatus == "Active" && !EventBookingWindow.IsClosed(result.StartDate, result.StartTime, DateTimeOffset.UtcNow),
             result.PaymentOptions,
             result.Attendees?
-                .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber))
+                .Select(a => new EventAttendeeSummaryResponse(a.AttendeeName, a.TicketNumber, ProfileImageUrl: a.ProfileImageUrl))
                 .ToArray(),
             result.CreatedAtUtc,
             result.UpdatedAtUtc,
@@ -449,7 +478,9 @@ internal static class EventEndpoints
             // takes there.
             IsTicketRaisedByMe: myTicket is not null,
             TicketId: myTicket?.TicketId,
-            TicketRef: myTicket?.TicketRef);
+            TicketRef: myTicket?.TicketRef, EventStatus: result.EventStatus, IsCancelledByHost: result.EventStatus == "Cancelled",
+            AttendedCount: result.AttendedCount, EarnedAmount: result.EarnedAmount,
+            BookingsCloseAtUtc: EventBookingWindow.CloseAtUtc(result.StartDate, result.StartTime));
     }
 
     /// <summary>
@@ -460,8 +491,14 @@ internal static class EventEndpoints
     /// </summary>
     private static PhysicalEventInput? MergePhysical(
         Optional<PhysicalEventRequest?> patched,
-        PhysicalEventResult? current)
+        PhysicalEventResult? current, Optional<int> capacity = default)
     {
+        if (capacity.IsSet)
+        {
+            var merged = MergePhysical(patched, current);
+            if (merged is null) throw new ArgumentException("maximumCapacity requires a physical event.");
+            return merged with { MaximumCapacity = capacity.Value };
+        }
         if (patched.IsSet)
         {
             return patched.Value is null

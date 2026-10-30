@@ -200,10 +200,10 @@ internal sealed class CosmosPetSitterServiceRegistry(
         return document is null ? null : ToResult(document);
     }
 
-    private static (PetSitterLicense License, PetSitterOffering Offering) BuildLicenseAndOffering(
-        string licenseNumber,
-        string licenseType,
-        string licenseImageUrl,
+    private static (PetSitterLicense? License, PetSitterOffering Offering) BuildLicenseAndOffering(
+        string? licenseNumber,
+        string? licenseType,
+        string? licenseImageUrl,
         BoardingOfferingInput? dayCare,
         BoardingOfferingInput? nightStay,
         IReadOnlyCollection<string> animalsHandled,
@@ -226,10 +226,11 @@ internal sealed class CosmosPetSitterServiceRegistry(
             throw new ArgumentException("MaxPetsAtOneTime must be between 1 and 4.", nameof(maxPetsAtOneTime));
         }
 
-        var license = new PetSitterLicense
+        var license = string.IsNullOrWhiteSpace(licenseImageUrl)
+            ? null : new PetSitterLicense
         {
-            LicenseNumber = Required(licenseNumber, nameof(licenseNumber)),
-            LicenseType = Required(licenseType, nameof(licenseType)),
+            LicenseNumber = Trim(licenseNumber) ?? string.Empty,
+            LicenseType = Trim(licenseType) ?? string.Empty,
             ImageUrl = Required(licenseImageUrl, nameof(licenseImageUrl))
         };
 
@@ -264,6 +265,16 @@ internal sealed class CosmosPetSitterServiceRegistry(
             throw new ArgumentException($"{fieldName}.LatePickupCharges must be non-negative.", fieldName);
         }
 
+        var hasFixedTimes = input.HasFixedTimes ?? (input.DropOffTime.HasValue && input.PickUpTime.HasValue);
+        if (hasFixedTimes && (!input.DropOffTime.HasValue || !input.PickUpTime.HasValue))
+        {
+            throw new ArgumentException($"{fieldName} requires both drop-off and pick-up times when hasFixedTimes is true.", fieldName);
+        }
+        if (!hasFixedTimes && (input.DropOffTime.HasValue || input.PickUpTime.HasValue))
+        {
+            throw new ArgumentException($"{fieldName} must omit both times when hasFixedTimes is false.", fieldName);
+        }
+
         return new BoardingOffering
         {
             PricePerHour = input.PricePerHour,
@@ -271,7 +282,8 @@ internal sealed class CosmosPetSitterServiceRegistry(
             MinimumBookingHours = input.MinimumBookingHours,
             LatePickupCharges = input.LatePickupCharges,
             DropOffTime = input.DropOffTime,
-            PickUpTime = input.PickUpTime
+            PickUpTime = input.PickUpTime,
+            HasFixedTimes = hasFixedTimes
         };
     }
 
@@ -424,7 +436,8 @@ internal sealed class CosmosPetSitterServiceRegistry(
                 offering.MinimumBookingHours,
                 offering.LatePickupCharges,
                 offering.DropOffTime,
-                offering.PickUpTime);
+                offering.PickUpTime,
+                offering.HasFixedTimes ?? (offering.DropOffTime.HasValue && offering.PickUpTime.HasValue));
     }
 
     private static string Required(string? value, string name)

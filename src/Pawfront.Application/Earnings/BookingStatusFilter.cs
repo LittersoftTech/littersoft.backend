@@ -40,7 +40,7 @@ namespace Pawfront.Application.Earnings;
 /// </remarks>
 public static class BookingStatusFilter
 {
-    /// <summary>The job happened and money moved.</summary>
+    /// <summary>The job is finished, whether or not payment was received.</summary>
     public const string CompletedGroup = "Completed";
 
     /// <summary>Still live — booked, confirmed, underway, or mid-modification.</summary>
@@ -88,6 +88,7 @@ public static class BookingStatusFilter
         new HashSet<string>(StringComparer.Ordinal)
         {
             Bookings.BookingStatuses.Completed,
+            Bookings.BookingStatuses.PaymentNotReceived,
             Bookings.BookingStatuses.Paid
         };
 
@@ -148,7 +149,8 @@ public static class BookingStatusFilter
             Bookings.BookingStatuses.StartJob,
             Bookings.BookingStatuses.InProgress,
             Bookings.BookingStatuses.Ending,
-            Bookings.BookingStatuses.JobStarted
+            Bookings.BookingStatuses.JobStarted,
+            Bookings.BookingStatuses.JobIncomplete
         };
 
     /// <summary>

@@ -60,10 +60,12 @@ public interface IParentPetService
     /// gallery). The blob upload happens at the endpoint layer; this method
     /// only writes the URL. Throws <see cref="PetNotFoundException"/> when the
     /// pet row is missing.
+    /// Pass null to remove the primary photo. Completion is recalculated from
+    /// the saved row in either case.
     /// </summary>
     Task<UpdatePetProfilePhotoResponse> UpdateProfilePhotoAsync(
         Guid petId,
-        string profilePhotoUrl,
+        string? profilePhotoUrl,
         CancellationToken cancellationToken);
 
     /// <summary>

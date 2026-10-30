@@ -21,8 +21,8 @@ public interface INightStayBookingSqlStore
         string subCategory,
         DateOnly checkInDate,
         DateOnly checkOutDate,
-        TimeOnly dropOffTime,
-        TimeOnly pickUpTime,
+        TimeOnly? dropOffTime,
+        TimeOnly? pickUpTime,
         string? jobNotes,
         string? locationType,
         // Snapshot of the offering's per-night rate at booking time (price-lock).
@@ -85,7 +85,7 @@ public interface INightStayBookingSqlStore
         Guid actorId,
         string? note,
         CapturedLocation? location,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, string? noShowReason = null);
 
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
         Guid bookingId,
@@ -106,7 +106,7 @@ public interface INightStayBookingSqlStore
         string newCode,
         int ttlMinutes,
         CapturedLocation? location,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, bool waitForCustomer = false);
 
     Task<NightStayBookingResult> VerifyStartOtpAsync(
         Guid bookingId,
@@ -118,10 +118,11 @@ public interface INightStayBookingSqlStore
     Task<NightStayBookingResult> CompleteAsync(
         Guid bookingId,
         Guid providerId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool customerArrivedForCollection = false);
 
     /// <summary>
-    /// Flips a COMPLETED stay to PAID and inserts the payment ledger row. Maps
+    /// Flips a COMPLETED or PAYMENT_NOT_RECEIVED stay to PAID and inserts the payment ledger row. Maps
     /// 51280 not found, 51281 forbidden, 51282 not payable, 51283 already paid.
     /// </summary>
     Task<NightStayBookingResult> MarkPaidAsync(
@@ -159,7 +160,8 @@ public interface INightStayBookingSqlStore
         bool accept,
         int capacity,
         string? note,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool cancelBooking = false);
 
     Task<BookingEvidenceResult> AddEvidenceAsync(
         Guid bookingId,

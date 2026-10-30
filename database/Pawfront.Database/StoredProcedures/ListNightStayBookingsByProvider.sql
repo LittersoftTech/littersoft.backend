@@ -47,7 +47,17 @@ BEGIN
            [PetName]          = pet.[PetName],
            [AnimalType]       = pet.[PetType],
            [Breed]            = pet.[Breed],
-           [PetGender]        = pet.[Gender]
+           [PetGender]        = pet.[Gender],
+           n.[CashNotReceivedAtUtc], n.[CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = n.[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN n.[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc](n.[CreatedAtUtc], n.[CheckInDate], COALESCE(n.[DropOffTime],CAST('00:00' AS TIME)), NULL, NULL)
+           WHEN n.[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], n.[CheckInDate], COALESCE(n.[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE(n.[DropOffTime],CAST('00:00' AS TIME)) END)
+                FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = n.[NightStayBookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'NightStay' AND pay.[BookingId]=n.[NightStayBookingId]) AS [PaidAtUtc]
     FROM [Booking].[NightStayBookings] n
     LEFT JOIN [Parent].[PetParents] pp
         ON pp.[PetParentId] = n.[PetParentId]

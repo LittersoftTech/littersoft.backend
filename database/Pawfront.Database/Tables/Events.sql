@@ -1,5 +1,10 @@
 CREATE TABLE [Event].[Events]
 (
+    [MaximumCapacity] INT NULL,
+    [CancelledWithBookings] BIT NOT NULL CONSTRAINT DF_Events_CancelledBooked DEFAULT 0,
+    [RemovedByHost] BIT NOT NULL CONSTRAINT DF_Events_Removed DEFAULT 0,
+    [EventStatus] NVARCHAR(16) NOT NULL CONSTRAINT DF_Events_Status DEFAULT N'Active',
+    [CancelledAtUtc] DATETIME2(7) NULL,
     [EventId] UNIQUEIDENTIFIER NOT NULL
         CONSTRAINT [DF_Events_EventId] DEFAULT NEWSEQUENTIALID(),
     -- Either ProviderId or PetParentId is set on each row; the CHECK below
@@ -19,15 +24,15 @@ CREATE TABLE [Event].[Events]
     [StartTime] TIME(0) NOT NULL,
     [EndTime] TIME(0) NOT NULL,
     -- Ticketing. Stored on the main event row (not the Cosmos physical
-    -- extension) so it's returned for every event type — online events have
+    -- extension) so it's returned for every event type â€” online events have
     -- no Cosmos document but can still be paid. [Price] is NULL for free
     -- events; the application normalises it to NULL whenever IsPaid = 0.
     [IsPaid] BIT NOT NULL
         CONSTRAINT [DF_Events_IsPaid] DEFAULT 0,
     [Price] DECIMAL(18, 2) NULL,
-    -- Refund policy the creator advertises. Optional (NULL when unset) — it
+    -- Refund policy the creator advertises. Optional (NULL when unset) â€” it
     -- doesn't apply to free events, so it's never required. When set it is one
-    -- of FullRefundUpTo4Hours / FullRefundUpTo2Hours / NoRefund (CHECK below).
+    -- of FullRefundUpTo4Hours / FullRefundUpTo2Hours / FullRefundUpTo24Hours / FullRefundUpTo48Hours / NoRefund (CHECK below).
     [CancellationPolicy] NVARCHAR(32) NULL,
     -- Joining link for ONLINE events (e.g. the meeting URL). NULL for physical
     -- events, which carry a venue location in the Cosmos extension doc instead.
@@ -55,8 +60,7 @@ CREATE TABLE [Event].[Events]
      OR ([ProviderId] IS NULL AND [PetParentId] IS NOT NULL)
     ),
     CONSTRAINT [CK_Events_EventCategory] CHECK ([EventCategory] IN (
-        N'AdoptionAndRescue', N'PetTraining', N'Charity', N'Volunteering',
-        N'HealthAndWellness', N'SocialAndCultural', N'OutdoorActivities', N'ParentEducation')),
+        N'MeetupsAndSocials', N'WalksAndOutdoors', N'TrainingAndWorkshops', N'SportsAndCompetitions', N'ShowsAndDemonstrations', N'TalksAndLearning', N'HealthAndWellness', N'AdoptionAndRescue', N'CharityAndVolunteering', N'Celebrations')),
     CONSTRAINT [CK_Events_EventType] CHECK ([EventType] IN (N'Physical', N'Online')),
     CONSTRAINT [CK_Events_DateRange] CHECK ([StartDate] <= [EndDate]),
     -- A paid event must carry a non-negative price; a free event has none.
@@ -65,7 +69,7 @@ CREATE TABLE [Event].[Events]
      OR ([IsPaid] = 1 AND [Price] IS NOT NULL AND [Price] >= 0)
     ),
     CONSTRAINT [CK_Events_CancellationPolicy] CHECK ([CancellationPolicy] IN (
-        N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'NoRefund'))
+        N'FullRefundUpTo4Hours', N'FullRefundUpTo2Hours', N'FullRefundUpTo24Hours', N'FullRefundUpTo48Hours', N'NoRefund'))
 );
 
 GO

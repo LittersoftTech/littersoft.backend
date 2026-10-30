@@ -19,8 +19,8 @@ internal sealed class SqlNightStayBookingStore(
         string subCategory,
         DateOnly checkInDate,
         DateOnly checkOutDate,
-        TimeOnly dropOffTime,
-        TimeOnly pickUpTime,
+        TimeOnly? dropOffTime,
+        TimeOnly? pickUpTime,
         string? jobNotes,
         string? locationType,
         decimal? pricePerNight,
@@ -44,8 +44,8 @@ internal sealed class SqlNightStayBookingStore(
         command.Parameters.AddWithValue("@SubCategory", subCategory);
         command.Parameters.AddWithValue("@CheckInDate", checkInDate.ToDateTime(TimeOnly.MinValue));
         command.Parameters.AddWithValue("@CheckOutDate", checkOutDate.ToDateTime(TimeOnly.MinValue));
-        command.Parameters.AddWithValue("@DropOffTime", dropOffTime.ToTimeSpan());
-        command.Parameters.AddWithValue("@PickUpTime", pickUpTime.ToTimeSpan());
+        command.Parameters.Add("@DropOffTime", SqlDbType.Time).Value = (object?)dropOffTime?.ToTimeSpan() ?? DBNull.Value;
+        command.Parameters.Add("@PickUpTime", SqlDbType.Time).Value = (object?)pickUpTime?.ToTimeSpan() ?? DBNull.Value;
         command.Parameters.AddWithValue("@JobNotes",
             jobNotes is null ? DBNull.Value : (object)jobNotes);
         command.Parameters.AddWithValue("@LocationType",
@@ -63,6 +63,10 @@ internal sealed class SqlNightStayBookingStore(
                 throw new InvalidOperationException("Night stay booking row was not returned after create.");
             }
             return ReadRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51421)
+        {
+            throw new InvalidNightStayDatesException(exception.Message);
         }
         catch (SqlException exception) when (exception.Number == 51230)
         {
@@ -215,6 +219,22 @@ internal sealed class SqlNightStayBookingStore(
     // shared ReadRow reader -- which every other night-stay sproc feeds -- stays
     // untouched at 0-14. Same convention ReadListItemRow uses for the parent
     // list's snapshot extras.
+    private static DateTimeOffset? ReadPaidTimestamp(SqlDataReader reader)
+    {
+        for (var i = 0; i < reader.FieldCount; i++)
+            if (reader.GetName(i) == "PaidAtUtc")
+                return reader.IsDBNull(i) ? null : new DateTimeOffset(reader.GetDateTime(i), TimeSpan.Zero);
+        return null;
+    }
+
+    private static DateTimeOffset? ReadRequestExpiry(SqlDataReader reader)
+    {
+        for (var i = 0; i < reader.FieldCount; i++)
+            if (reader.GetName(i) == "RequestExpiresAtUtc")
+                return reader.IsDBNull(i) ? null : new DateTimeOffset(reader.GetDateTime(i), TimeSpan.Zero);
+        return null;
+    }
+
     private static NightStayBookingResult ReadProviderListRow(SqlDataReader reader) =>
         ReadRow(reader) with
         {
@@ -296,7 +316,7 @@ internal sealed class SqlNightStayBookingStore(
         Guid actorId,
         string? note,
         CapturedLocation? location,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, string? noShowReason = null)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -310,6 +330,7 @@ internal sealed class SqlNightStayBookingStore(
         command.Parameters.AddWithValue("@Actor", actor.ToString());
         command.Parameters.AddWithValue("@ActorId", actorId);
         command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
+        if (noShowReason is not null) command.Parameters.AddWithValue("@NoShowReason", noShowReason);
         LocationParameters.Add(command, location);
 
         try
@@ -354,7 +375,7 @@ internal sealed class SqlNightStayBookingStore(
         }
         catch (SqlException exception) when (exception.Number == 51248)
         {
-            throw new BookingNoShowTooEarlyException(bookingId);
+            throw new BookingNoShowTooEarlyException(bookingId, isNightStay: true);
         }
         catch (SqlException exception) when (exception.Number == 51249)
         {
@@ -439,7 +460,7 @@ internal sealed class SqlNightStayBookingStore(
 
     public async Task<NightStayBookingResult> StartJobAsync(
         Guid bookingId, Guid providerId, string newCode, int ttlMinutes, CapturedLocation? location,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool waitForCustomer = false)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -452,6 +473,7 @@ internal sealed class SqlNightStayBookingStore(
         command.Parameters.AddWithValue("@NewCode", newCode);
         command.Parameters.AddWithValue("@TtlMinutes", ttlMinutes);
         LocationParameters.Add(command, location);
+        command.Parameters.AddWithValue("@WaitForCustomer", waitForCustomer);
 
         try
         {
@@ -535,7 +557,7 @@ internal sealed class SqlNightStayBookingStore(
     }
 
     public async Task<NightStayBookingResult> CompleteAsync(
-        Guid bookingId, Guid providerId, CancellationToken cancellationToken)
+        Guid bookingId, Guid providerId, CancellationToken cancellationToken, bool customerArrivedForCollection = false)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -545,6 +567,7 @@ internal sealed class SqlNightStayBookingStore(
         };
         command.Parameters.AddWithValue("@NightStayBookingId", bookingId);
         command.Parameters.AddWithValue("@ProviderId", providerId);
+        command.Parameters.AddWithValue("@CustomerArrivedForCollection", customerArrivedForCollection);
 
         try
         {
@@ -643,6 +666,14 @@ internal sealed class SqlNightStayBookingStore(
             }
             return ReadRow(reader);
         }
+        catch (SqlException exception) when (exception.Number == 51991)
+        {
+            throw new BookingModificationLimitReachedException(bookingId);
+        }
+        catch (SqlException exception) when (exception.Number == 51421)
+        {
+            throw new InvalidNightStayDatesException(exception.Message);
+        }
         catch (SqlException exception) when (exception.Number == 51260)
         {
             throw new NightStayBookingNotFoundException(bookingId);
@@ -696,7 +727,7 @@ internal sealed class SqlNightStayBookingStore(
 
     public async Task<NightStayBookingResult> RespondModificationAsync(
         Guid bookingId, BookingStatusActor actor, Guid actorId,
-        bool accept, int capacity, string? note, CancellationToken cancellationToken)
+        bool accept, int capacity, string? note, CancellationToken cancellationToken, bool cancelBooking = false)
     {
         await using var connection = new SqlConnection(await GetConnectionStringAsync(cancellationToken));
         await connection.OpenAsync(cancellationToken);
@@ -708,6 +739,7 @@ internal sealed class SqlNightStayBookingStore(
         command.Parameters.AddWithValue("@Actor", actor.ToString());
         command.Parameters.AddWithValue("@ActorId", actorId);
         command.Parameters.AddWithValue("@Accept", accept);
+        command.Parameters.AddWithValue("@CancelBooking", cancelBooking);
         command.Parameters.AddWithValue("@Capacity", capacity);
         command.Parameters.AddWithValue("@Note", note is null ? DBNull.Value : (object)note);
 
@@ -719,6 +751,10 @@ internal sealed class SqlNightStayBookingStore(
                 throw new InvalidOperationException("Night stay booking row was not returned after modification response.");
             }
             return ReadRow(reader);
+        }
+        catch (SqlException exception) when (exception.Number == 51421)
+        {
+            throw new InvalidNightStayDatesException(exception.Message);
         }
         catch (SqlException exception) when (exception.Number == 51265)
         {
@@ -809,6 +845,12 @@ internal sealed class SqlNightStayBookingStore(
         return rows;
     }
 
+    private static DateTimeOffset? ReadCashReport(SqlDataReader reader)
+    {
+        var ordinal = reader.GetOrdinal("CashNotReceivedAtUtc");
+        return reader.IsDBNull(ordinal) ? null : new DateTimeOffset(reader.GetDateTime(ordinal), TimeSpan.Zero);
+    }
+
     private static NightStayBookingResult ReadRow(SqlDataReader reader) =>
         new(NightStayBookingId: reader.GetGuid(0),
             ProviderId: reader.GetGuid(1),
@@ -818,15 +860,20 @@ internal sealed class SqlNightStayBookingStore(
             SubCategory: reader.GetString(5),
             CheckInDate: DateOnly.FromDateTime(reader.GetDateTime(6)),
             CheckOutDate: DateOnly.FromDateTime(reader.GetDateTime(7)),
-            DropOffTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(8)),
-            PickUpTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(9)),
+            DropOffTime: reader.IsDBNull(8) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(8)),
+            PickUpTime: reader.IsDBNull(9) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(9)),
             Status: reader.GetString(10),
             CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(11), TimeSpan.Zero),
             UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero),
             CancelledAtUtc: reader.IsDBNull(13)
                 ? null
                 : new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero),
-            PetId: reader.IsDBNull(14) ? null : reader.GetGuid(14));
+            PetId: reader.IsDBNull(14) ? null : reader.GetGuid(14),
+            CashNotReceivedAtUtc: ReadCashReport(reader),
+            CancellationReason: reader.IsDBNull(reader.GetOrdinal("CancellationReason")) ? null : reader.GetString(reader.GetOrdinal("CancellationReason")),
+            PaidAtUtc: ReadPaidTimestamp(reader),
+            RequestExpiresAtUtc: ReadRequestExpiry(reader),
+            ProviderModificationUsed: reader.GetBoolean(reader.GetOrdinal("ProviderModificationUsed")));
 
     private static NightStayBookingDetailRow ReadDetailRow(SqlDataReader reader) =>
         new(NightStayBookingId: reader.GetGuid(0),
@@ -838,8 +885,8 @@ internal sealed class SqlNightStayBookingStore(
             SubCategory: reader.GetString(6),
             CheckInDate: DateOnly.FromDateTime(reader.GetDateTime(7)),
             CheckOutDate: DateOnly.FromDateTime(reader.GetDateTime(8)),
-            DropOffTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(9)),
-            PickUpTime: TimeOnly.FromTimeSpan(reader.GetTimeSpan(10)),
+            DropOffTime: reader.IsDBNull(9) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(9)),
+            PickUpTime: reader.IsDBNull(10) ? null : TimeOnly.FromTimeSpan(reader.GetTimeSpan(10)),
             Status: reader.GetString(11),
             CreatedAtUtc: new DateTimeOffset(reader.GetDateTime(12), TimeSpan.Zero),
             UpdatedAtUtc: new DateTimeOffset(reader.GetDateTime(13), TimeSpan.Zero),
@@ -889,11 +936,17 @@ internal sealed class SqlNightStayBookingStore(
             SnapshotLongitude: reader.IsDBNull(54) ? null : reader.GetDecimal(54),
             // Payment ledger join — null until the stay is marked PAID.
             // Appended LAST to the sproc's projection, so no ordinal above moved.
+            IsParentModificationDone: reader.GetBoolean(reader.GetOrdinal("IsParentModificationDone")),
+            IsProviderModificationDone: reader.GetBoolean(reader.GetOrdinal("IsProviderModificationDone")),
             IsModificationDone: !reader.IsDBNull(57) && reader.GetBoolean(57),
             PayoutMethod: reader.IsDBNull(55) ? null : reader.GetString(55),
             PaidAtUtc: reader.IsDBNull(56)
                 ? null
-                : new DateTimeOffset(reader.GetDateTime(56), TimeSpan.Zero));
+                : new DateTimeOffset(reader.GetDateTime(56), TimeSpan.Zero),
+            CashNotReceivedAtUtc: ReadCashReport(reader),
+            CancellationReason: reader.IsDBNull(reader.GetOrdinal("CancellationReason")) ? null : reader.GetString(reader.GetOrdinal("CancellationReason")),
+            RequestExpiresAtUtc: ReadRequestExpiry(reader),
+            ProviderModificationUsed: reader.GetBoolean(reader.GetOrdinal("ProviderModificationUsed")));
 
     private async Task<string> GetConnectionStringAsync(CancellationToken cancellationToken)
     {

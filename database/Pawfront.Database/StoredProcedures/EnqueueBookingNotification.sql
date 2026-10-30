@@ -78,7 +78,10 @@ CREATE OR ALTER PROCEDURE [Notification].[EnqueueBookingNotification]
     @ClosingAtUtc DATETIME2(0) = NULL,
     -- Idempotency. Callers pass a suffix rather than a whole key so the
     -- type + booking prefix stays consistent across every producer.
-    @DedupeSuffix NVARCHAR(64) = NULL
+    @DedupeSuffix NVARCHAR(64) = NULL,
+    @CompletionScenario NVARCHAR(32) = NULL,
+    @NoShowReason NVARCHAR(32) = NULL,
+    @TicketId UNIQUEIDENTIFIER = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -156,6 +159,32 @@ BEGIN
     BEGIN
         RETURN;
     END
+
+    -- P-U15 belongs to an unpaid-completion support report. A legacy standalone
+    -- unpaid-status call can still record its state, but waits for the ticket
+    -- before notifying the parent. Completion checks the same report so it
+    -- cannot emit a conflicting ordinary payment request.
+    IF @NotificationType IN (N'BOOKING_COMPLETED', N'BOOKING_CASH_NOT_RECEIVED')
+    BEGIN
+        DECLARE @ExpectedBookingType NVARCHAR(16)=CASE WHEN @IsNightStay=1 THEN N'NightStay' ELSE N'SingleDay' END;
+        DECLARE @RequestedCashTicketId UNIQUEIDENTIFIER=@TicketId;
+        SET @TicketId=NULL;
+        SELECT TOP (1) @TicketId=TicketId
+        FROM [Support].[Tickets]
+        WHERE BookingId=@BookingId AND BookingType=@ExpectedBookingType
+          AND TicketType=N'BookingIncident' AND RaisedByType=N'Provider'
+          AND (Category=N'Cash Not Received' OR Reason=N'Cash Not Received')
+          AND Status<>N'CLOSED'
+          AND (@RequestedCashTicketId IS NULL OR TicketId=@RequestedCashTicketId)
+        ORDER BY CreatedAtUtc DESC;
+        IF @TicketId IS NOT NULL
+        BEGIN
+            SET @NotificationType=N'BOOKING_CASH_NOT_RECEIVED';
+            SET @DedupeSuffix=CONVERT(NVARCHAR(36),@TicketId);
+        END
+        ELSE IF @NotificationType=N'BOOKING_CASH_NOT_RECEIVED'
+            RETURN;
+    END;
 
     DECLARE @ProviderName NVARCHAR(200);
     DECLARE @ParentName NVARCHAR(200);
@@ -248,6 +277,9 @@ BEGIN
             CONVERT(NVARCHAR(19), @NewServiceStartUtc, 126) AS [newServiceStartUtc],
             CONVERT(NVARCHAR(19), @NewCheckOutUtc, 126)   AS [newCheckOutUtc],
             @AbsentParty                                 AS [absentParty],
+            @CompletionScenario                          AS [completionScenario],
+            @NoShowReason                                AS [noShowReason],
+            CONVERT(NVARCHAR(36), @TicketId)               AS [ticketId],
             @InvoiceId                                   AS [invoiceId],
             @IssuedBy                                    AS [issuedBy],
             CONVERT(NVARCHAR(19), @ReviewByUtc, 126)      AS [reviewByUtc],

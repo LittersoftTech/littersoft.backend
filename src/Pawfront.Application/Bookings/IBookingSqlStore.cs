@@ -155,7 +155,7 @@ public interface IBookingSqlStore
         // The acting party's position. Written only for the two NO-SHOW
         // transitions; null for every other status this engine serves.
         CapturedLocation? location,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, string? noShowReason = null);
 
     Task<IReadOnlyList<BookingStatusHistoryEntry>> ListStatusHistoryAsync(
         Guid bookingId,
@@ -185,7 +185,7 @@ public interface IBookingSqlStore
         int ttlMinutes,
         // Where the provider was when they confirmed arrival.
         CapturedLocation? location,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken, bool waitForCustomer = false);
 
     /// <summary>
     /// Validates the start-OTP and moves the booking START_JOB → IN_PROGRESS
@@ -206,10 +206,11 @@ public interface IBookingSqlStore
     Task<BookingResult> CompleteAsync(
         Guid bookingId,
         Guid providerId,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool customerArrivedForCollection = false);
 
     /// <summary>
-    /// Flips a COMPLETED booking to PAID and inserts the payment ledger row
+    /// Flips a COMPLETED or PAYMENT_NOT_RECEIVED booking to PAID and inserts the payment ledger row
     /// (<c>Booking.BookingPayments</c>). Maps 51160 not found, 51161 forbidden,
     /// 51162 not payable, 51163 Custom walk-in, 51164 already paid.
     /// </summary>
@@ -255,7 +256,8 @@ public interface IBookingSqlStore
         bool accept,
         int capacity,
         string? note,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        bool cancelBooking = false);
 
     Task<BookingEvidenceResult> AddEvidenceAsync(
         Guid bookingId,

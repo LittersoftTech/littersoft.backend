@@ -1,4 +1,4 @@
-﻿-- Enqueues a notification that the CALLER intends to send itself, right now,
+-- Enqueues a notification that the CALLER intends to send itself, right now,
 -- instead of leaving it for the 1-minute NotificationDispatchFunction.
 --
 -- This exists for chat. Every other notification in the product is a side effect
@@ -52,6 +52,18 @@ BEGIN
     DECLARE @Now DATETIME2(7) = SYSUTCDATETIME();
 
     SET @NotificationId = NULL;
+
+    IF (@Audience=N'Provider' AND EXISTS(SELECT 1 FROM Provider.Providers WHERE ProviderId=@RecipientId AND IsDeleted=1))
+       OR (@Audience=N'PetParent' AND EXISTS(SELECT 1 FROM Parent.PetParents WHERE PetParentId=@RecipientId AND IsDeleted=1))
+    BEGIN
+        IF @SuppressResultSet=0
+        BEGIN
+            SELECT CAST('00000000-0000-0000-0000-000000000000' AS UNIQUEIDENTIFIER) AS NotificationId;
+            SELECT CAST(NULL AS NVARCHAR(2048)) AS FcmToken, CAST(NULL AS NVARCHAR(32)) AS DevicePlatform WHERE 1=0;
+        END
+        RETURN;
+    END
+
 
     IF @DedupeKey IS NOT NULL
     BEGIN

@@ -31,8 +31,32 @@ internal static class ProviderEarningsEndpoints
         group.MapGet("/", GetForPeriod);
         // Which bookings produced the money — paginated, filterable, sortable.
         group.MapGet("/bookings", ListEarningsBookings);
+        group.MapGet("/statement", DownloadStatement);
 
         return builder;
+    }
+
+    private static async Task<IResult> DownloadStatement(
+        Guid providerId, DateOnly? from, DateOnly? to, HttpContext httpContext,
+        IProviderOnboardingService onboardingService, IProviderEarningsStore store,
+        Microsoft.Extensions.Options.IOptions<Pawfront.Application.Configuration.PawfrontFeeOptions> feeOptions,
+        CancellationToken cancellationToken)
+    {
+        var denied = await EnsureCallerOwnsProviderAsync(providerId, httpContext, onboardingService, cancellationToken);
+        if (denied is not null) return denied;
+        var rangeError = ProviderStatement.ValidateRange(from, to);
+        if (rangeError is not null)
+            return ApiResults.BadRequest("InvalidRequest", rangeError);
+
+        // Export every matching row in one read; the screen's 20-row cap does not apply.
+        var (rows, _) = await store.ListBookingsAsync(providerId, from, to,
+            ProviderStatement.Statuses, feeOptions.Value.PawfrontFeePercentage,
+            EarningsSortBy.Date, EarningsSortDirection.Ascending, 0, int.MaxValue, null, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var pdf = Pawfront.Api.Statements.ProviderStatementPdf.Render(providerId, from, to, rows);
+        httpContext.Response.Headers.CacheControl = "private, no-store";
+        return Results.File(pdf, "application/pdf",
+            $"pawfront-statement-{providerId}-{from?.ToString("yyyy-MM-dd") ?? "beginning"}-{to?.ToString("yyyy-MM-dd") ?? "present"}.pdf");
     }
 
     private static async Task<IResult> GetOverview(
@@ -273,5 +297,6 @@ internal static class ProviderEarningsEndpoints
             row.PaymentMethod,
             row.Breed,
             row.PetGender,
-            row.CustomerPhotoUrl);
+            row.CustomerPhotoUrl,
+            row.CashNotReceivedAtUtc);
 }

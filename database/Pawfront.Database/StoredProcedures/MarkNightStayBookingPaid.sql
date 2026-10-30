@@ -1,9 +1,9 @@
 -- Records that the parent has paid the provider for a multi-night stay: flips
--- COMPLETED -> PAID, writes an audit row, and inserts the payment ledger row in
+-- COMPLETED or PAYMENT_NOT_RECEIVED -> PAID, writes an audit row, and inserts the payment ledger row in
 -- [Booking].[BookingPayments] (BookingType = 'NightStay'). Mirror of
 -- [Booking].[MarkBookingPaid]. Night-stay bookings are always App bookings, so
 -- there is no Custom check. Provider-only, paid at most once.
--- THROWs: 51280 not found, 51281 not the provider, 51282 not COMPLETED,
+-- THROWs: 51280 not found, 51281 not the provider, 51282 not COMPLETED or PAYMENT_NOT_RECEIVED,
 -- 51283 already paid.
 -- Also records the provider's "Cash Received" geolocation — see
 -- [Booking].[MarkBookingPaid]. The parent's own fix arrives separately, via
@@ -51,7 +51,7 @@ BEGIN
         THROW 51283, 'Booking is already marked paid.', 1;
     END
 
-    IF @CurrentStatus <> N'COMPLETED'
+    IF @CurrentStatus NOT IN (N'COMPLETED', N'PAYMENT_NOT_RECEIVED')
     BEGIN
         THROW 51282, 'Booking must be completed before it can be marked paid.', 1;
     END
@@ -67,6 +67,7 @@ BEGIN
 
     UPDATE [Booking].[NightStayBookings]
     SET [Status] = N'PAID',
+        [CashNotReceivedAtUtc] = NULL,
         [UpdatedAtUtc] = @Now,
         [PayoutId] = COALESCE([PayoutId], @PayoutId),
         [PayoutStatus] = N'Paid'
@@ -115,13 +116,8 @@ BEGIN
         @NotificationType = N'BOOKING_PAID',
         @Amount = @AmountText;
 
-    -- ...and the provider's invoice (V-S14). Mirror of Booking.MarkBookingPaid.
-    EXEC [Notification].[EnqueueBookingNotification]
-        @BookingId = @NightStayBookingId,
-        @IsNightStay = 1,
-        @Audience = N'Provider',
-        @NotificationType = N'INVOICE_ISSUED',
-        @Amount = @AmountText;
+    -- V4 invoice copy promises a document. CompleteInvoiceGeneration sends
+    -- V-S14 only after the provider's PDF is durable, with its 60-second delay.
 
     SELECT [NightStayBookingId],
            [ProviderId],
@@ -137,7 +133,17 @@ BEGIN
            [CreatedAtUtc],
            [UpdatedAtUtc],
            [CancelledAtUtc],
-           [PetId]
+           [PetId],
+           [CashNotReceivedAtUtc], [CancellationReason],
+           CAST(CASE WHEN EXISTS (SELECT 1 FROM [Booking].[NightStayBookingStatusHistory] mh WHERE mh.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId] AND mh.[ToStatus] = N'PARENT_ACCEPTED_MODIFICATION') THEN 1 ELSE 0 END AS BIT) AS [ProviderModificationUsed],
+           CASE WHEN [Booking].[NightStayBookings].[Status] = N'CREATED' THEN
+               [Booking].[RequestExpiresAtUtc]([Booking].[NightStayBookings].[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), NULL, NULL)
+           WHEN [Booking].[NightStayBookings].[Status] IN (N'MODIFICATION_REQUEST_BY_PARENT',N'MODIFICATION_REQUEST_BY_PROVIDER') THEN
+               (SELECT [Booking].[RequestExpiresAtUtc](m.[CreatedAtUtc], [Booking].[NightStayBookings].[CheckInDate], COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)), m.[ProposedCheckInDate], CASE WHEN m.[RequestedByActor]=N'Parent' AND m.[HasAcknowledgedTerms]=1 THEN COALESCE(m.[AcknowledgedDropOffTime],CAST('00:00' AS TIME)) ELSE COALESCE([Booking].[NightStayBookings].[DropOffTime],CAST('00:00' AS TIME)) END)
+                FROM [Booking].[NightStayBookingModifications] m WHERE m.[NightStayBookingId] = [Booking].[NightStayBookings].[NightStayBookingId])
+           END AS [RequestExpiresAtUtc],
+           (SELECT pay.[PaidAtUtc] FROM [Booking].[BookingPayments] pay
+            WHERE pay.[BookingType]=N'NightStay' AND pay.[BookingId]=[Booking].[NightStayBookings].[NightStayBookingId]) AS [PaidAtUtc]
     FROM [Booking].[NightStayBookings]
     WHERE [NightStayBookingId] = @NightStayBookingId;
 
